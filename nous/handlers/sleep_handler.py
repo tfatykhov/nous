@@ -241,7 +241,12 @@ class SleepHandler:
                 return
 
             data = response.json()
-            text = data.get("content", [{}])[0].get("text", "")
+            # Find the text block — skip thinking blocks if present
+            text = ""
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    break
             reflection = json.loads(text)
 
             # Store reflection summary as a fact

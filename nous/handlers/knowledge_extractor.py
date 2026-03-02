@@ -193,7 +193,12 @@ class KnowledgeExtractor:
                 return []
 
             data = response.json()
-            text = data.get("content", [{}])[0].get("text", "")
+            # Find the text block — skip thinking blocks if present
+            text = ""
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    break
             return json.loads(text)
 
         except (json.JSONDecodeError, httpx.TimeoutException):
