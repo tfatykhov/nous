@@ -159,7 +159,17 @@ class EpisodeSummarizer:
                 return None
 
             data = response.json()
-            text = data.get("content", [{}])[0].get("text", "")
+            # Find the text block — skip thinking blocks if present
+            text = ""
+            for block in data.get("content", []):
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    break
+
+            if not text:
+                logger.warning("Summary LLM returned empty text (content blocks: %s)",
+                               [b.get("type") for b in data.get("content", [])])
+                return None
 
             return json.loads(text)
 
