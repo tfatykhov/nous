@@ -145,6 +145,7 @@ class ContextEngine:
             )
 
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
+        # Dedup against identity prompt to avoid repeating the same info
         if budget.user_profile > 0:
             try:
                 profile_facts = await self._heart.list_facts_by_category(
@@ -152,6 +153,15 @@ class ContextEngine:
                     active_only=True,
                     session=session,
                 )
+                if profile_facts and _effective_identity:
+                    # Filter out facts whose content overlaps >60% with identity
+                    profile_facts = [
+                        f for f in profile_facts
+                        if text_overlap(
+                            getattr(f, "content", "")[:200],
+                            _effective_identity,
+                        ) < 0.6
+                    ]
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
                     profile_text = self._truncate_to_budget(profile_text, budget.user_profile)
@@ -371,6 +381,20 @@ class ContextEngine:
         if self._settings.temporal_context_enabled:
             try:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
+                # Filter out system/internal episodes (handler tasks, summarization runs)
+                _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
+                if recent:
+                    recent = [
+                        e for e in recent
+                        if not any(
+                            marker in (e.summary or "")
+                            for marker in _SYSTEM_EPISODE_MARKERS
+                        )
+                        and not any(
+                            marker in (e.title or "")
+                            for marker in _SYSTEM_EPISODE_MARKERS
+                        )
+                    ]
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
@@ -399,6 +423,14 @@ class ContextEngine:
                 limit = _limits.get("episode", 5)
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
+                # Filter out system/internal episodes
+                episodes = [
+                    e for e in episodes
+                    if not any(
+                        marker in (getattr(e, "summary", "") or "")
+                        for marker in _SYSTEM_EPISODE_MARKERS
+                    )
+                ]
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
