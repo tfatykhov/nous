@@ -2,7 +2,7 @@
 -- Part of spec 008 (Agent Identity & Tiered Context Model)
 
 -- Agent identity sections (character, values, protocols, preferences, boundaries)
-CREATE TABLE nous_system.agent_identity (
+CREATE TABLE IF NOT EXISTS nous_system.agent_identity (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     agent_id VARCHAR(100) NOT NULL REFERENCES nous_system.agents(id),
     section VARCHAR(50) NOT NULL,
@@ -14,7 +14,7 @@ CREATE TABLE nous_system.agent_identity (
     previous_version_id UUID REFERENCES nous_system.agent_identity(id)
 );
 
-CREATE UNIQUE INDEX idx_identity_agent_section_current
+CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_agent_section_current
     ON nous_system.agent_identity(agent_id, section) WHERE is_current = TRUE;
 
 -- Initiation state flag on agents table

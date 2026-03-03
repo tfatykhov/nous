@@ -190,6 +190,33 @@ def create_app(
                 )
                 counts["active_censors"] = result.scalar() or 0
 
+                # Working memory sessions
+                result = await session.execute(
+                    text("SELECT session_id FROM heart.working_memory WHERE agent_id = :agent_id"),
+                    {"agent_id": settings.agent_id},
+                )
+                wm_session_ids = [row[0] for row in result]
+
+                # Fetch working memory details for each session
+                working_memory_sessions = []
+                for wm_sid in wm_session_ids:
+                    wm_state = await heart.get_working_memory(wm_sid, session=session)
+                    if wm_state:
+                        working_memory_sessions.append({
+                            "session_id": wm_sid,
+                            "current_task": wm_state.current_task,
+                            "current_frame": wm_state.current_frame,
+                            "item_count": wm_state.item_count,
+                            "items": [
+                                {"type": it.type, "summary": it.summary, "relevance": it.relevance}
+                                for it in wm_state.items
+                            ],
+                            "open_threads": [
+                                {"description": t.description, "priority": t.priority}
+                                for t in wm_state.open_threads
+                            ],
+                        })
+
             return JSONResponse(
                 {
                     "agent_id": settings.agent_id,
@@ -209,6 +236,7 @@ def create_app(
                         "total_episodes": counts["total_episodes"],
                         "total_procedures": counts["total_procedures"],
                     },
+                    "working_memory": working_memory_sessions,
                 }
             )
         except Exception as e:
