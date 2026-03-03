@@ -37,6 +37,22 @@ TIER3_THRESHOLDS = {
     "episode": 0.3,
 }
 
+# Markers that identify internal/system episodes (handler tasks, summarizers)
+_SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
+
+# Minimum text_overlap ratio to consider a fact redundant with identity prompt
+_IDENTITY_OVERLAP_THRESHOLD = 0.6
+
+
+def _is_system_episode(episode) -> bool:
+    """Check if an episode is an internal/system episode that shouldn't surface."""
+    summary = getattr(episode, "summary", "") or ""
+    title = getattr(episode, "title", "") or ""
+    return any(
+        marker in summary or marker in title
+        for marker in _SYSTEM_EPISODE_MARKERS
+    )
+
 
 class ContextEngine:
     """Assembles context from Brain and Heart within token budgets."""
@@ -145,6 +161,7 @@ class ContextEngine:
             )
 
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
+        # Dedup against identity prompt to avoid repeating the same info
         if budget.user_profile > 0:
             try:
                 profile_facts = await self._heart.list_facts_by_category(
@@ -152,6 +169,15 @@ class ContextEngine:
                     active_only=True,
                     session=session,
                 )
+                if profile_facts and _effective_identity:
+                    # Filter out facts whose content overlaps with identity
+                    profile_facts = [
+                        f for f in profile_facts
+                        if text_overlap(
+                            getattr(f, "content", "")[:200],
+                            _effective_identity,
+                        ) < _IDENTITY_OVERLAP_THRESHOLD
+                    ]
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
                     profile_text = self._truncate_to_budget(profile_text, budget.user_profile)
@@ -371,6 +397,9 @@ class ContextEngine:
         if self._settings.temporal_context_enabled:
             try:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
+                # Filter out system/internal episodes (handler tasks, summarization runs)
+                if recent:
+                    recent = [e for e in recent if not _is_system_episode(e)]
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
@@ -399,6 +428,8 @@ class ContextEngine:
                 limit = _limits.get("episode", 5)
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
+                # Filter out system/internal episodes
+                episodes = [e for e in episodes if not _is_system_episode(e)]
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
