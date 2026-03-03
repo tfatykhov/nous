@@ -134,6 +134,130 @@ async def subtask_mgr(db):
     return SubtaskManager(db, "test-agent")
 
 
+class TestWorkerEnhancements:
+    """012.2: Background worker uses frame-aware prefix and guardrails."""
+
+    async def test_worker_passes_is_subtask(self):
+        """Worker should pass is_subtask=True to runner.run_turn()."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=120,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Test task"
+        subtask.parent_session_id = "parent-123"
+        subtask.timeout_seconds = 120
+        subtask.frame_type = None
+        subtask.model = None
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        mock_runner.run_turn.assert_called_once()
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_subtask") is True
+        assert call_kwargs.get("max_tool_calls") == 20
+
+    async def test_worker_passes_model_override(self):
+        """Worker should pass subtask.model as model_override."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=120,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Quick lookup"
+        subtask.parent_session_id = None
+        subtask.timeout_seconds = 60
+        subtask.frame_type = "research"
+        subtask.model = "claude-haiku-3-5-20241022"
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("model_override") == "claude-haiku-3-5-20241022"
+
+    async def test_worker_uses_shared_prefix(self):
+        """Worker should use build_subtask_prefix for system_prompt_prefix."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=120,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Research weather"
+        subtask.parent_session_id = None
+        subtask.timeout_seconds = 120
+        subtask.frame_type = "task"
+        subtask.model = None
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        prefix = call_kwargs.get("system_prompt_prefix")
+        assert "background subtask" in prefix.lower()
+        assert "Research weather" in prefix
+        # Frame-aware: should mention the frame type
+        assert "task" in prefix.lower()
+
+
 class TestSpawnTaskEnhancements:
     """012.2: spawn_task tool gains frame_type, await_result, and model params."""
 
@@ -694,7 +818,7 @@ class TestSubtaskWorkerPool:
     async def test_execute_subtask_passes_system_prompt_prefix(
         self, mock_runner, worker_heart, worker_settings, mock_bus
     ):
-        """_execute_subtask passes system_prompt_prefix to run_turn."""
+        """_execute_subtask passes system_prompt_prefix via shared prefix builder."""
         pool = SubtaskWorkerPool(
             runner=mock_runner,
             heart=worker_heart,
@@ -715,8 +839,10 @@ class TestSubtaskWorkerPool:
         prefix = call_kwargs["system_prompt_prefix"]
         assert "background subtask" in prefix
         assert "Prefix test task" in prefix
-        assert "parent-sess-42" in prefix
         assert "Do not ask questions" in prefix
+        # 012.2: Worker now also passes subtask guardrail params
+        assert call_kwargs.get("is_subtask") is True
+        assert call_kwargs.get("max_tool_calls") == 20
 
 
 # ---------------------------------------------------------------------------
