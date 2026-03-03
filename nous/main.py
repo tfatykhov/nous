@@ -175,14 +175,14 @@ async def create_components(settings: Settings) -> dict:
     from nous.identity.tools import register_identity_tools
     register_identity_tools(dispatcher, identity_manager)
 
-    # 011.1: Register subtask/schedule tools
-    if settings.subtask_enabled:
-        from nous.api.tools import register_subtask_tools
-        register_subtask_tools(dispatcher, heart, settings)
-
     runner = AgentRunner(cognitive, brain, heart, settings)
     runner.set_dispatcher(dispatcher)
     await runner.start()
+
+    # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
+    if settings.subtask_enabled:
+        from nous.api.tools import register_subtask_tools
+        register_subtask_tools(dispatcher, heart, settings, runner=runner)
 
     # 011.1: Start SubtaskWorkerPool (needs runner + bus)
     subtask_pool = None
