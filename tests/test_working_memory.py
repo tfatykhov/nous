@@ -162,18 +162,16 @@ async def test_evict_specific(heart, session):
 
 
 async def test_add_thread(heart, session):
-    """Thread added to open_threads."""
+    """Thread added to open_threads via Heart delegation."""
     sid = f"test-session-{uuid.uuid4().hex[:8]}"
     await heart.get_or_create_working_memory(sid, session=session)
 
-    # Working memory doesn't have a direct add_thread on Heart,
-    # so we call the manager directly
     thread = OpenThread(
         description="Investigate memory leak",
         priority="high",
         created_at=datetime.now(UTC),
     )
-    state = await heart.working_memory.add_thread(sid, thread, session=session)
+    state = await heart.add_thread(sid, thread, session=session)
 
     assert len(state.open_threads) == 1
     assert state.open_threads[0].description == "Investigate memory leak"
@@ -186,7 +184,7 @@ async def test_add_thread(heart, session):
 
 
 async def test_resolve_thread(heart, session):
-    """Thread removed by description match."""
+    """Thread removed by description match via Heart delegation."""
     sid = f"test-session-{uuid.uuid4().hex[:8]}"
     await heart.get_or_create_working_memory(sid, session=session)
 
@@ -201,11 +199,11 @@ async def test_resolve_thread(heart, session):
         created_at=datetime.now(UTC),
     )
 
-    await heart.working_memory.add_thread(sid, thread1, session=session)
-    await heart.working_memory.add_thread(sid, thread2, session=session)
+    await heart.add_thread(sid, thread1, session=session)
+    await heart.add_thread(sid, thread2, session=session)
 
     # Resolve by matching description (case-insensitive contains)
-    state = await heart.working_memory.resolve_thread(sid, "login bug", session=session)
+    state = await heart.resolve_thread(sid, "login bug", session=session)
 
     assert len(state.open_threads) == 1
     assert state.open_threads[0].description == "Review PR #42"

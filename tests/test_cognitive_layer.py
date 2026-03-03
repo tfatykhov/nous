@@ -578,3 +578,151 @@ async def test_task_frame_no_deliberation(cognitive):
     )
     result = await cognitive._deliberation.should_deliberate(frame)
     assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Working memory items & threads (issue #34)
+# ---------------------------------------------------------------------------
+
+
+async def test_pre_turn_loads_recalled_items_to_working_memory(cognitive, heart, session):
+    """_load_recalled_to_working_memory loads high-scoring items into working memory.
+
+    Tests the helper directly to avoid pre-existing context build issues.
+    With score >= 0.7, items are loaded; below 0.7 they're filtered out.
+    """
+    from nous.cognitive.schemas import BuildResult
+
+    sid = f"test-wm-items-{uuid.uuid4().hex[:8]}"
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    fact_id = str(uuid.uuid4())
+    decision_id = str(uuid.uuid4())
+    low_score_id = str(uuid.uuid4())
+
+    build_result = BuildResult(
+        system_prompt="test",
+        recalled_ids={
+            "fact": [fact_id],
+            "decision": [decision_id, low_score_id],
+            "procedure": [],
+            "episode": [],
+        },
+        recalled_content_map={
+            fact_id: "Important fact about testing",
+            decision_id: "Use Redis for caching",
+            low_score_id: "Low relevance decision",
+        },
+        recalled_score_map={
+            fact_id: 0.85,
+            decision_id: 0.75,
+            low_score_id: 0.3,  # Below 0.7 threshold — should be filtered
+        },
+    )
+
+    await cognitive._load_recalled_to_working_memory(sid, build_result, session=session)
+
+    wm = await heart.get_working_memory(sid, session=session)
+    assert wm is not None
+    # Only items with score >= 0.7 should be loaded (fact + decision, not low_score)
+    assert wm.item_count == 2
+    summaries = {item.summary for item in wm.items}
+    assert "Important fact about testing" in summaries
+    assert "Use Redis for caching" in summaries
+
+
+async def test_post_turn_adds_error_thread(cognitive, heart, session):
+    """Tool errors in post_turn create high-priority open threads."""
+    sid = f"test-wm-thread-err-{uuid.uuid4().hex[:8]}"
+
+    # Manually create working memory (bypass pre_turn's context build)
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    # Build a minimal TurnContext (skip pre_turn to avoid schema issues)
+    from nous.cognitive.schemas import FrameSelection
+    ctx = TurnContext(
+        system_prompt="test",
+        frame=FrameSelection(
+            frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern",
+        ),
+    )
+
+    turn_result = TurnResult(
+        response_text="Failed to write file.",
+        tool_results=[
+            ToolResult(
+                tool_name="write_file",
+                arguments={"path": "/test"},
+                error="Permission denied",
+            )
+        ],
+    )
+
+    await cognitive.post_turn("nous-default", sid, turn_result, ctx, session=session)
+
+    wm = await heart.get_working_memory(sid, session=session)
+    assert wm is not None
+    assert len(wm.open_threads) >= 1
+    error_threads = [t for t in wm.open_threads if t.priority == "high"]
+    assert len(error_threads) >= 1
+    assert "write_file" in error_threads[0].description
+
+
+async def test_post_turn_resolves_thread_on_success(cognitive, heart, session):
+    """Successful tool calls resolve matching open threads."""
+    sid = f"test-wm-thread-resolve-{uuid.uuid4().hex[:8]}"
+
+    # Manually create working memory
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    from nous.cognitive.schemas import FrameSelection
+    ctx = TurnContext(
+        system_prompt="test",
+        frame=FrameSelection(
+            frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern",
+        ),
+    )
+
+    # First: create an error thread via failed tool
+    error_result = TurnResult(
+        response_text="Failed.",
+        tool_results=[
+            ToolResult(tool_name="write_file", arguments={}, error="Permission denied"),
+        ],
+    )
+    await cognitive.post_turn("nous-default", sid, error_result, ctx, session=session)
+
+    wm = await heart.get_working_memory(sid, session=session)
+    assert len(wm.open_threads) >= 1
+
+    # Second turn: same tool succeeds
+    success_result = TurnResult(
+        response_text="File written.",
+        tool_results=[
+            ToolResult(tool_name="write_file", arguments={}, result="ok"),
+        ],
+    )
+    await cognitive.post_turn("nous-default", sid, success_result, ctx, session=session)
+
+    wm2 = await heart.get_working_memory(sid, session=session)
+    # The thread mentioning write_file should be resolved
+    write_threads = [t for t in wm2.open_threads if "write_file" in t.description]
+    assert len(write_threads) == 0
+
+
+async def test_end_session_clears_working_memory(cognitive, heart, session):
+    """end_session clears working memory for the session."""
+    sid = f"test-wm-clear-{uuid.uuid4().hex[:8]}"
+
+    # Manually create working memory (bypass pre_turn)
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    # Verify working memory exists
+    wm = await heart.get_working_memory(sid, session=session)
+    assert wm is not None
+
+    await cognitive.end_session("nous-default", sid, session=session)
+
+    # Working memory should be cleared
+    wm_after = await heart.get_working_memory(sid, session=session)
+    assert wm_after is None

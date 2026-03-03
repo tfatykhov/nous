@@ -32,6 +32,7 @@ from nous.heart.schemas import (
     FactDetail,
     FactInput,
     FactSummary,
+    OpenThread,
     ProcedureDetail,
     ProcedureInput,
     ProcedureOutcome,
@@ -400,6 +401,18 @@ class Heart:
     async def clear_working_memory(self, session_id: str, session: AsyncSession | None = None) -> None:
         """Clear working memory for session."""
         await self.working_memory.clear(session_id, session)
+
+    async def add_thread(
+        self, session_id: str, thread: OpenThread, session: AsyncSession | None = None
+    ) -> WorkingMemoryState:
+        """Add an open thread to working memory."""
+        return await self.working_memory.add_thread(session_id, thread, session)
+
+    async def resolve_thread(
+        self, session_id: str, description: str, session: AsyncSession | None = None
+    ) -> WorkingMemoryState:
+        """Resolve (remove) an open thread by description match."""
+        return await self.working_memory.resolve_thread(session_id, description, session)
 
     # ==================================================================
     # Conversation State
