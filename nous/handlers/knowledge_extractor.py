@@ -31,7 +31,7 @@ Focus on:
 - Project/system facts (architecture, constraints, conventions, file paths)
 - People facts (roles, names, relationships)
 - Technical decisions made during the conversation
-- Rules or patterns the user wants followed
+- Explicit rules or directives from the user
 
 Conversation:
 {conversation_text}
@@ -41,10 +41,22 @@ Return ONLY a valid JSON array (empty array if nothing worth storing):
   {{
     "subject": "<who/what the fact is about>",
     "content": "<the fact, stated clearly and completely>",
-    "category": "<preference|technical|person|tool|concept|rule>",
+    "category": "<category>",
     "confidence": <0.6-1.0>
   }}
 ]
+
+Categories (use the RIGHT one — this affects how facts are loaded):
+- "preference" — User preferences (formats, units, style). Loaded EVERY turn.
+- "person" — People facts (names, roles, relationships). Loaded EVERY turn.
+- "rule" — ONLY explicit directives from the user (e.g., "never push to main"). Loaded EVERY turn.
+- "technical" — Architecture, implementation, or project-specific knowledge. Loaded only when relevant.
+- "concept" — General knowledge, research findings, theoretical insights. Loaded only when relevant.
+- "tool" — Tool/library behavior, gotchas, configuration. Loaded only when relevant.
+
+IMPORTANT: "rule" is for user-stated directives ONLY. Research findings, observations,
+debug lessons, and architecture patterns should be "technical" or "concept".
+If in doubt between "rule" and something else, choose the something else.
 
 Only include facts genuinely useful across future conversations.
 Skip transient details, task-specific context, and already-obvious information.
