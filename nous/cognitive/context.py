@@ -44,6 +44,16 @@ _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
 _IDENTITY_OVERLAP_THRESHOLD = 0.6
 
 
+def _is_system_episode(episode) -> bool:
+    """Check if an episode is an internal/system episode that shouldn't surface."""
+    summary = getattr(episode, "summary", "") or ""
+    title = getattr(episode, "title", "") or ""
+    return any(
+        marker in summary or marker in title
+        for marker in _SYSTEM_EPISODE_MARKERS
+    )
+
+
 class ContextEngine:
     """Assembles context from Brain and Heart within token budgets."""
 
@@ -389,14 +399,7 @@ class ContextEngine:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
                 # Filter out system/internal episodes (handler tasks, summarization runs)
                 if recent:
-                    recent = [
-                        e for e in recent
-                        if not any(
-                            marker in (getattr(e, "summary", "") or "")
-                            or marker in (getattr(e, "title", "") or "")
-                            for marker in _SYSTEM_EPISODE_MARKERS
-                        )
-                    ]
+                    recent = [e for e in recent if not _is_system_episode(e)]
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
@@ -425,15 +428,8 @@ class ContextEngine:
                 limit = _limits.get("episode", 5)
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
-                # Filter out system/internal episodes (check both summary and title)
-                episodes = [
-                    e for e in episodes
-                    if not any(
-                        marker in (getattr(e, "summary", "") or "")
-                        or marker in (getattr(e, "title", "") or "")
-                        for marker in _SYSTEM_EPISODE_MARKERS
-                    )
-                ]
+                # Filter out system/internal episodes
+                episodes = [e for e in episodes if not _is_system_episode(e)]
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
