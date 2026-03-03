@@ -37,6 +37,9 @@ TIER3_THRESHOLDS = {
     "episode": 0.3,
 }
 
+# Markers that identify internal/system episodes (handler tasks, summarizers)
+_SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
+
 
 class ContextEngine:
     """Assembles context from Brain and Heart within token budgets."""
@@ -382,7 +385,6 @@ class ContextEngine:
             try:
                 recent = await self._heart.list_episodes(limit=5, hours=48)
                 # Filter out system/internal episodes (handler tasks, summarization runs)
-                _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
                 if recent:
                     recent = [
                         e for e in recent
