@@ -654,10 +654,11 @@ FRAME_DEFAULT_MODELS: dict[str, str] = {
 }
 
 
-def create_subtask_tools(heart: Heart, settings: "Settings") -> dict[str, Any]:
+def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = None) -> dict[str, Any]:
     """Create subtask/schedule tool closures with Heart captured in closure context.
 
     Returns a dict of async callables suitable for ToolDispatcher registration.
+    The optional runner param enables inline (await_result) subtask execution.
     """
     from nous.config import Settings as _Settings  # noqa: F811 — deferred to avoid circular
 
@@ -666,44 +667,131 @@ def create_subtask_tools(heart: Heart, settings: "Settings") -> dict[str, Any]:
         priority: str = "normal",
         timeout: int | None = None,
         notify: bool = True,
+        frame_type: str | None = None,
+        await_result: bool = False,
+        model: str | None = None,
         _session_id: str | None = None,
     ) -> dict[str, Any]:
-        """Spawn a background subtask for the worker pool.
+        """Spawn a subtask, optionally waiting for its result inline.
 
         Args:
             task: Natural-language instruction for the subtask
             priority: urgent, normal, or low
             timeout: Max seconds (clamped to settings.subtask_max_timeout)
             notify: Whether to notify on completion
+            frame_type: Cognitive frame for the subtask
+            await_result: If true, execute inline and return result
+            model: Model override for this subtask
 
         Returns:
-            MCP-compliant response with subtask ID or error message
+            MCP-compliant response with subtask ID or inline result
         """
         try:
-            effective_timeout = min(
-                timeout or settings.subtask_default_timeout,
-                settings.subtask_max_timeout,
-            )
+            # 012.2: Apply frame-default model mapping
+            effective_model = model
+            if not effective_model and frame_type:
+                effective_model = FRAME_DEFAULT_MODELS.get(frame_type)
+
+            # 012.2: Differentiate timeout defaults
+            if await_result:
+                effective_timeout = min(
+                    timeout or INLINE_SUBTASK_DEFAULT_TIMEOUT,
+                    settings.subtask_max_timeout,
+                )
+            else:
+                effective_timeout = min(
+                    timeout or settings.subtask_default_timeout,
+                    settings.subtask_max_timeout,
+                )
+
             subtask = await heart.subtasks.create(
                 task=task,
                 priority=priority,
                 timeout=effective_timeout,
                 notify=notify,
                 parent_session_id=_session_id,
+                frame_type=frame_type,
+                model=effective_model,
             )
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Subtask spawned.\n"
-                            f"ID: {subtask.id}\n"
-                            f"Priority: {priority}\n"
-                            f"Timeout: {effective_timeout}s"
-                        ),
-                    }
-                ]
-            }
+
+            if not await_result:
+                # Fire-and-forget (existing behavior)
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Subtask spawned.\n"
+                                f"ID: {subtask.id}\n"
+                                f"Priority: {priority}\n"
+                                f"Timeout: {effective_timeout}s"
+                            ),
+                        }
+                    ]
+                }
+
+            # 012.2: Synchronous inline execution
+            if runner is None:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Cannot execute inline subtask: runner not available. Use await_result=false.",
+                        }
+                    ]
+                }
+
+            import asyncio as _asyncio
+
+            subtask_session_id = f"subtask-{subtask.id.hex[:8]}"
+            system_prefix = build_subtask_prefix(task, frame_type)
+
+            try:
+                response_text, _ctx, _usage = await _asyncio.wait_for(
+                    runner.run_turn(
+                        session_id=subtask_session_id,
+                        user_message=task,
+                        agent_id=settings.agent_id,
+                        system_prompt_prefix=system_prefix,
+                        skip_episode=True,
+                        is_subtask=True,
+                        max_tool_calls=SUBTASK_TOOL_CALL_LIMIT,
+                        model_override=effective_model,
+                    ),
+                    timeout=effective_timeout,
+                )
+
+                await heart.subtasks.complete(subtask.id, response_text)
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"[Subtask {subtask.id.hex[:8]} completed]\n\n{response_text}",
+                        }
+                    ]
+                }
+
+            except _asyncio.TimeoutError:
+                await heart.subtasks.fail(subtask.id, f"Timeout after {effective_timeout}s")
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]",
+                        }
+                    ]
+                }
+            except Exception as e:
+                await heart.subtasks.fail(subtask.id, str(e))
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"[Subtask {subtask.id.hex[:8]} failed: {e}]",
+                        }
+                    ]
+                }
+
         except ValueError as e:
             return {"content": [{"type": "text", "text": f"Cannot spawn subtask: {e}"}]}
         except Exception as e:
@@ -892,7 +980,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings") -> dict[str, Any]:
 
 _SPAWN_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Spawn a background subtask for the worker pool to execute autonomously",
+    "description": "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget background execution.",
     "properties": {
         "task": {
             "type": "string",
@@ -913,6 +1001,20 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
             "type": "boolean",
             "description": "Notify on completion",
             "default": True,
+        },
+        "frame_type": {
+            "type": "string",
+            "description": "Cognitive frame for the subtask. If omitted, auto-detected.",
+            "enum": ["task", "research", "conversation", "decision", "debug"],
+        },
+        "await_result": {
+            "type": "boolean",
+            "description": "If true, wait for subtask completion and return result inline. Default false (fire-and-forget).",
+            "default": False,
+        },
+        "model": {
+            "type": "string",
+            "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks.",
         },
     },
     "required": ["task"],
@@ -969,12 +1071,13 @@ _CANCEL_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "Settings") -> None:
+def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "Settings", runner: object = None) -> None:
     """Create subtask/schedule tools and register them with the dispatcher.
 
     Called at startup when subtask_enabled is True.
+    The optional runner enables inline (await_result) subtask execution.
     """
-    closures = create_subtask_tools(heart, settings)
+    closures = create_subtask_tools(heart, settings, runner)
 
     dispatcher.register("spawn_task", closures["spawn_task"], _SPAWN_TASK_SCHEMA)
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)

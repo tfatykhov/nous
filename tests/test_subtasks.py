@@ -134,6 +134,89 @@ async def subtask_mgr(db):
     return SubtaskManager(db, "test-agent")
 
 
+class TestSpawnTaskEnhancements:
+    """012.2: spawn_task tool gains frame_type, await_result, and model params."""
+
+    async def test_spawn_with_frame_type(self, settings):
+        """frame_type is passed through to SubtaskManager.create()."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Research topic",
+            frame_type="research",
+            _session_id="test-session",
+        )
+
+        heart.subtasks.create.assert_called_once()
+        call_kwargs = heart.subtasks.create.call_args.kwargs
+        assert call_kwargs.get("frame_type") == "research"
+
+    async def test_spawn_with_model(self, settings):
+        """model is passed through to SubtaskManager.create()."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Quick lookup",
+            model="claude-haiku-3-5-20241022",
+            _session_id="test-session",
+        )
+
+        call_kwargs = heart.subtasks.create.call_args.kwargs
+        assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+
+    async def test_spawn_without_new_params(self, settings):
+        """Backward compat: existing spawn_task calls still work."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Simple task",
+            _session_id="test-session",
+        )
+
+        assert "subtask" in result["content"][0]["text"].lower()
+
+    async def test_spawn_frame_type_applies_default_model(self, settings):
+        """research frame_type should auto-apply haiku model when no model specified."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Research something",
+            frame_type="research",
+            _session_id="test-session",
+        )
+
+        call_kwargs = heart.subtasks.create.call_args.kwargs
+        assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+
+
 class TestRunnerSubtaskGuardrails:
     """012.2: Runner respects is_subtask and max_tool_calls."""
 
