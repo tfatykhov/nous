@@ -107,6 +107,7 @@ class ContextEngine:
             "episode": [],
         }
         recalled_content_map: dict[str, str] = {}
+        recalled_score_map: dict[str, float] = {}
 
         # Apply budget overrides from retrieval plan (F6: REPLACE semantics)
         skip_types: set[str] = set()
@@ -246,11 +247,12 @@ class ContextEngine:
                 if decisions:
                     # 007.2: Diversity filter — use category as topic key
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
-                    # F1: Collect recalled IDs
+                    # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
                         if mid:
                             recalled_ids["decision"].append(mid)
+                            recalled_score_map[mid] = getattr(d, "score", 0) or 0
                     # Format content for each decision (F8: recalled_content_map)
                     dec_text = self._format_decisions(decisions)
                     for d in decisions:
@@ -308,6 +310,7 @@ class ContextEngine:
                         if mid:
                             recalled_ids["fact"].append(mid)
                             recalled_content_map[mid] = getattr(f, "content", "")
+                            recalled_score_map[mid] = getattr(f, "score", 0) or 0
 
                     logger.info("Tier3 facts after pipeline: %d remaining", len(facts))
                     facts_text = self._format_facts(facts)
@@ -346,6 +349,7 @@ class ContextEngine:
                         if mid:
                             recalled_ids["procedure"].append(mid)
                             recalled_content_map[mid] = getattr(p, "name", "")
+                            recalled_score_map[mid] = getattr(p, "score", 0) or 0
 
                     proc_text = self._format_procedures(procedures)
                     proc_text = self._truncate_to_budget(proc_text, budget.procedures)
@@ -418,6 +422,7 @@ class ContextEngine:
                         if mid:
                             recalled_ids["episode"].append(mid)
                             recalled_content_map[mid] = getattr(e, "summary", "")
+                            recalled_score_map[mid] = getattr(e, "score", 0) or 0
 
                     ep_text = self._format_episodes(episodes)
                     ep_text = self._truncate_to_budget(ep_text, budget.episodes)
@@ -443,6 +448,7 @@ class ContextEngine:
             sections=sections,
             recalled_ids=recalled_ids,
             recalled_content_map=recalled_content_map,
+            recalled_score_map=recalled_score_map,
         )
 
     async def _apply_dedup(

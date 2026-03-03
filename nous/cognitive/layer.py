@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -25,12 +26,12 @@ from nous.cognitive.deliberation import DeliberationEngine
 from nous.cognitive.frames import FrameEngine
 from nous.cognitive.intent import IntentClassifier, IntentSignals
 from nous.cognitive.monitor import MonitorEngine
-from nous.cognitive.schemas import Assessment, SessionMetadata, TurnContext, TurnResult
+from nous.cognitive.schemas import Assessment, BuildResult, SessionMetadata, TurnContext, TurnResult
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart.heart import Heart
-from nous.heart.schemas import EpisodeInput, FactInput
+from nous.heart.schemas import EpisodeInput, FactInput, OpenThread, WorkingMemoryItem
 from nous.storage.models import Agent
 
 logger = logging.getLogger(__name__)
@@ -273,6 +274,8 @@ class CognitiveLayer:
         recalled_procedure_ids: list[str] = []
         recalled_episode_ids: list[str] = []
         recalled_content_map: dict[str, str] = {}
+        recalled_score_map: dict[str, float] = {}
+        build_result = None
         context_token_estimate = 0
         if not _is_initiation:
             # 008: Load identity from DB for normal turns (review fix P1-3)
@@ -309,9 +312,11 @@ class CognitiveLayer:
                 recalled_procedure_ids = build_result.recalled_ids.get("procedure", [])
                 recalled_episode_ids = build_result.recalled_ids.get("episode", [])
                 recalled_content_map = build_result.recalled_content_map
+                recalled_score_map = build_result.recalled_score_map
         except Exception:
             logger.warning("Context build failed, using identity prompt only")
             system_prompt = self._context._identity_prompt or ""
+            build_result = None
 
         # 3b. SUBTASK RESULTS — inject undelivered results into context
         try:
@@ -374,6 +379,15 @@ class CognitiveLayer:
         except Exception:
             logger.warning("Failed to update working memory for session %s", session_id)
 
+        # 6b. WORKING MEMORY — load recalled items
+        if build_result is not None:
+            try:
+                await self._load_recalled_to_working_memory(
+                    session_id, build_result, session=session
+                )
+            except Exception:
+                logger.warning("Failed to load items to working memory")
+
         # Get active censor patterns for TurnContext
         active_censors: list[str] = []
         try:
@@ -393,6 +407,7 @@ class CognitiveLayer:
             recalled_procedure_ids=recalled_procedure_ids,
             recalled_episode_ids=recalled_episode_ids,
             recalled_content_map=recalled_content_map,
+            recalled_score_map=recalled_score_map,
         )
 
     async def post_turn(
@@ -530,7 +545,24 @@ class CognitiveLayer:
         # 006: Transcript capture
         meta.transcript.append(f"Assistant: {turn_result.response_text[:500]}")
 
-        # 6. EMIT EVENT — P1-1: bus.emit with backward compat else branch
+        # 6b. WORKING MEMORY — manage open threads based on tool results
+        try:
+            if any(tr.error for tr in turn_result.tool_results):
+                error_tools = [tr.tool_name for tr in turn_result.tool_results if tr.error]
+                thread = OpenThread(
+                    description=f"Tool errors in: {', '.join(error_tools)}",
+                    priority="high",
+                    created_at=datetime.now(UTC),
+                )
+                await self._heart.add_thread(session_id, thread, session=session)
+
+            successful_tools = [tr.tool_name for tr in turn_result.tool_results if not tr.error]
+            for tool_name in successful_tools:
+                await self._heart.resolve_thread(session_id, tool_name, session=session)
+        except Exception:
+            logger.warning("Failed to update working memory threads for session %s", session_id)
+
+        # 7. EMIT EVENT — P1-1: bus.emit with backward compat else branch
         event_data = {
             "session_id": session_id,
             "frame": turn_context.frame.frame_id,
@@ -651,6 +683,52 @@ class CognitiveLayer:
                 return None
 
         return text[:200]
+
+    async def _load_recalled_to_working_memory(
+        self,
+        session_id: str,
+        build_result: BuildResult,
+        session: AsyncSession | None = None,
+    ) -> None:
+        """Load high-scoring recalled items into working memory.
+
+        Filters to items with score >= 0.7 (matches context engine render
+        threshold), caps at 10 items (half of max_items=20 capacity), and
+        sorts by score descending.
+
+        Items loaded this turn appear in the NEXT turn's context because
+        working memory is read at step 4 and loaded at step 6b.
+        """
+        score_map = build_result.recalled_score_map
+        content_map = build_result.recalled_content_map
+        recalled_ids = build_result.recalled_ids
+
+        # Collect (memory_type, memory_id, score, content) tuples
+        candidates: list[tuple[str, str, float, str]] = []
+        for mem_type, id_list in recalled_ids.items():
+            for mid in id_list:
+                score = score_map.get(mid, 0)
+                if score >= 0.7:
+                    content = content_map.get(mid, "")
+                    candidates.append((mem_type, mid, score, content))
+
+        if not candidates:
+            return
+
+        # Sort by score descending, take top 10
+        candidates.sort(key=lambda c: c[2], reverse=True)
+        candidates = candidates[:10]
+
+        now = datetime.now(UTC)
+        for mem_type, mid, score, content in candidates:
+            item = WorkingMemoryItem(
+                type=mem_type,
+                ref_id=UUID(mid),
+                summary=content[:200],
+                relevance=score,
+                loaded_at=now,
+            )
+            await self._heart.load_to_working_memory(session_id, item, session=session)
 
     def _is_informational(self, turn_result: TurnResult) -> bool:
         """Detect responses that are information, not decisions (006.2, 007.3, 009.5).
@@ -941,7 +1019,13 @@ class CognitiveLayer:
                 except Exception:
                     logger.warning("Failed to extract fact from reflection: %s", learned_text[:50])
 
-        # 3. Clean up monitor session censor counts
+        # 3. Clean up working memory for this session
+        try:
+            await self._heart.clear_working_memory(session_id, session=session)
+        except Exception:
+            logger.warning("Failed to clear working memory for session %s", session_id)
+
+        # 3b. Clean up monitor session censor counts
         self._monitor._session_censor_counts.pop(session_id, None)
 
         # 4. Emit session_ended event — 006: bus.emit with backward compat

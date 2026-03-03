@@ -101,6 +101,7 @@ class BuildResult(BaseModel):
     sections: list[ContextSection] = Field(default_factory=list)
     recalled_ids: dict[str, list[str]] = Field(default_factory=dict)
     recalled_content_map: dict[str, str] = Field(default_factory=dict)
+    recalled_score_map: dict[str, float] = Field(default_factory=dict)
 
 
 class TurnContext(BaseModel):
@@ -116,6 +117,7 @@ class TurnContext(BaseModel):
     recalled_procedure_ids: list[str] = Field(default_factory=list)
     recalled_episode_ids: list[str] = Field(default_factory=list)
     recalled_content_map: dict[str, str] = Field(default_factory=dict)
+    recalled_score_map: dict[str, float] = Field(default_factory=dict)
 
 
 class ToolResult(BaseModel):
