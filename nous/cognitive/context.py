@@ -40,6 +40,9 @@ TIER3_THRESHOLDS = {
 # Markers that identify internal/system episodes (handler tasks, summarizers)
 _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
 
+# Minimum text_overlap ratio to consider a fact redundant with identity prompt
+_IDENTITY_OVERLAP_THRESHOLD = 0.6
+
 
 class ContextEngine:
     """Assembles context from Brain and Heart within token budgets."""
@@ -157,13 +160,13 @@ class ContextEngine:
                     session=session,
                 )
                 if profile_facts and _effective_identity:
-                    # Filter out facts whose content overlaps >60% with identity
+                    # Filter out facts whose content overlaps with identity
                     profile_facts = [
                         f for f in profile_facts
                         if text_overlap(
                             getattr(f, "content", "")[:200],
                             _effective_identity,
-                        ) < 0.6
+                        ) < _IDENTITY_OVERLAP_THRESHOLD
                     ]
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
@@ -389,11 +392,8 @@ class ContextEngine:
                     recent = [
                         e for e in recent
                         if not any(
-                            marker in (e.summary or "")
-                            for marker in _SYSTEM_EPISODE_MARKERS
-                        )
-                        and not any(
-                            marker in (e.title or "")
+                            marker in (getattr(e, "summary", "") or "")
+                            or marker in (getattr(e, "title", "") or "")
                             for marker in _SYSTEM_EPISODE_MARKERS
                         )
                     ]
@@ -425,11 +425,12 @@ class ContextEngine:
                 limit = _limits.get("episode", 5)
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
-                # Filter out system/internal episodes
+                # Filter out system/internal episodes (check both summary and title)
                 episodes = [
                     e for e in episodes
                     if not any(
                         marker in (getattr(e, "summary", "") or "")
+                        or marker in (getattr(e, "title", "") or "")
                         for marker in _SYSTEM_EPISODE_MARKERS
                     )
                 ]
