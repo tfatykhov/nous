@@ -57,6 +57,35 @@ class TestSubtaskModel:
         assert subtask.parent_session_id == "session-abc123"
         assert subtask.priority == 50
 
+    async def test_subtask_with_frame_type_and_model(self, session: AsyncSession):
+        """012.2: Subtask stores frame_type and model."""
+        subtask = Subtask(
+            agent_id="test-agent",
+            task="Research weather patterns",
+            priority=100,
+            timeout_seconds=120,
+            frame_type="research",
+            model="claude-haiku-3-5-20241022",
+        )
+        session.add(subtask)
+        await session.flush()
+
+        assert subtask.frame_type == "research"
+        assert subtask.model == "claude-haiku-3-5-20241022"
+
+    async def test_subtask_frame_type_nullable(self, session: AsyncSession):
+        """012.2: frame_type and model are optional (backward compat)."""
+        subtask = Subtask(
+            agent_id="test-agent",
+            task="Simple task",
+            priority=100,
+        )
+        session.add(subtask)
+        await session.flush()
+
+        assert subtask.frame_type is None
+        assert subtask.model is None
+
 
 class TestScheduleModel:
     """ORM model tests for heart.schedules."""
