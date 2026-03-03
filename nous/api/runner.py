@@ -275,6 +275,9 @@ class AgentRunner:
         platform: str | None = None,
         system_prompt_prefix: str | None = None,
         skip_episode: bool = False,
+        is_subtask: bool = False,
+        max_tool_calls: int | None = None,
+        model_override: str | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -356,6 +359,9 @@ class AgentRunner:
                 conversation=conversation,
                 frame_id=turn_context.frame.frame_id,
                 session_id=session_id,
+                is_subtask=is_subtask,
+                max_tool_calls=max_tool_calls,
+                model_override=model_override,
             )
             conversation.messages.append(Message(role="assistant", content=response_text))
         except Exception as e:
@@ -901,6 +907,9 @@ class AgentRunner:
         conversation: Conversation,
         frame_id: str,
         session_id: str | None = None,
+        is_subtask: bool = False,
+        max_tool_calls: int | None = None,
+        model_override: str | None = None,
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -919,6 +928,11 @@ class AgentRunner:
         # Get tools for current frame (D5)
         tools = self._dispatcher.available_tools(frame_id)
 
+        # 012.2: Remove delegation tools from subtask tool set (no-nesting rule)
+        if is_subtask:
+            _SUBTASK_EXCLUDED_TOOLS = {"spawn_task", "schedule_task"}
+            tools = [t for t in tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
+
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
         messages = self._format_messages(conversation)
@@ -927,6 +941,7 @@ class AgentRunner:
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
         total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         turns = 0
+        total_tool_calls = 0
         max_turns = self._settings.max_turns
 
         while turns < max_turns:
@@ -934,6 +949,7 @@ class AgentRunner:
                 system_prompt=system_prompt,
                 messages=messages,
                 tools=tools if tools else None,
+                model_override=model_override,
             )
 
             # Accumulate usage + calibrate token estimator
@@ -1000,6 +1016,22 @@ class AgentRunner:
                 "content": tool_results_for_message,
             })
 
+            total_tool_calls += len(tool_results_for_message)
+
+            # 012.2: Enforce subtask tool call limit
+            if max_tool_calls and total_tool_calls >= max_tool_calls:
+                logger.info("Subtask tool call limit reached (%d/%d)", total_tool_calls, max_tool_calls)
+                final = await self._call_api(
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=None,
+                    model_override=model_override,
+                )
+                if final.usage:
+                    total_usage["input_tokens"] += final.usage.get("input_tokens", 0)
+                    total_usage["output_tokens"] += final.usage.get("output_tokens", 0)
+                return self._extract_text(final.content), all_tool_results, total_usage, all_thinking_blocks
+
             # Prune old tool results before next API call (Spec 008.1 Layer 1)
             if self._compactor:
                 self._compactor.prune_tool_results(messages)
@@ -1014,6 +1046,7 @@ class AgentRunner:
                 system_prompt=system_prompt,
                 messages=messages,
                 tools=None,
+                model_override=model_override,
             )
             if final_response.usage:
                 total_usage["input_tokens"] += final_response.usage.get("input_tokens", 0)

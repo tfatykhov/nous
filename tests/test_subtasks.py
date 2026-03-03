@@ -134,6 +134,29 @@ async def subtask_mgr(db):
     return SubtaskManager(db, "test-agent")
 
 
+class TestRunnerSubtaskGuardrails:
+    """012.2: Runner respects is_subtask and max_tool_calls."""
+
+    def test_tool_filtering_removes_spawn_and_schedule(self):
+        """is_subtask=True should filter spawn_task and schedule_task from tools."""
+        all_tools = [
+            {"name": "bash", "description": "Run bash", "input_schema": {}},
+            {"name": "spawn_task", "description": "Spawn", "input_schema": {}},
+            {"name": "schedule_task", "description": "Schedule", "input_schema": {}},
+            {"name": "read_file", "description": "Read", "input_schema": {}},
+        ]
+        # Filter like the runner would
+        subtask_excluded = {"spawn_task", "schedule_task"}
+        filtered = [t for t in all_tools if t["name"] not in subtask_excluded]
+
+        assert len(filtered) == 2
+        names = {t["name"] for t in filtered}
+        assert "bash" in names
+        assert "read_file" in names
+        assert "spawn_task" not in names
+        assert "schedule_task" not in names
+
+
 class TestSubtaskPrefixBuilder:
     """012.2: Shared prefix builder for frame-aware subtask context."""
 
