@@ -32,6 +32,8 @@ class SubtaskManager:
         timeout: int = 120,
         notify: bool = True,
         metadata: dict | None = None,
+        frame_type: str | None = None,
+        model: str | None = None,
     ) -> Subtask:
         """Create a new pending subtask. Raises ValueError if pending limit reached."""
         pri_val = _PRIORITY_MAP.get(priority, 100)
@@ -57,6 +59,8 @@ class SubtaskManager:
                 timeout_seconds=timeout,
                 notify=notify,
                 metadata_=metadata or {},
+                frame_type=frame_type,
+                model=model,
             )
             session.add(subtask)
             await session.commit()

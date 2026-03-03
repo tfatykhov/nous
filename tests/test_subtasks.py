@@ -134,6 +134,40 @@ async def subtask_mgr(db):
     return SubtaskManager(db, "test-agent")
 
 
+class TestSubtaskManagerEnhancements:
+    """012.2: SubtaskManager create() accepts frame_type and model."""
+
+    async def test_create_with_frame_type(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Research topic X",
+            frame_type="research",
+        )
+        assert subtask.frame_type == "research"
+        assert subtask.model is None
+
+    async def test_create_with_model(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Quick lookup",
+            model="claude-haiku-3-5-20241022",
+        )
+        assert subtask.model == "claude-haiku-3-5-20241022"
+
+    async def test_create_with_frame_type_and_model(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Research with haiku",
+            frame_type="research",
+            model="claude-haiku-3-5-20241022",
+        )
+        assert subtask.frame_type == "research"
+        assert subtask.model == "claude-haiku-3-5-20241022"
+
+    async def test_create_without_new_params_backward_compat(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(task="Normal task")
+        assert subtask.frame_type is None
+        assert subtask.model is None
+        assert subtask.status == "pending"
+
+
 class TestSubtaskManager:
     """SubtaskManager CRUD and queue tests."""
 
