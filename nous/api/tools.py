@@ -616,8 +616,42 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart) 
 
 
 # ---------------------------------------------------------------------------
+# Subtask prefix builder (012.2)
+# ---------------------------------------------------------------------------
+
+
+def build_subtask_prefix(task: str, frame_type: str | None = None) -> str:
+    """Build a system prompt prefix for subtask execution.
+
+    Used by both inline (await_result) and background worker subtask execution
+    to ensure consistent frame-aware context assembly.
+    """
+    from nous.api.runner import FRAME_TOOLS
+
+    base = (
+        "You are executing a background subtask.\n"
+        "Deliver a clear, complete result. Do not ask questions."
+    )
+
+    frame_instruction = ""
+    if frame_type and frame_type in FRAME_TOOLS:
+        frame_instruction = f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate reasoning and tool usage."
+
+    return f"{base}{frame_instruction}\n\nTask: {task}"
+
+
+# ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
+
+# 012.2: Subtask execution guardrails
+SUBTASK_TOOL_CALL_LIMIT = 20
+INLINE_SUBTASK_DEFAULT_TIMEOUT = 90  # seconds
+
+# 012.2: Frame-type to default model mapping (cost optimization)
+FRAME_DEFAULT_MODELS: dict[str, str] = {
+    "research": "claude-haiku-3-5-20241022",
+}
 
 
 def create_subtask_tools(heart: Heart, settings: "Settings") -> dict[str, Any]:

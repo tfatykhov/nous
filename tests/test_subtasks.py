@@ -134,6 +134,32 @@ async def subtask_mgr(db):
     return SubtaskManager(db, "test-agent")
 
 
+class TestSubtaskPrefixBuilder:
+    """012.2: Shared prefix builder for frame-aware subtask context."""
+
+    def test_prefix_without_frame(self):
+        from nous.api.tools import build_subtask_prefix
+
+        prefix = build_subtask_prefix("Do something", frame_type=None)
+        assert "background subtask" in prefix.lower()
+        assert "Do something" in prefix
+        assert "Frame:" not in prefix
+
+    def test_prefix_with_task_frame(self):
+        from nous.api.tools import build_subtask_prefix
+
+        prefix = build_subtask_prefix("Write code", frame_type="task")
+        assert "Write code" in prefix
+        assert "task" in prefix.lower()
+
+    def test_prefix_with_unknown_frame(self):
+        from nous.api.tools import build_subtask_prefix
+
+        prefix = build_subtask_prefix("Do something", frame_type="nonexistent")
+        assert "Do something" in prefix
+        assert "Frame:" not in prefix
+
+
 class TestSubtaskManagerEnhancements:
     """012.2: SubtaskManager create() accepts frame_type and model."""
 
