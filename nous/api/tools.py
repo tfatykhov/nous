@@ -1114,17 +1114,29 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
         write_count = {"n": 0}
         output_buf = io.StringIO()
 
-        # Sync wrappers run in thread pool where asyncio.run() is safe
+        # Get the running event loop so threads can schedule DB coroutines back on it.
+        # Using run_coroutine_threadsafe instead of asyncio.run() prevents deadlocks:
+        # asyncio.run() creates a NEW loop in the thread, which can't access the
+        # connection pool belonging to the main loop. run_coroutine_threadsafe schedules
+        # the coroutine on the MAIN loop while it's awaiting the executor — no deadlock.
+        loop = asyncio.get_running_loop()
+
+        def _schedule(coro):
+            """Schedule a coroutine on the main loop and block the thread until done."""
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(
+                timeout=max(1, settings.programmatic_tools_timeout - 1)
+            )
+
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
-            results = asyncio.run(heart.search_facts(query, limit=limit))
+            results = _schedule(heart.search_facts(query, limit=limit))
             return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
 
         def _recall_recent(hours: int = 24, limit: int = 5) -> list[dict]:
-            results = asyncio.run(heart.list_episodes(limit=limit, hours=hours))
+            results = _schedule(heart.list_episodes(limit=limit, hours=hours))
             return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
 
         def _list_tasks(status: str | None = None) -> list[dict]:
-            results = asyncio.run(heart.subtasks.list(status=status))
+            results = _schedule(heart.subtasks.list(status=status))
             return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
 
         def _learn_fact(
@@ -1136,7 +1148,7 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
             if write_count["n"] >= _MAX_WRITES:
                 raise RuntimeError(f"learn_fact write cap ({_MAX_WRITES}) exceeded")
             write_count["n"] += 1
-            asyncio.run(heart.learn(FactInput(
+            _schedule(heart.learn(FactInput(
                 content=content, category=category,
                 subject=subject, confidence=confidence,
             )))
@@ -1173,9 +1185,10 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
         timeout = settings.programmatic_tools_timeout
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(_run)
-            future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
+            # await run_in_executor releases the event loop so DB coroutines
+            # scheduled via run_coroutine_threadsafe can actually execute.
+            await asyncio.wait_for(loop.run_in_executor(executor, _run), timeout=timeout)
+        except asyncio.TimeoutError:
             return {"content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}]}
