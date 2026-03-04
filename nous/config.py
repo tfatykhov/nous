@@ -156,6 +156,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
 
+    # 012.3: Programmatic tool calling
+    programmatic_tools_enabled: bool = True
+    programmatic_tools_timeout: int = 10
+
     # 012.2: Subtask execution guardrails (configurable constants)
     subtask_tool_call_limit: int = 20
     inline_subtask_timeout: int = 90  # seconds
