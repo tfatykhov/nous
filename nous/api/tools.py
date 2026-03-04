@@ -20,6 +20,7 @@ from uuid import UUID
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
+from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import CensorInput, FactInput
 
@@ -1073,3 +1074,149 @@ def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)
     dispatcher.register("list_tasks", closures["list_tasks"], _LIST_TASKS_SCHEMA)
     dispatcher.register("cancel_task", closures["cancel_task"], _CANCEL_TASK_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# Programmatic tool calling (012.3)
+# ---------------------------------------------------------------------------
+
+SAFE_BUILTINS = {
+    "len", "list", "dict", "set", "str", "int", "float", "bool",
+    "print", "range", "enumerate", "zip", "sorted", "filter",
+    "map", "max", "min", "sum", "any", "all", "isinstance",
+    "repr", "round", "abs", "type", "tuple",
+}
+
+_MAX_WRITES = 5
+
+
+def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) -> dict[str, Any]:
+    """Create run_python tool closure for client-side programmatic execution.
+
+    Returns a dict with a single "run_python" async callable.
+    The closure captures heart (for memory wrappers) and settings (for timeout).
+    """
+    import asyncio
+    import builtins
+    import collections
+    import concurrent.futures
+    import datetime
+    import functools
+    import io
+    import itertools
+    import json
+    import math
+    import re
+    import statistics
+
+    async def run_python(code: str) -> dict[str, Any]:
+        """Execute Python code with Nous memory functions in scope."""
+        write_count = {"n": 0}
+        output_buf = io.StringIO()
+
+        # Sync wrappers run in thread pool where asyncio.run() is safe
+        def _recall_deep(query: str, limit: int = 5) -> list[dict]:
+            results = asyncio.run(heart.search_facts(query, limit=limit))
+            return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
+
+        def _recall_recent(hours: int = 24, limit: int = 5) -> list[dict]:
+            results = asyncio.run(heart.list_episodes(limit=limit, hours=hours))
+            return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
+
+        def _list_tasks(status: str | None = None) -> list[dict]:
+            results = asyncio.run(heart.subtasks.list(status=status))
+            return [r.model_dump() if hasattr(r, "model_dump") else r for r in results]
+
+        def _learn_fact(
+            content: str,
+            category: str = "technical",
+            subject: str | None = None,
+            confidence: float = 1.0,
+        ) -> str:
+            if write_count["n"] >= _MAX_WRITES:
+                raise RuntimeError(f"learn_fact write cap ({_MAX_WRITES}) exceeded")
+            write_count["n"] += 1
+            asyncio.run(heart.learn(FactInput(
+                content=content, category=category,
+                subject=subject, confidence=confidence,
+            )))
+            return f"stored: {content[:60]}"
+
+        def _print(*args: object) -> None:
+            output_buf.write(" ".join(str(a) for a in args) + "\n")
+
+        safe_builtins = {k: getattr(builtins, k) for k in SAFE_BUILTINS if hasattr(builtins, k)}
+
+        namespace: dict[str, Any] = {
+            "__builtins__": safe_builtins,
+            # Nous memory functions
+            "recall_deep": _recall_deep,
+            "recall_recent": _recall_recent,
+            "list_tasks": _list_tasks,
+            "learn_fact": _learn_fact,
+            "print": _print,
+            "result": None,
+            # Safe stdlib modules (pre-injected — import statement is disabled)
+            "json": json,
+            "re": re,
+            "math": math,
+            "datetime": datetime,
+            "collections": collections,
+            "itertools": itertools,
+            "functools": functools,
+            "statistics": statistics,
+        }
+
+        def _run() -> None:
+            exec(compile(code, "<nous_script>", "exec"), namespace)
+
+        timeout = settings.programmatic_tools_timeout
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = executor.submit(_run)
+            future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            return {"content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}]}
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        output = output_buf.getvalue()
+        result = namespace.get("result")
+        text = output or (str(result) if result is not None else "OK")
+        return {"content": [{"type": "text", "text": text}]}
+
+    return {"run_python": run_python}
+
+
+_RUN_PYTHON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Execute Python code with Nous memory functions and safe stdlib in scope. "
+        "Memory functions: recall_deep(query, limit=5), recall_recent(hours=24, limit=5), "
+        "list_tasks(status=None), learn_fact(content, category, subject, confidence). "
+        "Stdlib available: json, re, math, datetime, collections, itertools, functools, statistics. "
+        "Use this to batch multiple memory lookups, filter results, and return only what's needed — "
+        "reducing token usage compared to separate tool calls. "
+        "Set result = <value> to return structured data. Use print() to emit text output. "
+        "Max runtime is configurable (default 10s). Max 5 learn_fact calls per execution."
+    ),
+    "properties": {
+        "code": {
+            "type": "string",
+            "description": "Python code to execute",
+        }
+    },
+    "required": ["code"],
+}
+
+
+def register_programmatic_tools(
+    dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings,
+) -> None:
+    """Register run_python tool if programmatic tools are enabled."""
+    if not settings.programmatic_tools_enabled:
+        return
+    closures = create_programmatic_tools(brain, heart, settings)
+    dispatcher.register("run_python", closures["run_python"], _RUN_PYTHON_SCHEMA)
