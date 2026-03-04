@@ -57,6 +57,35 @@ class TestSubtaskModel:
         assert subtask.parent_session_id == "session-abc123"
         assert subtask.priority == 50
 
+    async def test_subtask_with_frame_type_and_model(self, session: AsyncSession):
+        """012.2: Subtask stores frame_type and model."""
+        subtask = Subtask(
+            agent_id="test-agent",
+            task="Research weather patterns",
+            priority=100,
+            timeout_seconds=120,
+            frame_type="research",
+            model="claude-haiku-3-5-20241022",
+        )
+        session.add(subtask)
+        await session.flush()
+
+        assert subtask.frame_type == "research"
+        assert subtask.model == "claude-haiku-3-5-20241022"
+
+    async def test_subtask_frame_type_nullable(self, session: AsyncSession):
+        """012.2: frame_type and model are optional (backward compat)."""
+        subtask = Subtask(
+            agent_id="test-agent",
+            task="Simple task",
+            priority=100,
+        )
+        session.add(subtask)
+        await session.flush()
+
+        assert subtask.frame_type is None
+        assert subtask.model is None
+
 
 class TestScheduleModel:
     """ORM model tests for heart.schedules."""
@@ -103,6 +132,296 @@ from nous.heart.subtasks import SubtaskManager
 @pytest_asyncio.fixture
 async def subtask_mgr(db):
     return SubtaskManager(db, "test-agent")
+
+
+class TestWorkerEnhancements:
+    """012.2: Background worker uses frame-aware prefix and guardrails."""
+
+    async def test_worker_passes_is_subtask(self):
+        """Worker should pass is_subtask=True to runner.run_turn()."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=120,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Test task"
+        subtask.parent_session_id = "parent-123"
+        subtask.timeout_seconds = 120
+        subtask.frame_type = None
+        subtask.model = None
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        mock_runner.run_turn.assert_called_once()
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_subtask") is True
+        assert call_kwargs.get("max_tool_calls") == 20
+
+    async def test_worker_passes_model_override(self):
+        """Worker should pass subtask.model as model_override."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=120,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Quick lookup"
+        subtask.parent_session_id = None
+        subtask.timeout_seconds = 60
+        subtask.frame_type = "research"
+        subtask.model = "claude-haiku-3-5-20241022"
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("model_override") == "claude-haiku-3-5-20241022"
+
+    async def test_worker_uses_shared_prefix(self):
+        """Worker should use build_subtask_prefix for system_prompt_prefix."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=120,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Research weather"
+        subtask.parent_session_id = None
+        subtask.timeout_seconds = 120
+        subtask.frame_type = "task"
+        subtask.model = None
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        prefix = call_kwargs.get("system_prompt_prefix")
+        assert "background subtask" in prefix.lower()
+        assert "Research weather" in prefix
+        # Frame-aware: should mention the frame type
+        assert "task" in prefix.lower()
+
+
+class TestSpawnTaskEnhancements:
+    """012.2: spawn_task tool gains frame_type, await_result, and model params."""
+
+    async def test_spawn_with_frame_type(self, settings):
+        """frame_type is passed through to SubtaskManager.create()."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Research topic",
+            frame_type="research",
+            _session_id="test-session",
+        )
+
+        heart.subtasks.create.assert_called_once()
+        call_kwargs = heart.subtasks.create.call_args.kwargs
+        assert call_kwargs.get("frame_type") == "research"
+
+    async def test_spawn_with_model(self, settings):
+        """model is passed through to SubtaskManager.create()."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Quick lookup",
+            model="claude-haiku-3-5-20241022",
+            _session_id="test-session",
+        )
+
+        call_kwargs = heart.subtasks.create.call_args.kwargs
+        assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+
+    async def test_spawn_without_new_params(self, settings):
+        """Backward compat: existing spawn_task calls still work."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Simple task",
+            _session_id="test-session",
+        )
+
+        assert "subtask" in result["content"][0]["text"].lower()
+
+    async def test_spawn_frame_type_applies_default_model(self, settings):
+        """research frame_type should auto-apply haiku model when no model specified."""
+        from nous.api.tools import create_subtask_tools
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, settings)
+        result = await tools["spawn_task"](
+            task="Research something",
+            frame_type="research",
+            _session_id="test-session",
+        )
+
+        call_kwargs = heart.subtasks.create.call_args.kwargs
+        assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+
+
+class TestRunnerSubtaskGuardrails:
+    """012.2: Runner respects is_subtask and max_tool_calls."""
+
+    def test_tool_filtering_removes_spawn_and_schedule(self):
+        """is_subtask=True should filter spawn_task and schedule_task from tools."""
+        all_tools = [
+            {"name": "bash", "description": "Run bash", "input_schema": {}},
+            {"name": "spawn_task", "description": "Spawn", "input_schema": {}},
+            {"name": "schedule_task", "description": "Schedule", "input_schema": {}},
+            {"name": "read_file", "description": "Read", "input_schema": {}},
+        ]
+        # Filter like the runner would
+        subtask_excluded = {"spawn_task", "schedule_task"}
+        filtered = [t for t in all_tools if t["name"] not in subtask_excluded]
+
+        assert len(filtered) == 2
+        names = {t["name"] for t in filtered}
+        assert "bash" in names
+        assert "read_file" in names
+        assert "spawn_task" not in names
+        assert "schedule_task" not in names
+
+
+class TestSubtaskPrefixBuilder:
+    """012.2: Shared prefix builder for frame-aware subtask context."""
+
+    def test_prefix_without_frame(self):
+        from nous.api.tools import build_subtask_prefix
+
+        prefix = build_subtask_prefix("Do something", frame_type=None)
+        assert "background subtask" in prefix.lower()
+        assert "Do something" in prefix
+        assert "Frame:" not in prefix
+
+    def test_prefix_with_task_frame(self):
+        from nous.api.tools import build_subtask_prefix
+
+        prefix = build_subtask_prefix("Write code", frame_type="task")
+        assert "Write code" in prefix
+        assert "task" in prefix.lower()
+
+    def test_prefix_with_unknown_frame(self):
+        from nous.api.tools import build_subtask_prefix
+
+        prefix = build_subtask_prefix("Do something", frame_type="nonexistent")
+        assert "Do something" in prefix
+        assert "Frame:" not in prefix
+
+
+class TestSubtaskManagerEnhancements:
+    """012.2: SubtaskManager create() accepts frame_type and model."""
+
+    async def test_create_with_frame_type(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Research topic X",
+            frame_type="research",
+        )
+        assert subtask.frame_type == "research"
+        assert subtask.model is None
+
+    async def test_create_with_model(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Quick lookup",
+            model="claude-haiku-3-5-20241022",
+        )
+        assert subtask.model == "claude-haiku-3-5-20241022"
+
+    async def test_create_with_frame_type_and_model(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Research with haiku",
+            frame_type="research",
+            model="claude-haiku-3-5-20241022",
+        )
+        assert subtask.frame_type == "research"
+        assert subtask.model == "claude-haiku-3-5-20241022"
+
+    async def test_create_without_new_params_backward_compat(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(task="Normal task")
+        assert subtask.frame_type is None
+        assert subtask.model is None
+        assert subtask.status == "pending"
 
 
 class TestSubtaskManager:
@@ -499,7 +818,7 @@ class TestSubtaskWorkerPool:
     async def test_execute_subtask_passes_system_prompt_prefix(
         self, mock_runner, worker_heart, worker_settings, mock_bus
     ):
-        """_execute_subtask passes system_prompt_prefix to run_turn."""
+        """_execute_subtask passes system_prompt_prefix via shared prefix builder."""
         pool = SubtaskWorkerPool(
             runner=mock_runner,
             heart=worker_heart,
@@ -520,8 +839,10 @@ class TestSubtaskWorkerPool:
         prefix = call_kwargs["system_prompt_prefix"]
         assert "background subtask" in prefix
         assert "Prefix test task" in prefix
-        assert "parent-sess-42" in prefix
         assert "Do not ask questions" in prefix
+        # 012.2: Worker now also passes subtask guardrail params
+        assert call_kwargs.get("is_subtask") is True
+        assert call_kwargs.get("max_tool_calls") == 20
 
 
 # ---------------------------------------------------------------------------

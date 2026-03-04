@@ -418,6 +418,8 @@ CREATE TABLE IF NOT EXISTS heart.subtasks (
     error TEXT,
     worker_id VARCHAR(100),
     timeout_seconds INTEGER NOT NULL DEFAULT 120,
+    frame_type VARCHAR(30),
+    model VARCHAR(100),
     notify BOOLEAN NOT NULL DEFAULT TRUE,
     delivered BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

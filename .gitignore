@@ -10,3 +10,4 @@ pgdata/
 .idea/
 PLAN-tests.md
 /.claude
+.worktrees
