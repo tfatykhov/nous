@@ -1060,3 +1060,94 @@ class TestFormatSubtaskResults:
         )
         output = _format_subtask_results([s])
         assert "Result: None" in output
+
+
+# ---------------------------------------------------------------------------
+# Config tests for subtask constants (012.2 configurability)
+# ---------------------------------------------------------------------------
+
+
+class TestSubtaskConfigDefaults:
+    """012.2: Subtask constants are configurable via Settings."""
+
+    def test_defaults(self):
+        """Default values match the previously hardcoded constants."""
+        s = Settings()
+        assert s.subtask_tool_call_limit == 20
+        assert s.inline_subtask_timeout == 90
+        assert s.frame_default_models == {"research": "claude-haiku-3-5-20241022"}
+
+    def test_custom_values(self):
+        """Settings accepts custom values for subtask constants."""
+        s = Settings(
+            subtask_tool_call_limit=30,
+            inline_subtask_timeout=120,
+            frame_default_models={"research": "claude-haiku-3-5-20241022", "task": "claude-sonnet-4-5-20250514"},
+        )
+        assert s.subtask_tool_call_limit == 30
+        assert s.inline_subtask_timeout == 120
+        assert s.frame_default_models == {
+            "research": "claude-haiku-3-5-20241022",
+            "task": "claude-sonnet-4-5-20250514",
+        }
+
+    def test_empty_frame_default_models(self):
+        """Empty dict disables all frame-default model mappings."""
+        s = Settings(frame_default_models={})
+        assert s.frame_default_models == {}
+
+    def test_spawn_task_uses_settings_frame_models(self):
+        """spawn_task reads frame_default_models from settings, not a constant."""
+        from nous.api.tools import create_subtask_tools
+
+        custom_settings = Settings(
+            frame_default_models={"debug": "claude-haiku-3-5-20241022"},
+        )
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, custom_settings)
+
+        async def _run():
+            await tools["spawn_task"](
+                task="Debug something",
+                frame_type="debug",
+                _session_id="test",
+            )
+            call_kwargs = heart.subtasks.create.call_args.kwargs
+            assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+
+        asyncio.get_event_loop().run_until_complete(_run())
+
+    def test_spawn_task_uses_settings_inline_timeout(self):
+        """spawn_task uses settings.inline_subtask_timeout for await_result default."""
+        from nous.api.tools import create_subtask_tools
+
+        custom_settings = Settings(
+            inline_subtask_timeout=45,
+            subtask_max_timeout=600,
+        )
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+
+        tools = create_subtask_tools(heart, custom_settings, runner=None)
+
+        async def _run():
+            result = await tools["spawn_task"](
+                task="Inline task",
+                await_result=True,
+                _session_id="test",
+            )
+            call_kwargs = heart.subtasks.create.call_args.kwargs
+            # timeout should be min(45, 600) = 45
+            assert call_kwargs.get("timeout") == 45
+
+        asyncio.get_event_loop().run_until_complete(_run())

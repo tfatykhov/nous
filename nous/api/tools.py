@@ -644,16 +644,6 @@ def build_subtask_prefix(task: str, frame_type: str | None = None) -> str:
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
 
-# 012.2: Subtask execution guardrails
-SUBTASK_TOOL_CALL_LIMIT = 20
-INLINE_SUBTASK_DEFAULT_TIMEOUT = 90  # seconds
-
-# 012.2: Frame-type to default model mapping (cost optimization)
-FRAME_DEFAULT_MODELS: dict[str, str] = {
-    "research": "claude-haiku-3-5-20241022",
-}
-
-
 def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = None) -> dict[str, Any]:
     """Create subtask/schedule tool closures with Heart captured in closure context.
 
@@ -690,12 +680,12 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             # 012.2: Apply frame-default model mapping
             effective_model = model
             if not effective_model and frame_type:
-                effective_model = FRAME_DEFAULT_MODELS.get(frame_type)
+                effective_model = settings.frame_default_models.get(frame_type)
 
             # 012.2: Differentiate timeout defaults
             if await_result:
                 effective_timeout = min(
-                    timeout or INLINE_SUBTASK_DEFAULT_TIMEOUT,
+                    timeout or settings.inline_subtask_timeout,
                     settings.subtask_max_timeout,
                 )
             else:
@@ -755,7 +745,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                         system_prompt_prefix=system_prefix,
                         skip_episode=True,
                         is_subtask=True,
-                        max_tool_calls=SUBTASK_TOOL_CALL_LIMIT,
+                        max_tool_calls=settings.subtask_tool_call_limit,
                         model_override=effective_model,
                     ),
                     timeout=effective_timeout,

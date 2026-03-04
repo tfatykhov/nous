@@ -467,14 +467,14 @@ class EpisodeManager:
         from sqlalchemy import text
 
         sql = text("""
-            SELECT id, 1 - (embedding <=> :embedding::vector) AS cosine_sim
+            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS cosine_sim
             FROM heart.episodes
             WHERE agent_id = :agent_id
               AND active = true
               AND outcome != 'abandoned'
               AND embedding IS NOT NULL
               AND started_at > NOW() - make_interval(hours => :hours)
-            ORDER BY embedding <=> :embedding::vector
+            ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """)
         result = await session.execute(sql, {

@@ -156,6 +156,13 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
 
+    # 012.2: Subtask execution guardrails (configurable constants)
+    subtask_tool_call_limit: int = 20
+    inline_subtask_timeout: int = 90  # seconds
+    frame_default_models: dict[str, str] = Field(
+        default_factory=lambda: {"research": "claude-haiku-3-5-20241022"},
+    )
+
     @model_validator(mode="after")
     def _validate_keepalive(self) -> "Settings":
         if self.keepalive_interval >= self.tool_timeout:

@@ -461,7 +461,7 @@ class Heart:
                 compaction_count=compaction_count,
             )
             .on_conflict_do_update(
-                constraint="uq_conversation_state_agent_session",
+                index_elements=["agent_id", "session_id"],
                 set_={
                     "summary": summary,
                     "messages": messages,

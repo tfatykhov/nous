@@ -208,6 +208,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SCHEDULE_CHECK_INTERVAL` | `60` | Seconds between schedule checks |
 | `NOUS_TELEGRAM_BOT_TOKEN` | — | Telegram bot token for subtask notifications |
 | `NOUS_TELEGRAM_CHAT_ID` | — | Telegram chat ID for subtask notifications |
+| `NOUS_SUBTASK_TOOL_CALL_LIMIT` | `20` | Max tool calls per subtask execution |
+| `NOUS_INLINE_SUBTASK_TIMEOUT` | `90` | Default timeout for inline (await_result) subtasks |
+| `NOUS_FRAME_DEFAULT_MODELS` | `{"research":"claude-haiku-3-5-20241022"}` | JSON map of frame type to default model |
 
 ### REST Endpoints
 

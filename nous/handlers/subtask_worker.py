@@ -136,7 +136,7 @@ class SubtaskWorkerPool:
         )
 
         # 012.2: Use shared prefix builder for frame-aware context
-        from nous.api.tools import SUBTASK_TOOL_CALL_LIMIT, build_subtask_prefix
+        from nous.api.tools import build_subtask_prefix
 
         system_prefix = build_subtask_prefix(subtask.task, subtask.frame_type)
 
@@ -148,7 +148,7 @@ class SubtaskWorkerPool:
                 system_prompt_prefix=system_prefix,
                 skip_episode=True,
                 is_subtask=True,
-                max_tool_calls=SUBTASK_TOOL_CALL_LIMIT,
+                max_tool_calls=self._settings.subtask_tool_call_limit,
                 model_override=subtask.model,
             )
 
