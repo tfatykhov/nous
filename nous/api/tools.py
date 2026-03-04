@@ -1188,6 +1188,7 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
         def _run() -> None:
             exec(compile(code, "<nous_script>", "exec"), namespace)
 
+        logger.info("run_python | %d chars\n%s", len(code), code)
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             # await run_in_executor releases the event loop so DB coroutines
