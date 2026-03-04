@@ -823,7 +823,6 @@ class AgentRunner:
                 # Execute tools (P1-2: all results in single user message)
                 tool_results_for_message: list[dict[str, Any]] = []
                 for tc in tool_calls:
-                    yield StreamEvent(type="tool_start", tool_name=tc["name"])
                     start_time = time.monotonic()
                     result_text, is_error = "", False
                     async for item in self._dispatch_with_keepalive(
