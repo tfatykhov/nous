@@ -14,6 +14,7 @@ Each tool returns MCP-compliant response format and handles errors gracefully.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 from uuid import UUID
@@ -1120,12 +1121,17 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
         # connection pool belonging to the main loop. run_coroutine_threadsafe schedules
         # the coroutine on the MAIN loop while it's awaiting the executor — no deadlock.
         loop = asyncio.get_running_loop()
+        timeout = settings.programmatic_tools_timeout
+        deadline = time.monotonic() + timeout
 
         def _schedule(coro):
-            """Schedule a coroutine on the main loop and block the thread until done."""
-            return asyncio.run_coroutine_threadsafe(coro, loop).result(
-                timeout=max(1, settings.programmatic_tools_timeout - 1)
-            )
+            """Schedule a coroutine on the main loop and block the thread until done.
+
+            Uses deadline-relative timeout so per-call budget tracks remaining
+            wall time — prevents thread from outliving the main asyncio.wait_for.
+            """
+            remaining = max(0.1, deadline - time.monotonic())
+            return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=remaining)
 
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
             results = _schedule(heart.search_facts(query, limit=limit))
@@ -1182,7 +1188,6 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
         def _run() -> None:
             exec(compile(code, "<nous_script>", "exec"), namespace)
 
-        timeout = settings.programmatic_tools_timeout
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
             # await run_in_executor releases the event loop so DB coroutines
