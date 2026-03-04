@@ -174,7 +174,7 @@ class ContextEngine:
                     profile_facts = [
                         f for f in profile_facts
                         if text_overlap(
-                            getattr(f, "content", "")[:200],
+                            (getattr(f, "content", "") or "")[:200],
                             _effective_identity,
                         ) < _IDENTITY_OVERLAP_THRESHOLD
                     ]
@@ -265,7 +265,7 @@ class ContextEngine:
                 logger.info("Tier3 decisions: %d results, has_embeddings=%s, scores=%s, descs=%s",
                     len(decisions) if decisions else 0, self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
-                    [getattr(d, "description", "")[:50] for d in (decisions or [])[:3]])
+                    [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
                 if decisions and self._has_embeddings:
                     # Tier 3: min_score threshold (only with embeddings — keyword scores too low)
                     decisions = [d for d in decisions if (getattr(d, "score", None) or 0) >= TIER3_THRESHOLDS["decision"]]
@@ -311,7 +311,7 @@ class ContextEngine:
                 logger.info("Tier3 facts: %d results, has_embeddings=%s, scores=%s, subjects=%s",
                     len(facts) if facts else 0, self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
-                    [getattr(f, "subject", "")[:30] for f in (facts or [])[:5]])
+                    [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
                 if facts and self._has_embeddings:
                     # Tier 3: min_score threshold (only with embeddings)
                     facts = [f for f in facts if (getattr(f, "score", None) or 0) >= TIER3_THRESHOLDS["fact"]]
