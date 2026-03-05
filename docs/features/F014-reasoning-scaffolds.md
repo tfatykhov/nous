@@ -1,6 +1,6 @@
 # F014 — Frame Reasoning Scaffolds
 
-**Status:** Draft (v3 — revised after architecture review)  
+**Status:** Draft (v4 — approved with required revisions)  
 **Author:** Nous (with Tim)  
 **Created:** 2026-03-05  
 **Revised:** 2026-03-05  
@@ -48,10 +48,24 @@ Why pilot Decision first:
 
 ### Success Criteria (2-week measurement window)
 
+**Success (expand to next frame):**
 - Average reason count per decision increases (baseline: current avg)
 - Confidence calibration improves (fewer 0.95+ decisions that get marked as failures)
 - No increase in scaffold-related token costs > 15% per decision turn
 - Qualitative: decision descriptions become more structured without feeling formulaic
+
+**Failure (kill or redesign):**
+- Token cost increase > 25% with no measurable quality improvement
+- Scaffold steps are parroted mechanically without genuine reasoning (cargo cult)
+- Decision recording frequency drops (scaffold overhead discourages recording)
+- Tim reports the agent feels formulaic or robotic in decision conversations
+
+**Pre-pilot baseline task:** Before enabling scaffolds, run a query against the `decisions` table to capture:
+- Average reason count per decision (last 30 days)
+- Confidence distribution histogram (buckets: 0-0.5, 0.5-0.7, 0.7-0.85, 0.85-0.95, 0.95-1.0)
+- Decision-to-failure rate by confidence bucket
+- Average token usage per decision-frame turn
+Store as a fact in Heart for comparison at pilot end.
 
 ### File Structure
 
@@ -92,6 +106,12 @@ DECISION_SCAFFOLD_SHORT = (
 )
 
 
+import os
+
+# Kill switch — set NOUS_REASONING_SCAFFOLDS=false to disable all scaffolds
+SCAFFOLDS_ENABLED = os.getenv("NOUS_REASONING_SCAFFOLDS", "true").lower() in ("true", "1", "yes")
+
+
 def get_scaffold(frame_id: str, turn_in_frame: int, message_length: int) -> str | None:
     """Return the appropriate scaffold for a frame and turn.
 
@@ -103,6 +123,10 @@ def get_scaffold(frame_id: str, turn_in_frame: int, message_length: int) -> str 
     Returns:
         Scaffold string, or None if no scaffold applies.
     """
+    # Kill switch
+    if not SCAFFOLDS_ENABLED:
+        return None
+
     # Phase 1: Only Decision frame gets a scaffold
     if frame_id != "decision":
         return None
@@ -126,8 +150,8 @@ def _get_frame_instructions(self, turn_context: TurnContext) -> str:
     # Check for reasoning scaffold (replaces tool nudges for scaffolded frames)
     scaffold = get_scaffold(
         frame_id=frame_id,
-        turn_in_frame=turn_context.turn_in_frame,  # requires tracking
-        message_length=len(turn_context.user_message or ""),
+        turn_in_frame=turn_context.turn_in_frame,  # tracked in runner.py turn loop
+        message_length=turn_context.message_length,  # set by runner.py from user message
     )
     if scaffold:
         return scaffold
@@ -142,7 +166,21 @@ Key: scaffolds **replace** the existing `_get_frame_instructions()` return for t
 
 ### Turn Tracking
 
-Add `turn_in_frame: int` to TurnContext (or derive from conversation history). Resets when frame changes.
+Add two fields to `TurnContext` in `nous/nous/cognitive/schemas.py`:
+
+```python
+class TurnContext(BaseModel):
+    # ... existing fields ...
+    turn_in_frame: int = 1       # resets when frame changes
+    message_length: int = 0      # char length of user message (for complexity gate)
+```
+
+**Tracking site: `runner.py` turn loop.** The runner already owns the turn loop and has access to the user message. Before calling `_get_frame_instructions()`:
+- Set `turn_context.message_length = len(user_message)`
+- Track frame changes: if `current_frame != previous_frame`, reset `turn_in_frame` to 1; otherwise increment
+- This avoids passing raw user messages into TurnContext (only the length is needed for the complexity gate)
+
+**Config flag:** Add `NOUS_REASONING_SCAFFOLDS=true` to `.env` (kill switch, follows existing `NOUS_*_ENABLED` pattern).
 
 Token savings from compression:
 - Turn 1: ~280 tokens (full scaffold)
@@ -263,10 +301,11 @@ def get_scaffold(frame_id: str, turn_in_frame: int, message_length: int) -> str 
 RESEARCH_SUBTASK_SCAFFOLD = (
     "You are executing a research subtask. Follow this process:\n"
     "1. SCOPE — Define what you're researching and success criteria.\n"
-    "2. SEARCH — Use web_search with multiple query angles.\n"
-    "3. GATHER — Use web_fetch to read promising sources. Note conflicts.\n"
-    "4. SYNTHESIZE — Combine findings. Separate facts from inference.\n"
-    "5. DELIVER — Structured summary with key findings, sources, and confidence.\n"
+    "2. RECALL — Use recall_deep to check what is already known. Don't re-research existing knowledge.\n"
+    "3. SEARCH — Use web_search with multiple query angles for gaps not covered by memory.\n"
+    "4. GATHER — Use web_fetch to read promising sources. Note conflicts between sources and memory.\n"
+    "5. SYNTHESIZE — Combine memory + new findings. Separate facts from inference.\n"
+    "6. DELIVER — Structured summary with key findings, sources, and confidence.\n"
     "Deliver a clear, complete result. Do not ask questions."
 )
 
@@ -331,12 +370,12 @@ When Cognition Engine protocol ships:
 
 | File | Change |
 |------|--------|
-| `nous/nous/cognitive/scaffolds.py` | **NEW** — scaffold templates + `get_scaffold()` function |
-| `nous/nous/api/runner.py` | Modify `_get_frame_instructions()` to call `get_scaffold()` first |
+| `nous/nous/cognitive/scaffolds.py` | **NEW** — scaffold templates, `get_scaffold()` function, kill switch |
+| `nous/nous/api/runner.py` | Modify `_get_frame_instructions()` to call `get_scaffold()` first; track `turn_in_frame` + `message_length` in turn loop |
 | `nous/nous/api/tools.py` | Modify `build_subtask_prefix()` for research scaffold |
-| `nous/nous/cognitive/context.py` | Add `turn_in_frame` tracking to TurnContext |
+| `nous/nous/cognitive/schemas.py` | Add `turn_in_frame: int` and `message_length: int` fields to `TurnContext` |
+| `.env` | Add `NOUS_REASONING_SCAFFOLDS=true` config flag |
 | `nous/nous/heart/heart.py` | Phase 2 only — template storage/retrieval |
-| `nous/nous/cognitive/schemas.py` | Phase 2 only — template Pydantic models |
 
 ---
 
@@ -367,6 +406,15 @@ When Cognition Engine protocol ships:
 
 ## Revision History
 
+**v4 (2026-03-05) — Approved with required revisions (Round 2 review):**
+- **Kill switch re-added:** `NOUS_REASONING_SCAFFOLDS=true` env var with `SCAFFOLDS_ENABLED` gate in `get_scaffold()` (follows `NOUS_*_ENABLED` pattern; caught as regression from v2)
+- **TurnContext fixed:** `turn_context.user_message` reference replaced with `message_length: int` field (`user_message` doesn't exist on TurnContext)
+- **Affected files fixed:** `context.py` → `schemas.py` for TurnContext changes; added `.env` to affected files
+- **Turn tracking clarified:** `runner.py` is the tracking site; both `turn_in_frame` and `message_length` set there before `_get_frame_instructions()` call
+- **Research scaffold:** Added RECALL step (step 2) before SEARCH — check memory before hitting the web
+- **Failure criteria added:** Explicit kill/redesign conditions alongside success metrics
+- **Baseline metrics:** Promoted from open question to concrete pre-pilot task with specific queries
+
 **v3 (2026-03-05) — Post-architecture-review:**
 - **Rollout changed:** Decision frame pilot first (2 weeks), expand only after measurement
 - **Research scaffold:** Moved to `build_subtask_prefix()` in tools.py (not frame system)
@@ -394,4 +442,3 @@ When Cognition Engine protocol ships:
 1. Should scaffolds be visible in the agent's response, or purely internal (thinking block only)?
 2. Template inheritance — should subtasks inherit the parent's scaffold or get their own based on frame_type?
 3. How should scaffold compression handle frame switches mid-conversation? (Reset turn count per frame switch — proposed default)
-4. What's the baseline decision quality metric? Need to measure current avg reason count, confidence distribution, and failure rate before pilot starts.
