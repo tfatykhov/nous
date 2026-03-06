@@ -282,7 +282,7 @@ All core architecture is implemented and running:
 | Brain (F001) | ✅ Shipped | Decision recording, deliberation traces, calibration, guardrails, graph |
 | Heart (F002) | ✅ Shipped | Episodes, facts, procedures, censors, working memory |
 | Cognitive Layer (F003) | ✅ Shipped | Frame selection, recall, deliberation, monitoring, reflection |
-| Runtime (F004) | ✅ Shipped | REST API (15 endpoints), MCP server, Telegram bot |
+| Runtime (F004) | ✅ Shipped | REST API (23 endpoints), MCP server, Telegram bot |
 | Context Engine (F005) | ✅ Shipped | Tiered context (always-on identity + search thresholds), token budgets, dedup |
 | Event Bus (F006) | ✅ Shipped | In-process async bus with automated handlers |
 | Memory Improvements (F010) | ✅ Shipped | Episode summaries, fact extraction, user tagging |
@@ -296,8 +296,16 @@ All core architecture is implemented and running:
 | Deliberation Capture | ✅ Shipped | Extended thinking blocks → deliberation traces, garbage cleanup |
 | Episode Summary Quality (008.3-008.4) | ✅ Shipped | Backfill + enhanced prompt, candidate_facts, smart truncation, decision context |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
+| Decision Review Loop (008.5) | ✅ Shipped | Periodic review sweeps, outcome tracking |
+| Temporal Recall (008.6) | ✅ Shipped | `recall_recent` tool, time-based episode retrieval |
+| Decision Quality Gate (009.5) | ✅ Shipped | Pre-record validation, confidence checks, duplicate detection |
+| Subtasks & Scheduling (011.1) | ✅ Shipped | Background/inline tasks, worker pool, schedules, result delivery |
+| Subtask Enhancements (012.2) | ✅ Shipped | frame_type per subtask, model override, worker guardrails |
+| Programmatic Tool Calling (012.3) | ✅ Shipped | `run_python` sandboxed tool, stdlib whitelist, async bridge |
+| Working Memory Threads | ✅ Shipped | Thread-linked working memory items |
+| Exa.ai Fallback Search | ✅ Shipped | Exa.ai as fallback when Brave Search unavailable |
 
-**Stats:** ~38,800 lines of Python · 971 tests · 18 Postgres tables · Docker deployment
+**Stats:** ~60,100 lines of Python · 1,052 tests · 22 Postgres tables (3 schemas) · Docker deployment
 
 See [Feature Index](docs/features/INDEX.md) for the full breakdown.
 

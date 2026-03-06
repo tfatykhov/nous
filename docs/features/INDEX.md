@@ -21,125 +21,151 @@
 ### P1: Capabilities
 | Feature | Name | Status | Description |
 |---------|------|--------|-------------|
-| F009 | [Async Subtasks](F009-async-subtasks.md) | ✅ Shipped | Background task queue — parallel execution, non-blocking chat, Postgres-backed workers, scheduled/recurring tasks |
-| F010 | [Memory Improvements](F010-memory-improvements.md) | ✅ Shipped | Episode summaries, clean decision descriptions, proactive fact learning, user-tagged episodes |
+| F009 | [Async Subtasks](F009-async-subtasks.md) | ✅ Shipped | Background/inline tasks, schedules, result delivery, worker guardrails |
+| F010 | [Web Browsing](F010-web-browsing.md) | Planned | Deep web browsing, multi-page research, content extraction |
+| F011 | [Proactive Intelligence](F011-proactive.md) | Planned | Schedule-driven monitoring, news watching, autonomous research |
+| F012 | [A2A Protocol](F012-a2a-protocol.md) | Planned | Google A2A for multi-agent communication |
+| F013 | [Frame Splitting](F013-frame-splitting.md) | Partial | Full spec deferred; 012.2 shipped subtask-level frame_type as lightweight alternative |
+| F018 | [Agent Identity](F018-agent-identity.md) | ✅ Shipped | Identity tiering, values, protocols, preferences, initiation ceremony |
+| F019 | [Nous Website](F019-nous-website.md) | 📋 Specced | Public website, Minsky-first narrative, interactive demos |
 
-### P0: Identity & Context
-| Feature | Name | Status | Description |
-|---------|------|--------|-------------|
-| F018 | [Agent Identity](F018-agent-identity.md) | ✅ Shipped | DB-backed identity — initiation protocol, versioned sections, tiered context model |
+---
 
-### Implementation Specs
+## Current Stats
 
-All shipped implementation specs with PR references:
+| Metric | Value |
+|--------|-------|
+| Source code | ~19,600 lines Python (source) · ~60,100 total with tests |
+| Tests | 1,052 tests across 51 files |
+| Database | 22 tables, 3 schemas (`brain`, `heart`, `nous_system`) |
+| LLM Tools | 15 (`record_decision`, `recall_deep`, `recall_recent`, `learn_fact`, `create_censor`, `run_python`, `spawn_task`, `schedule_task`, `list_tasks`, `cancel_task`, `bash`, `read_file`, `write_file`, `web_search`, `web_fetch`) |
+| REST endpoints | 23 |
+| Docs | 14 feature docs · 38 implementation specs · 17 research notes |
 
-| Spec | Name | Status | PR |
-|------|------|--------|-----|
-| 001 | Postgres Scaffold | ✅ Shipped | #1 |
-| 002 | Brain Module | ✅ Shipped | #2 |
-| 003 | Heart Module | ✅ Shipped | #3 |
-| 003.1 | Heart Enhancements | ✅ Shipped | #6 |
-| 003.2 | Frame-Tagged Encoding | ✅ Shipped | — |
-| 004 | Cognitive Layer | ✅ Shipped | #10 |
-| 004.1 | CEL Guardrails | ✅ Shipped | #10 |
-| 005 | Runtime (REST + MCP + Runner) | ✅ Shipped | — |
-| 005.1 | Smart Context Preparation | ✅ Shipped | — |
-| 005.2 | Direct API Rewrite | ✅ Shipped | #15 |
-| 005.3 | Web Tools | ✅ Shipped | #16 |
-| 005.4 | Streaming Responses | ✅ Shipped | #23 |
-| 005.5 | Noise Reduction | ✅ Shipped | #20 |
-| 006 | Event Bus | ✅ Shipped | — |
-| 006.2 | Context Quality | ✅ Shipped | #31 |
-| 007 | Extended Thinking | ✅ Shipped | — |
-| 007.1 | Thinking Indicators | ✅ Shipped | #53 |
-| 007.2 | Topic-Aware Recall | ✅ Shipped | #55 |
-| 007.3 | Improve _is_informational() | ✅ Shipped | #55 |
-| 007.4 | Fix Unpopulated Columns | ✅ Shipped | #55 |
-| 007.5 | Recall Min Threshold | ⏸ Reverted | #59 — superseded by 008 |
-| 008 | Agent Identity & Tiered Context | ✅ Shipped | #60, #61, #62 — F018 identity + tiered context + API |
-| 008.1-P1 | Tool Output Pruning + Token Estimation | ✅ Shipped | #69 |
-| 008.1-P2 | History Compaction Core | ✅ Shipped | #70 |
-| 008.1-P3 | Durable Integration (persistence, events, knowledge extraction) | ✅ Shipped | #71 |
-| 008.1-P4 | Adaptive Compaction | 📋 Specced | — |
-| 008.2 | Topic-Aware Recall v2 | 📋 Specced | — full spec deferred; spike merged |
-| 008.3 | Episode Summary Backfill & Lifecycle | ✅ Shipped | #79 — backfill unsummarized episodes, active flag lifecycle |
-| 008.4 | Episode Summary Quality | ✅ Shipped | — enhanced prompt, candidate_facts, smart truncation, decision context |
-| 008.5 | Decision Review Loop | ✅ Shipped | #81 — auto-review signals, REST endpoints, calibration snapshots |
-| 009.1-009.4 | Memory Lifecycle Implementation | 📦 Shelved | — system too young (53 facts, 86 episodes at time of assessment) |
-| 008.6 | Temporal Recall | ✅ Shipped | — dual-path retrieval: time-based + semantic. Fixes cross-domain recall gap |
-| 009.5 | Decision Quality Gate | ✅ Shipped | #92 — 3-layer filter: source filtering, dedup window, quality gate. Fixes 43% noise rate |
-| 010.1 | Health Dashboard (F007 Phase 1) | 📋 Specced | — enrich GET /status |
-| — | Streaming Keepalive + Tool Timeout | ✅ Shipped | #73 — keepalive during Anthropic wait, `NOUS_TOOL_TIMEOUT` |
-| — | Typing Indicator Fix | ✅ Shipped | — continuous typing via background task |
-| — | Topic Persistence Spike | ✅ Shipped | #75 — `_resolve_focus_text()` follow-up detection |
-| — | Deliberation Thinking Capture | ✅ Shipped | #76 — extended thinking blocks → `brain.thoughts`, garbage cleanup |
-| — | Phase 1 Voice | ✅ Shipped | — 3 procedures (send_email, notify_tim, talk_to_emerson) + 2 censors |
-| — | RRF Score Fix | ✅ Shipped | #64 — use original hybrid scores instead of RRF ranking |
-| — | Query Deduplication Fix | ✅ Shipped | — prevent doubled query when topic = input |
-| — | Tier 3 Threshold Tuning | ✅ Shipped | #66 — decision threshold 0.3→0.20 |
-| — | Timezone Fix (ORM models) | ✅ Shipped | #87 — DateTime(timezone=True) on all 27 timestamp columns |
-| — | /new Session Ending | ✅ Shipped | #88 — /new now calls DELETE /chat/{session_id}, fires session_ended for all handlers |
-| — | Periodic Decision Sweep | ✅ Shipped | #89 — background asyncio loop, configurable interval (default 1hr) |
-| 011.1 | Subtasks & Scheduling | ✅ Shipped | #85 — F009: subtask queue, worker pool, scheduling, time parser, 4 tools, 6 endpoints |
-| 011.2 | Subtask Result Delivery | ✅ Shipped | — subtask results auto-injected into parent session context, skip_episode for workers, delivered tracking |
+---
 
-### Phase 2 — Quality (next to build)
+## Implementation Roadmap
 
-| Feature | Name | Priority | Description |
-|---------|------|----------|-------------|
-| #38 | _is_informational() Phase 2 | P1 | Partially addressed by PR #76 (delete instead of abandon). Further tuning possible. |
-| #52 | Topic-Aware Recall v2 | P1 | Spike merged (#75). Full 008.2 spec exists if spike proves insufficient. |
-| F011 | [Skill Discovery](F011-skill-discovery.md) | P1 | Index workspace skills as procedures, auto-surface in RECALL based on task/frame. |
-| 010.1 | Health Dashboard | P1 | Enrich GET /status with episode outcome breakdown, fact health, decision stats. |
+### Phase 1: Foundation (Shipped)
 
-### Phase 3 — Growth
+| Spec Area | Status | Key Deliverables |
+|-----------|--------|-----------------|
+| Decision Intelligence (001-002) | ✅ Shipped | Brain schema, recording, calibration, guardrails, graph edges |
+| Episodic Memory (003) | ✅ Shipped | Episodes, facts, procedures, censors, frame encoding |
+| Cognitive Frames (004-004.1) | ✅ Shipped | 8 frame types, CEL guardrails, mode-specific behavior |
+| Runtime & API (005) | ✅ Shipped | Docker, REST, MCP, direct API, smart context prep |
+| Event System & Observability (006) | ✅ Shipped | In-process event bus, 7 handlers, observability hooks |
+| Context Quality (006.2) | ✅ Shipped | Dedup, budget tracking, quality scoring |
+| Extended Thinking (007) | ✅ Shipped | `thinking` blocks in prompts, thinking indicators |
+| Context Recall (007.2-007.4) | ✅ Shipped | Topic-aware recall, is_informational, unpopulated cleanup |
+| Agent Identity (008/F018) | ✅ Shipped | Identity system, tiered context, initiation ceremony |
+| Conversation Compaction (008.1) | ✅ Shipped | Rolling compaction, summary insertion |
+| Streaming & Reliability | ✅ Shipped | SSE streaming, backpressure, graceful errors |
+| Topic Persistence | ✅ Shipped | Topic-aware recall v2 (008.2), multi-scope recall |
+| Deliberation Capture | ✅ Shipped | `thinking` block extraction, structured traces |
+| Episode Summary Quality (008.3-008.4) | ✅ Shipped | Backfill + enhanced prompt, candidate_facts, smart truncation, decision context |
+| Decision Review Loop (008.5) | ✅ Shipped | Periodic review sweeps, outcome tracking |
+| Temporal Recall (008.6) | ✅ Shipped | `recall_recent` tool, time-based episode retrieval |
+| Decision Quality Gate (009.5) | ✅ Shipped | Pre-record validation, confidence checks, duplicate detection |
+| Context Dedup & Cleanup | ✅ Shipped | Fact category cleanup, context deduplication (PR #101) |
+| Exa.ai Fallback Search | ✅ Shipped | Exa.ai as fallback when Brave Search unavailable |
 
-| Feature | Name | Priority | Description |
-|---------|------|----------|-------------|
-| F007 | Metrics & Growth | P2 | Calibration, Brier scores, outcome tracking. Decision data now clean (27 real decisions). |
-| F008 | Memory Lifecycle | P2 | Shelved — system too young. Revisit when data grows. Specs 009.1-009.4 written. |
-| F012 | K-Line Learning | P2 | Auto-create procedures from repeated patterns. |
-| 008.1-P4 | Adaptive Compaction | P2 | LLM-powered summarization with configurable triggers. Spec written. |
+### Phase 2: Capabilities (In Progress)
+
+| Spec Area | Status | Key Deliverables |
+|-----------|--------|-----------------|
+| **Subtasks (011.1)** | ✅ Shipped | spawn_task, schedule_task, worker pool, result delivery |
+| **Subtask Result Delivery** | ✅ Shipped | await_result inline, push via Telegram/email |
+| **Subtask Enhancements (012.2)** | ✅ Shipped | frame_type per subtask, model override, shared prefix builder, worker guardrails (no-nesting, tool limit, timeout) |
+| **Programmatic Tool Calling (012.3)** | ✅ Shipped | `run_python` tool, sandboxed execution, stdlib whitelist, async bridge |
+| **Working Memory Threads** | ✅ Shipped | Thread-linked working memory items (PR #100) |
+| **Scripting Indicator** | ✅ Shipped | 💻 indicator for run_python execution (PR #112) |
+| Web Browsing (F010) | Planned | Multi-page research, content pipelines |
+| Multimodal File Support (011.2) | 📋 Specced | Image/PDF/audio upload, extraction, memory storage |
+| Proactive Intelligence (F011) | Planned | Autonomous monitoring, news watching |
+| A2A Protocol (F012) | Planned | Google A2A, agent card, task negotiation |
+
+### Phase 3: Growth & Measurement
+
+| Spec Area | Status | Key Deliverables |
+|-----------|--------|-----------------|
+| Memory Lifecycle (F008) | Specced | 009.1-009.4: reactive lifecycle, maintenance engine, episode enhancements, fact generalization |
+| Metrics & Growth (F007) | Planned | 5-level measurement, weekly reports |
+| Health Dashboard (010.1) | 📋 Specced | System health, memory stats, decision analytics |
 
 ### Future
 
-| Feature | Name | Description |
-|---------|------|-------------|
-| F013 | Frame Splitting | Parallel cognitive frames via sub-agents |
-| F014 | Model Router | LLM portability via proxy layer |
-| F015 | Growth Engine | Administrative self-improvement (Papert's Principle) |
-| F016 | Multi-Agent | Nous agents sharing knowledge |
-| F017 | Dashboard | Visual growth tracking and cognitive state |
-| F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
+| Spec Area | Status | Notes |
+|-----------|--------|-------|
+| Frame Splitting (012.1/F013) | Deferred | Full spec written; 012.2 shipped lightweight alternative (frame_type per subtask) |
+| Nous Website (F019) | 📋 Specced | Public site, Minsky narrative, interactive demos |
 
-## Stats
+---
 
-- **Total source:** ~32,800 lines of Python
-- **Test count:** 857 tests across 46 test files
-- **Database:** 18 tables across 2 schemas (brain, heart)
-- **Tools:** 14 agent tools (record_decision, recall_deep, learn_fact, create_censor, store_identity, complete_initiation, spawn_task, schedule_task, list_tasks, cancel_task, bash, read_file, write_file, web_search, web_fetch)
-- **Endpoints:** 23 REST endpoints + MCP server + Telegram bot
-- **Feature specs:** 14 feature docs + 17 research notes
-- **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors
+## Implementation Specs
+
+| # | Spec | Status | PR |
+|---|------|--------|----|
+| 001 | [Postgres Scaffold](../implementation/001-postgres-scaffold.md) | ✅ Shipped | #1 |
+| 002 | [Brain Module](../implementation/002-brain-module.md) | ✅ Shipped | #4 |
+| 003 | [Heart Module](../implementation/003-heart-module.md) | ✅ Shipped | #9 |
+| 003.1 | [Heart Enhancements](../implementation/003.1-heart-enhancements.md) | ✅ Shipped | #19 |
+| 003.2 | [Frame-Tagged Encoding](../implementation/003.2-frame-tagged-encoding.md) | ✅ Shipped | #22 |
+| 004 | [Cognitive Layer](../implementation/004-cognitive-layer.md) | ✅ Shipped | #12 |
+| 004.1 | [CEL Guardrails](../implementation/004.1-cel-guardrails.md) | ✅ Shipped | #14 |
+| 005 | [Runtime](../implementation/005-runtime.md) | ✅ Shipped | #16 |
+| 005.1 | [Smart Context Prep](../implementation/005.1-smart-context-preparation.md) | ✅ Shipped | #25 |
+| 005.2 | [Direct API Rewrite](../implementation/005.2-direct-api-rewrite.md) | ✅ Shipped | #27 |
+| 005.3 | [Web Tools](../implementation/005.3-web-tools.md) | ✅ Shipped | #31 |
+| 005.4 | [Streaming Responses](../implementation/005.4-streaming-responses.md) | ✅ Shipped | #33 |
+| 005.5 | [Noise Reduction](../implementation/005.5-noise-reduction.md) | ✅ Shipped | #52 |
+| 006 | [Event Bus](../implementation/006-event-bus.md) | ✅ Shipped | #36 |
+| 006.1 | [Event Bus Observability](../implementation/006.1-event-bus-observability.md) | ✅ Shipped | #40 |
+| 006.2 | [Context Quality](../implementation/006.2-context-quality.md) | ✅ Shipped | #54 |
+| 007.1 | [Thinking Indicators](../implementation/007.1-thinking-indicators.md) | ✅ Shipped | #43 |
+| 007.2 | [Topic-Aware Recall](../implementation/007.2-topic-aware-recall.md) | ✅ Shipped | #45 |
+| 007.3 | [Is Informational](../implementation/007.3-is-informational.md) | ✅ Shipped | #47 |
+| 007.4 | [Unpopulated Columns](../implementation/007.4-unpopulated-columns.md) | ✅ Shipped | #48 |
+| 008 | [Identity & Tiered Context](../implementation/008-identity-and-tiered-context.md) | ✅ Shipped | #56 |
+| 008.1 | [Conversation Compaction](../implementation/008.1-conversation-compaction.md) | ✅ Shipped | #60 |
+| 008.2 | [Topic Recall v2](../implementation/008.2-topic-recall-v2.md) | ✅ Shipped | #63 |
+| 008.3 | [Episode Summary Backfill](../implementation/008.3-episode-summary-backfill.md) | ✅ Shipped | #72 |
+| 008.4 | [Summary Quality](../implementation/008.4-summary-quality.md) | ✅ Shipped | #72 |
+| 008.5 | [Decision Review Loop](../implementation/008.5-decision-review-loop.md) | ✅ Shipped | #76 |
+| 008.6 | [Temporal Recall](../implementation/008.6-temporal-recall.md) | ✅ Shipped | #78 |
+| 009.1 | [Reactive Memory Lifecycle](../implementation/009.1-reactive-memory-lifecycle.md) | 📋 Specced | — |
+| 009.2 | [Maintenance Engine](../implementation/009.2-maintenance-engine.md) | 📋 Specced | — |
+| 009.3 | [Episode Enhancements](../implementation/009.3-episode-enhancements.md) | 📋 Specced | — |
+| 009.4 | [Fact Generalization](../implementation/009.4-fact-generalization.md) | 📋 Specced | — |
+| 009.5 | [Decision Quality Gate](../implementation/009.5-decision-quality-gate.md) | ✅ Shipped | #92 |
+| 010.1 | [Health Dashboard](../implementation/010.1-health-dashboard.md) | 📋 Specced | — |
+| 011.1 | [Subtasks & Scheduling](../implementation/011.1-subtasks-and-scheduling.md) | ✅ Shipped | #69 |
+| 011.2 | [Multimodal File Support](../implementation/011.2-multimodal-file-support.md) | 📋 Specced | — |
+| 012.1 | [Frame Splitting](../implementation/012.1-frame-splitting.md) | 📋 Deferred | — |
+| 012.2 | [Subtask Enhancements Light](../implementation/012.2-subtask-enhancements-light.md) | ✅ Shipped | #104 |
+| 012.3 | [Programmatic Tool Calling](../implementation/012.3-programmatic-tool-calling.md) | ✅ Shipped | #107 |
+
+---
 
 ## Research Notes
 
-| # | Title | Key Topic |
-|---|-------|-----------|
-| [001](../research/001-foundations.md) | Foundations | Problem statement, Nous hypothesis |
-| [002](../research/002-minsky-mapping.md) | Minsky Mapping | 14 chapters → Nous components |
-| [003](../research/003-runtime-decision.md) | Runtime Decision | Claude Agent SDK + model router |
-| [004](../research/004-storage-architecture.md) | Storage Architecture | Postgres + pgvector, swappable backends |
-| [005](../research/005-cognitive-layer.md) | Cognitive Layer | The seven systems |
-| [006](../research/006-v01-features.md) | v0.1.0 Features | Initial feature plan |
-| [007](../research/007-memory-integration.md) | Memory Integration | 5 memory types, CE integration |
-| [008](../research/008-database-design.md) | Database Design | 20 tables, 3 schemas, full SQL |
+| # | Topic | Summary |
+|---|-------|---------|
+| [001](../research/001-foundations.md) | Foundations | Minsky's Society of Mind → dual-module architecture |
+| [002](../research/002-minsky-mapping.md) | Minsky Mapping | K-lines, frames, censors → concrete system design |
+| [003](../research/003-runtime-decision.md) | Runtime Decision | Docker, GPU, orchestration tradeoffs |
+| [004](../research/004-storage-architecture.md) | Storage Architecture | Postgres + pgvector, schema decisions |
+| [005](../research/005-cognitive-layer.md) | Cognitive Layer | How Brain + Heart compose into thinking |
+| [006](../research/006-v01-features.md) | v0.1 Features | Feature scoping, MVP decisions |
+| [007](../research/007-memory-integration.md) | Memory Integration | Episodic ↔ semantic ↔ procedural flows |
+| [008](../research/008-database-design.md) | Database Design | 22 tables, 3 schemas, full SQL |
 | [009](../research/009-context-management.md) | Context Management | Token budgets, relevance scoring |
 | [010](../research/010-summarization-strategy.md) | Summarization | 3-tier compression, episode lifecycle |
 | [011](../research/011-measuring-success.md) | Measuring Success | 5-level metrics, growth reports |
 | [012](../research/012-automation-pipeline.md) | Automation Pipeline | Event bus, 7 handlers, full wiring |
 | [013](../research/013-langchain-memory-lessons.md) | LangChain Memory Lessons | 5 takeaways: reflection, generalization, validation, approval gates |
-| [014](../research/014-group-evolving-agents.md) | GEA | Experience sharing for open-ended self-improvement |
+| [014a](../research/014-group-evolving-agents.md) | GEA | Experience sharing for open-ended self-improvement |
+| [014b](../research/014-acteon-action-gateway.md) | Acteon | Action gateway for agent coordination, approval gates |
 | [015](../research/015-deep-thinking-ratio.md) | DTR | Measuring real reasoning effort, not token count |
 | [016](../research/016-agent-memory-synthesis.md) | Agent Memory Synthesis | 9 papers on LLM agent memory (2025-2026) — retrieval, consolidation, generalization |
 
@@ -147,9 +173,10 @@ All shipped implementation specs with PR references:
 
 ![Nous Architecture](../nous-architecture.png)
 
-## Database: 16 Tables, 2 Schemas
+## Database: 22 Tables, 3 Schemas
 
 | Schema | Tables | Purpose |
 |--------|--------|---------|
+| `nous_system` (4) | agents, agent_identity, frames, events | Core identity & coordination |
 | `brain` (8) | decisions, decision_tags, decision_reasons, decision_bridge, thoughts, graph_edges, guardrails, calibration_snapshots | Decision intelligence |
 | `heart` (10) | episodes, episode_decisions, episode_procedures, facts, procedures, censors, working_memory, conversation_state, subtasks, schedules | Memory system |
