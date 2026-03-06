@@ -58,20 +58,13 @@ Frame-specific token budgets for the SYSTEM PROMPT context assembly:
 
 ## Root Cause Analysis
 
-### Hypothesis 1: Hard History Window + Tool-Heavy Turns (HIGH CONFIDENCE)
+### ~~Hypothesis 1: Hard History Window + Tool-Heavy Turns~~ (RULED OUT)
 
-**The 20-message hard window is the most likely hallucination source.**
+**Investigation revealed `NOUS_COMPACTION_ENABLED=true` is set in production.** With compaction enabled, `_format_messages()` returns ALL messages — the 20-message hard window (`MAX_HISTORY_MESSAGES=20`) is NOT active. Compaction manages history size via LLM summarization at the 100K token threshold.
 
-Consider a debugging session where each turn involves 3 tool calls:
-- Turn 1: user(1) + assistant(1) + tool_results(1) + assistant(1) + tool_results(1) + assistant(1) + tool_results(1) + assistant(1) = 8 messages
-- Turn 2: same = 8 messages
-- Turn 3: same = 8 messages → total 24 messages
+This hypothesis is eliminated as a root cause. However, the 20-message fallback remains a risk if compaction is ever disabled.
 
-By turn 3, the first 4 messages of turn 1 are already gone. The user's original problem statement, the first diagnostic results, and the initial assistant reasoning are silently dropped. The model sees tool results from turn 2 onward but has no context for WHY those tools were called.
-
-**The model doesn't know what it doesn't know.** It sees partial tool results and infers (hallucinates) what the earlier context must have been.
-
-### Hypothesis 2: Tool Output Pruning Destroys Critical Middle Content (MEDIUM CONFIDENCE)
+### Hypothesis 2: Tool Output Pruning Destroys Critical Content (HIGH CONFIDENCE — PRIMARY SUSPECT)
 
 The head+tail trim strategy (keep first 1,500 + last 1,500, drop the middle) is reasonable for log-like outputs but destructive for structured data:
 - JSON objects: first 1,500 chars has keys/structure, last 1,500 has closing braces. The actual data is in the middle.
@@ -80,11 +73,9 @@ The head+tail trim strategy (keep first 1,500 + last 1,500, drop the middle) is 
 
 After 6 newer tool calls, old results are replaced entirely with `"[Tool output cleared - content was processed in earlier turns]"`. The model sees that a tool was called but has zero information about what it returned. It has to guess — and guessing is hallucinating.
 
-### Hypothesis 3: Compaction Disabled = No Safety Net (MEDIUM CONFIDENCE)
+### ~~Hypothesis 3: Compaction Disabled~~ (RULED OUT)
 
-With `compaction_enabled=False` (the default), there is NO mechanism to summarize old conversation context. The system relies entirely on the 20-message window. When that window slides past critical information, it's gone forever for that session.
-
-Compaction would at least preserve a structured summary. Without it, the model has an abrupt amnesia boundary.
+Compaction IS enabled in production via `NOUS_COMPACTION_ENABLED=true`. However, the threshold is 100K tokens (~400K chars) — which means compaction may not trigger until 30-40+ tool-heavy turns. Tool pruning destroys context LONG before compaction has a chance to preserve it via summarization. **Lowering the compaction threshold is part of the fix.**
 
 ### Hypothesis 4: Context Assembly Dedup Removes Relevant Content (LOW CONFIDENCE)
 
@@ -302,12 +293,14 @@ This is a heuristic, not a guarantee — but it provides early warning.
 
 ## Implementation Priority
 
-1. **Enable compaction by default** — single line change, highest impact
-2. **Turn-aware history window** — prevents tool-call message explosion from eating context
-3. **Gradual tool result degradation** — replace hard-clear with descriptive placeholders
-4. **Context health logging** — observability to diagnose future issues
-5. **Content-aware trimming** — nice-to-have, improves quality for structured data
+1. **Gradual tool result degradation** — replace hard-clear with descriptive summaries (PRIMARY FIX)
+2. **Lower compaction threshold** — from 100K to 50K tokens so summarization kicks in before pruning destroys too much
+3. **Context health logging** — observability to diagnose and measure improvement
+4. **Content-aware trimming** — nice-to-have, improves quality for structured data
+5. **Turn-aware history window** — safety net for non-compaction mode
 6. **Hallucination detection** — experimental, helps measure improvement
+
+Note: Compaction is already enabled in production. The 20-message window is not active.
 
 ---
 
