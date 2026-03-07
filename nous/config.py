@@ -130,10 +130,13 @@ class Settings(BaseSettings):
         default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_TAIL"
     )
     tool_hard_clear_after: int = Field(
-        default=6, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
+        default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
     )
     keep_last_tool_results: int = Field(
         default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS"
+    )
+    tool_metadata_degrade_after: int = Field(
+        default=8, validation_alias="NOUS_TOOL_METADATA_DEGRADE_AFTER"
     )
 
     # Compaction: Layer 2 (History Compaction) — Phase 2
@@ -186,6 +189,15 @@ class Settings(BaseSettings):
                 f"tool_soft_trim_head ({self.tool_soft_trim_head}) + "
                 f"tool_soft_trim_tail ({self.tool_soft_trim_tail}) must be < "
                 f"tool_soft_trim_chars ({self.tool_soft_trim_chars})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_pruning_tiers(self) -> "Settings":
+        if self.tool_metadata_degrade_after >= self.tool_hard_clear_after:
+            raise ValueError(
+                f"tool_metadata_degrade_after ({self.tool_metadata_degrade_after}) "
+                f"must be < tool_hard_clear_after ({self.tool_hard_clear_after})"
             )
         return self
 

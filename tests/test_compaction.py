@@ -132,7 +132,8 @@ def _make_settings(**overrides) -> Settings:
         "NOUS_TOOL_SOFT_TRIM_CHARS": "100",
         "NOUS_TOOL_SOFT_TRIM_HEAD": "20",
         "NOUS_TOOL_SOFT_TRIM_TAIL": "20",
-        "NOUS_TOOL_HARD_CLEAR_AFTER": "4",
+        "NOUS_TOOL_HARD_CLEAR_AFTER": "12",
+        "NOUS_TOOL_METADATA_DEGRADE_AFTER": "8",
         "NOUS_KEEP_LAST_TOOL_RESULTS": "2",
     }
     defaults.update(overrides)
@@ -203,8 +204,11 @@ class TestPruneToolResults:
 
     def test_hard_clear_old_results(self):
         """Results older than hard_clear_after get replaced with placeholder."""
-        compactor = ConversationCompactor(_make_settings())
-        # Create 7 tool results (hard_clear_after=4, keep_last=2)
+        compactor = ConversationCompactor(_make_settings(
+            NOUS_TOOL_HARD_CLEAR_AFTER="4",
+            NOUS_TOOL_METADATA_DEGRADE_AFTER="3",
+        ))
+        # Create 7 tool results (hard_clear_after=4, metadata_degrade_after=3, keep_last=2)
         messages = []
         for i in range(7):
             messages.append(_make_assistant())
@@ -212,14 +216,14 @@ class TestPruneToolResults:
 
         compactor.prune_tool_results(messages)
 
-        # First 3 results (age 7, 6, 5 > hard_clear_after=4) should be hard-cleared
+        # First 4 results (age 7, 6, 5, 4 >= hard_clear_after=4) should be hard-cleared
         assert "cleared" in messages[1]["content"][0]["content"]
         assert "cleared" in messages[3]["content"][0]["content"]
         assert "cleared" in messages[5]["content"][0]["content"]
+        assert "cleared" in messages[7]["content"][0]["content"]
 
-        # Results 4 and 5 (age 3, 2) are between hard-clear and protection
-        # Not hard-cleared, may be soft-trimmed if large
-        assert "result_3" in messages[7]["content"][0]["content"]
+        # Result 4 (age 3 >= metadata_degrade_after=3) would be degraded,
+        # but content "result_4" is small (<200 chars) so kept as-is
         assert "result_4" in messages[9]["content"][0]["content"]
 
         # Last 2 (protected)
