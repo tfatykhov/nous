@@ -25,6 +25,7 @@ from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
+from nous.heart.schemas import FactInput
 
 logger = logging.getLogger(__name__)
 
@@ -879,7 +880,18 @@ class AgentRunner:
 
                 # Prune old tool results before next API call (Spec 008.1 Layer 1)
                 if self._compactor:
-                    self._compactor.prune_tool_results(messages)
+                    extracted_facts = self._compactor.prune_tool_results(messages)
+                    if extracted_facts:
+                        for fact_text in extracted_facts:
+                            try:
+                                await self._heart.learn(FactInput(
+                                    content=fact_text,
+                                    category="technical",
+                                    confidence=0.3,
+                                    source="pre_prune_extraction",
+                                ))
+                            except Exception:
+                                logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
             else:
                 # Max turns reached -- final call without tools
                 logger.warning("Streaming tool loop reached max_turns=%d", self._settings.max_turns)
@@ -1057,7 +1069,18 @@ class AgentRunner:
 
             # Prune old tool results before next API call (Spec 008.1 Layer 1)
             if self._compactor:
-                self._compactor.prune_tool_results(messages)
+                extracted_facts = self._compactor.prune_tool_results(messages)
+                if extracted_facts:
+                    for fact_text in extracted_facts:
+                        try:
+                            await self._heart.learn(FactInput(
+                                content=fact_text,
+                                category="technical",
+                                confidence=0.3,
+                                source="pre_prune_extraction",
+                            ))
+                        except Exception:
+                            logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
 
             turns += 1
 
