@@ -112,7 +112,7 @@ All shipped implementation specs with PR references:
 | F014 | Model Router | LLM portability via proxy layer |
 | F015 | Growth Engine | Administrative self-improvement (Papert's Principle) |
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
-| F020 | Multi-Agent | Nous agents sharing knowledge |
+| F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | SmartCompress (ingestion-time statistical compression) + ReversibleCache (CCR-style cache for web_search/web_fetch) |
 | F021 | Dashboard | Visual growth tracking and cognitive state |
 
 ## Stats
