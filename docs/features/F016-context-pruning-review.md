@@ -1,12 +1,13 @@
 # F016 — Context Pruning Review & Anti-Hallucination Hardening
 
-**Status:** Draft (v3 — integrated review feedback + Nous research)
+**Status:** Draft (v4 — context pressure signaling + scope boundaries)
 **Author:** Emerson (analysis & spec), Tim (requirements), Nous (research)
 **Created:** 2026-03-06
 **Revised:** 2026-03-07
 **Priority:** Critical
 **Trigger:** Nous hallucinating on long-running sessions. Root cause confirmed: tool pruning hard-clear destroying context the model needs.
 **Reviews:** Architecture review (no P1s), Correctness review (1 P1, 4 P2s) — all addressed in v3.
+**v4 additions:** Context pressure warning, soft tool budgets, large codebase scope boundary.
 
 ---
 
@@ -351,9 +352,79 @@ FRAME_TOOL_WINDOWS: dict[str, int] = {
 }
 ```
 
-### Phase 5: Safety Net Improvements (Lower Priority)
+### Phase 5: Context Pressure Signaling (v4)
 
-#### 5.1 Enable Compaction by Default
+The `preserve` profile keeps source code in context much longer (hard-clear at age 20), which works for normal sessions (5-10 file reads). But for deep code analysis (20+ files), the model will exhaust context without realizing it. Pruning is reactive - it cleans up *after* the model has already read too many files. We need to intervene *before* the next tool call.
+
+#### 5.1 Context Pressure Warning
+
+Inject a system-level warning into the conversation when tool result tokens exceed a threshold:
+
+```python
+TOOL_CONTENT_WARNING_THRESHOLD = 40_000  # tokens
+
+def _check_context_pressure(self, messages: list[dict[str, Any]]) -> str | None:
+    """Return warning message if tool results are consuming too much context."""
+    tool_tokens = sum(
+        self._estimate_tokens(msg.get("content", ""))
+        for msg in messages
+        if msg.get("role") == "user"
+        and isinstance(msg.get("content"), list)
+        and any(
+            b.get("type") == "tool_result"
+            for b in msg["content"]
+            if isinstance(b, dict)
+        )
+    )
+    if tool_tokens > TOOL_CONTENT_WARNING_THRESHOLD:
+        return (
+            "⚠️ Context pressure: tool results are consuming "
+            f"~{tool_tokens:,} tokens. Summarize key findings to memory "
+            "before reading more files. Use write_file or record_fact "
+            "to offload what you've learned."
+        )
+    return None
+```
+
+Injected as a system message before the next API call in `run_turn()`. The model sees it and can decide to offload.
+
+#### 5.2 Tool Call Budget (Cross-ref F015)
+
+F015 already specs per-frame tool budgets. For `read_file` specifically, enforce a soft limit:
+
+```python
+FRAME_TOOL_LIMITS: dict[str, dict[str, int]] = {
+    "debug": {"read_file": 12, "bash": 20},
+    "task": {"read_file": 10, "bash": 15},
+    "research": {"read_file": 8, "bash": 10},
+    "conversation": {"read_file": 4, "bash": 5},
+}
+```
+
+When limit is hit, the tool returns a warning instead of an error:
+```
+⚠️ read_file limit reached (10/10 for task frame). You can still call read_file,
+but consider: have you stored your findings? Use write_file to save a summary
+of what you've learned before reading more files.
+```
+
+This is a soft limit (warning, not block) because sometimes the model genuinely needs more files. But the friction forces a conscious decision.
+
+#### 5.3 Scope Boundary: Large Codebase Analysis
+
+> **F016 does NOT solve large codebase analysis (100+ files).** No pruning strategy can keep 100 source files in a 200K context window. That problem requires **retrieval** (semantic code index + targeted chunk retrieval), not **retention** (keeping everything in context).
+>
+> A future spec (code indexing / semantic code search) should address:
+> - Embedding functions/classes/modules into Heart
+> - `recall_code("authentication middleware")` → returns relevant chunks
+> - `read_file` becomes a targeted follow-up, not a scanning tool
+> - Task definitions reference repos; Nous indexes on first use
+>
+> F016's scope: prevent hallucination from context loss in normal sessions (5-20 file reads). The context pressure warning (Phase 5.1) and tool budgets (Phase 5.2) serve as a bridge — they nudge the model toward offload-and-retrieve patterns even without a dedicated code index.
+
+### Phase 6: Safety Net Improvements (Lower Priority)
+
+#### 6.1 Enable Compaction by Default
 
 Change code default to match production:
 ```python
@@ -362,7 +433,7 @@ compaction_enabled: bool = Field(
 )
 ```
 
-#### 5.2 Turn-Aware History Window (Fallback Mode)
+#### 6.2 Turn-Aware History Window (Fallback Mode)
 
 For cases where compaction is disabled, count turns instead of messages:
 
@@ -374,7 +445,7 @@ max_history_turns: int = Field(
 
 Walk backwards counting user text messages (not tool_result messages) as turn boundaries.
 
-#### 5.3 Content-Aware Soft Trimming
+#### 6.3 Content-Aware Soft Trimming
 
 Detect content type before applying head+tail trim:
 - JSON: preserve keys/structure, truncate values
@@ -391,8 +462,9 @@ Fallback to head+tail on any parse error.
 |------|--------|-------|
 | `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()`, `_extract_facts_before_clear()`, updated `prune_tool_results()` with 4-tier pipeline + content-type profiles | 1, 4 |
 | `nous/config.py` | `tool_metadata_degrade_after=8`, `tool_hard_clear_after=12`, `compaction_threshold=60000`, `keep_recent_tokens=30000`, `compaction_enabled=True` default, `model_validator` for tier ordering | 1-2, 5 |
-| `nous/api/runner.py` | Context health logging, turn-aware window (phase 5) | 3, 5 |
-| `nous/cognitive/schemas.py` | `FRAME_TOOL_WINDOWS` override for `keep_last_tool_results` | 4 |
+| `nous/api/runner.py` | Context health logging, context pressure warning, turn-aware window | 3, 5, 6 |
+| `nous/cognitive/schemas.py` | `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS` | 4, 5 |
+| `nous/api/tools.py` | Soft tool budget warning in `read_file` response | 5 |
 
 ---
 
@@ -406,9 +478,11 @@ Fallback to head+tail on any parse error.
 6. **Content-type-aware pruning** — per-tool decay profiles
 7. **Pre-prune fact extraction** — regex capture before hard-clear (conservative tools)
 8. **Frame-adaptive window sizes** — override tool result protection per frame
-9. **Enable compaction default** — align code with production
-10. **Turn-aware history window** — safety net for non-compaction mode
-11. **Content-aware trimming** — nice-to-have
+9. **Context pressure warning** — system message when tool tokens > 40K
+10. **Soft tool budgets** — per-frame read_file limits with warning (cross-ref F015)
+11. **Enable compaction default** — align code with production
+12. **Turn-aware history window** — safety net for non-compaction mode
+13. **Content-aware trimming** — nice-to-have
 
 ---
 
