@@ -7,12 +7,14 @@ to test realistic context assembly.
 
 import uuid
 
+import pytest
 import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import ContextBudget, FrameSelection
+from nous.config import Settings
 from nous.heart import CensorInput, FactInput, ProcedureInput
 
 # ---------------------------------------------------------------------------
@@ -20,18 +22,28 @@ from nous.heart import CensorInput, FactInput, ProcedureInput
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def ctx_settings() -> Settings:
+    """Settings with relevance floor disabled for context tests.
+
+    Seeded items have no embeddings so their search scores are arbitrary;
+    the relevance floor would filter them out, making the tests flaky.
+    """
+    return Settings(relevance_floor_enabled=False)
+
+
 @pytest_asyncio.fixture
-async def brain(db, settings):
+async def brain(db, ctx_settings):
     """Brain without embeddings for context tests."""
-    b = Brain(database=db, settings=settings)
+    b = Brain(database=db, settings=ctx_settings)
     yield b
     await b.close()
 
 
 @pytest_asyncio.fixture
-async def context_engine(brain, heart, settings):
+async def context_engine(brain, heart, ctx_settings):
     """ContextEngine wired to Brain and Heart."""
-    return ContextEngine(brain, heart, settings, identity_prompt="You are Nous, a thinking agent.")
+    return ContextEngine(brain, heart, ctx_settings, identity_prompt="You are Nous, a thinking agent.")
 
 
 def _frame_selection(frame_id: str = "task", **overrides) -> FrameSelection:

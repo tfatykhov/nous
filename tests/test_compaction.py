@@ -346,8 +346,8 @@ class TestFindCutPoint:
         assert compactor.find_cut_point(messages, keep_recent_tokens=10000) == 0
 
     def test_should_compact_disabled(self):
-        compactor = ConversationCompactor(_make_settings())
-        # compaction_enabled defaults to False
+        compactor = ConversationCompactor(_make_settings(NOUS_COMPACTION_ENABLED="false"))
+        # compaction explicitly disabled
         assert compactor.should_compact(5000, 200000) is False
 
     def test_snaps_to_user_boundary(self):

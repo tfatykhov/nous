@@ -154,7 +154,7 @@ class Settings(BaseSettings):
 
     # Compaction: Layer 2 (History Compaction) — Phase 2
     compaction_enabled: bool = Field(
-        default=False, validation_alias="NOUS_COMPACTION_ENABLED"
+        default=True, validation_alias="NOUS_COMPACTION_ENABLED"
     )
     compaction_threshold: int = Field(
         default=100_000, validation_alias="NOUS_COMPACTION_THRESHOLD"
