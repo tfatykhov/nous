@@ -45,6 +45,7 @@ TOOL_DECAY_PROFILES: dict[str, str] = {
     "bash": "standard",
     "run_python": "standard",
     "web_search": "conservative",
+    "web_fetch": "conservative",
 }
 
 # Profile -> (soft_trim_age, metadata_degrade_age, hard_clear_age)

@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from nous.api.compaction import ConversationCompactor
+from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
 from nous.brain.brain import Brain
 from nous.cognitive.layer import CognitiveLayer
@@ -1030,10 +1031,16 @@ class AgentRunner:
                     )
                     duration_ms = int((time.monotonic() - start_time) * 1000)
 
+                    # F020: SmartCompress — ingestion-time compression
+                    compressed_text = await smart_compress(
+                        tool_name, tool_input, result_text, self._settings,
+                        is_error=is_error,
+                    )
+
                     tool_results_for_message.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": result_text,
+                        "content": compressed_text,
                         "is_error": is_error,
                     })
 
