@@ -527,10 +527,19 @@ class CognitiveLayer:
             for mid, mem_type, content in _all_recalled:
                 if content:
                     overlap = UsageTracker.compute_overlap(content, response_text)
+                    # F017 Phase 6: Multi-level strength detection
+                    if overlap >= 0.5:
+                        strength = 1.0  # Direct reference
+                    elif overlap >= 0.25:
+                        strength = 0.5  # Paraphrase
+                    elif overlap >= 0.10:
+                        strength = 0.2  # Topic overlap
+                    else:
+                        strength = 0.0  # Not referenced
                     self._usage_tracker.record_retrieval(
                         memory_id=mid,
                         memory_type=mem_type,
-                        was_referenced=overlap >= 0.15,
+                        was_referenced=strength > 0,
                         overlap_score=overlap,
                     )
 

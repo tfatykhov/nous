@@ -60,15 +60,15 @@ def test_boost_factor_referenced():
 
 
 def test_boost_factor_ignored():
-    """0% reference rate gives 0.5x penalty."""
+    """0% reference rate gives 0.3x penalty."""
     tracker = UsageTracker()
     tracker.record_retrieval("mem-1", "fact", was_referenced=False)
     tracker.record_retrieval("mem-1", "fact", was_referenced=False)
     tracker.record_retrieval("mem-1", "fact", was_referenced=False)
 
     boost = tracker.get_boost_factor("mem-1")
-    # ref_rate = 0/3 = 0; boost = 0.5 + 0 = 0.5
-    assert boost == 0.5
+    # ref_rate = 0/3 = 0; boost = 0.3 + 0 * 1.7 = 0.3
+    assert boost == 0.3
 
 
 def test_unknown_memory_neutral():
