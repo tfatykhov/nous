@@ -294,23 +294,26 @@ Different tools should decay at different rates based on re-fetchability:
 
 ```python
 TOOL_DECAY_PROFILES: dict[str, str] = {
-    # Aggressive — content is re-readable on demand
-    "read_file": "aggressive",
+    # Preserve — code/source files: skip metadata degradation entirely,
+    # trust compaction to summarize. Too information-dense for lossy pruning.
+    "read_file": "preserve",
+    # Aggressive — content is re-readable on demand or already stored
     "list_files": "aggressive",
+    "recall_deep": "aggressive",  # already in DB
     # Standard — not easily re-fetched, use default tiers
     "bash": "standard",
     "run_python": "standard",
     # Conservative — extract facts BEFORE clearing (not re-fetchable)
     "web_search": "conservative",
-    "recall_deep": "aggressive",  # already in DB
 }
 ```
 
-| Profile | Soft-trim age | Metadata age | Hard-clear age |
-|---------|--------------|--------------|----------------|
-| aggressive | 2 | 4 | 8 |
-| standard | 3 | 8 | 12 |
-| conservative | 5 | 10 | 15 |
+| Profile | Soft-trim age | Metadata age | Hard-clear age | Rationale |
+|---------|--------------|--------------|----------------|-----------|
+| preserve | 8 | _(skipped)_ | 20 | Code is too dense for lossy metadata traces. Keep full (soft-trimmed) content long enough for compaction to summarize it properly. |
+| aggressive | 2 | 4 | 8 | Re-readable or already persisted |
+| standard | 3 | 8 | 12 | Default tier progression |
+| conservative | 5 | 10 | 15 | Extract facts before clearing |
 
 #### 4.0.1 Pre-Prune Fact Extraction (~30 LOC)
 
