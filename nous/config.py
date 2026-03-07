@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 
+    # F017: Staleness penalty
+    staleness_penalty_enabled: bool = True
+    staleness_half_life_days: int = 14
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000

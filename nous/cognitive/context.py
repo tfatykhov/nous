@@ -7,6 +7,7 @@ and concatenates them in priority order within per-section token budgets.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -292,6 +293,8 @@ class ContextEngine:
                     decisions = [d for d in decisions if (getattr(d, "score", None) or 0) >= TIER3_THRESHOLDS["decision"]]
                     logger.info("Tier3 decisions after threshold: %d", len(decisions))
                 if decisions:
+                    # F017: Staleness penalty (before boosts)
+                    decisions = self._apply_staleness_penalty(decisions)
                     # 007.2: Diversity filter — use category as topic key
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
                     # F017: Relevance floor + diminishing returns cutoff
@@ -341,6 +344,8 @@ class ContextEngine:
                     # Superseded by F017 relevance floor when enabled
                     facts = [f for f in facts if (getattr(f, "score", None) or 0) >= TIER3_THRESHOLDS["fact"]]
                 if facts:
+                    # F017: Staleness penalty (before boosts)
+                    facts = self._apply_staleness_penalty(facts)
                     # F10: apply_frame_boost (preserved from existing pipeline)
                     facts = apply_frame_boost(facts, frame.frame_id, _active_censor_names)
 
@@ -391,6 +396,8 @@ class ContextEngine:
                     # Superseded by F017 relevance floor when enabled
                     procedures = [p for p in procedures if (getattr(p, "score", None) or 0) >= TIER3_THRESHOLDS["procedure"]]
                 if procedures:
+                    # F017: Staleness penalty (before boosts)
+                    procedures = self._apply_staleness_penalty(procedures)
                     # F10: apply_frame_boost
                     procedures = apply_frame_boost(procedures, frame.frame_id, _active_censor_names)
 
@@ -470,6 +477,8 @@ class ContextEngine:
                     # Superseded by F017 relevance floor when enabled
                     episodes = [e for e in episodes if (getattr(e, "score", None) or 0) >= TIER3_THRESHOLDS["episode"]]
                 if episodes:
+                    # F017: Staleness penalty (before boosts)
+                    episodes = self._apply_staleness_penalty(episodes)
                     # F10: apply_frame_boost
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
 
@@ -597,6 +606,34 @@ class ContextEngine:
             if prev > 0 and score < prev * drop_ratio:
                 return results[:i]
         return results
+
+    def _apply_staleness_penalty(self, results: list) -> list:
+        """Apply time-decay penalty to relevance scores (F017 Phase 5)."""
+        if not self._settings.staleness_penalty_enabled:
+            return results
+        half_life = self._settings.staleness_half_life_days
+        now = datetime.now(timezone.utc)
+        adjusted = []
+        for r in results:
+            score = getattr(r, "score", None)
+            if score is None:
+                adjusted.append(r)
+                continue
+            created = getattr(r, "created_at", None)
+            if not created:
+                adjusted.append(r)
+                continue
+            category = getattr(r, "category", "")
+            if category in {"rule", "preference"}:
+                adjusted.append(r)
+                continue
+            age_days = (now - created).days
+            if age_days > 0:
+                decay = 0.5 ** (age_days / half_life)
+                adjusted.append(_wrap_with_score(r, score * max(decay, 0.3)))
+            else:
+                adjusted.append(r)
+        return adjusted
 
     def _enforce_diversity(self, items: list, topic_attr: str, max_per_subject: int = 2) -> list:
         """Prevent one topic from dominating recall results (007.2).
