@@ -105,6 +105,25 @@ async def hybrid_search(
     return [(row.id, float(row.combined_score if hasattr(row, "combined_score") else row.score)) for row in rows]
 
 
+class _ScoredWrapper:
+    """Lightweight proxy that overrides .score without mutating the ORM object."""
+    __slots__ = ("_item", "_score")
+
+    def __init__(self, item, score: float) -> None:
+        object.__setattr__(self, "_item", item)
+        object.__setattr__(self, "_score", score)
+
+    def __getattr__(self, name: str):
+        if name == "score":
+            return object.__getattribute__(self, "_score")
+        return getattr(object.__getattribute__(self, "_item"), name)
+
+
+def _wrap_with_score(item, score: float):
+    """Wrap an item with an overridden score."""
+    return _ScoredWrapper(item, score)
+
+
 def apply_frame_boost(
     results: list,
     current_frame: str | None = None,
@@ -136,7 +155,8 @@ def apply_frame_boost(
                 jaccard = len(enc_censors & cur_censors) / len(union)
                 boost *= 1.0 + 0.2 * jaccard
 
-        boosted.append((item, boost))
+        wrapped = _wrap_with_score(item, (getattr(item, "score", 0) or 0) * boost)
+        boosted.append((wrapped, boost))
 
     # Sort by boost descending (stable sort preserves relevance order within same boost)
     boosted.sort(key=lambda x: x[1], reverse=True)

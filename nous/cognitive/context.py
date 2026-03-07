@@ -20,7 +20,7 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.search import apply_frame_boost
+from nous.heart.search import apply_frame_boost, _wrap_with_score
 
 logger = logging.getLogger(__name__)
 
@@ -523,7 +523,8 @@ class ContextEngine:
         for item in items:
             mid = str(getattr(item, "id", ""))
             boost = usage_tracker.get_boost_factor(mid) if mid else 1.0
-            boosted.append((item, boost))
+            wrapped = _wrap_with_score(item, (getattr(item, "score", 0) or 0) * boost)
+            boosted.append((wrapped, boost))
 
         boosted.sort(key=lambda x: x[1], reverse=True)
         return [item for item, _ in boosted]
