@@ -160,6 +160,26 @@ class ContextEngine:
                 )
             )
 
+        # F016 Phase 0: Anti-hallucination prompt
+        if self._settings.anti_hallucination_prompt:
+            anti_halluc = (
+                "When you encounter a cleared or degraded tool result "
+                "(marked with [Tool output cleared] or showing only metadata), "
+                "do NOT attempt to reconstruct or guess the original content. "
+                'Instead, say "I\'d need to re-read that file" or "Let me fetch '
+                'that again" and call the tool again. Results marked with '
+                '"re-fetchable" can be retrieved by calling the same tool '
+                "with the same arguments."
+            )
+            sections.append(
+                ContextSection(
+                    priority=2,  # High priority, right after identity
+                    label="Context Safety",
+                    content=anti_halluc,
+                    token_estimate=self._estimate_tokens(anti_halluc),
+                )
+            )
+
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
         # Dedup against identity prompt to avoid repeating the same info
         if budget.user_profile > 0:

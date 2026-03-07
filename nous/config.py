@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     auto_link_max: int = 3
     quality_block_threshold: float = 0.5
 
+    # Anti-hallucination (F016 Phase 0)
+    anti_hallucination_prompt: bool = True
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000
