@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # F017: Diminishing returns cutoff
     relevance_drop_ratio: float = 0.6
 
+    # F017: Budget scaling
+    budget_scale_enabled: bool = True
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000

@@ -310,7 +310,7 @@ class ContextEngine:
                         if mid:
                             desc = getattr(d, "description", "")
                             recalled_content_map[mid] = desc
-                    dec_text = self._truncate_to_budget(dec_text, budget.decisions)
+                    dec_text = self._truncate_to_budget(dec_text, self._scaled_budget(budget.decisions))
                     sections.append(
                         ContextSection(
                             priority=5,
@@ -368,7 +368,7 @@ class ContextEngine:
 
                     logger.info("Tier3 facts after pipeline: %d remaining", len(facts))
                     facts_text = self._format_facts(facts)
-                    facts_text = self._truncate_to_budget(facts_text, budget.facts)
+                    facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
                     sections.append(
                         ContextSection(
                             priority=6,
@@ -410,7 +410,7 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(p, "score", 0) or 0
 
                     proc_text = self._format_procedures(procedures)
-                    proc_text = self._truncate_to_budget(proc_text, budget.procedures)
+                    proc_text = self._truncate_to_budget(proc_text, self._scaled_budget(budget.procedures))
                     sections.append(
                         ContextSection(
                             priority=7,
@@ -492,7 +492,7 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(e, "score", 0) or 0
 
                     ep_text = self._format_episodes(episodes)
-                    ep_text = self._truncate_to_budget(ep_text, budget.episodes)
+                    ep_text = self._truncate_to_budget(ep_text, self._scaled_budget(budget.episodes))
                     sections.append(
                         ContextSection(
                             priority=8,
@@ -625,6 +625,17 @@ class ContextEngine:
                 result.append(item)
                 seen[topic_key] = count + 1
         return result
+
+    def _scaled_budget(self, base_budget: int) -> int:
+        """Scale budget ceiling for larger context windows (F017 Phase 3)."""
+        if not self._settings.budget_scale_enabled:
+            return base_budget
+        window = self._settings._get_context_window(self._settings.model)
+        if window >= 1_000_000:
+            return int(base_budget * 2.5)
+        elif window >= 200_000:
+            return int(base_budget * 1.5)
+        return base_budget
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count: len(text) / CHARS_PER_TOKEN."""
