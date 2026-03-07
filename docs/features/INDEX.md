@@ -27,6 +27,8 @@
 ### P0: Identity & Context
 | Feature | Name | Status | Description |
 |---------|------|--------|-------------|
+| F016 | [Context Pruning](F016-context-pruning-review.md) | ✅ Shipped | 4-tier tool pruning, anti-hallucination prompt, model-aware compaction, content-type decay profiles, pre-prune fact extraction |
+| F017 | [Context Quality Gate](F017-context-quality-gate.md) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
 | F018 | [Agent Identity](F018-agent-identity.md) | ✅ Shipped | DB-backed identity — initiation protocol, versioned sections, tiered context model |
 
 ### Implementation Specs
@@ -82,6 +84,7 @@ All shipped implementation specs with PR references:
 | — | Periodic Decision Sweep | ✅ Shipped | #89 — background asyncio loop, configurable interval (default 1hr) |
 | 011.1 | Subtasks & Scheduling | ✅ Shipped | #85 — F009: subtask queue, worker pool, scheduling, time parser, 4 tools, 6 endpoints |
 | 011.2 | Subtask Result Delivery | ✅ Shipped | — subtask results auto-injected into parent session context, skip_episode for workers, delivered tracking |
+| 014.1 | Context Quality Engine (F016+F017) | ✅ Shipped | #122 — 4-tier pruning, relevance floor, staleness penalty, model-aware thresholds, usage tracking, pre-prune extraction |
 
 ### Phase 2 — Quality (next to build)
 
@@ -108,18 +111,18 @@ All shipped implementation specs with PR references:
 | F013 | Frame Splitting | Parallel cognitive frames via sub-agents |
 | F014 | Model Router | LLM portability via proxy layer |
 | F015 | Growth Engine | Administrative self-improvement (Papert's Principle) |
-| F016 | Multi-Agent | Nous agents sharing knowledge |
-| F017 | Dashboard | Visual growth tracking and cognitive state |
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
+| F020 | Multi-Agent | Nous agents sharing knowledge |
+| F021 | Dashboard | Visual growth tracking and cognitive state |
 
 ## Stats
 
-- **Total source:** ~32,800 lines of Python
-- **Test count:** 857 tests across 46 test files
+- **Total source:** ~34,000 lines of Python
+- **Test count:** 935+ tests across 57 test files
 - **Database:** 18 tables across 2 schemas (brain, heart)
 - **Tools:** 14 agent tools (record_decision, recall_deep, learn_fact, create_censor, store_identity, complete_initiation, spawn_task, schedule_task, list_tasks, cancel_task, bash, read_file, write_file, web_search, web_fetch)
 - **Endpoints:** 23 REST endpoints + MCP server + Telegram bot
-- **Feature specs:** 14 feature docs + 17 research notes
+- **Feature specs:** 16 feature docs + 17 research notes
 - **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors
 
 ## Research Notes

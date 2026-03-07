@@ -70,11 +70,11 @@ nous/
 │       ├── tools.py            # Tool dispatcher + registration
 │       ├── builtin_tools.py    # bash, read_file, write_file
 │       └── web_tools.py        # web_search, web_fetch
-├── tests/                      # 424 tests across 33 files
+├── tests/                      # 500+ tests across 44 files
 └── docs/
-    ├── research/               # Theory & design notes (001-015)
-    ├── features/               # High-level feature specs (F001-F016)
-    └── implementation/         # Build specs (001-006, all shipped)
+    ├── research/               # Theory & design notes (001-016)
+    ├── features/               # High-level feature specs (F001-F019)
+    └── implementation/         # Build specs (001-014.1, all shipped)
 ```
 
 ## What's Shipped (v0.1.0)
@@ -98,6 +98,7 @@ nous/
 | F010 | Memory improvements (episode summaries, fact extraction, user tagging) | #21 |
 | 011.1 | Subtasks & Scheduling (F009) | #85 |
 | 011.2 | Subtask Result Delivery (F009) | — |
+| 014.1 | Context Quality Engine (F016+F017) | #122 |
 
 ## How to Work
 
@@ -213,6 +214,24 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_FRAME_DEFAULT_MODELS` | `{"research":"claude-haiku-3-5-20241022"}` | JSON map of frame type to default model |
 | `NOUS_PROGRAMMATIC_TOOLS_ENABLED` | `true` | Enable run_python tool for client-side code execution |
 | `NOUS_PROGRAMMATIC_TOOLS_TIMEOUT` | `10` | Timeout in seconds for run_python code execution |
+| `NOUS_ANTI_HALLUCINATION_PROMPT` | `true` | Inject "don't guess, re-fetch" safety prompt into system context |
+| `NOUS_TOOL_PRUNING_ENABLED` | `true` | Enable 4-tier tool result pruning pipeline |
+| `NOUS_TOOL_SOFT_TRIM_CHARS` | `4000` | Threshold above which tool results get soft-trimmed |
+| `NOUS_TOOL_SOFT_TRIM_HEAD` | `1500` | Chars to keep from start when soft-trimming |
+| `NOUS_TOOL_SOFT_TRIM_TAIL` | `1500` | Chars to keep from end when soft-trimming |
+| `NOUS_TOOL_METADATA_DEGRADE_AFTER` | `8` | Tool result age (in results) before metadata degradation |
+| `NOUS_TOOL_HARD_CLEAR_AFTER` | `12` | Tool result age before hard-clear replacement |
+| `NOUS_KEEP_LAST_TOOL_RESULTS` | `2` | Number of most recent tool results always protected |
+| `NOUS_COMPACTION_ENABLED` | `true` | Enable LLM-powered history compaction |
+| `NOUS_COMPACTION_THRESHOLD` | auto | Token count triggering compaction (auto-scales per model context window) |
+| `NOUS_KEEP_RECENT_TOKENS` | auto | Tokens to preserve during compaction (auto-scales per model) |
+| `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
+| `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
+| `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
+| `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
+| `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
+| `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
+| `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
 
 ### REST Endpoints
 
