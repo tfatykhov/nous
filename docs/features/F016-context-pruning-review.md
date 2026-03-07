@@ -8,6 +8,7 @@
 **Trigger:** Nous hallucinating on long-running sessions. Root cause confirmed: tool pruning hard-clear destroying context the model needs.
 **Reviews:** Architecture review (no P1s), Correctness review (1 P1, 4 P2s) — all addressed in v3.
 **v4 additions:** Context pressure warning, soft tool budgets, large codebase scope boundary.
+**v5 additions:** P0 anti-hallucination system prompt, re-fetch hints in metadata traces (from modern techniques review).
 
 ---
 
@@ -115,6 +116,30 @@ Turn 9: User asks "What did we see in database.py earlier?"
 
 ## Proposed Changes
 
+### Phase 0: Anti-Hallucination System Prompt (P0 — Zero Cost)
+
+> **Source:** Modern techniques review. Zero implementation cost, highest impact. The model hallucinates because it tries to be helpful by reconstructing cleared content. Tell it not to.
+
+Add to the identity/system prompt (injected via context assembly):
+
+```
+When you encounter a cleared or degraded tool result (marked with [tool result cleared]
+or showing only metadata), do NOT attempt to reconstruct or guess the original content.
+Instead, say "I'd need to re-read that file" or "Let me fetch that again" and call the
+tool again. Results marked with "↺ re-fetchable" can be retrieved by calling the same
+tool with the same arguments.
+```
+
+**Implementation:** Add as a new section in `cognitive/context.py` context assembly, after the identity prompt. Controlled by a config flag:
+
+```python
+anti_hallucination_prompt: bool = Field(
+    default=True, validation_alias="NOUS_ANTI_HALLUCINATION_PROMPT"
+)
+```
+
+**Why this works:** The model already knows the content is gone (it sees the placeholder). It hallucinates because Claude is trained to be helpful — saying "I can't see that anymore" feels like a cop-out. Explicit permission to re-fetch removes that pressure.
+
 ### Phase 1: Metadata-Based Tool Degradation (Critical — Primary Fix)
 
 **Replace the generic hard-clear placeholder with a descriptive metadata trace.**
@@ -167,9 +192,13 @@ def _metadata_degrade(self, item: dict[str, Any], tool_use_block: dict[str, Any]
     # Count lines/items
     line_count = text.count("\n") + 1
 
+    # Re-fetch hint based on tool type
+    refetchable = tool_name in {"read_file", "list_files", "bash", "run_python"}
+    refetch_hint = " | ↺ re-fetchable" if refetchable else ""
+
     item["content"] = (
         f"[{tool_name}({args_summary}): {line_count} lines, "
-        f"{len(text)} chars | first: {first_line}]"
+        f"{len(text)} chars | first: {first_line}{refetch_hint}]"
     )
 ```
 
@@ -460,8 +489,9 @@ Fallback to head+tail on any parse error.
 
 | File | Change | Phase |
 |------|--------|-------|
-| `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()`, `_extract_facts_before_clear()`, updated `prune_tool_results()` with 4-tier pipeline + content-type profiles | 1, 4 |
-| `nous/config.py` | `tool_metadata_degrade_after=8`, `tool_hard_clear_after=12`, `compaction_threshold=60000`, `keep_recent_tokens=30000`, `compaction_enabled=True` default, `model_validator` for tier ordering | 1-2, 5 |
+| `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()` (with re-fetch hints), `_extract_facts_before_clear()`, updated `prune_tool_results()` with 4-tier pipeline + content-type profiles | 1, 4 |
+| `nous/cognitive/context.py` | Anti-hallucination prompt injection in context assembly | 0 |
+| `nous/config.py` | `anti_hallucination_prompt=True`, `tool_metadata_degrade_after=8`, `tool_hard_clear_after=12`, `compaction_threshold=60000`, `keep_recent_tokens=30000`, `compaction_enabled=True` default, `model_validator` for tier ordering | 0-2, 5 |
 | `nous/api/runner.py` | Context health logging, context pressure warning, turn-aware window | 3, 5, 6 |
 | `nous/cognitive/schemas.py` | `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS` | 4, 5 |
 | `nous/api/tools.py` | Soft tool budget warning in `read_file` response | 5 |
@@ -470,19 +500,20 @@ Fallback to head+tail on any parse error.
 
 ## Implementation Priority
 
-1. **Metadata-based tool degradation** — 4-tier pruning pipeline replacing hard-clear (PRIMARY FIX)
-2. **Increase hard-clear age** from 6 → 12 (gives metadata tier room to work)
-3. **Config validation** — ensure `degrade_after < hard_clear_after`
-4. **Lower compaction threshold** — 100K → 60K tokens (⚠️ breaking change, document in changelog)
-5. **Context health logging** — observability per turn
-6. **Content-type-aware pruning** — per-tool decay profiles
-7. **Pre-prune fact extraction** — regex capture before hard-clear (conservative tools)
-8. **Frame-adaptive window sizes** — override tool result protection per frame
-9. **Context pressure warning** — system message when tool tokens > 40K
-10. **Soft tool budgets** — per-frame read_file limits with warning (cross-ref F015)
-11. **Enable compaction default** — align code with production
-12. **Turn-aware history window** — safety net for non-compaction mode
-13. **Content-aware trimming** — nice-to-have
+1. **Anti-hallucination system prompt** — tell the model to re-fetch instead of guessing (P0, zero cost)
+2. **Metadata-based tool degradation** — 4-tier pruning pipeline with re-fetch hints (PRIMARY FIX)
+3. **Increase hard-clear age** from 6 → 12 (gives metadata tier room to work)
+4. **Config validation** — ensure `degrade_after < hard_clear_after`
+5. **Lower compaction threshold** — 100K → 60K tokens (⚠️ breaking change, document in changelog)
+6. **Context health logging** — observability per turn
+7. **Content-type-aware pruning** — per-tool decay profiles
+8. **Pre-prune fact extraction** — regex capture before hard-clear (conservative tools)
+9. **Frame-adaptive window sizes** — override tool result protection per frame
+10. **Context pressure warning** — system message when tool tokens > 40K
+11. **Soft tool budgets** — per-frame read_file limits with warning (cross-ref F015)
+12. **Enable compaction default** — align code with production
+13. **Turn-aware history window** — safety net for non-compaction mode
+14. **Content-aware trimming** — nice-to-have
 
 ---
 
