@@ -325,8 +325,8 @@ class AgentRunner:
                 system_prompt = system_prompt_prefix + "\n\n" + system_prompt
 
             # Layer 2: History compaction (Spec 008.1)
+            messages = self._format_messages(conversation)
             if self._compactor and self._settings.compaction_enabled:
-                messages = self._format_messages(conversation)
                 system_tokens = self._compactor.estimator.estimate(system_prompt)
                 history_tokens = self._compactor.estimator.estimate_messages(messages)
                 if self._compactor.should_compact(system_tokens, history_tokens):
@@ -353,6 +353,18 @@ class AgentRunner:
                                 await self._save_conversation(
                                     _agent_id, session_id, conversation
                                 )
+            else:
+                system_tokens = len(system_prompt) // 4
+                history_tokens = sum(
+                    len(m.get("content", "")) // 4 for m in messages
+                )
+
+            logger.info(
+                "Context health: messages=%d, system_tokens~=%d, "
+                "history_tokens~=%d, frame=%s",
+                len(messages), system_tokens, history_tokens,
+                turn_context.frame.frame_id if turn_context else "unknown",
+            )
 
             response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
                 system_prompt=system_prompt,
@@ -671,6 +683,18 @@ class AgentRunner:
                                 _agent_id, session_id, conversation
                             )
                             messages = self._format_messages(conversation)
+        else:
+            system_tokens = len(system_prompt) // 4
+            history_tokens = sum(
+                len(m.get("content", "")) // 4 for m in messages
+            )
+
+        logger.info(
+            "Context health: messages=%d, system_tokens~=%d, "
+            "history_tokens~=%d, frame=%s",
+            len(messages), system_tokens, history_tokens,
+            turn_context.frame.frame_id if turn_context else "unknown",
+        )
 
         all_tool_results: list[ToolResult] = []
         all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
