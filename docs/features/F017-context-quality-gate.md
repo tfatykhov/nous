@@ -253,6 +253,79 @@ def _apply_staleness_penalty(
 - 1 month: ~25% (0.5^(30/14) = 0.228)
 - Exempt: rules and preferences (they don't go stale)
 
+### Phase 6: Context Usage Tracking (ACE-Inspired)
+
+> **Source:** ACE (Automated Context Engineering, Stanford/ICLR 2026) showed +10.6% on benchmarks by evolving playbooks based on what actually works. Current usage_boost (D3) tracks which items were *retrieved*. This phase tracks which items the model actually *used*.
+
+The gap: we know what we put in the context, but not what the model found useful. An item might score 0.85 and fill budget, but the model ignores it entirely. Conversely, a 0.42 item might be referenced 5 times in the response.
+
+#### 6.1 Response Reference Detection
+
+After each model response, scan for references to assembled context:
+
+```python
+def _detect_context_usage(
+    self,
+    response_text: str,
+    assembled_items: list[AssembledItem],
+) -> list[tuple[str, str, float]]:
+    """Detect which assembled context items the model referenced.
+
+    Returns list of (item_id, memory_type, reference_strength).
+    reference_strength:
+      1.0 — direct quote or exact reference
+      0.5 — paraphrase or indirect reference
+      0.2 — topic overlap (same domain, not clearly referenced)
+    """
+    usages = []
+    for item in assembled_items:
+        # Check for direct content overlap
+        key_phrases = self._extract_key_phrases(item.content)
+        matches = sum(
+            1 for phrase in key_phrases
+            if phrase.lower() in response_text.lower()
+        )
+        if matches >= 2:
+            strength = min(1.0, matches * 0.3)
+            usages.append((item.id, item.memory_type, strength))
+    return usages
+```
+
+#### 6.2 Feedback Loop to Retrieval
+
+Feed usage data back into the retrieval pipeline:
+
+```python
+# Items the model actually used get a boost in future retrieval
+for item_id, memory_type, strength in usages:
+    await self._usage_tracker.record_usage(
+        item_id=item_id,
+        memory_type=memory_type,
+        strength=strength,
+        frame=frame.frame_id,
+    )
+
+# Items assembled but never referenced get a penalty
+for item in assembled_items:
+    if item.id not in used_ids:
+        await self._usage_tracker.record_unused(
+            item_id=item.id,
+            memory_type=item.memory_type,
+            frame=frame.frame_id,
+        )
+```
+
+**Over time:** Items that are consistently assembled but never used will have their effective scores lowered. Items that are consistently referenced will rise. This is the ACE principle — the context strategy evolves based on outcomes, not just initial relevance scores.
+
+#### 6.3 Difference from Existing D3 Usage Tracker
+
+| | D3 (current) | Phase 6 (ACE-style) |
+|---|---|---|
+| **Tracks** | Which items were retrieved | Which items the model actually referenced |
+| **Signal** | "We showed this to the model" | "The model found this useful" |
+| **Feedback** | Boost retrieved items | Boost used items, penalize assembled-but-unused |
+| **Granularity** | Binary (retrieved or not) | Strength-weighted (direct quote vs topic overlap) |
+
 ---
 
 ## Updated Pipeline
@@ -269,6 +342,10 @@ retrieve
   → apply_diminishing_cutoff    (Phase 2 — find natural boundary)
   → truncate_to_scaled_budget   (Phase 3 — ceiling, not target)
   → log_fill_ratio              (Phase 4 — observability)
+
+# Post-response (Phase 6 — async, after model responds):
+  → detect_context_usage        (Phase 6 — what did the model actually use?)
+  → update_usage_tracker        (Phase 6 — boost used, penalize unused)
 ```
 
 **Why staleness is early:** Staleness adjusts raw scores before boosting. A stale item can still be rescued by frame_boost if it's relevant to the current frame. But it starts from a lower base, so equally relevant fresh content wins.
@@ -281,7 +358,8 @@ retrieve
 
 | File | Change | Phase |
 |------|--------|-------|
-| `nous/cognitive/context.py` | `_apply_relevance_floor()`, `_apply_diminishing_returns_cutoff()`, `_apply_staleness_penalty()`, `_scaled_budget()`, fill ratio logging, updated `build()` pipeline ordering | 1-5 |
+| `nous/cognitive/context.py` | `_apply_relevance_floor()`, `_apply_diminishing_returns_cutoff()`, `_apply_staleness_penalty()`, `_scaled_budget()`, `_detect_context_usage()`, fill ratio logging, updated `build()` pipeline ordering | 1-6 |
+| `nous/api/runner.py` | Post-response usage detection call (Phase 6) | 6 |
 | `nous/cognitive/schemas.py` | `RELEVANCE_FLOORS`, `BUDGET_SCALE_FACTORS` constants, scaled budget calculation in `ContextBudget` | 1, 3 |
 | `nous/config.py` | New settings (all with env var overrides): | 1-5 |
 
@@ -320,8 +398,9 @@ staleness_half_life_days: int = Field(
 3. **Context fill ratio logging** — observability before scaling budgets
 4. **Model-aware budget scaling** — increase ceilings on 1M models
 5. **Staleness penalty** — time-decay for older content
+6. **Context usage tracking** — ACE-style feedback: boost what the model actually uses, penalize assembled-but-ignored
 
-> **Recommendation:** Ship Phases 1-3 first, observe fill ratios for a week, then tune floors/cutoffs based on data before enabling Phase 4 scaling.
+> **Recommendation:** Ship Phases 1-3 first, observe fill ratios for a week, then tune floors/cutoffs based on data before enabling Phase 4 scaling. Phase 6 requires Phase 4 logging data to validate.
 
 ---
 
@@ -388,3 +467,5 @@ staleness_half_life_days: int = Field(
 3. ~~How should the quality gate interact with the usage tracker (D3)?~~ **RESOLVED (v2):** Floor now applies AFTER usage_boost. Items boosted by usage feedback are evaluated at their boosted score. A low raw-score item that gets usage-boosted above the floor will pass.
 
 4. Should there be a minimum result count guarantee? e.g., "always include at least 2 facts regardless of floor" to prevent completely empty context sections. Risk: defeats the purpose of the floor for sparse queries.
+
+5. **(NEW v2)** Should staleness half-life be per-memory-type? Decisions are situational (shorter half-life), facts are reference (longer). Current: uniform 14 days for all.
