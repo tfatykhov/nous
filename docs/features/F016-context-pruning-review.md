@@ -9,6 +9,7 @@
 **Reviews:** Architecture review (no P1s), Correctness review (1 P1, 4 P2s) — all addressed in v3.
 **v4 additions:** Context pressure warning, soft tool budgets, large codebase scope boundary.
 **v5 additions:** P0 anti-hallucination system prompt, re-fetch hints in metadata traces (from modern techniques review).
+**v6 additions:** Model-aware context limits — dynamic compaction thresholds based on model context window (1M for Sonnet/Opus 4.6).
 
 ---
 
@@ -267,27 +268,77 @@ tool_use_index = self._build_tool_use_index(messages)
 tool_use_block = tool_use_index.get(tool_use_id)
 ```
 
-### Phase 2: Lower Compaction Threshold
+### Phase 2: Model-Aware Context Limits
 
-> **⚠️ Breaking Change (v3 note):** Changing these defaults will cause compaction to fire ~3.5× more frequently. With threshold=60K and keep_recent=30K, only 20K of headroom remains (vs 70K currently). Compaction fires every ~5-10 iterations after first trigger. Deployments relying on the old defaults should explicitly set `NOUS_COMPACTION_THRESHOLD=100000` to preserve behavior.
+> **v6 revision:** Original v2-v4 proposed lowering compaction threshold from 100K → 60K. This was based on the assumption that Claude's context window was 200K. Claude Sonnet 4.6 and Opus 4.6 support **1M tokens**. At 1M, compacting at 100K means Nous uses only 10% of the available window — the aggressive pruning is largely self-inflicted.
 
-Reduce `compaction_threshold` from 100K → 60K tokens:
-
-```python
-compaction_threshold: int = Field(
-    default=60_000, validation_alias="NOUS_COMPACTION_THRESHOLD"
-)
-```
-
-**Rationale:** At 100K, compaction doesn't fire until ~turn 30-40 in tool-heavy sessions. At 60K, it fires around turn 15-20 — early enough that the structured summary preserves information BEFORE metadata degradation has replaced too many results.
-
-Also increase `keep_recent_tokens` from 20K → 30K to protect more recent context during compaction:
+#### 2.1 Model Context Window Registry
 
 ```python
-keep_recent_tokens: int = Field(
-    default=30_000, validation_alias="NOUS_KEEP_RECENT_TOKENS"
-)
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    # 1M context models
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    # 200K context models
+    "claude-sonnet-4-5": 200_000,
+    "claude-opus-4-5": 200_000,
+    # 128K context models
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+}
+
+def _get_context_window(self, model: str) -> int:
+    """Look up context window for model. Default 200K for unknown models."""
+    for key, window in MODEL_CONTEXT_WINDOWS.items():
+        if key in model:
+            return window
+    return 200_000
 ```
+
+#### 2.2 Dynamic Compaction Thresholds
+
+Scale compaction thresholds as a percentage of the model's context window:
+
+```python
+# Compaction fires at 60% of context window
+COMPACTION_THRESHOLD_RATIO = 0.60
+# Keep 20% of context window as recent context during compaction
+KEEP_RECENT_RATIO = 0.20
+```
+
+| Model | Context Window | Compaction Threshold (60%) | Keep Recent (20%) | Usable Before Compaction |
+|-------|---------------|---------------------------|-------------------|-------------------------|
+| Sonnet/Opus 4.6 | 1,000,000 | 600,000 | 200,000 | **600K tokens** |
+| Sonnet/Opus 4.5 | 200,000 | 120,000 | 40,000 | 120K tokens |
+| GPT-4o | 128,000 | 76,800 | 25,600 | 76K tokens |
+
+```python
+@property
+def effective_compaction_threshold(self) -> int:
+    """Dynamic threshold based on model context window."""
+    if self.compaction_threshold != 100_000:
+        return self.compaction_threshold  # Explicit override takes priority
+    window = self._get_context_window(self.model)
+    return int(window * COMPACTION_THRESHOLD_RATIO)
+
+@property
+def effective_keep_recent(self) -> int:
+    """Dynamic keep_recent based on model context window."""
+    if self.keep_recent_tokens != 20_000:
+        return self.keep_recent_tokens  # Explicit override takes priority
+    window = self._get_context_window(self.model)
+    return int(window * KEEP_RECENT_RATIO)
+```
+
+**Impact for Sonnet/Opus 4.6 (1M context):**
+- Compaction doesn't fire until **600K tokens** (~150-200 turns with heavy tool use)
+- Most sessions will never hit compaction at all
+- The 4-tier pruning pipeline (Phase 1) still applies but kicks in much later
+- Tool results can stay at full content for 10x longer
+
+**Backward compatibility:** If `NOUS_COMPACTION_THRESHOLD` is explicitly set, it takes priority over the dynamic calculation. Existing deployments are unaffected.
+
+> **⚠️ Cost consideration:** 1M context = higher per-request cost. Anthropic charges per input token. A session using 500K tokens of context costs ~5x more than one using 100K. The dynamic threshold should be paired with context health logging (Phase 3) so operators can monitor actual usage and tune the ratio if needed.
 
 ### Phase 3: Context Health Logging
 
@@ -344,6 +395,8 @@ TOOL_DECAY_PROFILES: dict[str, str] = {
 | aggressive | 2 | 4 | 8 | Re-readable or already persisted |
 | standard | 3 | 8 | 12 | Default tier progression |
 | conservative | 5 | 10 | 15 | Extract facts before clearing |
+
+> **v6 note:** These ages are defaults for 200K context models. With 1M context (Sonnet/Opus 4.6), the 4-tier pipeline still applies but matters less — at 600K compaction threshold, most sessions won't accumulate enough tool results for even the `standard` profile to hit hard-clear. Consider scaling ages proportionally to context window in a future iteration, but the current defaults are a safe floor.
 
 #### 4.0.1 Pre-Prune Fact Extraction (~30 LOC)
 
@@ -522,9 +575,11 @@ Fallback to head+tail on any parse error.
 | Change | Impact |
 |--------|--------|
 | Metadata traces (~150 chars each) replacing placeholders (~60 chars) | +~90 chars × N degraded results = **+500-1500 tokens per long session** |
-| Lower compaction threshold (60K vs 100K) | Compaction fires earlier → more frequent LLM summary calls (~1 extra per long session) |
+| Anti-hallucination system prompt | ~80 tokens per request (negligible) |
+| Re-fetch hints in metadata | ~5 tokens per degraded result (negligible) |
 | Context health logging | Zero token cost (server-side only) |
-| **Total estimated increase** | **< 10% per session** |
+| **Model-aware thresholds (1M context)** | **⚠️ Significant cost increase.** Sessions that previously compacted at 100K will now run to 600K. At Anthropic's pricing, a 500K input request costs ~5x more than 100K. Operators should monitor via context health logs and tune `COMPACTION_THRESHOLD_RATIO` if costs are too high. |
+| **Total estimated increase** | **Variable: negligible for short sessions, up to 5x for long sessions on 1M models** |
 
 ---
 
