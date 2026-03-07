@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     thinking_budget: int = 10000  # budget_tokens for manual mode (min 1024)
     effort: Literal["low", "medium", "high", "max"] = "high"
 
+    # Context window override (0 = auto-detect from model name)
+    context_window: int = Field(
+        default=0, validation_alias="NOUS_CONTEXT_WINDOW"
+    )
+
     # Direct API settings
     max_turns: int = 10  # Max tool use iterations per turn
     api_base_url: str = "https://api.anthropic.com"
@@ -239,6 +244,8 @@ class Settings(BaseSettings):
         return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
 
     def _get_context_window(self, model: str) -> int:
+        if self.context_window > 0:
+            return self.context_window
         from nous.cognitive.schemas import MODEL_CONTEXT_WINDOWS
         for key in sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True):
             if key in model:
