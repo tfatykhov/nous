@@ -283,7 +283,16 @@ def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResul
     )
 
 
-# --- Task 5: Main entry point ---
+# --- Task 5+9: Main entry point ---
+
+
+@dataclass
+class SmartCompressResult:
+    """Result of smart_compress — text + optional cache info."""
+    text: str
+    was_compressed: bool = False
+    original_text: str | None = None  # Only set for non-re-fetchable tools
+    item_count: int | None = None
 
 
 async def smart_compress(
@@ -292,25 +301,30 @@ async def smart_compress(
     result_text: str,
     settings: Settings,
     is_error: bool = False,
-) -> str:
+) -> SmartCompressResult:
     """Main entry point — compress tool output if appropriate.
 
-    Returns original text unchanged if compression is skipped.
+    Returns SmartCompressResult with compressed text and cache metadata.
     Called from runner.py _tool_loop after dispatch, before messages[].
     """
+    passthrough = SmartCompressResult(text=result_text)
+
     if not settings.smart_compress_enabled:
-        return result_text
+        return passthrough
     if is_error:
-        return result_text
+        return passthrough
     if len(result_text) < settings.smart_compress_min_chars:
-        return result_text
+        return passthrough
     if not is_crushable(result_text, min_chars=settings.smart_compress_min_chars):
-        return result_text
+        return passthrough
 
     content_type = classify_content(result_text, min_chars=settings.smart_compress_min_chars)
 
     if content_type == ContentType.SMALL:
-        return result_text
+        return passthrough
+
+    compressed_text = result_text
+    item_count = None
 
     if content_type == ContentType.STRING_ARRAY:
         lines = result_text.split("\n")
@@ -319,20 +333,31 @@ async def smart_compress(
             max_k=settings.smart_compress_max_k,
             elbow_threshold=settings.smart_compress_elbow_threshold,
         )
-        return compressed.to_text()
+        compressed_text = compressed.to_text()
+        item_count = compressed.original_count
 
-    if content_type == ContentType.DICT_ARRAY:
+    elif content_type == ContentType.DICT_ARRAY:
         try:
             items = json.loads(result_text.strip())
             compressed = compress_dict_array(items, max_k=settings.smart_compress_max_k)
-            return compressed.to_text()
+            compressed_text = compressed.to_text()
+            item_count = compressed.original_count
         except (json.JSONDecodeError, TypeError):
-            return result_text
+            return passthrough
 
-    if content_type == ContentType.LOG_FORMAT:
+    elif content_type in (ContentType.LOG_FORMAT, ContentType.RAW_TEXT):
         lines = result_text.split("\n")
         compressed = compress_string_array(lines, max_k=settings.smart_compress_max_k)
-        return compressed.to_text()
+        compressed_text = compressed.to_text()
+        item_count = compressed.original_count
 
-    # RAW_TEXT — pass through for now (future: structural section detection)
-    return result_text
+    if compressed_text == result_text:
+        return passthrough
+
+    from nous.api.tool_cache import NON_REFETCHABLE_TOOLS
+    return SmartCompressResult(
+        text=compressed_text,
+        was_compressed=True,
+        original_text=result_text if tool_name in NON_REFETCHABLE_TOOLS else None,
+        item_count=item_count,
+    )

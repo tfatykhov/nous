@@ -10,6 +10,7 @@ from nous.api.smart_compress import (
     compress_string_array,
     compress_dict_array,
     smart_compress,
+    SmartCompressResult,
 )
 from nous.config import Settings
 
@@ -183,21 +184,23 @@ class TestSmartCompressEntryPoint:
             smart_compress_min_chars=500,
         )
         result = await smart_compress("bash", {}, "short output", settings)
-        assert result == "short output"
+        assert result.text == "short output"
+        assert result.was_compressed is False
 
     @pytest.mark.asyncio
     async def test_disabled_passes_through(self):
         settings = Settings(smart_compress_enabled=False)
         big = "\n".join(f"line {i}" for i in range(200))
         result = await smart_compress("bash", {}, big, settings)
-        assert result == big
+        assert result.text == big
+        assert result.was_compressed is False
 
     @pytest.mark.asyncio
     async def test_error_results_pass_through(self):
         settings = Settings(smart_compress_enabled=True)
         big = "\n".join(f"line {i}" for i in range(200))
         result = await smart_compress("bash", {}, big, settings, is_error=True)
-        assert result == big
+        assert result.text == big
 
     @pytest.mark.asyncio
     async def test_grep_output_compressed(self):
@@ -211,8 +214,10 @@ class TestSmartCompressEntryPoint:
         lines.append("ERROR: build failed")
         text = "\n".join(lines)
         result = await smart_compress("bash", {}, text, settings)
-        assert len(result) < len(text)
-        assert "[SmartCompressed:" in result
+        assert len(result.text) < len(text)
+        assert "[SmartCompressed:" in result.text
+        assert result.was_compressed is True
+        assert result.original_text is None  # bash is re-fetchable
 
     @pytest.mark.asyncio
     async def test_json_array_compressed(self):
@@ -224,4 +229,19 @@ class TestSmartCompressEntryPoint:
         items = [{"id": i, "score": 1.0 - i * 0.02, "data": f"item_{i}"} for i in range(50)]
         text = json.dumps(items)
         result = await smart_compress("web_search", {}, text, settings)
-        assert "[SmartCompressed:" in result
+        assert "[SmartCompressed:" in result.text
+        assert result.was_compressed is True
+        assert result.original_text == text  # web_search is non-re-fetchable
+
+    @pytest.mark.asyncio
+    async def test_non_refetchable_preserves_original(self):
+        settings = Settings(
+            smart_compress_enabled=True,
+            smart_compress_min_chars=100,
+            smart_compress_max_k=5,
+        )
+        items = [{"id": i, "score": 1.0 - i * 0.02, "data": f"item_{i}"} for i in range(50)]
+        text = json.dumps(items)
+        result = await smart_compress("web_fetch", {"url": "https://example.com"}, text, settings)
+        assert result.original_text == text
+        assert result.item_count == 50

@@ -39,12 +39,12 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "learn_fact", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
-    "question": ["recall_deep", "recall_recent", "bash", "read_file", "write_file", "record_decision", "learn_fact", "create_censor", "web_search", "web_fetch", "list_tasks", "cancel_task", "run_python"],
-    "decision": ["record_decision", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "web_search", "web_fetch", "list_tasks", "cancel_task"],
-    "creative": ["learn_fact", "recall_deep", "recall_recent", "write_file", "web_search"],
+    "conversation": ["record_decision", "learn_fact", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
+    "question": ["recall_deep", "recall_recent", "bash", "read_file", "write_file", "record_decision", "learn_fact", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python"],
+    "decision": ["record_decision", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task"],
+    "creative": ["learn_fact", "recall_deep", "recall_recent", "write_file", "web_search", "cache_retrieve"],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
+    "debug": ["record_decision", "recall_deep", "recall_recent", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -962,13 +962,13 @@ class AgentRunner:
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
-        # Get tools for current frame (D5)
-        tools = self._dispatcher.available_tools(frame_id)
+        # Get base tools for current frame (D5)
+        base_tools = self._dispatcher.available_tools(frame_id)
 
         # 012.2: Remove delegation tools from subtask tool set (no-nesting rule)
         if is_subtask:
             _SUBTASK_EXCLUDED_TOOLS = {"spawn_task", "schedule_task"}
-            tools = [t for t in tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
+            base_tools = [t for t in base_tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -982,6 +982,9 @@ class AgentRunner:
         max_turns = self._settings.max_turns
 
         while turns < max_turns:
+            # F020: Rebuild tool list each iteration for dynamic cache_retrieve
+            tools = list(base_tools)
+
             api_response = await self._call_api(
                 system_prompt=system_prompt,
                 messages=messages,
@@ -1032,15 +1035,33 @@ class AgentRunner:
                     duration_ms = int((time.monotonic() - start_time) * 1000)
 
                     # F020: SmartCompress — ingestion-time compression
-                    compressed_text = await smart_compress(
+                    compress_result = await smart_compress(
                         tool_name, tool_input, result_text, self._settings,
                         is_error=is_error,
                     )
 
+                    # F020: Cache original if non-re-fetchable and compressed
+                    if compress_result.original_text and session_id:
+                        try:
+                            from nous.api.tool_cache import cache_compressed_result
+                            async with self._heart.db.session() as db_sess:
+                                hash_key = await cache_compressed_result(
+                                    db_sess,
+                                    agent_id=self._settings.agent_id,
+                                    session_id=session_id,
+                                    tool_name=tool_name,
+                                    tool_input=tool_input,
+                                    original_content=compress_result.original_text,
+                                    item_count=compress_result.item_count,
+                                )
+                                logger.debug("Cached %s result [%s]", tool_name, hash_key)
+                        except Exception:
+                            logger.warning("Failed to cache %s result", tool_name, exc_info=True)
+
                     tool_results_for_message.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use_id,
-                        "content": compressed_text,
+                        "content": compress_result.text,
                         "is_error": is_error,
                     })
 

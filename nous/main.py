@@ -152,6 +152,22 @@ async def create_components(settings: Settings) -> dict:
             decision_reviewer = None
             logger.debug("DecisionReviewer not available yet")
 
+        # F020: Clean up tool cache on session end
+        from nous.api.tool_cache import cleanup_session_cache
+
+        async def _on_session_ended_cleanup_cache(event):
+            sid = getattr(event, "session_id", None) or (event.get("session_id") if isinstance(event, dict) else None)
+            if sid:
+                try:
+                    async with database.session() as db_sess:
+                        count = await cleanup_session_cache(db_sess, sid)
+                        if count:
+                            logger.debug("Cleaned %d cache entries for session %s", count, sid)
+                except Exception:
+                    logger.warning("Failed to cleanup tool cache", exc_info=True)
+
+        bus.on("session_ended", _on_session_ended_cleanup_cache)
+
         # Start bus + monitor
         await bus.start()
         if session_monitor:
@@ -170,6 +186,10 @@ async def create_components(settings: Settings) -> dict:
         limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
     )
     register_web_tools(dispatcher, settings, web_http)
+
+    # F020: Register cache_retrieve tool
+    from nous.api.tools import register_cache_retrieve_tool
+    register_cache_retrieve_tool(dispatcher, db.session_factory)
 
     # 008: Register identity tools (gated by "initiation" frame)
     from nous.identity.tools import register_identity_tools
