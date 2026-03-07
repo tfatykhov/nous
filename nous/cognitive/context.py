@@ -286,13 +286,16 @@ class ContextEngine:
                     len(decisions) if decisions else 0, self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
                     [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
-                if decisions and self._has_embeddings:
+                if decisions and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings — keyword scores too low)
+                    # Superseded by F017 relevance floor when enabled
                     decisions = [d for d in decisions if (getattr(d, "score", None) or 0) >= TIER3_THRESHOLDS["decision"]]
                     logger.info("Tier3 decisions after threshold: %d", len(decisions))
                 if decisions:
                     # 007.2: Diversity filter — use category as topic key
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
+                    # F017: Relevance floor
+                    decisions = self._apply_relevance_floor(decisions, "decision")
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
@@ -332,8 +335,9 @@ class ContextEngine:
                     len(facts) if facts else 0, self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
-                if facts and self._has_embeddings:
+                if facts and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings)
+                    # Superseded by F017 relevance floor when enabled
                     facts = [f for f in facts if (getattr(f, "score", None) or 0) >= TIER3_THRESHOLDS["fact"]]
                 if facts:
                     # F10: apply_frame_boost (preserved from existing pipeline)
@@ -347,6 +351,8 @@ class ContextEngine:
 
                     # Usage boost
                     facts = self._apply_usage_boost(facts, usage_tracker)
+                    # F017: Relevance floor
+                    facts = self._apply_relevance_floor(facts, "fact")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
@@ -378,8 +384,9 @@ class ContextEngine:
                 limit = _limits.get("procedure", 5)
                 q_text = _query_texts.get("procedure", _default_query)
                 procedures = await self._heart.search_procedures(q_text, limit=limit, session=session)
-                if procedures and self._has_embeddings:
+                if procedures and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings)
+                    # Superseded by F017 relevance floor when enabled
                     procedures = [p for p in procedures if (getattr(p, "score", None) or 0) >= TIER3_THRESHOLDS["procedure"]]
                 if procedures:
                     # F10: apply_frame_boost
@@ -388,6 +395,8 @@ class ContextEngine:
                     # Dedup + usage boost
                     procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
                     procedures = self._apply_usage_boost(procedures, usage_tracker)
+                    # F017: Relevance floor
+                    procedures = self._apply_relevance_floor(procedures, "procedure")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for p in procedures:
@@ -453,8 +462,9 @@ class ContextEngine:
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
-                if episodes and self._has_embeddings:
+                if episodes and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings)
+                    # Superseded by F017 relevance floor when enabled
                     episodes = [e for e in episodes if (getattr(e, "score", None) or 0) >= TIER3_THRESHOLDS["episode"]]
                 if episodes:
                     # F10: apply_frame_boost
@@ -466,6 +476,8 @@ class ContextEngine:
                     # Dedup + usage boost
                     episodes = await self._apply_dedup(episodes, _conv_msgs, "summary")
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
+                    # F017: Relevance floor
+                    episodes = self._apply_relevance_floor(episodes, "episode")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for e in episodes:
@@ -548,6 +560,18 @@ class ContextEngine:
 
         boosted.sort(key=lambda x: x[1], reverse=True)
         return [item for item, _ in boosted]
+
+    def _apply_relevance_floor(self, results: list, memory_type: str) -> list:
+        """Remove results below the relevance floor (F017 Phase 1)."""
+        if not self._settings.relevance_floor_enabled:
+            return results
+        from nous.cognitive.schemas import RELEVANCE_FLOORS, FLOOR_EXEMPT_SOURCES
+        floor = RELEVANCE_FLOORS.get(memory_type, 0.40)
+        return [
+            r for r in results
+            if (getattr(r, "score", 0) or 0) >= floor
+            or getattr(r, "source", None) in FLOOR_EXEMPT_SOURCES
+        ]
 
     def _enforce_diversity(self, items: list, topic_attr: str, max_per_subject: int = 2) -> list:
         """Prevent one topic from dominating recall results (007.2).

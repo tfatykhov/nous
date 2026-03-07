@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Anti-hallucination (F016 Phase 0)
     anti_hallucination_prompt: bool = True
 
+    # F017: Relevance floor
+    relevance_floor_enabled: bool = True
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000

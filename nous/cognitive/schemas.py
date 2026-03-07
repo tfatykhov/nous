@@ -24,6 +24,19 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 COMPACTION_THRESHOLD_RATIO = 0.60
 KEEP_RECENT_RATIO = 0.20
 
+# F017 Phase 1: Per-type minimum relevance scores
+RELEVANCE_FLOORS: dict[str, float] = {
+    "fact": 0.45,
+    "decision": 0.40,
+    "procedure": 0.50,
+    "episode": 0.35,
+}
+
+# Sources exempt from relevance floor filtering
+FLOOR_EXEMPT_SOURCES: set[str] = {
+    "pre_prune_extraction",
+}
+
 
 @dataclass
 class SessionMetadata:
