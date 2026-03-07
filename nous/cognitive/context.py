@@ -147,6 +147,18 @@ class ContextEngine:
         if _conv_msgs:
             _conv_msgs = _conv_msgs[-budget.conversation_window :]
 
+        # Tier 0: Current date/time — always injected
+        now_utc = datetime.now(timezone.utc)
+        datetime_text = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
+        sections.append(
+            ContextSection(
+                priority=0,
+                label="Current Date/Time",
+                content=datetime_text,
+                token_estimate=self._estimate_tokens(datetime_text),
+            )
+        )
+
         # 1. Identity (always included)
         # 008: Use identity_override from DB if available, fall back to static
         _effective_identity = identity_override or self._identity_prompt
