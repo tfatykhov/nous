@@ -174,6 +174,14 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
+    def _detect_explicit_overrides(self) -> "Settings":
+        object.__setattr__(self, '_compaction_threshold_explicit',
+                          'compaction_threshold' in self.model_fields_set)
+        object.__setattr__(self, '_keep_recent_explicit',
+                          'keep_recent_tokens' in self.model_fields_set)
+        return self
+
+    @model_validator(mode="after")
     def _validate_keepalive(self) -> "Settings":
         if self.keepalive_interval >= self.tool_timeout:
             raise ValueError(
@@ -216,3 +224,24 @@ class Settings(BaseSettings):
     @property
     def db_url(self) -> str:
         return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
+    def _get_context_window(self, model: str) -> int:
+        from nous.cognitive.schemas import MODEL_CONTEXT_WINDOWS
+        for key in sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True):
+            if key in model:
+                return MODEL_CONTEXT_WINDOWS[key]
+        return 200_000
+
+    @property
+    def effective_compaction_threshold(self) -> int:
+        if getattr(self, '_compaction_threshold_explicit', False):
+            return self.compaction_threshold
+        from nous.cognitive.schemas import COMPACTION_THRESHOLD_RATIO
+        return int(self._get_context_window(self.model) * COMPACTION_THRESHOLD_RATIO)
+
+    @property
+    def effective_keep_recent(self) -> int:
+        if getattr(self, '_keep_recent_explicit', False):
+            return self.keep_recent_tokens
+        from nous.cognitive.schemas import KEEP_RECENT_RATIO
+        return int(self._get_context_window(self.model) * KEEP_RECENT_RATIO)

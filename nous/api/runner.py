@@ -336,7 +336,7 @@ class AgentRunner:
                         history_tokens = self._compactor.estimator.estimate_messages(messages)
                         if self._compactor.should_compact(system_tokens, history_tokens):
                             cut_point = self._compactor.find_cut_point(
-                                messages, self._settings.keep_recent_tokens
+                                messages, self._settings.effective_keep_recent
                             )
                             if cut_point > 0:
                                 snapshot = messages[:cut_point]
@@ -663,7 +663,7 @@ class AgentRunner:
                     history_tokens = self._compactor.estimator.estimate_messages(messages)
                     if self._compactor.should_compact(system_tokens, history_tokens):
                         cut_point = self._compactor.find_cut_point(
-                            messages, self._settings.keep_recent_tokens
+                            messages, self._settings.effective_keep_recent
                         )
                         if cut_point > 0:
                             # 008.1 Phase 3: Snapshot for event handlers (decoupled from mutation)

@@ -11,6 +11,19 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+# Model context window sizes (tokens)
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-opus-4-5": 200_000,
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+}
+
+COMPACTION_THRESHOLD_RATIO = 0.60
+KEEP_RECENT_RATIO = 0.20
+
 
 @dataclass
 class SessionMetadata:

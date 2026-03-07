@@ -355,7 +355,7 @@ class ConversationCompactor:
         if not self._settings.compaction_enabled:
             return False
         total = system_tokens + history_tokens
-        return total > self._settings.compaction_threshold
+        return total > self._settings.effective_compaction_threshold
 
     def find_cut_point(
         self, messages: list[dict[str, Any]], keep_recent_tokens: int
