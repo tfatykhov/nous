@@ -203,32 +203,36 @@ class TestPruneToolResults:
         assert messages[1]["content"][0]["content"] == "small"
 
     def test_hard_clear_old_results(self):
-        """Results older than hard_clear_after get replaced with placeholder."""
-        compactor = ConversationCompactor(_make_settings(
-            NOUS_TOOL_HARD_CLEAR_AFTER="4",
-            NOUS_TOOL_METADATA_DEGRADE_AFTER="3",
-        ))
-        # Create 7 tool results (hard_clear_after=4, metadata_degrade_after=3, keep_last=2)
+        """Results older than clear_age get replaced with placeholder.
+
+        Uses list_files (aggressive profile: clear_age=8, degrade_age=4)
+        so that 10 tool results produce hard-clears at the oldest positions.
+        """
+        compactor = ConversationCompactor(_make_settings())
+        # Create 10 tool results with list_files (aggressive: clear_age=8)
+        # keep_last=2, so ages are 10,9,...,1. Ages >= 8 -> hard-cleared (first 3).
         messages = []
-        for i in range(7):
-            messages.append(_make_assistant())
+        for i in range(10):
+            messages.append({
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": f"t{i}", "name": "list_files", "input": {"path": "."}}],
+            })
             messages.append(_make_tool_result(f"result_{i}", f"t{i}"))
 
         compactor.prune_tool_results(messages)
 
-        # First 4 results (age 7, 6, 5, 4 >= hard_clear_after=4) should be hard-cleared
+        # First 3 results (age 10, 9, 8 >= clear_age=8) should be hard-cleared
         assert "cleared" in messages[1]["content"][0]["content"]
         assert "cleared" in messages[3]["content"][0]["content"]
         assert "cleared" in messages[5]["content"][0]["content"]
-        assert "cleared" in messages[7]["content"][0]["content"]
 
-        # Result 4 (age 3 >= metadata_degrade_after=3) would be degraded,
-        # but content "result_4" is small (<200 chars) so kept as-is
-        assert "result_4" in messages[9]["content"][0]["content"]
+        # Result at age 7 (< clear_age=8, >= degrade_age=4) would be degraded,
+        # but content "result_3" is small (<200 chars) so kept as-is
+        assert "result_3" in messages[7]["content"][0]["content"]
 
         # Last 2 (protected)
-        assert "result_5" in messages[11]["content"][0]["content"]
-        assert "result_6" in messages[13]["content"][0]["content"]
+        assert "result_8" in messages[17]["content"][0]["content"]
+        assert "result_9" in messages[19]["content"][0]["content"]
 
     def test_never_modify_assistant_blocks(self):
         """Assistant messages (including thinking blocks) are never modified."""

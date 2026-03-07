@@ -75,11 +75,11 @@ class TestMetadataDegrade:
 
 
 class TestFourTierPruning:
-    def _make_session(self, n_tool_msgs, content_size=500):
+    def _make_session(self, n_tool_msgs, content_size=500, tool_name="bash"):
         messages = []
         for i in range(n_tool_msgs):
             asst, user = _make_tool_msg(
-                "read_file", {"path": f"file_{i}.py"},
+                tool_name, {"command": f"cmd_{i}"},
                 f"import os\n" + f"line {i}\n" * (content_size // 10),
                 tool_use_id=f"tu_{i}",
             )
@@ -121,7 +121,7 @@ class TestFourTierPruning:
         # Find one in the metadata-degraded range (age 8-11)
         # With 14 tool msgs and keep_last=2, tool_msgs[4] has age 10
         degraded = tool_msgs[4]["content"][0]["content"]
-        assert degraded.startswith("[read_file(")
+        assert degraded.startswith("[bash(")
 
 
 class TestConfigValidation:

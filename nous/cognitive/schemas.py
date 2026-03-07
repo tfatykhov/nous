@@ -37,6 +37,33 @@ FLOOR_EXEMPT_SOURCES: set[str] = {
     "pre_prune_extraction",
 }
 
+# F016 Phase 4: Per-tool decay profiles for content-type-aware pruning
+TOOL_DECAY_PROFILES: dict[str, str] = {
+    "read_file": "preserve",
+    "list_files": "aggressive",
+    "recall_deep": "aggressive",
+    "bash": "standard",
+    "run_python": "standard",
+    "web_search": "conservative",
+}
+
+# Profile -> (soft_trim_age, metadata_degrade_age, hard_clear_age)
+DECAY_PROFILE_AGES: dict[str, tuple[int, int, int]] = {
+    "preserve": (8, 999, 20),     # Skip metadata degradation
+    "aggressive": (2, 4, 8),
+    "standard": (3, 8, 12),       # Default
+    "conservative": (5, 10, 15),
+}
+
+FRAME_TOOL_WINDOWS: dict[str, int] = {
+    "debug": 4,
+    "decision": 3,
+    "task": 2,
+    "question": 2,
+    "conversation": 2,
+    "creative": 1,
+}
+
 
 @dataclass
 class SessionMetadata:
