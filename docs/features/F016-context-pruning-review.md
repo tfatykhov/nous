@@ -1,6 +1,6 @@
 # F016 — Context Pruning Review & Anti-Hallucination Hardening
 
-**Status:** Draft (v4 — context pressure signaling + scope boundaries)
+**Status:** Draft (v8 — all P1/P2/P3 fixes from deep code validation)
 **Author:** Emerson (analysis & spec), Tim (requirements), Nous (research)
 **Created:** 2026-03-06
 **Revised:** 2026-03-07
@@ -11,6 +11,7 @@
 **v5 additions:** P0 anti-hallucination system prompt, re-fetch hints in metadata traces (from modern techniques review).
 **v6 additions:** Model-aware context limits — dynamic compaction thresholds based on model context window (1M for Sonnet/Opus 4.6).
 **v7 fixes:** P1 #2 (pre-prune facts survive F017 floor via source tag), P1 #4 (_metadata_degrade small content handling), P2 #1 (explicit env var detection replaces sentinel), P2 #2 (Heart dependency via runner.py caller), P2 #4 (constants centralized in schemas.py).
+**v8 fixes:** P1 #1 (_detect_explicit_overrides uses model_fields_set instead of os.environ — catches .env file values), P1 #2 (store_fact → heart.learn(FactInput(...))), P1 #3 (document callers that must switch to effective_* properties), P1 #4 (explicit tool_use_id extraction in pruning pipeline), P2 #1 (deduplicate schemas.py in affected files table), P2 #2 (context pressure warning via system prompt section not "system message"), P2 #3 (tool budget dispatch signature change documented), P2 #4 (pruning timing clarified: per-iteration not per-tool-call), P2 #5 (preserve profile age note for 200K models), P2 #6 (model context window matching uses sorted longest-first), P3 #1 (remove nonexistent "research" frame).
 
 ---
 
@@ -46,7 +47,7 @@ Nous starts hallucinating during extended sessions — producing responses that 
 - **Status: NOT the problem** — compaction is on in production
 
 **Layer 1: Tool Output Pruning (compaction.py, per-turn) ← PRIMARY SUSPECT**
-Applied after EACH tool execution cycle, before the next API call. Mutates the in-memory messages list.
+Applied once per tool loop iteration, after ALL tool results for that turn are appended as a batch, before the next API call (runner.py `_tool_loop` ~line 1035, `stream_chat` ~line 858). Mutates the in-memory messages list.
 
 Pruning logic (from `prune_tool_results()`):
 1. Find all tool result message indices in the messages list
@@ -271,7 +272,13 @@ Usage in `prune_tool_results()`:
 ```python
 tool_use_index = self._build_tool_use_index(messages)
 # ...
-tool_use_block = tool_use_index.get(tool_use_id)
+# Each tool_result item has a "tool_use_id" field linking it to
+# the assistant's tool_use block (set in runner.py ~line 843):
+#   {"type": "tool_result", "tool_use_id": tc["id"], "content": ..., "is_error": ...}
+for item in content:
+    tool_use_id = item.get("tool_use_id")
+    tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
+    self._metadata_degrade(item, tool_use_block)
 ```
 
 ### Phase 2: Model-Aware Context Limits
@@ -294,10 +301,14 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 }
 
 def _get_context_window(self, model: str) -> int:
-    """Look up context window for model. Default 200K for unknown models."""
-    for key, window in MODEL_CONTEXT_WINDOWS.items():
+    """Look up context window for model. Default 200K for unknown models.
+
+    Matches are sorted longest-key-first to prevent partial matches
+    (e.g., "claude-sonnet-4-5" matching before "claude-sonnet-4-5-20250514").
+    """
+    for key in sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True):
         if key in model:
-            return window
+            return MODEL_CONTEXT_WINDOWS[key]
     return 200_000
 ```
 
@@ -319,24 +330,26 @@ KEEP_RECENT_RATIO = 0.20
 | GPT-4o | 128,000 | 76,800 | 25,600 | 76K tokens |
 
 ```python
-# Track whether values were explicitly set via env var
+# Track whether values were explicitly set via env var or .env file
 _compaction_threshold_explicit: bool = False
 _keep_recent_explicit: bool = False
 
 @model_validator(mode="after")
 def _detect_explicit_overrides(self) -> "Settings":
-    """Detect if compaction settings were explicitly provided via env vars.
+    """Detect if compaction settings were explicitly provided.
 
-    v7 fix (P2 #1): The old approach compared against sentinel values
-    (e.g., != 100_000), which broke if someone explicitly set the value
-    to the default. Instead, check if the env var is actually set.
+    v8 fix (P1 #1): The v7 approach used `os.environ` checks, but
+    pydantic-settings with `env_file=".env"` reads the file directly
+    WITHOUT injecting into os.environ. Values set via .env would be
+    missed. Instead, use pydantic's `model_fields_set` which tracks
+    all fields that were explicitly provided (from any source: env vars,
+    .env file, or constructor kwargs).
     """
-    import os
     self._compaction_threshold_explicit = (
-        "NOUS_COMPACTION_THRESHOLD" in os.environ
+        "compaction_threshold" in self.model_fields_set
     )
     self._keep_recent_explicit = (
-        "NOUS_KEEP_RECENT_TOKENS" in os.environ
+        "keep_recent_tokens" in self.model_fields_set
     )
     return self
 
@@ -364,6 +377,10 @@ def effective_keep_recent(self) -> int:
 - Tool results can stay at full content for 10x longer
 
 **Backward compatibility:** If `NOUS_COMPACTION_THRESHOLD` is explicitly set, it takes priority over the dynamic calculation. Existing deployments are unaffected.
+
+**Caller updates required (v8 P1 #3):** The following call sites must switch from raw settings fields to the new `effective_*` properties:
+- `compaction.py:should_compact()` — change `self._settings.compaction_threshold` → `self._settings.effective_compaction_threshold`
+- `runner.py` (run_turn ~line 340, stream_chat ~line 655) — change `self._settings.keep_recent_tokens` → `self._settings.effective_keep_recent` when passing to `find_cut_point()`
 
 > **⚠️ Cost consideration:** 1M context = higher per-request cost. Anthropic charges per input token. A session using 500K tokens of context costs ~5x more than one using 100K. The dynamic threshold should be paired with context health logging (Phase 3) so operators can monitor actual usage and tune the ratio if needed.
 
@@ -418,7 +435,7 @@ TOOL_DECAY_PROFILES: dict[str, str] = {
 
 | Profile | Soft-trim age | Metadata age | Hard-clear age | Rationale |
 |---------|--------------|--------------|----------------|-----------|
-| preserve | 8 | _(skipped)_ | 20 | Code is too dense for lossy metadata traces. Keep full (soft-trimmed) content long enough for compaction to summarize it properly. |
+| preserve | 8 | _(skipped)_ | 20 | Code is too dense for lossy metadata traces. Keep full (soft-trimmed) content long enough for compaction to summarize it properly. **⚠️ On 200K models:** soft-trimmed read_file results (~3000 chars each) retained until age 20 can consume significant context in code-heavy sessions (10+ file reads). Monitor via context health logs. Consider reducing to hard-clear age 14 for 200K models in a future iteration. |
 | aggressive | 2 | 4 | 8 | Re-readable or already persisted |
 | standard | 3 | 8 | 12 | Default tier progression |
 | conservative | 5 | 10 | 15 | Extract facts before clearing |
@@ -448,15 +465,16 @@ def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]
 
 ```python
 # In runner.py (caller), after prune_tool_results():
+# Import at top of file: from nous.heart.schemas import FactInput
 extracted_facts = self._compaction.prune_tool_results(messages, frame)
 if extracted_facts:
     for fact_text in extracted_facts:
-        await self._heart.store_fact(
+        await self._heart.learn(FactInput(
             content=fact_text,
             category="technical",
             confidence=0.3,
             source="pre_prune_extraction",
-        )
+        ))
 ```
 
 These extracted facts are stored via Heart as `confidence=0.3` facts with `source="pre_prune_extraction"` tag (auto-expire, won't clutter context).
@@ -472,8 +490,8 @@ FRAME_TOOL_WINDOWS: dict[str, int] = {
     "debug": 4,          # Need error traces
     "decision": 3,       # Need evidence
     "task": 2,           # Default
+    "question": 2,       # Default
     "conversation": 2,   # Default
-    "research": 1,       # Results go to memory
     "creative": 1,       # Minimal tool context needed
 }
 ```
@@ -512,7 +530,7 @@ def _check_context_pressure(self, messages: list[dict[str, Any]]) -> str | None:
     return None
 ```
 
-Injected as a system message before the next API call in `run_turn()`. The model sees it and can decide to offload.
+Injected as a dynamic section appended to the system prompt before the next API call in `run_turn()`. The Anthropic API has no `system` role in the messages array — only `user`/`assistant` — so this must be added to the system prompt string (similar to how context.py's `build()` assembles sections). The model sees it and can decide to offload.
 
 #### 5.2 Tool Call Budget (Cross-ref F015)
 
@@ -522,7 +540,7 @@ F015 already specs per-frame tool budgets. For `read_file` specifically, enforce
 FRAME_TOOL_LIMITS: dict[str, dict[str, int]] = {
     "debug": {"read_file": 12, "bash": 20},
     "task": {"read_file": 10, "bash": 15},
-    "research": {"read_file": 8, "bash": 10},
+    "question": {"read_file": 8, "bash": 10},
     "conversation": {"read_file": 4, "bash": 5},
 }
 ```
@@ -535,6 +553,11 @@ of what you've learned before reading more files.
 ```
 
 This is a soft limit (warning, not block) because sometimes the model genuinely needs more files. But the friction forces a conscious decision.
+
+**Integration note (v8 P2 #3):** `ToolDispatcher.dispatch()` currently accepts `(name, args, session_id)` — no `frame_id`. To track per-frame budgets, either:
+- Expand dispatch signature: `dispatch(name, args, session_id, frame_id=None)`, or
+- Pass frame context via the runner's tool loop, which already knows the active frame (runner.py `_tool_loop` has `frame_id` parameter).
+The recommended approach is to add a `set_frame(session_id, frame_id)` method on ToolDispatcher that the runner calls at the start of each tool loop iteration, keeping dispatch() unchanged. Budget counters are tracked as `dict[tuple[str, str, str], int]` keyed by `(session_id, frame_id, tool_name)` and reset per session.
 
 #### 5.3 Scope Boundary: Large Codebase Analysis
 
@@ -588,11 +611,10 @@ Fallback to head+tail on any parse error.
 |------|--------|-------|
 | `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()` (with re-fetch hints), updated `prune_tool_results()` with 4-tier pipeline (returns extracted facts list) | 1, 4 |
 | `nous/cognitive/context.py` | Anti-hallucination prompt injection in context assembly | 0 |
-| `nous/cognitive/schemas.py` | `TOOL_DECAY_PROFILES`, `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS`, `MODEL_CONTEXT_WINDOWS` constants (v7 P2 #4: all constants centralized here) | 4, 5 |
-| `nous/config.py` | `anti_hallucination_prompt`, `tool_metadata_degrade_after`, `tool_hard_clear_after`, `compaction_enabled` default, `model_validator` for tier ordering, `_detect_explicit_overrides` for dynamic thresholds | 0-2, 5 |
-| `nous/api/runner.py` | Context health logging, context pressure warning, turn-aware window | 3, 5, 6 |
-| `nous/cognitive/schemas.py` | `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS` | 4, 5 |
-| `nous/api/tools.py` | Soft tool budget warning in `read_file` response | 5 |
+| `nous/cognitive/schemas.py` | `TOOL_DECAY_PROFILES`, `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS`, `MODEL_CONTEXT_WINDOWS` constants (v7 P2 #4: all constants centralized here) | 2, 4, 5 |
+| `nous/config.py` | `anti_hallucination_prompt`, `tool_metadata_degrade_after`, `tool_hard_clear_after`, `compaction_enabled` default, `model_validator` for tier ordering, `_detect_explicit_overrides` for dynamic thresholds, `effective_compaction_threshold` / `effective_keep_recent` properties | 0-2, 5 |
+| `nous/api/runner.py` | Context health logging, context pressure warning (via system prompt), turn-aware window, switch to `effective_*` properties, pre-prune fact storage via `heart.learn()` | 3, 4, 5, 6 |
+| `nous/api/tools.py` | Soft tool budget warning in `read_file` response (requires `frame_id` in dispatch context) | 5 |
 
 ---
 
