@@ -18,7 +18,7 @@ import httpx
 
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers
+from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.brain.brain import Brain
 from nous.heart.heart import Heart
 
@@ -171,7 +171,7 @@ class EpisodeSummarizer:
                                [b.get("type") for b in data.get("content", [])])
                 return None
 
-            return json.loads(text)
+            return parse_llm_json(text)
 
         except (json.JSONDecodeError, httpx.TimeoutException) as e:
             logger.warning("Summary generation failed: %s", e)

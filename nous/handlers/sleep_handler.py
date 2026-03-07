@@ -30,7 +30,7 @@ import httpx
 from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers
+from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 
@@ -247,7 +247,7 @@ class SleepHandler:
                 if block.get("type") == "text":
                     text = block.get("text", "")
                     break
-            reflection = json.loads(text)
+            reflection = parse_llm_json(text)
 
             # Store reflection summary as a fact
             if reflection.get("summary"):

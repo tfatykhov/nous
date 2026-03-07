@@ -17,7 +17,7 @@ import httpx
 
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers
+from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 
@@ -211,7 +211,7 @@ class KnowledgeExtractor:
                 if block.get("type") == "text":
                     text = block.get("text", "")
                     break
-            return json.loads(text)
+            return parse_llm_json(text)
 
         except (json.JSONDecodeError, httpx.TimeoutException):
             return []
