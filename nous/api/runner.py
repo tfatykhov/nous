@@ -32,8 +32,9 @@ logger = logging.getLogger(__name__)
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
 
-# Frame types that should nudge Claude to call record_decision
-_DECISION_FRAMES = frozenset({"decision", "task", "debug"})
+# Frame types where record_decision is expected
+_REQUIRED_DECISION_FRAMES = frozenset({"decision"})
+_OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
@@ -1234,16 +1235,27 @@ Rules:
         turn_context: TurnContext,
         tool_results: list[ToolResult],
     ) -> None:
-        """Log a warning if a decision frame was active but record_decision wasn't called."""
+        """Log if a decision frame was active but record_decision wasn't called.
+
+        WARNING for decision frame (mandatory), DEBUG for task/debug (optional).
+        """
         frame_id = turn_context.frame.frame_id
-        if frame_id not in _DECISION_FRAMES:
+        tool_names = {tr.tool_name for tr in tool_results}
+
+        if "record_decision" in tool_names:
             return
 
-        tool_names = {tr.tool_name for tr in tool_results}
-        if "record_decision" not in tool_names:
+        if frame_id in _REQUIRED_DECISION_FRAMES:
             logger.warning(
                 "Safety net: frame=%s but record_decision was not called during turn "
                 "(session decision_id=%s). Consider recording this decision.",
+                frame_id,
+                turn_context.decision_id,
+            )
+        elif frame_id in _OPTIONAL_DECISION_FRAMES:
+            logger.debug(
+                "Safety net: frame=%s, record_decision not called during turn "
+                "(session decision_id=%s).",
                 frame_id,
                 turn_context.decision_id,
             )
