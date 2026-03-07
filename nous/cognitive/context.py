@@ -7,6 +7,7 @@ and concatenates them in priority order within per-section token budgets.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,7 +21,7 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.search import apply_frame_boost
+from nous.heart.search import apply_frame_boost, _wrap_with_score
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +161,26 @@ class ContextEngine:
                 )
             )
 
+        # F016 Phase 0: Anti-hallucination prompt
+        if self._settings.anti_hallucination_prompt:
+            anti_halluc = (
+                "When you encounter a cleared or degraded tool result "
+                "(marked with [Tool output cleared] or showing only metadata), "
+                "do NOT attempt to reconstruct or guess the original content. "
+                'Instead, say "I\'d need to re-read that file" or "Let me fetch '
+                'that again" and call the tool again. Results marked with '
+                '"re-fetchable" can be retrieved by calling the same tool '
+                "with the same arguments."
+            )
+            sections.append(
+                ContextSection(
+                    priority=2,  # High priority, right after identity
+                    label="Context Safety",
+                    content=anti_halluc,
+                    token_estimate=self._estimate_tokens(anti_halluc),
+                )
+            )
+
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
         # Dedup against identity prompt to avoid repeating the same info
         if budget.user_profile > 0:
@@ -266,13 +287,19 @@ class ContextEngine:
                     len(decisions) if decisions else 0, self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
                     [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
-                if decisions and self._has_embeddings:
+                if decisions and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings — keyword scores too low)
+                    # Superseded by F017 relevance floor when enabled
                     decisions = [d for d in decisions if (getattr(d, "score", None) or 0) >= TIER3_THRESHOLDS["decision"]]
                     logger.info("Tier3 decisions after threshold: %d", len(decisions))
                 if decisions:
+                    # F017: Staleness penalty (before boosts)
+                    decisions = self._apply_staleness_penalty(decisions)
                     # 007.2: Diversity filter — use category as topic key
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
+                    # F017: Relevance floor + diminishing returns cutoff
+                    decisions = self._apply_relevance_floor(decisions, "decision")
+                    decisions = self._apply_diminishing_returns_cutoff(decisions)
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
@@ -286,7 +313,7 @@ class ContextEngine:
                         if mid:
                             desc = getattr(d, "description", "")
                             recalled_content_map[mid] = desc
-                    dec_text = self._truncate_to_budget(dec_text, budget.decisions)
+                    dec_text = self._truncate_to_budget(dec_text, self._scaled_budget(budget.decisions))
                     sections.append(
                         ContextSection(
                             priority=5,
@@ -312,10 +339,13 @@ class ContextEngine:
                     len(facts) if facts else 0, self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
-                if facts and self._has_embeddings:
+                if facts and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings)
+                    # Superseded by F017 relevance floor when enabled
                     facts = [f for f in facts if (getattr(f, "score", None) or 0) >= TIER3_THRESHOLDS["fact"]]
                 if facts:
+                    # F017: Staleness penalty (before boosts)
+                    facts = self._apply_staleness_penalty(facts)
                     # F10: apply_frame_boost (preserved from existing pipeline)
                     facts = apply_frame_boost(facts, frame.frame_id, _active_censor_names)
 
@@ -327,6 +357,9 @@ class ContextEngine:
 
                     # Usage boost
                     facts = self._apply_usage_boost(facts, usage_tracker)
+                    # F017: Relevance floor + diminishing returns cutoff
+                    facts = self._apply_relevance_floor(facts, "fact")
+                    facts = self._apply_diminishing_returns_cutoff(facts)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
@@ -340,7 +373,7 @@ class ContextEngine:
 
                     logger.info("Tier3 facts after pipeline: %d remaining", len(facts))
                     facts_text = self._format_facts(facts)
-                    facts_text = self._truncate_to_budget(facts_text, budget.facts)
+                    facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
                     sections.append(
                         ContextSection(
                             priority=6,
@@ -358,16 +391,22 @@ class ContextEngine:
                 limit = _limits.get("procedure", 5)
                 q_text = _query_texts.get("procedure", _default_query)
                 procedures = await self._heart.search_procedures(q_text, limit=limit, session=session)
-                if procedures and self._has_embeddings:
+                if procedures and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings)
+                    # Superseded by F017 relevance floor when enabled
                     procedures = [p for p in procedures if (getattr(p, "score", None) or 0) >= TIER3_THRESHOLDS["procedure"]]
                 if procedures:
+                    # F017: Staleness penalty (before boosts)
+                    procedures = self._apply_staleness_penalty(procedures)
                     # F10: apply_frame_boost
                     procedures = apply_frame_boost(procedures, frame.frame_id, _active_censor_names)
 
                     # Dedup + usage boost
                     procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
                     procedures = self._apply_usage_boost(procedures, usage_tracker)
+                    # F017: Relevance floor + diminishing returns cutoff
+                    procedures = self._apply_relevance_floor(procedures, "procedure")
+                    procedures = self._apply_diminishing_returns_cutoff(procedures)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for p in procedures:
@@ -378,7 +417,7 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(p, "score", 0) or 0
 
                     proc_text = self._format_procedures(procedures)
-                    proc_text = self._truncate_to_budget(proc_text, budget.procedures)
+                    proc_text = self._truncate_to_budget(proc_text, self._scaled_budget(budget.procedures))
                     sections.append(
                         ContextSection(
                             priority=7,
@@ -433,10 +472,13 @@ class ContextEngine:
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
-                if episodes and self._has_embeddings:
+                if episodes and self._has_embeddings and not self._settings.relevance_floor_enabled:
                     # Tier 3: min_score threshold (only with embeddings)
+                    # Superseded by F017 relevance floor when enabled
                     episodes = [e for e in episodes if (getattr(e, "score", None) or 0) >= TIER3_THRESHOLDS["episode"]]
                 if episodes:
+                    # F017: Staleness penalty (before boosts)
+                    episodes = self._apply_staleness_penalty(episodes)
                     # F10: apply_frame_boost
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
 
@@ -446,6 +488,9 @@ class ContextEngine:
                     # Dedup + usage boost
                     episodes = await self._apply_dedup(episodes, _conv_msgs, "summary")
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
+                    # F017: Relevance floor + diminishing returns cutoff
+                    episodes = self._apply_relevance_floor(episodes, "episode")
+                    episodes = self._apply_diminishing_returns_cutoff(episodes)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for e in episodes:
@@ -456,7 +501,7 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(e, "score", 0) or 0
 
                     ep_text = self._format_episodes(episodes)
-                    ep_text = self._truncate_to_budget(ep_text, budget.episodes)
+                    ep_text = self._truncate_to_budget(ep_text, self._scaled_budget(budget.episodes))
                     sections.append(
                         ContextSection(
                             priority=8,
@@ -474,6 +519,15 @@ class ContextEngine:
             parts.append(f"## {section.label}\n\n{section.content}")
 
         system_prompt = "\n\n".join(parts)
+
+        total_budget = budget.total
+        total_used = sum(s.token_estimate for s in sections)
+        logger.info(
+            "Context assembly: frame=%s, budget=%d, used=%d, fill_ratio=%.1f%%",
+            frame.frame_id, total_budget, total_used,
+            (total_used / total_budget * 100) if total_budget > 0 else 0,
+        )
+
         return BuildResult(
             system_prompt=system_prompt,
             sections=sections,
@@ -523,10 +577,63 @@ class ContextEngine:
         for item in items:
             mid = str(getattr(item, "id", ""))
             boost = usage_tracker.get_boost_factor(mid) if mid else 1.0
-            boosted.append((item, boost))
+            wrapped = _wrap_with_score(item, (getattr(item, "score", 0) or 0) * boost)
+            boosted.append((wrapped, boost))
 
         boosted.sort(key=lambda x: x[1], reverse=True)
         return [item for item, _ in boosted]
+
+    def _apply_relevance_floor(self, results: list, memory_type: str) -> list:
+        """Remove results below the relevance floor (F017 Phase 1)."""
+        if not self._settings.relevance_floor_enabled:
+            return results
+        from nous.cognitive.schemas import RELEVANCE_FLOORS, FLOOR_EXEMPT_SOURCES
+        floor = RELEVANCE_FLOORS.get(memory_type, 0.40)
+        return [
+            r for r in results
+            if (getattr(r, "score", 0) or 0) >= floor
+            or getattr(r, "source", None) in FLOOR_EXEMPT_SOURCES
+        ]
+
+    def _apply_diminishing_returns_cutoff(self, results: list) -> list:
+        """Cut results at sharp score drops (F017 Phase 2)."""
+        if len(results) < 2:
+            return results
+        drop_ratio = self._settings.relevance_drop_ratio
+        for i in range(1, len(results)):
+            score = getattr(results[i], "score", 0) or 0
+            prev = getattr(results[i - 1], "score", 0) or 0
+            if prev > 0 and score < prev * drop_ratio:
+                return results[:i]
+        return results
+
+    def _apply_staleness_penalty(self, results: list) -> list:
+        """Apply time-decay penalty to relevance scores (F017 Phase 5)."""
+        if not self._settings.staleness_penalty_enabled:
+            return results
+        half_life = self._settings.staleness_half_life_days
+        now = datetime.now(timezone.utc)
+        adjusted = []
+        for r in results:
+            score = getattr(r, "score", None)
+            if score is None:
+                adjusted.append(r)
+                continue
+            created = getattr(r, "created_at", None)
+            if not created:
+                adjusted.append(r)
+                continue
+            category = getattr(r, "category", "")
+            if category in {"rule", "preference"}:
+                adjusted.append(r)
+                continue
+            age_days = (now - created).days
+            if age_days > 0:
+                decay = 0.5 ** (age_days / half_life)
+                adjusted.append(_wrap_with_score(r, score * max(decay, 0.3)))
+            else:
+                adjusted.append(r)
+        return adjusted
 
     def _enforce_diversity(self, items: list, topic_attr: str, max_per_subject: int = 2) -> list:
         """Prevent one topic from dominating recall results (007.2).
@@ -555,6 +662,17 @@ class ContextEngine:
                 result.append(item)
                 seen[topic_key] = count + 1
         return result
+
+    def _scaled_budget(self, base_budget: int) -> int:
+        """Scale budget ceiling for larger context windows (F017 Phase 3)."""
+        if not self._settings.budget_scale_enabled:
+            return base_budget
+        window = self._settings._get_context_window(self._settings.model)
+        if window >= 1_000_000:
+            return int(base_budget * 2.5)
+        elif window >= 200_000:
+            return int(base_budget * 1.5)
+        return base_budget
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count: len(text) / CHARS_PER_TOKEN."""

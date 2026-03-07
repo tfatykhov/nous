@@ -16,6 +16,7 @@ import time
 from typing import Any, Protocol
 
 from nous.api.models import ApiResponse, Conversation, Message
+from nous.cognitive.schemas import DECAY_PROFILE_AGES, TOOL_DECAY_PROFILES
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -196,32 +197,100 @@ class ConversationCompactor:
             and content[0].get("type") == "tool_result"
         )
 
-    def prune_tool_results(self, messages: list[dict[str, Any]]) -> None:
+    def _build_tool_use_index(
+        self, messages: list[dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        """Build tool_use_id -> tool_use block index. O(N) once."""
+        index: dict[str, dict[str, Any]] = {}
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool_id = block.get("id")
+                    if tool_id:
+                        index[tool_id] = block
+        return index
+
+    def _metadata_degrade(
+        self, item: dict[str, Any], tool_use_block: dict[str, Any] | None
+    ) -> None:
+        """Replace tool result with descriptive metadata trace."""
+        text = item.get("content", "")
+        if not isinstance(text, str):
+            return
+        if len(text) < 200:
+            return  # Small results: keep as-is
+
+        tool_name = tool_use_block.get("name", "tool") if tool_use_block else "tool"
+        tool_input = tool_use_block.get("input", {}) if tool_use_block else {}
+
+        args_parts = []
+        for k, v in (tool_input.items() if isinstance(tool_input, dict) else []):
+            v_str = str(v)[:80]
+            args_parts.append(f"{k}={v_str}")
+        args_summary = ", ".join(args_parts[:3])
+
+        first_line = ""
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped and len(stripped) > 5:
+                first_line = stripped[:120]
+                break
+
+        line_count = text.count("\n") + 1
+        refetchable = tool_name in {"read_file", "list_files", "bash", "run_python"}
+        refetch_hint = " | re-fetchable" if refetchable else ""
+
+        item["content"] = (
+            f"[{tool_name}({args_summary}): {line_count} lines, "
+            f"{len(text)} chars | first: {first_line}{refetch_hint}]"
+        )
+
+    def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
+        """Extract URLs, paths, key-values before hard-clearing."""
+        facts: list[str] = []
+        # URLs
+        facts.extend(re.findall(r'https?://[^\s\'"<>]+', content))
+        # File paths
+        facts.extend(re.findall(r'(?:/[\w.-]+){2,}', content))
+        # Key-value patterns
+        facts.extend(re.findall(r'\b\w+:\s+[\w.-]+', content)[:5])
+        return facts[:10]
+
+    def prune_tool_results(self, messages: list[dict[str, Any]]) -> list[str]:
         """Prune old tool results from in-turn message accumulation.
 
-        Mutates messages in place. Two-phase approach:
-        1. Soft-trim: Keep head + tail of oversized results
-        2. Hard-clear: Replace very old results with placeholder
+        Mutates messages in place. Four-tier approach:
+        1. Full: Recent results kept as-is (protected zone)
+        2. Soft-trim: Keep head + tail of oversized results
+        3. Metadata-degrade: Replace with tool name, args, first line
+        4. Hard-clear: Replace very old results with placeholder
 
         Never modifies user text messages or assistant content blocks.
         Protects the last keep_last_tool_results tool-result messages.
+
+        Returns list of facts extracted from hard-cleared content.
         """
         if not self._settings.tool_pruning_enabled:
-            return
+            return []
 
-        # Find all tool result message indices
-        tool_indices: list[int] = [
+        tool_indices = [
             i for i, msg in enumerate(messages)
             if self.is_tool_result_message(msg)
         ]
-
         if not tool_indices:
-            return
+            return []
 
-        # Protection zone: last N tool result messages
         protected = set(tool_indices[-self._settings.keep_last_tool_results:])
+        tool_use_index = self._build_tool_use_index(messages)
 
+        extracted: list[str] = []
         soft_trimmed = 0
+        metadata_degraded = 0
         hard_cleared = 0
 
         for pos, idx in enumerate(tool_indices):
@@ -229,21 +298,51 @@ class ConversationCompactor:
                 continue
 
             msg = messages[idx]
-            content = msg["content"]  # list of tool_result dicts
-            age = len(tool_indices) - pos  # distance from end
+            content = msg["content"]
+            age = len(tool_indices) - pos
 
-            # Hard-clear: very old results
-            if age > self._settings.tool_hard_clear_after:
+            # Get per-tool decay profile
+            tool_name = None
+            for item in content:
+                tool_use_id = item.get("tool_use_id")
+                if tool_use_id:
+                    block = tool_use_index.get(tool_use_id)
+                    if block:
+                        tool_name = block.get("name")
+                        break
+
+            profile_name = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
+            _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
+                profile_name, (3, 8, 12)
+            )
+
+            # Tier 4: Hard-clear (age >= clear_age)
+            if age >= clear_age:
                 for item in content:
                     if self._has_image_content(item):
                         continue
+                    text = item.get("content", "")
+                    # Extract facts from conservative tools before clearing
+                    if isinstance(text, str) and text and profile_name == "conservative":
+                        extracted.extend(self._extract_facts_before_clear(tool_name or "unknown", text))
                     item["content"] = (
                         "[Tool output cleared - content was processed in earlier turns]"
                     )
                 hard_cleared += 1
                 continue
 
-            # Soft-trim: oversized results
+            # Tier 3: Metadata degrade (age >= degrade_age)
+            if age >= degrade_age:
+                for item in content:
+                    if self._has_image_content(item):
+                        continue
+                    tool_use_id = item.get("tool_use_id")
+                    tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
+                    self._metadata_degrade(item, tool_use_block)
+                metadata_degraded += 1
+                continue
+
+            # Tier 2: Soft-trim (oversized results)
             for item in content:
                 if self._has_image_content(item):
                     continue
@@ -262,13 +361,15 @@ class ConversationCompactor:
                     )
                     soft_trimmed += 1
 
-        if soft_trimmed or hard_cleared:
+        if soft_trimmed or hard_cleared or metadata_degraded:
             logger.info(
-                "Pruned tool results: soft-trimmed=%d, hard-cleared=%d "
-                "(total tool msgs=%d, protected=%d)",
-                soft_trimmed, hard_cleared,
+                "Pruned tool results: soft_trimmed=%d, metadata_degraded=%d, "
+                "hard_cleared=%d (total=%d, protected=%d)",
+                soft_trimmed, metadata_degraded, hard_cleared,
                 len(tool_indices), len(protected),
             )
+
+        return extracted
 
     @staticmethod
     def _has_image_content(item: dict[str, Any]) -> bool:
@@ -290,7 +391,7 @@ class ConversationCompactor:
         if not self._settings.compaction_enabled:
             return False
         total = system_tokens + history_tokens
-        return total > self._settings.compaction_threshold
+        return total > self._settings.effective_compaction_threshold
 
     def find_cut_point(
         self, messages: list[dict[str, Any]], keep_recent_tokens: int

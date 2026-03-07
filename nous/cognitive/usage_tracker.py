@@ -107,14 +107,14 @@ class UsageTracker:
         > 1.0 for frequently-referenced memories.
         < 1.0 for frequently-retrieved but rarely-referenced memories.
 
-        Range: [0.5, 1.5]
+        Range: [0.3, 2.0]
         """
         stats = self._stats.get(memory_id)
         if stats is None or stats.times_retrieved < 2:
             return 1.0
         ref_rate = stats.times_referenced / stats.times_retrieved
-        # Scale: 0% referenced -> 0.5x, 50% -> 1.0x, 100% -> 1.5x
-        return 0.5 + ref_rate
+        # Scale: 0% referenced -> 0.3x, 50% -> 1.15x, 100% -> 2.0x
+        return 0.3 + ref_rate * 1.7
 
     def _compute_decayed_score(self, memory_id: str) -> float:
         """Compute usage score with exponential decay.

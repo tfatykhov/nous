@@ -25,6 +25,7 @@ from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
+from nous.heart.schemas import FactInput
 
 logger = logging.getLogger(__name__)
 
@@ -325,8 +326,8 @@ class AgentRunner:
                 system_prompt = system_prompt_prefix + "\n\n" + system_prompt
 
             # Layer 2: History compaction (Spec 008.1)
+            messages = self._format_messages(conversation)
             if self._compactor and self._settings.compaction_enabled:
-                messages = self._format_messages(conversation)
                 system_tokens = self._compactor.estimator.estimate(system_prompt)
                 history_tokens = self._compactor.estimator.estimate_messages(messages)
                 if self._compactor.should_compact(system_tokens, history_tokens):
@@ -336,7 +337,7 @@ class AgentRunner:
                         history_tokens = self._compactor.estimator.estimate_messages(messages)
                         if self._compactor.should_compact(system_tokens, history_tokens):
                             cut_point = self._compactor.find_cut_point(
-                                messages, self._settings.keep_recent_tokens
+                                messages, self._settings.effective_keep_recent
                             )
                             if cut_point > 0:
                                 snapshot = messages[:cut_point]
@@ -353,6 +354,18 @@ class AgentRunner:
                                 await self._save_conversation(
                                     _agent_id, session_id, conversation
                                 )
+            else:
+                system_tokens = len(system_prompt) // 4
+                history_tokens = sum(
+                    len(m.get("content", "")) // 4 for m in messages
+                )
+
+            logger.info(
+                "Context health: messages=%d, system_tokens~=%d, "
+                "history_tokens~=%d, frame=%s",
+                len(messages), system_tokens, history_tokens,
+                turn_context.frame.frame_id if turn_context else "unknown",
+            )
 
             response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
                 system_prompt=system_prompt,
@@ -651,7 +664,7 @@ class AgentRunner:
                     history_tokens = self._compactor.estimator.estimate_messages(messages)
                     if self._compactor.should_compact(system_tokens, history_tokens):
                         cut_point = self._compactor.find_cut_point(
-                            messages, self._settings.keep_recent_tokens
+                            messages, self._settings.effective_keep_recent
                         )
                         if cut_point > 0:
                             # 008.1 Phase 3: Snapshot for event handlers (decoupled from mutation)
@@ -671,6 +684,18 @@ class AgentRunner:
                                 _agent_id, session_id, conversation
                             )
                             messages = self._format_messages(conversation)
+        else:
+            system_tokens = len(system_prompt) // 4
+            history_tokens = sum(
+                len(m.get("content", "")) // 4 for m in messages
+            )
+
+        logger.info(
+            "Context health: messages=%d, system_tokens~=%d, "
+            "history_tokens~=%d, frame=%s",
+            len(messages), system_tokens, history_tokens,
+            turn_context.frame.frame_id if turn_context else "unknown",
+        )
 
         all_tool_results: list[ToolResult] = []
         all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
@@ -855,7 +880,18 @@ class AgentRunner:
 
                 # Prune old tool results before next API call (Spec 008.1 Layer 1)
                 if self._compactor:
-                    self._compactor.prune_tool_results(messages)
+                    extracted_facts = self._compactor.prune_tool_results(messages)
+                    if extracted_facts:
+                        for fact_text in extracted_facts:
+                            try:
+                                await self._heart.learn(FactInput(
+                                    content=fact_text,
+                                    category="technical",
+                                    confidence=0.3,
+                                    source="pre_prune_extraction",
+                                ))
+                            except Exception:
+                                logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
             else:
                 # Max turns reached -- final call without tools
                 logger.warning("Streaming tool loop reached max_turns=%d", self._settings.max_turns)
@@ -1033,7 +1069,18 @@ class AgentRunner:
 
             # Prune old tool results before next API call (Spec 008.1 Layer 1)
             if self._compactor:
-                self._compactor.prune_tool_results(messages)
+                extracted_facts = self._compactor.prune_tool_results(messages)
+                if extracted_facts:
+                    for fact_text in extracted_facts:
+                        try:
+                            await self._heart.learn(FactInput(
+                                content=fact_text,
+                                category="technical",
+                                confidence=0.3,
+                                source="pre_prune_extraction",
+                            ))
+                        except Exception:
+                            logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
 
             turns += 1
 

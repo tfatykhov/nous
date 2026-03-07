@@ -11,6 +11,59 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+# Model context window sizes (tokens)
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-opus-4-5": 200_000,
+    "gpt-4o": 128_000,
+    "gpt-4-turbo": 128_000,
+}
+
+COMPACTION_THRESHOLD_RATIO = 0.60
+KEEP_RECENT_RATIO = 0.20
+
+# F017 Phase 1: Per-type minimum relevance scores
+RELEVANCE_FLOORS: dict[str, float] = {
+    "fact": 0.45,
+    "decision": 0.40,
+    "procedure": 0.50,
+    "episode": 0.35,
+}
+
+# Sources exempt from relevance floor filtering
+FLOOR_EXEMPT_SOURCES: set[str] = {
+    "pre_prune_extraction",
+}
+
+# F016 Phase 4: Per-tool decay profiles for content-type-aware pruning
+TOOL_DECAY_PROFILES: dict[str, str] = {
+    "read_file": "preserve",
+    "list_files": "aggressive",
+    "recall_deep": "aggressive",
+    "bash": "standard",
+    "run_python": "standard",
+    "web_search": "conservative",
+}
+
+# Profile -> (soft_trim_age, metadata_degrade_age, hard_clear_age)
+DECAY_PROFILE_AGES: dict[str, tuple[int, int, int]] = {
+    "preserve": (8, 999, 20),     # Skip metadata degradation
+    "aggressive": (2, 4, 8),
+    "standard": (3, 8, 12),       # Default
+    "conservative": (5, 10, 15),
+}
+
+FRAME_TOOL_WINDOWS: dict[str, int] = {
+    "debug": 4,
+    "decision": 3,
+    "task": 2,
+    "question": 2,
+    "conversation": 2,
+    "creative": 1,
+}
+
 
 @dataclass
 class SessionMetadata:

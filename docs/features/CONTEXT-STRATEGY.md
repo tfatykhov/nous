@@ -3,7 +3,8 @@
 **Status:** Reference Document
 **Author:** Emerson
 **Created:** 2026-03-07
-**Covers:** F014, F015, F016, F017
+**Covers:** 004 (frames), F015, F016, F017
+**Revised:** 2026-03-07 (v2)
 
 ---
 
@@ -34,7 +35,7 @@ The core insight: **300 focused tokens beats 113K unfocused ones.** Context qual
 │  │ compress │  │ Staleness│  │ aware    │  │          │    │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
 │                                                              │
-│  Cross-cutting: F014 Frame Scaffolds (what frame am I in?)  │
+│  Cross-cutting: 004 Frame Scaffolds (what frame am I in?)  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -48,11 +49,11 @@ Before context is destroyed, extract and store what matters.
 |-----------|------|-------------|
 | Pre-prune fact extraction | F016 §4.0.1 | Regex-extract URLs, paths, key-values from tool results before hard-clear. Store as `confidence=0.3` facts in Heart. |
 | Context pressure warning | F016 §5.1 | System message at 40K tool tokens: "summarize findings before reading more files." Nudges the model to write. |
-| Anti-hallucination prompt | F016 §0 | "Don't guess, re-fetch." Prevents the model from fabricating lost context — makes it write or re-read instead. |
-
 **When it fires:** During tool loop, before pruning destroys content.
 
 **Key interaction:** Extracted facts are tagged `source=pre_prune_extraction` and exempt from F017's relevance floor (F017 §1, `FLOOR_EXEMPT_SOURCES`). Without this exemption, the quality gate would block the very facts that Write saved.
+
+**Cross-cutting: Anti-hallucination prompt** (F016 §0) — "Don't guess, re-fetch." Injected into the system prompt, this prevents the model from fabricating lost context after pruning. Not strictly a Write or Compress mechanism — it's a safety net that makes both strategies effective.
 
 ### 2. SELECT — Only retrieve what's relevant (F017)
 
@@ -70,13 +71,13 @@ The context assembly pipeline retrieves memory (facts, decisions, episodes, proc
 
 **Pipeline order:**
 ```
-retrieve → staleness_penalty → frame_boost → dedup → usage_boost
-  → relevance_floor → diminishing_cutoff → truncate → log
+retrieve → staleness_penalty → frame_boost → diversity_filter → dedup
+  → usage_boost → relevance_floor → diminishing_cutoff → truncate → log
 ```
 
-**When it fires:** Pre-turn, during context assembly (system prompt construction).
+**When it fires:** Pre-turn, during context assembly (system prompt construction). Phase 6 (usage tracking) is the exception — it runs post-turn in `layer.py:post_turn()`, feeding back into the SELECT pipeline on the *next* turn via usage boost factors.
 
-**Key interaction with F014:** Frame selection determines which `ContextBudget` is used. A `debug` frame gets 10K total with heavy procedure allocation. A `conversation` frame gets 3K with no procedures. The frame is the first quality decision.
+**Key interaction with 004:** Frame selection determines which `ContextBudget` is used. A `debug` frame gets 10K total with heavy procedure allocation. A `conversation` frame gets 3K with no procedures. The frame is the first quality decision.
 
 ### 3. COMPRESS — Degrade gracefully (F016 Phases 1-3)
 
@@ -115,7 +116,7 @@ When a task needs heavy context (deep code analysis, multi-file debugging), isol
 |-----------|------|-------------|
 | Subtask isolation | F015 | Per-frame timeout and tool limits. Debug gets more tool calls, research gets fewer. |
 | Tool budgets | F016 §5.2 | Soft per-frame limits on `read_file` (e.g., 10 for task, 12 for debug). Warning, not block. |
-| Frame-adaptive windows | F016 §4.0.2 | `keep_last_tool_results` varies by frame. Debug keeps 4, research keeps 1. |
+| Frame-adaptive windows | F016 §4.0.2 | `keep_last_tool_results` varies by frame. Debug keeps 4, creative keeps 1. |
 | Session budgets | F015 | Total token tracking per session. Prevents runaway subtasks. |
 
 **When it fires:** At tool call time (budgets) and at subtask spawn (isolation).
@@ -129,7 +130,7 @@ When a task needs heavy context (deep code analysis, multi-file debugging), isol
 ```
 User sends message
   │
-  ├─ F014: Classify frame (task/debug/decision/conversation/...)
+  ├─ 004: Classify frame (task/debug/decision/conversation/...)
   │
   ├─ F017 SELECT: Assemble system prompt context
   │   ├─ Retrieve from Heart (facts, procedures, episodes)
@@ -165,8 +166,8 @@ User sends message
 **Safeguard:** These operate on different content. Compaction affects conversation history. Floor affects system prompt retrieval. Even in worst case, the model has: identity prompt + anti-hallucination prompt + whatever passes the floor + recent conversation (keep_recent_tokens).
 
 ### Pre-prune facts blocked by quality gate
-**Risk:** F016 extracts facts at confidence=0.3, F017 floor at 0.45 blocks them.
-**Safeguard:** `FLOOR_EXEMPT_SOURCES = {"pre_prune_extraction"}`. Extracted facts bypass the floor.
+**Risk:** F016 extracts facts at confidence=0.3. At query time, if their semantic search `score` falls below F017's relevance floor (0.45 for facts), they'd be filtered out.
+**Safeguard:** `FLOOR_EXEMPT_SOURCES = {"pre_prune_extraction"}`. Extracted facts are tagged with `source="pre_prune_extraction"` and bypass the floor check regardless of score.
 
 ### Stale but critical context
 **Risk:** Staleness penalty decays a foundational decision to below the floor.
@@ -185,7 +186,7 @@ User sends message
 ## Spec Dependencies
 
 ```
-F014 (Frame Scaffolds)
+004 Cognitive Layer (frames.py)
   │
   ├── F015 (Subtask Hardening) ─── ISOLATE
   │     └── per-frame timeout/tool config
@@ -206,7 +207,7 @@ F014 (Frame Scaffolds)
         └── ACE-style usage tracking
 ```
 
-**F014 is the foundation.** Frame classification determines budgets (F017), tool limits (F015), decay profiles (F016), and conversation window sizes. Without correct frame detection, the downstream specs optimize for the wrong context.
+**004 is the foundation.** Frame classification determines budgets (F017), tool limits (F015), decay profiles (F016), and conversation window sizes. Without correct frame detection, the downstream specs optimize for the wrong context.
 
 ---
 
@@ -248,4 +249,16 @@ The specs should be implemented in this order to avoid regressions:
 
 ---
 
-*This document is a map, not a plan. The individual specs (F014-F017) contain the implementation details. This shows how they fit together.*
+*This document is a map, not a plan. The individual specs (004, F015-F017) contain the implementation details. This shows how they fit together.*
+
+---
+
+## Changelog
+
+**v2** (2026-03-07) — Cross-validation against F016 v8 and F017 v3:
+1. Added `diversity_filter` to SELECT pipeline (was missing between `frame_boost` and `dedup`)
+2. Reclassified anti-hallucination prompt from WRITE to cross-cutting concern
+3. Fixed phantom F014 references → 004 Cognitive Layer (`frames.py`); F014 spec doesn't exist
+4. Clarified Phase 6 lifecycle: runs post-turn in `layer.py`, not during pre-turn assembly
+5. Fixed "research" frame reference → "creative" (research frame doesn't exist in `FrameType`)
+6. Fixed confidence/score conflation in failure mode: floor checks search `score`, not `confidence`

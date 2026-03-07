@@ -34,6 +34,22 @@ class Settings(BaseSettings):
     auto_link_max: int = 3
     quality_block_threshold: float = 0.5
 
+    # Anti-hallucination (F016 Phase 0)
+    anti_hallucination_prompt: bool = True
+
+    # F017: Relevance floor
+    relevance_floor_enabled: bool = True
+
+    # F017: Diminishing returns cutoff
+    relevance_drop_ratio: float = 0.6
+
+    # F017: Budget scaling
+    budget_scale_enabled: bool = True
+
+    # F017: Staleness penalty
+    staleness_penalty_enabled: bool = True
+    staleness_half_life_days: int = 14
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000
@@ -127,15 +143,18 @@ class Settings(BaseSettings):
         default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_TAIL"
     )
     tool_hard_clear_after: int = Field(
-        default=6, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
+        default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
     )
     keep_last_tool_results: int = Field(
         default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS"
     )
+    tool_metadata_degrade_after: int = Field(
+        default=8, validation_alias="NOUS_TOOL_METADATA_DEGRADE_AFTER"
+    )
 
     # Compaction: Layer 2 (History Compaction) — Phase 2
     compaction_enabled: bool = Field(
-        default=False, validation_alias="NOUS_COMPACTION_ENABLED"
+        default=True, validation_alias="NOUS_COMPACTION_ENABLED"
     )
     compaction_threshold: int = Field(
         default=100_000, validation_alias="NOUS_COMPACTION_THRESHOLD"
@@ -168,6 +187,14 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
+    def _detect_explicit_overrides(self) -> "Settings":
+        object.__setattr__(self, '_compaction_threshold_explicit',
+                          'compaction_threshold' in self.model_fields_set)
+        object.__setattr__(self, '_keep_recent_explicit',
+                          'keep_recent_tokens' in self.model_fields_set)
+        return self
+
+    @model_validator(mode="after")
     def _validate_keepalive(self) -> "Settings":
         if self.keepalive_interval >= self.tool_timeout:
             raise ValueError(
@@ -187,6 +214,15 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_pruning_tiers(self) -> "Settings":
+        if self.tool_metadata_degrade_after >= self.tool_hard_clear_after:
+            raise ValueError(
+                f"tool_metadata_degrade_after ({self.tool_metadata_degrade_after}) "
+                f"must be < tool_hard_clear_after ({self.tool_hard_clear_after})"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_thinking(self) -> "Settings":
         if self.thinking_mode == "manual":
             if self.thinking_budget < 1024:
@@ -201,3 +237,24 @@ class Settings(BaseSettings):
     @property
     def db_url(self) -> str:
         return f"postgresql+asyncpg://{self.db_user}:{self.db_password}@{self.db_host}:{self.db_port}/{self.db_name}"
+
+    def _get_context_window(self, model: str) -> int:
+        from nous.cognitive.schemas import MODEL_CONTEXT_WINDOWS
+        for key in sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True):
+            if key in model:
+                return MODEL_CONTEXT_WINDOWS[key]
+        return 200_000
+
+    @property
+    def effective_compaction_threshold(self) -> int:
+        if getattr(self, '_compaction_threshold_explicit', False):
+            return self.compaction_threshold
+        from nous.cognitive.schemas import COMPACTION_THRESHOLD_RATIO
+        return int(self._get_context_window(self.model) * COMPACTION_THRESHOLD_RATIO)
+
+    @property
+    def effective_keep_recent(self) -> int:
+        if getattr(self, '_keep_recent_explicit', False):
+            return self.keep_recent_tokens
+        from nous.cognitive.schemas import KEEP_RECENT_RATIO
+        return int(self._get_context_window(self.model) * KEEP_RECENT_RATIO)
