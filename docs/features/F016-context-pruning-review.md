@@ -1,11 +1,12 @@
 # F016 — Context Pruning Review & Anti-Hallucination Hardening
 
-**Status:** Draft (v2 — revised after code analysis)
-**Author:** Emerson (analysis & spec), Tim (requirements)
+**Status:** Draft (v3 — integrated review feedback + Nous research)
+**Author:** Emerson (analysis & spec), Tim (requirements), Nous (research)
 **Created:** 2026-03-06
 **Revised:** 2026-03-07
 **Priority:** Critical
 **Trigger:** Nous hallucinating on long-running sessions. Root cause confirmed: tool pruning hard-clear destroying context the model needs.
+**Reviews:** Architecture review (no P1s), Correctness review (1 P1, 4 P2s) — all addressed in v3.
 
 ---
 
@@ -173,12 +174,15 @@ def _metadata_degrade(self, item: dict[str, Any], tool_use_block: dict[str, Any]
 
 **Updated pruning pipeline (4 tiers instead of 2):**
 
-| Age (newer results after) | Action | Info Preserved |
-|--------------------------|--------|----------------|
+| Age | Action | Info Preserved |
+|-----|--------|----------------|
 | 0-2 | **Full content** (protected) | 100% |
 | 3-7 | **Soft-trim** (head 1500 + tail 1500) | ~75% for large results |
 | 8-11 | **Metadata degradation** (tool+args+first line) | Key reference info |
 | 12+ | **Hard-clear** (minimal placeholder) | Tool name only |
+
+> **v3 fix:** Tier boundaries use `>=` comparison. Age 3-7 means `age >= 3 and age < 8`.
+> Previous draft had an off-by-one: `>` operator with defaults 8/12 would produce tiers 3-8/9-12/13+.
 
 New settings:
 ```python
@@ -190,29 +194,52 @@ tool_hard_clear_after: int = Field(
 )
 ```
 
-**To resolve tool_use context for metadata:** Walk backwards from the tool_result message to find the preceding assistant message containing the matching `tool_use` block (matched by `tool_use_id`). This is already available in the messages list.
+**Config validation (v3 addition):**
+```python
+@model_validator(mode="after")
+def _validate_pruning_tiers(self) -> "Settings":
+    if self.tool_metadata_degrade_after >= self.tool_hard_clear_after:
+        raise ValueError(
+            f"tool_metadata_degrade_after ({self.tool_metadata_degrade_after}) "
+            f"must be < tool_hard_clear_after ({self.tool_hard_clear_after})"
+        )
+    return self
+```
+
+**To resolve tool_use context for metadata:** Build a lookup dict at the start of `prune_tool_results()` mapping `tool_use_id → tool_use block`. This is O(N) once instead of O(N²) per degradation.
+
+> **v3 change:** Replaced backward linear search with pre-built dict (architecture review P2). Compaction runs pre-turn, so tool_use blocks are never deleted during the tool loop — the dict is always complete.
 
 ```python
-def _find_tool_use_block(
-    self, messages: list[dict[str, Any]], tool_result_idx: int, tool_use_id: str
-) -> dict[str, Any] | None:
-    """Find the tool_use block that generated this tool_result."""
-    for i in range(tool_result_idx - 1, -1, -1):
-        msg = messages[i]
+def _build_tool_use_index(
+    self, messages: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Build tool_use_id → tool_use block index. O(N) once."""
+    index: dict[str, dict[str, Any]] = {}
+    for msg in messages:
         if msg.get("role") != "assistant":
             continue
         content = msg.get("content", [])
         if not isinstance(content, list):
             continue
         for block in content:
-            if (isinstance(block, dict)
-                and block.get("type") == "tool_use"
-                and block.get("id") == tool_use_id):
-                return block
-    return None
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tool_id = block.get("id")
+                if tool_id:
+                    index[tool_id] = block
+    return index
+```
+
+Usage in `prune_tool_results()`:
+```python
+tool_use_index = self._build_tool_use_index(messages)
+# ...
+tool_use_block = tool_use_index.get(tool_use_id)
 ```
 
 ### Phase 2: Lower Compaction Threshold
+
+> **⚠️ Breaking Change (v3 note):** Changing these defaults will cause compaction to fire ~3.5× more frequently. With threshold=60K and keep_recent=30K, only 20K of headroom remains (vs 70K currently). Compaction fires every ~5-10 iterations after first trigger. Deployments relying on the old defaults should explicitly set `NOUS_COMPACTION_THRESHOLD=100000` to preserve behavior.
 
 Reduce `compaction_threshold` from 100K → 60K tokens:
 
@@ -259,9 +286,71 @@ logger.info(
 )
 ```
 
-### Phase 4: Safety Net Improvements (Lower Priority)
+### Phase 4: Content-Type-Aware Pruning (v3 — from Nous research)
 
-#### 4.1 Enable Compaction by Default
+> **Source:** Nous's independent research. JetBrains paper confirms simple masking matches LLM summarization at half cost. Anthropic guidance: "offload before compress."
+
+Different tools should decay at different rates based on re-fetchability:
+
+```python
+TOOL_DECAY_PROFILES: dict[str, str] = {
+    # Aggressive — content is re-readable on demand
+    "read_file": "aggressive",
+    "list_files": "aggressive",
+    # Standard — not easily re-fetched, use default tiers
+    "bash": "standard",
+    "run_python": "standard",
+    # Conservative — extract facts BEFORE clearing (not re-fetchable)
+    "web_search": "conservative",
+    "recall_deep": "aggressive",  # already in DB
+}
+```
+
+| Profile | Soft-trim age | Metadata age | Hard-clear age |
+|---------|--------------|--------------|----------------|
+| aggressive | 2 | 4 | 8 |
+| standard | 3 | 8 | 12 |
+| conservative | 5 | 10 | 15 |
+
+#### 4.0.1 Pre-Prune Fact Extraction (~30 LOC)
+
+Before hard-clearing `conservative` tools, regex-extract key information and store as low-confidence facts. Zero LLM cost.
+
+```python
+import re
+
+def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
+    """Extract URLs, paths, numbers, and names before hard-clearing."""
+    facts = []
+    # URLs
+    facts.extend(re.findall(r'https?://[^\s\'"<>]+', content))
+    # File paths
+    facts.extend(re.findall(r'(?:/[\w.-]+){2,}', content))
+    # Key-value patterns (e.g., "version: 3.2.1")
+    facts.extend(re.findall(r'\b\w+:\s+[\w.-]+', content)[:5])
+    return facts[:10]  # Cap at 10 facts per result
+```
+
+These extracted facts are stored via Heart as `confidence=0.3` facts (auto-expire, won't clutter context).
+
+#### 4.0.2 Frame-Adaptive Window Sizes (~20 LOC)
+
+Override `keep_last_tool_results` based on active frame:
+
+```python
+FRAME_TOOL_WINDOWS: dict[str, int] = {
+    "debug": 4,          # Need error traces
+    "decision": 3,       # Need evidence
+    "task": 2,           # Default
+    "conversation": 2,   # Default
+    "research": 1,       # Results go to memory
+    "creative": 1,       # Minimal tool context needed
+}
+```
+
+### Phase 5: Safety Net Improvements (Lower Priority)
+
+#### 5.1 Enable Compaction by Default
 
 Change code default to match production:
 ```python
@@ -270,7 +359,7 @@ compaction_enabled: bool = Field(
 )
 ```
 
-#### 4.2 Turn-Aware History Window (Fallback Mode)
+#### 5.2 Turn-Aware History Window (Fallback Mode)
 
 For cases where compaction is disabled, count turns instead of messages:
 
@@ -282,7 +371,7 @@ max_history_turns: int = Field(
 
 Walk backwards counting user text messages (not tool_result messages) as turn boundaries.
 
-#### 4.3 Content-Aware Soft Trimming
+#### 5.3 Content-Aware Soft Trimming
 
 Detect content type before applying head+tail trim:
 - JSON: preserve keys/structure, truncate values
@@ -297,9 +386,10 @@ Fallback to head+tail on any parse error.
 
 | File | Change | Phase |
 |------|--------|-------|
-| `nous/api/compaction.py` | `_metadata_degrade()`, `_find_tool_use_block()`, updated `prune_tool_results()` with 4-tier pipeline | 1 |
-| `nous/config.py` | `tool_metadata_degrade_after=8`, `tool_hard_clear_after=12`, `compaction_threshold=60000`, `keep_recent_tokens=30000`, `compaction_enabled=True` default | 1-2 |
-| `nous/api/runner.py` | Context health logging, turn-aware window (phase 4) | 3-4 |
+| `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()`, `_extract_facts_before_clear()`, updated `prune_tool_results()` with 4-tier pipeline + content-type profiles | 1, 4 |
+| `nous/config.py` | `tool_metadata_degrade_after=8`, `tool_hard_clear_after=12`, `compaction_threshold=60000`, `keep_recent_tokens=30000`, `compaction_enabled=True` default, `model_validator` for tier ordering | 1-2, 5 |
+| `nous/api/runner.py` | Context health logging, turn-aware window (phase 5) | 3, 5 |
+| `nous/cognitive/schemas.py` | `FRAME_TOOL_WINDOWS` override for `keep_last_tool_results` | 4 |
 
 ---
 
@@ -307,11 +397,15 @@ Fallback to head+tail on any parse error.
 
 1. **Metadata-based tool degradation** — 4-tier pruning pipeline replacing hard-clear (PRIMARY FIX)
 2. **Increase hard-clear age** from 6 → 12 (gives metadata tier room to work)
-3. **Lower compaction threshold** — 100K → 60K tokens
-4. **Context health logging** — observability per turn
-5. **Enable compaction default** — align code with production
-6. **Turn-aware history window** — safety net for non-compaction mode
-7. **Content-aware trimming** — nice-to-have
+3. **Config validation** — ensure `degrade_after < hard_clear_after`
+4. **Lower compaction threshold** — 100K → 60K tokens (⚠️ breaking change, document in changelog)
+5. **Context health logging** — observability per turn
+6. **Content-type-aware pruning** — per-tool decay profiles
+7. **Pre-prune fact extraction** — regex capture before hard-clear (conservative tools)
+8. **Frame-adaptive window sizes** — override tool result protection per frame
+9. **Enable compaction default** — align code with production
+10. **Turn-aware history window** — safety net for non-compaction mode
+11. **Content-aware trimming** — nice-to-have
 
 ---
 
@@ -340,14 +434,20 @@ Fallback to head+tail on any parse error.
 
 | Change | Risk | Mitigation |
 |--------|------|------------|
-| Metadata degradation | `_find_tool_use_block()` may not find match (deleted by compaction) | Graceful fallback: use generic `"[tool result: N chars]"` if no tool_use block found |
-| Lower compaction threshold | More frequent LLM summarization calls | Cost is one background-model call per compaction; ~$0.01-0.02 per session |
-| Hard-clear age 12 | More tool results in context = larger payloads | Metadata-degraded results are ~150 chars each; 6 extra × 150 = 900 chars total |
+| Metadata degradation | Index miss if tool_use_id not found | Graceful fallback: `"[tool result: N chars]"` if no match in index |
+| Lower compaction threshold | **Breaking change** — 3.5× more frequent compaction | Document in changelog. Existing deployments can set `NOUS_COMPACTION_THRESHOLD=100000` explicitly |
+| Hard-clear age 12 | More tool results in context | Metadata-degraded results are ~150 chars each; 6 extra × 150 = 900 chars total |
+| Content-type profiles | Maintenance burden of per-tool config | Sane `standard` default; only override tools with clear re-fetchability characteristics |
+| Pre-prune fact extraction | Low-confidence facts polluting Heart | Capped at 10 per result, `confidence=0.3` auto-expires via existing cleanup |
 
 ---
 
 ## Open Questions
 
-1. Should compaction summaries include a "Tool Results Digest" section listing key tool calls and their essential outputs? Currently the summary prompt doesn't specifically ask for tool result preservation.
-2. Should the metadata degradation format be customizable per tool? e.g., `read_file` shows filename + line count, `recall_deep` shows query + result count, `bash` shows command + exit code.
-3. Should `_find_tool_use_block()` search be cached? In a long session with many messages, walking backwards each time could be slow. A dict mapping `tool_use_id → block` built during the tool loop would be O(1).
+1. ~~Should compaction summaries include a "Tool Results Digest" section listing key tool calls and their essential outputs?~~ **RESOLVED (v3):** Yes. The compaction summary prompt should request a "Key Tool Results" section. Combined with pre-prune fact extraction (Phase 4), this ensures tool findings survive compaction. Without it, compaction summaries lose tool-specific details even when metadata traces are present.
+
+2. ~~Should the metadata degradation format be customizable per tool?~~ **RESOLVED (v3):** Yes, via content-type-aware pruning profiles (Phase 4). `read_file` shows filename + line count, `web_search` extracts facts first, `bash` shows command + exit code. Implemented as `TOOL_DECAY_PROFILES` dict.
+
+3. ~~Should `_find_tool_use_block()` search be cached?~~ **RESOLVED (v3):** Yes. Replaced with `_build_tool_use_index()` that builds a `tool_use_id → block` dict once per `prune_tool_results()` call. O(N) build, O(1) lookups. Architecture review confirmed compaction runs pre-turn, so the index is always complete.
+
+4. **(NEW)** Should the "Tool Results Digest" in compaction summaries be generated from the metadata traces (cheap, available) or from original content before compaction (expensive, more complete)? Recommendation: use metadata traces — they're designed to preserve the essential info.
