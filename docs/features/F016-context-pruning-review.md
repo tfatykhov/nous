@@ -10,6 +10,7 @@
 **v4 additions:** Context pressure warning, soft tool budgets, large codebase scope boundary.
 **v5 additions:** P0 anti-hallucination system prompt, re-fetch hints in metadata traces (from modern techniques review).
 **v6 additions:** Model-aware context limits — dynamic compaction thresholds based on model context window (1M for Sonnet/Opus 4.6).
+**v7 fixes:** P1 #2 (pre-prune facts survive F017 floor via source tag), P1 #4 (_metadata_degrade small content handling), P2 #1 (explicit env var detection replaces sentinel), P2 #2 (Heart dependency via runner.py caller), P2 #4 (constants centralized in schemas.py).
 
 ---
 
@@ -168,8 +169,13 @@ def _metadata_degrade(self, item: dict[str, Any], tool_use_block: dict[str, Any]
     Latency: <1ms (string manipulation only, no LLM).
     """
     text = item.get("content", "")
-    if not isinstance(text, str) or len(text) < 200:
-        return  # Don't degrade tiny results
+    if not isinstance(text, str):
+        return
+    if len(text) < 200:
+        return  # Small results: keep as-is (already compact enough).
+        # NOTE (v7 fix P1 #4): Items < 200 chars stay at full content
+        # until hard-clear age, when they get the standard placeholder.
+        # The caller must NOT skip hard-clear for these items.
 
     # Extract tool context from the preceding assistant message's tool_use block
     tool_name = tool_use_block.get("name", "tool") if tool_use_block else "tool"
@@ -313,10 +319,31 @@ KEEP_RECENT_RATIO = 0.20
 | GPT-4o | 128,000 | 76,800 | 25,600 | 76K tokens |
 
 ```python
+# Track whether values were explicitly set via env var
+_compaction_threshold_explicit: bool = False
+_keep_recent_explicit: bool = False
+
+@model_validator(mode="after")
+def _detect_explicit_overrides(self) -> "Settings":
+    """Detect if compaction settings were explicitly provided via env vars.
+
+    v7 fix (P2 #1): The old approach compared against sentinel values
+    (e.g., != 100_000), which broke if someone explicitly set the value
+    to the default. Instead, check if the env var is actually set.
+    """
+    import os
+    self._compaction_threshold_explicit = (
+        "NOUS_COMPACTION_THRESHOLD" in os.environ
+    )
+    self._keep_recent_explicit = (
+        "NOUS_KEEP_RECENT_TOKENS" in os.environ
+    )
+    return self
+
 @property
 def effective_compaction_threshold(self) -> int:
     """Dynamic threshold based on model context window."""
-    if self.compaction_threshold != 100_000:
+    if self._compaction_threshold_explicit:
         return self.compaction_threshold  # Explicit override takes priority
     window = self._get_context_window(self.model)
     return int(window * COMPACTION_THRESHOLD_RATIO)
@@ -324,7 +351,7 @@ def effective_compaction_threshold(self) -> int:
 @property
 def effective_keep_recent(self) -> int:
     """Dynamic keep_recent based on model context window."""
-    if self.keep_recent_tokens != 20_000:
+    if self._keep_recent_explicit:
         return self.keep_recent_tokens  # Explicit override takes priority
     window = self._get_context_window(self.model)
     return int(window * KEEP_RECENT_RATIO)
@@ -417,7 +444,24 @@ def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]
     return facts[:10]  # Cap at 10 facts per result
 ```
 
-These extracted facts are stored via Heart as `confidence=0.3` facts (auto-expire, won't clutter context).
+> **v7 note (P2 #2 — Heart dependency):** `_extract_facts_before_clear()` needs to store facts in Heart, but `compaction.py` currently has no Heart dependency. Implementation approach: `prune_tool_results()` returns a list of extracted facts. The caller in `runner.py` (which already has Heart access) stores them. This keeps compaction.py stateless and avoids injecting a new dependency.
+
+```python
+# In runner.py (caller), after prune_tool_results():
+extracted_facts = self._compaction.prune_tool_results(messages, frame)
+if extracted_facts:
+    for fact_text in extracted_facts:
+        await self._heart.store_fact(
+            content=fact_text,
+            category="technical",
+            confidence=0.3,
+            source="pre_prune_extraction",
+        )
+```
+
+These extracted facts are stored via Heart as `confidence=0.3` facts with `source="pre_prune_extraction"` tag (auto-expire, won't clutter context).
+
+> **v7 fix (P1 #2 — F016/F017 interaction):** Extracted facts at `confidence=0.3` would be blocked by F017's relevance floor (0.45). Fix: extracted facts are tagged with `source="pre_prune_extraction"`. F017's relevance floor exempts this source tag — these facts exist specifically because the original content was destroyed, so filtering them defeats the purpose. They still compete on score for budget space and auto-expire via Heart's cleanup.
 
 #### 4.0.2 Frame-Adaptive Window Sizes (~20 LOC)
 
@@ -542,9 +586,10 @@ Fallback to head+tail on any parse error.
 
 | File | Change | Phase |
 |------|--------|-------|
-| `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()` (with re-fetch hints), `_extract_facts_before_clear()`, updated `prune_tool_results()` with 4-tier pipeline + content-type profiles | 1, 4 |
+| `nous/api/compaction.py` | `_build_tool_use_index()`, `_metadata_degrade()` (with re-fetch hints), updated `prune_tool_results()` with 4-tier pipeline (returns extracted facts list) | 1, 4 |
 | `nous/cognitive/context.py` | Anti-hallucination prompt injection in context assembly | 0 |
-| `nous/config.py` | `anti_hallucination_prompt=True`, `tool_metadata_degrade_after=8`, `tool_hard_clear_after=12`, `compaction_threshold=60000`, `keep_recent_tokens=30000`, `compaction_enabled=True` default, `model_validator` for tier ordering | 0-2, 5 |
+| `nous/cognitive/schemas.py` | `TOOL_DECAY_PROFILES`, `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS`, `MODEL_CONTEXT_WINDOWS` constants (v7 P2 #4: all constants centralized here) | 4, 5 |
+| `nous/config.py` | `anti_hallucination_prompt`, `tool_metadata_degrade_after`, `tool_hard_clear_after`, `compaction_enabled` default, `model_validator` for tier ordering, `_detect_explicit_overrides` for dynamic thresholds | 0-2, 5 |
 | `nous/api/runner.py` | Context health logging, context pressure warning, turn-aware window | 3, 5, 6 |
 | `nous/cognitive/schemas.py` | `FRAME_TOOL_WINDOWS`, `FRAME_TOOL_LIMITS` | 4, 5 |
 | `nous/api/tools.py` | Soft tool budget warning in `read_file` response | 5 |
@@ -557,7 +602,7 @@ Fallback to head+tail on any parse error.
 2. **Metadata-based tool degradation** — 4-tier pruning pipeline with re-fetch hints (PRIMARY FIX)
 3. **Increase hard-clear age** from 6 → 12 (gives metadata tier room to work)
 4. **Config validation** — ensure `degrade_after < hard_clear_after`
-5. **Lower compaction threshold** — 100K → 60K tokens (⚠️ breaking change, document in changelog)
+5. **Model-aware compaction thresholds** — dynamic based on context window (⚠️ breaking change, document in changelog)
 6. **Context health logging** — observability per turn
 7. **Content-type-aware pruning** — per-tool decay profiles
 8. **Pre-prune fact extraction** — regex capture before hard-clear (conservative tools)
@@ -598,10 +643,32 @@ Fallback to head+tail on any parse error.
 | Change | Risk | Mitigation |
 |--------|------|------------|
 | Metadata degradation | Index miss if tool_use_id not found | Graceful fallback: `"[tool result: N chars]"` if no match in index |
-| Lower compaction threshold | **Breaking change** — 3.5× more frequent compaction | Document in changelog. Existing deployments can set `NOUS_COMPACTION_THRESHOLD=100000` explicitly |
+| Dynamic compaction thresholds | **Breaking change** — thresholds scale with model context window. 1M models go from 100K → 600K (less compaction, higher cost) | Explicit `NOUS_COMPACTION_THRESHOLD` overrides dynamic. Existing deployments unaffected if env var is set. |
 | Hard-clear age 12 | More tool results in context | Metadata-degraded results are ~150 chars each; 6 extra × 150 = 900 chars total |
 | Content-type profiles | Maintenance burden of per-tool config | Sane `standard` default; only override tools with clear re-fetchability characteristics |
-| Pre-prune fact extraction | Low-confidence facts polluting Heart | Capped at 10 per result, `confidence=0.3` auto-expires via existing cleanup |
+| Pre-prune fact extraction | Low-confidence facts polluting Heart | Capped at 10 per result, `confidence=0.3` auto-expires via existing cleanup. Tagged `source=pre_prune_extraction` for F017 floor exemption. |
+
+---
+
+## Migration Path (v7 — P2 #7)
+
+**Upgrading existing deployments:**
+
+1. **Phase 0 (anti-hallucination prompt):** ON by default. Disable: `NOUS_ANTI_HALLUCINATION_PROMPT=false`. No risk — it's a system prompt addition.
+
+2. **Phase 1 (4-tier pruning):** Takes effect immediately. Existing sessions get new pruning behavior on next tool call. No migration needed — pruning is stateless.
+
+3. **Phase 2 (dynamic thresholds):** **Breaking change.** Deployments that don't set `NOUS_COMPACTION_THRESHOLD` will see thresholds jump from 100K to 600K on 1M models (less compaction, higher cost per request). To preserve old behavior: `NOUS_COMPACTION_THRESHOLD=100000`.
+
+4. **Sessions in progress:** All changes are per-turn. No session restart needed. A session that was at 90K tokens (near old threshold) will now have 510K of headroom on a 1M model.
+
+5. **Rollback:** Each phase has a config flag. Disable individually, takes effect on next turn.
+
+6. **Recommended rollout:**
+   - Day 1: Phase 0 (prompt) + Phase 3 (logging) — zero risk, gives observability
+   - Day 3: Phase 1 (4-tier pruning) — monitor via logs
+   - Week 2: Phase 2 (dynamic thresholds) — monitor cost impact
+   - Week 3: Phases 4-5 (content-type profiles, pressure warning)
 
 ---
 
