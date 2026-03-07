@@ -510,6 +510,15 @@ class ContextEngine:
             parts.append(f"## {section.label}\n\n{section.content}")
 
         system_prompt = "\n\n".join(parts)
+
+        total_budget = budget.total
+        total_used = sum(s.token_estimate for s in sections)
+        logger.info(
+            "Context assembly: frame=%s, budget=%d, used=%d, fill_ratio=%.1f%%",
+            frame.frame_id, total_budget, total_used,
+            (total_used / total_budget * 100) if total_budget > 0 else 0,
+        )
+
         return BuildResult(
             system_prompt=system_prompt,
             sections=sections,
