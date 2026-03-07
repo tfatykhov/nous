@@ -259,7 +259,7 @@ Both projects evolve independently. The shared asset is the philosophy, not the 
 
 ## Configuration
 
-Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for the full list of 71 variables):
+Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for the full list):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -270,6 +270,30 @@ Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for th
 | `NOUS_EFFORT` | `high` | Thinking depth for adaptive mode: `low`, `medium`, `high`, `max` |
 | `NOUS_EVENT_BUS_ENABLED` | `true` | Enable async event handlers (episode summarizer, fact extractor) |
 | `NOUS_WORKSPACE_DIR` | `/tmp/nous-workspace` | Agent workspace directory |
+
+**Context Quality (F016/F017):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NOUS_CONTEXT_WINDOW` | auto | Override model context window size in tokens (0 = auto-detect from model name) |
+| `NOUS_ANTI_HALLUCINATION_PROMPT` | `true` | Inject "don't guess, re-fetch" safety prompt into system context |
+| `NOUS_TOOL_PRUNING_ENABLED` | `true` | Enable 4-tier tool result pruning (full → soft-trim → metadata-degrade → hard-clear) |
+| `NOUS_TOOL_SOFT_TRIM_CHARS` | `4000` | Threshold above which tool results get soft-trimmed |
+| `NOUS_TOOL_SOFT_TRIM_HEAD` | `1500` | Chars to keep from start when soft-trimming |
+| `NOUS_TOOL_SOFT_TRIM_TAIL` | `1500` | Chars to keep from end when soft-trimming |
+| `NOUS_TOOL_METADATA_DEGRADE_AFTER` | `8` | Tool result age (in results) before metadata degradation |
+| `NOUS_TOOL_HARD_CLEAR_AFTER` | `12` | Tool result age before hard-clear replacement |
+| `NOUS_KEEP_LAST_TOOL_RESULTS` | `2` | Number of most recent tool results always protected |
+| `NOUS_COMPACTION_ENABLED` | `true` | Enable LLM-powered history compaction |
+| `NOUS_COMPACTION_THRESHOLD` | auto | Token count triggering compaction (auto-scales per model context window) |
+| `NOUS_KEEP_RECENT_TOKENS` | auto | Tokens to preserve during compaction (auto-scales per model) |
+| `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
+| `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
+| `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
+| `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
+| `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
+| `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
+| `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
 
 ## Status
 
@@ -295,9 +319,11 @@ All core architecture is implemented and running:
 | Topic Persistence | ✅ Shipped | Follow-up detection, current_task preservation across turns |
 | Deliberation Capture | ✅ Shipped | Extended thinking blocks → deliberation traces, garbage cleanup |
 | Episode Summary Quality (008.3-008.4) | ✅ Shipped | Backfill + enhanced prompt, candidate_facts, smart truncation, decision context |
+| Context Pruning (F016) | ✅ Shipped | 4-tier tool pruning, anti-hallucination prompt, model-aware compaction, content-type decay profiles, pre-prune fact extraction |
+| Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
-**Stats:** ~38,800 lines of Python · 971 tests · 18 Postgres tables · Docker deployment
+**Stats:** ~40,000 lines of Python · 1,000+ tests · 18 Postgres tables · Docker deployment
 
 See [Feature Index](docs/features/INDEX.md) for the full breakdown.
 
