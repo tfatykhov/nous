@@ -294,8 +294,9 @@ class ContextEngine:
                 if decisions:
                     # 007.2: Diversity filter — use category as topic key
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
-                    # F017: Relevance floor
+                    # F017: Relevance floor + diminishing returns cutoff
                     decisions = self._apply_relevance_floor(decisions, "decision")
+                    decisions = self._apply_diminishing_returns_cutoff(decisions)
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
@@ -351,8 +352,9 @@ class ContextEngine:
 
                     # Usage boost
                     facts = self._apply_usage_boost(facts, usage_tracker)
-                    # F017: Relevance floor
+                    # F017: Relevance floor + diminishing returns cutoff
                     facts = self._apply_relevance_floor(facts, "fact")
+                    facts = self._apply_diminishing_returns_cutoff(facts)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
@@ -395,8 +397,9 @@ class ContextEngine:
                     # Dedup + usage boost
                     procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
                     procedures = self._apply_usage_boost(procedures, usage_tracker)
-                    # F017: Relevance floor
+                    # F017: Relevance floor + diminishing returns cutoff
                     procedures = self._apply_relevance_floor(procedures, "procedure")
+                    procedures = self._apply_diminishing_returns_cutoff(procedures)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for p in procedures:
@@ -476,8 +479,9 @@ class ContextEngine:
                     # Dedup + usage boost
                     episodes = await self._apply_dedup(episodes, _conv_msgs, "summary")
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
-                    # F017: Relevance floor
+                    # F017: Relevance floor + diminishing returns cutoff
                     episodes = self._apply_relevance_floor(episodes, "episode")
+                    episodes = self._apply_diminishing_returns_cutoff(episodes)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for e in episodes:
@@ -572,6 +576,18 @@ class ContextEngine:
             if (getattr(r, "score", 0) or 0) >= floor
             or getattr(r, "source", None) in FLOOR_EXEMPT_SOURCES
         ]
+
+    def _apply_diminishing_returns_cutoff(self, results: list) -> list:
+        """Cut results at sharp score drops (F017 Phase 2)."""
+        if len(results) < 2:
+            return results
+        drop_ratio = self._settings.relevance_drop_ratio
+        for i in range(1, len(results)):
+            score = getattr(results[i], "score", 0) or 0
+            prev = getattr(results[i - 1], "score", 0) or 0
+            if prev > 0 and score < prev * drop_ratio:
+                return results[:i]
+        return results
 
     def _enforce_diversity(self, items: list, topic_attr: str, max_per_subject: int = 2) -> list:
         """Prevent one topic from dominating recall results (007.2).

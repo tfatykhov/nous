@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
 
+    # F017: Diminishing returns cutoff
+    relevance_drop_ratio: float = 0.6
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000
