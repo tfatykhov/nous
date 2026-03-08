@@ -24,7 +24,9 @@ UPDATE brain.graph_edges SET agent_id = 'nous-default' WHERE agent_id IS NULL;
 -- 5. Make agent_id NOT NULL
 ALTER TABLE brain.graph_edges ALTER COLUMN agent_id SET NOT NULL;
 
--- 6. Add type check constraints
+-- 6. Add type check constraints (idempotent)
+ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS ck_edges_source_type;
+ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS ck_edges_target_type;
 ALTER TABLE brain.graph_edges
     ADD CONSTRAINT ck_edges_source_type CHECK (
         source_type IN ('decision', 'fact', 'episode', 'procedure')
