@@ -325,7 +325,28 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # Search Brain decisions
             if search_all or "decision" in search_types:
                 decision_results = await brain.query(query, limit=limit)
-                if decision_results:
+
+                # F022: Graph expansion — expand top decisions by 1 hop
+                graph_expanded = []
+                if decision_results and settings.graph_recall_enabled:
+                    seen_ids = {d.id for d in decision_results}
+                    for dec in decision_results[:settings.graph_recall_max_expand]:
+                        if dec.score is None:
+                            continue
+                        try:
+                            neighbors = await brain.neighbors(
+                                dec.id,
+                                node_type="decision",
+                                limit=settings.graph_recall_max_neighbors,
+                            )
+                            for n in neighbors:
+                                if n.id not in seen_ids:
+                                    graph_expanded.append(n)
+                                    seen_ids.add(n.id)
+                        except Exception:
+                            logger.debug("Graph expansion failed for decision %s", dec.id)
+
+                if decision_results or graph_expanded:
                     results_text.append("\n=== Brain Decisions ===")
                     for i, dec in enumerate(decision_results, 1):
                         score_str = f" (score: {dec.score:.3f})" if dec.score else ""
@@ -333,18 +354,25 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"{i}. {dec.description} | {dec.category} | {dec.stakes} | "
                             f"confidence: {dec.confidence:.2f}{score_str}"
                         )
+                    for j, n in enumerate(graph_expanded, len(decision_results) + 1):
+                        decayed_score = n.edge_weight * settings.graph_recall_decay
+                        results_text.append(
+                            f"{j}. [via graph: {n.edge_relation}] {n.description} "
+                            f"(score: {decayed_score:.3f})"
+                        )
                 else:
                     results_text.append("\n=== Brain Decisions ===\nNo results found.")
 
             # F022 Phase 3: Surface contradictions among results
-            _settings = Settings()
-            if _settings.graph_recall_enabled and _settings.contradiction_detection:
+            if settings.graph_recall_enabled and settings.contradiction_detection:
                 try:
-                    # Collect all decision IDs from results
+                    # Collect all decision IDs from results (including graph-expanded)
                     all_ids: set = set()
                     if search_all or "decision" in search_types:
                         for d in (decision_results or []):
                             all_ids.add(d.id)
+                        for n in graph_expanded:
+                            all_ids.add(n.id)
 
                     if len(all_ids) >= 2:
                         from nous.storage.models import GraphEdge as GE
@@ -637,13 +665,13 @@ _RECALL_RECENT_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart) -> None:
+def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
     This is the main wiring function called at startup to register
     all 4 memory tools with their schemas.
     """
-    closures = create_nous_tools(brain, heart)
+    closures = create_nous_tools(brain, heart, settings=settings)
 
     dispatcher.register("record_decision", closures["record_decision"], _RECORD_DECISION_SCHEMA)
     dispatcher.register("learn_fact", closures["learn_fact"], _LEARN_FACT_SCHEMA)

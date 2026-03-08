@@ -182,7 +182,7 @@ async def create_components(settings: Settings) -> dict:
 
     # Create tool dispatcher and register all tools
     dispatcher = ToolDispatcher()
-    register_nous_tools(dispatcher, brain, heart)
+    register_nous_tools(dispatcher, brain, heart, settings=settings)
     register_builtin_tools(dispatcher, settings)
 
     # Web tools httpx client (separate from runner — no API auth headers)
