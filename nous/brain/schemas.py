@@ -147,3 +147,15 @@ class GraphEdgeInfo(BaseModel):
     relation: RelationType
     weight: float
     auto_linked: bool
+
+
+class NeighborResult(BaseModel):
+    """A graph neighbor with edge metadata."""
+
+    id: UUID
+    node_type: str
+    description: str
+    score: float | None = None
+    edge_relation: str
+    edge_weight: float
+    created_at: datetime

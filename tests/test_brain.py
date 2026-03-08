@@ -466,6 +466,9 @@ async def test_neighbors(brain, session):
     neighbor_ids = {n.id for n in neighbors}
     assert d1.id in neighbor_ids
     assert d3.id in neighbor_ids
+    for n in neighbors:
+        assert n.node_type == "decision"
+        assert n.edge_relation in ("supports", "related_to")
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +492,61 @@ async def test_link_with_types(brain, session):
     db_edge = result.scalar_one()
     assert db_edge.agent_id == brain.agent_id
     assert db_edge.source_type == "decision"
+
+
+# ---------------------------------------------------------------------------
+# 18c. test_neighbors_returns_neighbor_result
+# ---------------------------------------------------------------------------
+
+
+async def test_neighbors_returns_neighbor_result(brain, session):
+    """neighbors() returns NeighborResult with edge metadata."""
+    d1 = await brain.record(_record_input(description="Neighbor result A"), session=session)
+    d2 = await brain.record(_record_input(description="Neighbor result B"), session=session)
+
+    await brain.link(d1.id, d2.id, "supports", weight=0.9, session=session)
+
+    results = await brain.neighbors(d1.id, session=session)
+    assert len(results) == 1
+    n = results[0]
+    from nous.brain.schemas import NeighborResult
+
+    assert isinstance(n, NeighborResult)
+    assert n.id == d2.id
+    assert n.node_type == "decision"
+    assert n.edge_relation == "supports"
+    assert n.edge_weight == 0.9
+
+
+# ---------------------------------------------------------------------------
+# 18d. test_neighbors_with_node_type
+# ---------------------------------------------------------------------------
+
+
+async def test_neighbors_with_node_type(brain, session):
+    """neighbors() accepts node_type parameter for cross-type traversal."""
+    from uuid import uuid4
+
+    d1 = await brain.record(_record_input(description="Cross-type neighbor"), session=session)
+
+    fake_fact_id = uuid4()
+    edge = GraphEdge(
+        source_id=fake_fact_id,
+        target_id=d1.id,
+        source_type="fact",
+        target_type="decision",
+        agent_id=brain.agent_id,
+        relation="supports",
+        weight=0.85,
+    )
+    session.add(edge)
+    await session.flush()
+
+    results = await brain.neighbors(fake_fact_id, node_type="fact", session=session)
+    assert len(results) == 1
+    assert results[0].id == d1.id
+    assert results[0].node_type == "decision"
+    assert results[0].edge_relation == "supports"
 
 
 # ---------------------------------------------------------------------------
