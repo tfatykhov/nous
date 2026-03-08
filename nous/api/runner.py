@@ -385,6 +385,9 @@ class AgentRunner:
             thinking_blocks = []
             response_text = "I encountered an error processing your request. Please try again."
             conversation.messages.append(Message(role="assistant", content=response_text))
+            _caught_exc = e
+        else:
+            _caught_exc = None
 
         # 7. Post-turn (always called, even on error)
         turn_result = TurnResult(
@@ -400,6 +403,10 @@ class AgentRunner:
 
         # Store context
         conversation.turn_contexts.append(turn_context)
+
+        # Re-raise after cleanup so callers (e.g. subtask worker) see the real error
+        if _caught_exc is not None:
+            raise _caught_exc
 
         return response_text, turn_context, usage
 
@@ -915,6 +922,9 @@ class AgentRunner:
             error = str(e)
             response_text = "I encountered an error processing your request."
             conversation.messages.append(Message(role="assistant", content=response_text))
+            _caught_exc = e
+        else:
+            _caught_exc = None
         finally:
             # ALWAYS call post_turn (review P1: guaranteed cleanup)
             turn_result = TurnResult(
@@ -926,6 +936,10 @@ class AgentRunner:
             await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
             self._check_safety_net(turn_context, all_tool_results)
             conversation.turn_contexts.append(turn_context)
+
+        # Re-raise after cleanup so callers see the real error
+        if _caught_exc is not None:
+            raise _caught_exc
 
         # Note: streaming calibration skipped — accumulated total_usage across
         # multiple tool iterations would bias the per-char ratio. The _tool_loop

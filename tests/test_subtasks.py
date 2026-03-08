@@ -1204,3 +1204,83 @@ class TestSubtaskConfigDefaults:
             assert call_kwargs.get("timeout") == 45
 
         asyncio.get_event_loop().run_until_complete(_run())
+
+
+class TestRunTurnErrorPropagation:
+    """Verify run_turn re-raises exceptions after cleanup."""
+
+    async def test_run_turn_reraises_after_post_turn(self):
+        """run_turn should re-raise API errors so callers can handle them."""
+        from nous.api.runner import AgentRunner
+        from nous.cognitive.schemas import TurnContext, FrameSelection
+
+        settings = Settings()
+        mock_cognitive = AsyncMock()
+        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test")
+        mock_turn_ctx = MagicMock(spec=TurnContext)
+        mock_turn_ctx.frame = mock_frame
+        mock_turn_ctx.system_prompt = ""
+        mock_turn_ctx.recalled_decision_ids = []
+        mock_turn_ctx.active_censors = []
+        mock_turn_ctx.decision_id = None
+        mock_cognitive.pre_turn = AsyncMock(return_value=mock_turn_ctx)
+        mock_cognitive.post_turn = AsyncMock()
+        mock_brain = MagicMock()
+        mock_heart = MagicMock()
+
+        runner = AgentRunner(
+            settings=settings,
+            cognitive=mock_cognitive,
+            brain=mock_brain,
+            heart=mock_heart,
+        )
+
+        # Mock internal methods to raise an exception
+        runner._tool_loop = AsyncMock(side_effect=RuntimeError("API timeout"))
+        runner._build_system_prompt = MagicMock(return_value="system prompt")
+
+        with pytest.raises(RuntimeError, match="API timeout"):
+            await runner.run_turn(
+                session_id="test-session",
+                user_message="hello",
+            )
+
+        # post_turn should still have been called (cleanup happened before re-raise)
+        mock_cognitive.post_turn.assert_called_once()
+
+    async def test_run_turn_returns_normally_on_success(self):
+        """run_turn should return normally when no error occurs."""
+        from nous.api.runner import AgentRunner
+        from nous.cognitive.schemas import TurnContext, FrameSelection
+
+        settings = Settings()
+        mock_cognitive = AsyncMock()
+        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test")
+        mock_turn_ctx = MagicMock(spec=TurnContext)
+        mock_turn_ctx.frame = mock_frame
+        mock_turn_ctx.system_prompt = ""
+        mock_turn_ctx.recalled_decision_ids = []
+        mock_turn_ctx.active_censors = []
+        mock_turn_ctx.decision_id = None
+        mock_cognitive.pre_turn = AsyncMock(return_value=mock_turn_ctx)
+        mock_cognitive.post_turn = AsyncMock()
+        mock_brain = MagicMock()
+        mock_heart = MagicMock()
+
+        runner = AgentRunner(
+            settings=settings,
+            cognitive=mock_cognitive,
+            brain=mock_brain,
+            heart=mock_heart,
+        )
+
+        runner._tool_loop = AsyncMock(return_value=("Hello!", [], {"input_tokens": 10, "output_tokens": 5}, []))
+        runner._build_system_prompt = MagicMock(return_value="system prompt")
+
+        response_text, turn_ctx, usage = await runner.run_turn(
+            session_id="test-session-2",
+            user_message="hello",
+        )
+
+        assert response_text == "Hello!"
+        mock_cognitive.post_turn.assert_called_once()
