@@ -420,7 +420,7 @@ CREATE TABLE IF NOT EXISTS heart.subtasks (
     timeout_seconds INTEGER NOT NULL DEFAULT 120,
     frame_type VARCHAR(30),
     model VARCHAR(100),
-    notify BOOLEAN NOT NULL DEFAULT TRUE,
+    notify BOOLEAN NOT NULL DEFAULT FALSE,
     delivered BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     started_at TIMESTAMPTZ,
@@ -446,11 +446,13 @@ CREATE TABLE IF NOT EXISTS heart.schedules (
     next_fire_at TIMESTAMPTZ,
     fire_count INTEGER NOT NULL DEFAULT 0,
     max_fires INTEGER,
-    notify BOOLEAN NOT NULL DEFAULT TRUE,
+    notify BOOLEAN NOT NULL DEFAULT FALSE,
     timeout_seconds INTEGER NOT NULL DEFAULT 120,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_by_session VARCHAR,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    model VARCHAR(100),
+    frame_type VARCHAR(20),
     CONSTRAINT chk_schedule_type CHECK (schedule_type IN ('once', 'recurring')),
     CONSTRAINT chk_schedule_has_timing CHECK (
         (schedule_type = 'once' AND fire_at IS NOT NULL) OR

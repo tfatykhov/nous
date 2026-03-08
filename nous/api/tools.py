@@ -714,7 +714,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
         task: str,
         priority: str = "normal",
         timeout: int | None = None,
-        notify: bool = True,
+        notify: bool = False,
         frame_type: str | None = None,
         await_result: bool = False,
         model: str | None = None,
@@ -739,6 +739,8 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             effective_model = model
             if not effective_model and frame_type:
                 effective_model = settings.frame_default_models.get(frame_type)
+            if not effective_model:
+                effective_model = settings.background_model
 
             # 012.2: Differentiate timeout defaults
             if await_result:
@@ -850,7 +852,9 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
         task: str,
         when: str | None = None,
         every: str | None = None,
-        notify: bool = True,
+        notify: bool = False,
+        model: str | None = None,
+        frame_type: str | None = None,
     ) -> dict[str, Any]:
         """Schedule a task for later or recurring execution.
 
@@ -886,6 +890,8 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     fire_at=fire_at,
                     notify=notify,
                     timeout=settings.subtask_default_timeout,
+                    model=model,
+                    frame_type=frame_type,
                 )
             else:
                 interval_seconds, cron_expr = parse_every(every)  # type: ignore[arg-type]
@@ -896,6 +902,8 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     cron_expr=cron_expr,
                     notify=notify,
                     timeout=settings.subtask_default_timeout,
+                    model=model,
+                    frame_type=frame_type,
                 )
 
             next_fire = (
@@ -1048,7 +1056,7 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
         "notify": {
             "type": "boolean",
             "description": "Notify on completion",
-            "default": True,
+            "default": False,
         },
         "frame_type": {
             "type": "string",
@@ -1087,7 +1095,16 @@ _SCHEDULE_TASK_SCHEMA: dict[str, Any] = {
         "notify": {
             "type": "boolean",
             "description": "Notify on each fire",
-            "default": True,
+            "default": False,
+        },
+        "model": {
+            "type": "string",
+            "description": "Model to use for this scheduled task. If omitted, uses default background model.",
+        },
+        "frame_type": {
+            "type": "string",
+            "description": "Cognitive frame for the task (e.g. 'research', 'task')",
+            "enum": ["task", "research", "conversation", "decision", "debug"],
         },
     },
     "required": ["task"],
