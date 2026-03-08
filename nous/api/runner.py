@@ -1068,7 +1068,6 @@ class AgentRunner:
                                     original_content=compress_result.original_text,
                                     item_count=compress_result.item_count,
                                 )
-                                logger.debug("Cached %s result [%s]", tool_name, hash_key)
                         except Exception:
                             logger.warning("Failed to cache %s result", tool_name, exc_info=True)
 
