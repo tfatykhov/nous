@@ -113,6 +113,7 @@ All shipped implementation specs with PR references:
 | F015 | Growth Engine | Administrative self-improvement (Papert's Principle) |
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
 | F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | SmartCompress (ingestion-time statistical compression) + ReversibleCache (CCR-style cache for web_search/web_fetch) |
+| F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | Planned | Wire existing graph_edges into recall pipeline, cross-type edges, contradiction detection, spreading activation |
 | F021 | Dashboard | Visual growth tracking and cognitive state |
 
 ## Stats
