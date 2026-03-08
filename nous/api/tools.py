@@ -322,6 +322,33 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     else:
                         results_text.append("=== Heart Memory ===\nNo results found.")
 
+            # F022 Phase 2: Cross-type graph expansion — find decisions linked to Heart results
+            if heart_types and heart_results and settings.graph_recall_enabled and settings.cross_type_linking_enabled:
+                heart_graph_decisions = []
+                seen_graph_ids: set = set()
+                for hr in heart_results[:3]:
+                    if hr.type in ("fact", "episode"):
+                        try:
+                            neighbors = await brain.neighbors(
+                                hr.id,
+                                node_type=hr.type,
+                                limit=2,
+                            )
+                            for n in neighbors:
+                                if n.node_type == "decision" and n.id not in seen_graph_ids:
+                                    heart_graph_decisions.append(n)
+                                    seen_graph_ids.add(n.id)
+                        except Exception:
+                            pass
+
+                if heart_graph_decisions:
+                    results_text.append("\n=== Graph-Connected Decisions ===")
+                    for i, n in enumerate(heart_graph_decisions, 1):
+                        decayed = n.edge_weight * settings.graph_recall_decay
+                        results_text.append(
+                            f"{i}. [via {n.edge_relation}] {n.description} (score: {decayed:.3f})"
+                        )
+
             # Search Brain decisions
             if search_all or "decision" in search_types:
                 decision_results = await brain.query(query, limit=limit)
