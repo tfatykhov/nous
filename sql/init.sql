@@ -181,13 +181,21 @@ CREATE TABLE brain.thoughts (
 -- ---------------------------------------------------------------------------
 CREATE TABLE brain.graph_edges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    source_id UUID NOT NULL REFERENCES brain.decisions(id) ON DELETE CASCADE,
-    target_id UUID NOT NULL REFERENCES brain.decisions(id) ON DELETE CASCADE,
-    relation VARCHAR(50) NOT NULL CHECK (relation IN ('supports', 'contradicts', 'supersedes', 'related_to', 'caused_by')),
+    source_id UUID NOT NULL,
+    target_id UUID NOT NULL,
+    source_type VARCHAR(20) NOT NULL DEFAULT 'decision',
+    target_type VARCHAR(20) NOT NULL DEFAULT 'decision',
+    agent_id VARCHAR(100) NOT NULL,
+    relation VARCHAR(50) NOT NULL CHECK (relation IN (
+        'supports', 'contradicts', 'supersedes', 'related_to', 'caused_by',
+        'informed_by', 'evidence_for', 'discussed_in', 'extracted_from'
+    )),
     weight FLOAT DEFAULT 1.0,
     auto_linked BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(source_id, target_id, relation)
+    UNIQUE(source_id, target_id, relation),
+    CHECK (source_type IN ('decision', 'fact', 'episode', 'procedure')),
+    CHECK (target_type IN ('decision', 'fact', 'episode', 'procedure'))
 );
 
 -- ---------------------------------------------------------------------------
@@ -511,6 +519,9 @@ CREATE INDEX idx_thoughts_created ON brain.thoughts(created_at);
 -- --- brain.graph_edges indexes ---
 CREATE INDEX idx_edges_source ON brain.graph_edges(source_id);
 CREATE INDEX idx_edges_target ON brain.graph_edges(target_id);
+CREATE INDEX idx_graph_edges_source_type ON brain.graph_edges(source_id, source_type);
+CREATE INDEX idx_graph_edges_target_type ON brain.graph_edges(target_id, target_type);
+CREATE INDEX idx_graph_edges_agent ON brain.graph_edges(agent_id);
 
 -- --- brain.calibration_snapshots indexes ---
 CREATE INDEX idx_calibration_agent ON brain.calibration_snapshots(agent_id, snapshot_at DESC);

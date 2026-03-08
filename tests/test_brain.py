@@ -21,7 +21,7 @@ from nous.brain.schemas import (
     RecordInput,
     ThoughtInfo,
 )
-from nous.storage.models import Event
+from nous.storage.models import Event, GraphEdge
 
 # Must match conftest.GUARDRAIL_TEST_AGENT
 GUARDRAIL_TEST_AGENT = "test-guardrail-agent"
@@ -466,6 +466,29 @@ async def test_neighbors(brain, session):
     neighbor_ids = {n.id for n in neighbors}
     assert d1.id in neighbor_ids
     assert d3.id in neighbor_ids
+
+
+# ---------------------------------------------------------------------------
+# 18b. test_link_with_types
+# ---------------------------------------------------------------------------
+
+
+async def test_link_with_types(brain, session):
+    """Graph edges include source_type, target_type, and agent_id."""
+    d1 = await brain.record(_record_input(description="Typed link A"), session=session)
+    d2 = await brain.record(_record_input(description="Typed link B"), session=session)
+
+    edge = await brain.link(d1.id, d2.id, "supports", session=session)
+    assert edge.source_type == "decision"
+    assert edge.target_type == "decision"
+
+    # Verify agent_id persisted in DB
+    result = await session.execute(
+        select(GraphEdge).where(GraphEdge.source_id == d1.id)
+    )
+    db_edge = result.scalar_one()
+    assert db_edge.agent_id == brain.agent_id
+    assert db_edge.source_type == "decision"
 
 
 # ---------------------------------------------------------------------------

@@ -954,15 +954,17 @@ class Brain:
         target_id: UUID,
         relation: str,
         weight: float = 1.0,
+        source_type: str = "decision",
+        target_type: str = "decision",
         session: AsyncSession | None = None,
     ) -> GraphEdgeInfo:
-        """Create a graph edge between two decisions."""
+        """Create a graph edge between two nodes."""
         if session is None:
             async with self.db.session() as session:
-                result = await self._link(source_id, target_id, relation, weight, False, session)
+                result = await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
                 await session.commit()
                 return result
-        return await self._link(source_id, target_id, relation, weight, False, session)
+        return await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
 
     async def _link(
         self,
@@ -971,11 +973,16 @@ class Brain:
         relation: str,
         weight: float,
         auto_linked: bool,
-        session: AsyncSession,
+        source_type: str = "decision",
+        target_type: str = "decision",
+        session: AsyncSession | None = None,
     ) -> GraphEdgeInfo:
         edge = GraphEdge(
             source_id=source_id,
             target_id=target_id,
+            source_type=source_type,
+            target_type=target_type,
+            agent_id=self.agent_id,
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
@@ -997,6 +1004,8 @@ class Brain:
         return GraphEdgeInfo(
             source_id=source_id,
             target_id=target_id,
+            source_type=source_type,
+            target_type=target_type,
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
@@ -1146,6 +1155,9 @@ class Brain:
                 .values(
                     source_id=src,
                     target_id=tgt,
+                    source_type="decision",
+                    target_type="decision",
+                    agent_id=self.agent_id,
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,
@@ -1158,6 +1170,8 @@ class Brain:
                 GraphEdgeInfo(
                     source_id=src,
                     target_id=tgt,
+                    source_type="decision",
+                    target_type="decision",
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,
