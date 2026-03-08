@@ -353,25 +353,72 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             if search_all or "decision" in search_types:
                 decision_results = await brain.query(query, limit=limit)
 
-                # F022: Graph expansion — expand top decisions by 1 hop
+                # F022: Graph expansion — expand top decisions
                 graph_expanded = []
                 if decision_results and settings.graph_recall_enabled:
                     seen_ids = {d.id for d in decision_results}
-                    for dec in decision_results[:settings.graph_recall_max_expand]:
-                        if dec.score is None:
-                            continue
+
+                    # F022 Phase 4: Check if spreading activation should be used
+                    use_spreading = False
+                    if settings.spreading_activation_enabled != "false":
                         try:
-                            neighbors = await brain.neighbors(
-                                dec.id,
-                                node_type="decision",
-                                limit=settings.graph_recall_max_neighbors,
+                            from nous.brain.spreading_activation import (
+                                compute_graph_density,
+                                should_use_spreading_activation,
+                                spreading_activation_search,
                             )
-                            for n in neighbors:
-                                if n.id not in seen_ids:
-                                    graph_expanded.append(n)
-                                    seen_ids.add(n.id)
+                            async with brain.db.session() as sa_session:
+                                density = await compute_graph_density(sa_session, brain.agent_id)
+                                use_spreading = should_use_spreading_activation(settings, density)
                         except Exception:
-                            logger.debug("Graph expansion failed for decision %s", dec.id)
+                            logger.debug("Density check failed, using 1-hop")
+
+                    if use_spreading:
+                        # Use spreading activation CTE for multi-hop expansion
+                        try:
+                            async with brain.db.session() as sa_session:
+                                seeds = [
+                                    (d.id, "decision", d.score or 0.5)
+                                    for d in decision_results[:settings.graph_recall_max_expand]
+                                ]
+                                activated = await spreading_activation_search(
+                                    sa_session, brain.agent_id, seeds, settings
+                                )
+                                seed_ids = {s[0] for s in seeds}
+                                for nid, ntype, activation in activated:
+                                    if nid not in seed_ids and nid not in seen_ids and activation > 0.1:
+                                        from nous.brain.schemas import NeighborResult
+                                        from datetime import UTC, datetime
+                                        graph_expanded.append(NeighborResult(
+                                            id=nid,
+                                            node_type=ntype,
+                                            description=f"[{ntype}] {str(nid)[:8]}",
+                                            edge_relation="spreading_activation",
+                                            edge_weight=activation,
+                                            created_at=datetime.now(UTC),
+                                        ))
+                                        seen_ids.add(nid)
+                        except Exception:
+                            logger.debug("Spreading activation failed, falling back to 1-hop")
+                            use_spreading = False
+
+                    if not use_spreading:
+                        # Fall back to 1-hop expansion
+                        for dec in decision_results[:settings.graph_recall_max_expand]:
+                            if dec.score is None:
+                                continue
+                            try:
+                                neighbors = await brain.neighbors(
+                                    dec.id,
+                                    node_type="decision",
+                                    limit=settings.graph_recall_max_neighbors,
+                                )
+                                for n in neighbors:
+                                    if n.id not in seen_ids:
+                                        graph_expanded.append(n)
+                                        seen_ids.add(n.id)
+                            except Exception:
+                                logger.debug("Graph expansion failed for decision %s", dec.id)
 
                 if decision_results or graph_expanded:
                     results_text.append("\n=== Brain Decisions ===")
