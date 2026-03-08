@@ -185,6 +185,16 @@ class TestScheduleManager:
         assert updated.fire_count == 1
         assert updated.next_fire_at > now
 
+    async def test_schedule_notify_defaults_false(self, schedule_mgr: ScheduleManager):
+        from datetime import UTC, datetime, timedelta
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        schedule = await schedule_mgr.create(
+            task="Check status",
+            schedule_type="once",
+            fire_at=fire_at,
+        )
+        assert schedule.notify is False
+
 
 # ---------------------------------------------------------------------------
 # TaskScheduler tests

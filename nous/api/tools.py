@@ -714,7 +714,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
         task: str,
         priority: str = "normal",
         timeout: int | None = None,
-        notify: bool = True,
+        notify: bool = False,
         frame_type: str | None = None,
         await_result: bool = False,
         model: str | None = None,
@@ -850,7 +850,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
         task: str,
         when: str | None = None,
         every: str | None = None,
-        notify: bool = True,
+        notify: bool = False,
     ) -> dict[str, Any]:
         """Schedule a task for later or recurring execution.
 

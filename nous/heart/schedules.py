@@ -27,7 +27,7 @@ class ScheduleManager:
         fire_at: datetime | None = None,
         interval_seconds: int | None = None,
         cron_expr: str | None = None,
-        notify: bool = True,
+        notify: bool = False,
         timeout: int = 120,
         max_fires: int | None = None,
         session_id: str | None = None,

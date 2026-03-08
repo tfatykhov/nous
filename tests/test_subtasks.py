@@ -41,8 +41,19 @@ class TestSubtaskModel:
 
         assert subtask.id is not None
         assert subtask.status == "pending"
-        assert subtask.notify is True
+        assert subtask.notify is False
         assert subtask.created_at is not None
+
+    async def test_subtask_notify_defaults_false(self, session: AsyncSession):
+        subtask = Subtask(
+            agent_id="test-agent",
+            task="Background check",
+            priority=100,
+            timeout_seconds=60,
+        )
+        session.add(subtask)
+        await session.flush()
+        assert subtask.notify is False
 
     async def test_subtask_with_parent_session(self, session: AsyncSession):
         subtask = Subtask(

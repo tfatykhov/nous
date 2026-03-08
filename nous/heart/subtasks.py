@@ -30,7 +30,7 @@ class SubtaskManager:
         parent_session_id: str | None = None,
         priority: str = "normal",
         timeout: int = 120,
-        notify: bool = True,
+        notify: bool = False,
         metadata: dict | None = None,
         frame_type: str | None = None,
         model: str | None = None,
