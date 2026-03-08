@@ -282,3 +282,64 @@ async def test_dedup_exclude_ids(heart, session):
     updated_original = await heart.get_fact(original.id, session=session)
     assert updated_original.active is False
     assert updated_original.superseded_by == new_fact.id
+
+
+# ---------------------------------------------------------------------------
+# F022: Graph edge bridge tests
+# ---------------------------------------------------------------------------
+
+
+async def test_contradict_creates_graph_edge(heart, session):
+    """facts.contradict() also creates a 'contradicts' graph edge."""
+    from nous.storage.models import GraphEdge
+    from sqlalchemy import select
+
+    f1 = await heart.learn(
+        _fact_input(content="Tim prefers Celsius", subject="Tim"),
+        session=session,
+    )
+    f2 = await heart.contradict_fact(
+        f1.id,
+        _fact_input(content="Tim uses Fahrenheit", subject="Tim"),
+        session=session,
+    )
+
+    result = await session.execute(
+        select(GraphEdge).where(
+            GraphEdge.source_id == f2.id,
+            GraphEdge.target_id == f1.id,
+            GraphEdge.relation == "contradicts",
+        )
+    )
+    edge = result.scalar_one_or_none()
+    assert edge is not None
+    assert edge.source_type == "fact"
+    assert edge.target_type == "fact"
+
+
+async def test_supersede_creates_graph_edge(heart, session):
+    """facts.supersede() also creates a 'supersedes' graph edge."""
+    from nous.storage.models import GraphEdge
+    from sqlalchemy import select
+
+    f1 = await heart.learn(
+        _fact_input(content="Python 3.11 is latest", subject="Python"),
+        session=session,
+    )
+    f2 = await heart.supersede_fact(
+        f1.id,
+        _fact_input(content="Python 3.12 is latest", subject="Python"),
+        session=session,
+    )
+
+    result = await session.execute(
+        select(GraphEdge).where(
+            GraphEdge.source_id == f2.id,
+            GraphEdge.target_id == f1.id,
+            GraphEdge.relation == "supersedes",
+        )
+    )
+    edge = result.scalar_one_or_none()
+    assert edge is not None
+    assert edge.source_type == "fact"
+    assert edge.target_type == "fact"

@@ -1,6 +1,6 @@
 # F022 — Graph-Augmented Recall
 
-> **Status:** Planned
+> **Status:** Shipped
 > **Priority:** P1
 > **Depends on:** F001 (Brain Module — `graph_edges`, `auto_link_decisions`, `neighbors`), F002 (Heart Module)
 > **Research:** 016 — Agent Memory Synthesis, Gap G5 (Graph Overlay for Relational Retrieval)

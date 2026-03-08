@@ -230,23 +230,27 @@ class GraphEdge(Base):
     __table_args__ = (
         UniqueConstraint("source_id", "target_id", "relation", name="uq_edges_src_tgt_rel"),
         CheckConstraint(
-            "relation IN ('supports', 'contradicts', 'supersedes', 'related_to', 'caused_by')",
+            "relation IN ('supports', 'contradicts', 'supersedes', 'related_to', 'caused_by', "
+            "'informed_by', 'evidence_for', 'discussed_in', 'extracted_from')",
             name="ck_edges_relation",
+        ),
+        CheckConstraint(
+            "source_type IN ('decision', 'fact', 'episode', 'procedure')",
+            name="ck_edges_source_type",
+        ),
+        CheckConstraint(
+            "target_type IN ('decision', 'fact', 'episode', 'procedure')",
+            name="ck_edges_target_type",
         ),
         {"schema": "brain"},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    source_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("brain.decisions.id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    target_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("brain.decisions.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="decision")
+    target_type: Mapped[str] = mapped_column(String(20), nullable=False, server_default="decision")
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     relation: Mapped[str] = mapped_column(String(50), nullable=False)
     weight: Mapped[float | None] = mapped_column(Float, server_default="1.0")
     auto_linked: Mapped[bool | None] = mapped_column(Boolean, server_default="false")
