@@ -189,7 +189,7 @@ async def create_components(settings: Settings) -> dict:
 
     # F020: Register cache_retrieve tool
     from nous.api.tools import register_cache_retrieve_tool
-    register_cache_retrieve_tool(dispatcher, db.session_factory)
+    register_cache_retrieve_tool(dispatcher, database.session_factory)
 
     # 008: Register identity tools (gated by "initiation" frame)
     from nous.identity.tools import register_identity_tools
