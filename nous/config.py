@@ -205,6 +205,31 @@ class Settings(BaseSettings):
         default_factory=lambda: {"research": "claude-haiku-3-5-20241022"},
     )
 
+    # F022: Graph-Augmented Recall
+    graph_recall_enabled: bool = True
+    graph_recall_max_expand: int = 5
+    graph_recall_decay: float = 0.7
+    graph_recall_max_neighbors: int = 3
+
+    # F022 Phase 2: Cross-type linking
+    cross_type_linking_enabled: bool = True
+    cross_type_threshold: float = 0.80
+    cross_type_same_threshold: float = 0.90
+
+    # F022 Phase 3: Contradiction detection
+    contradiction_detection: bool = True
+    contradiction_similarity_threshold: float = 0.85
+    contradiction_model: str = "claude-haiku-4-5-20241022"
+
+    # F022 Phase 4: Spreading activation
+    spreading_activation_enabled: str = "auto"  # "auto", "true", "false"
+    spreading_activation_density_threshold: float = 3.0
+    spreading_activation_decay: float = 0.5
+    spreading_activation_max_depth: int = 2
+    spreading_activation_alpha: float = 0.5
+    spreading_activation_beta: float = 0.3
+    spreading_activation_gamma: float = 0.2
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',
