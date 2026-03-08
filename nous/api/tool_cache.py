@@ -50,7 +50,7 @@ async def cache_compressed_result(
         tool_input=tool_input,
         original_content=original_content,
         item_count=item_count,
-    ).on_conflict_do_nothing(constraint="uq_tool_cache_session_hash")
+    ).on_conflict_do_nothing(index_elements=["session_id", "hash_key"])
     await session.execute(stmt)
     await session.commit()
 
