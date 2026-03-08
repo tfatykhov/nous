@@ -32,6 +32,8 @@ class ScheduleManager:
         max_fires: int | None = None,
         session_id: str | None = None,
         metadata: dict | None = None,
+        model: str | None = None,
+        frame_type: str | None = None,
     ) -> Schedule:
         """Create a new schedule."""
         # Compute next_fire_at
@@ -60,6 +62,8 @@ class ScheduleManager:
                 max_fires=max_fires,
                 created_by_session=session_id,
                 metadata_=metadata or {},
+                model=model,
+                frame_type=frame_type,
             )
             session.add(schedule)
             await session.commit()

@@ -611,6 +611,8 @@ class Schedule(Base):
     metadata_: Mapped[dict] = mapped_column(
         "metadata", JSONB, nullable=False, server_default="{}"
     )
+    model: Mapped[str | None] = mapped_column(String(100))
+    frame_type: Mapped[str | None] = mapped_column(String(20))
 
 
 class ToolCache(Base):

@@ -451,6 +451,8 @@ CREATE TABLE IF NOT EXISTS heart.schedules (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_by_session VARCHAR,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    model VARCHAR(100),
+    frame_type VARCHAR(20),
     CONSTRAINT chk_schedule_type CHECK (schedule_type IN ('once', 'recurring')),
     CONSTRAINT chk_schedule_has_timing CHECK (
         (schedule_type = 'once' AND fire_at IS NOT NULL) OR
