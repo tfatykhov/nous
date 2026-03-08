@@ -19,6 +19,8 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
+
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
@@ -115,7 +117,7 @@ class ToolDispatcher:
 # ---------------------------------------------------------------------------
 
 
-def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
+def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = None) -> dict[str, Any]:
     """Create tool closures with Brain and Heart captured in closure context.
 
     Returns a dict of async callables suitable for ToolDispatcher registration.
@@ -124,6 +126,8 @@ def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
 
     All tools are wrapped in try/except to return error messages as tool results.
     """
+    if settings is None:
+        settings = Settings()
 
     async def record_decision(
         description: str,
@@ -331,6 +335,35 @@ def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
                         )
                 else:
                     results_text.append("\n=== Brain Decisions ===\nNo results found.")
+
+            # F022 Phase 3: Surface contradictions among results
+            _settings = Settings()
+            if _settings.graph_recall_enabled and _settings.contradiction_detection:
+                try:
+                    # Collect all decision IDs from results
+                    all_ids: set = set()
+                    if search_all or "decision" in search_types:
+                        for d in (decision_results or []):
+                            all_ids.add(d.id)
+
+                    if len(all_ids) >= 2:
+                        from nous.storage.models import GraphEdge as GE
+                        async with brain.db.session() as cs:
+                            cr = await cs.execute(
+                                select(GE).where(
+                                    GE.relation == "contradicts",
+                                    GE.source_id.in_(all_ids),
+                                    GE.target_id.in_(all_ids),
+                                )
+                            )
+                            for c in cr.scalars().all():
+                                results_text.append(
+                                    f"\nWarning: Contradiction detected between "
+                                    f"{c.source_type}({str(c.source_id)[:8]}) and "
+                                    f"{c.target_type}({str(c.target_id)[:8]})"
+                                )
+                except Exception:
+                    pass  # Non-critical
 
             if not results_text:
                 results_text.append("No results found.")
