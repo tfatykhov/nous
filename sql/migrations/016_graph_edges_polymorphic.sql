@@ -35,8 +35,9 @@ ALTER TABLE brain.graph_edges
         target_type IN ('decision', 'fact', 'episode', 'procedure')
     );
 
--- 7. Extend relation check constraint
+-- 7. Extend relation check constraint (drop both old names)
 ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS ck_edges_relation;
+ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS graph_edges_relation_check;
 ALTER TABLE brain.graph_edges
     ADD CONSTRAINT ck_edges_relation CHECK (
         relation IN (
