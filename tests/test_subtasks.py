@@ -826,6 +826,48 @@ class TestSubtaskWorkerPool:
 
         mock_http.post.assert_not_awaited()
 
+    async def test_worker_uses_background_model_when_no_override(
+        self, mock_runner, worker_heart, worker_settings, mock_bus
+    ):
+        """Worker should pass background_model when subtask has no model set."""
+        worker_settings.background_model = "claude-haiku-3-5-20241022"
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=worker_heart,
+            settings=worker_settings,
+            bus=mock_bus,
+        )
+
+        subtask = await worker_heart.subtasks.create(task="Background work")
+        dequeued = await worker_heart.subtasks.dequeue("test-worker")
+
+        await pool._execute_subtask(dequeued)
+
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs["model_override"] == "claude-haiku-3-5-20241022"
+
+    async def test_worker_uses_explicit_model_over_background(
+        self, mock_runner, worker_heart, worker_settings, mock_bus
+    ):
+        """Worker should prefer explicit model over background_model."""
+        worker_settings.background_model = "claude-haiku-3-5-20241022"
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=worker_heart,
+            settings=worker_settings,
+            bus=mock_bus,
+        )
+
+        subtask = await worker_heart.subtasks.create(
+            task="Explicit model work", model="claude-opus-4-20250514",
+        )
+        dequeued = await worker_heart.subtasks.dequeue("test-worker")
+
+        await pool._execute_subtask(dequeued)
+
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs["model_override"] == "claude-opus-4-20250514"
+
     async def test_execute_subtask_passes_system_prompt_prefix(
         self, mock_runner, worker_heart, worker_settings, mock_bus
     ):

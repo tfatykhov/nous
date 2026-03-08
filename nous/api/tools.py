@@ -739,6 +739,8 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             effective_model = model
             if not effective_model and frame_type:
                 effective_model = settings.frame_default_models.get(frame_type)
+            if not effective_model:
+                effective_model = settings.background_model
 
             # 012.2: Differentiate timeout defaults
             if await_result:
