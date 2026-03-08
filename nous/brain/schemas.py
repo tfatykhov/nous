@@ -15,7 +15,11 @@ from pydantic import BaseModel, Field
 CategoryType = Literal["architecture", "process", "tooling", "security", "integration"]
 StakesType = Literal["low", "medium", "high", "critical"]
 OutcomeType = Literal["pending", "success", "partial", "failure"]
-RelationType = Literal["supports", "contradicts", "supersedes", "related_to", "caused_by"]
+RelationType = Literal[
+    "supports", "contradicts", "supersedes", "related_to", "caused_by",
+    "informed_by", "evidence_for", "discussed_in", "extracted_from",
+]
+NodeType = Literal["decision", "fact", "episode", "procedure"]
 ReasonType = Literal[
     "analysis",
     "pattern",
@@ -134,10 +138,24 @@ class CalibrationReport(BaseModel):
 
 
 class GraphEdgeInfo(BaseModel):
-    """A graph edge between two decisions."""
+    """A graph edge between two nodes (decisions, facts, episodes, procedures)."""
 
     source_id: UUID
     target_id: UUID
+    source_type: str = "decision"
+    target_type: str = "decision"
     relation: RelationType
     weight: float
     auto_linked: bool
+
+
+class NeighborResult(BaseModel):
+    """A graph neighbor with edge metadata."""
+
+    id: UUID
+    node_type: str
+    description: str
+    score: float | None = None
+    edge_relation: str
+    edge_weight: float
+    created_at: datetime

@@ -19,6 +19,8 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
+
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
@@ -115,7 +117,7 @@ class ToolDispatcher:
 # ---------------------------------------------------------------------------
 
 
-def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
+def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = None) -> dict[str, Any]:
     """Create tool closures with Brain and Heart captured in closure context.
 
     Returns a dict of async callables suitable for ToolDispatcher registration.
@@ -124,6 +126,8 @@ def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
 
     All tools are wrapped in try/except to return error messages as tool results.
     """
+    if settings is None:
+        settings = Settings()
 
     async def record_decision(
         description: str,
@@ -318,10 +322,105 @@ def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
                     else:
                         results_text.append("=== Heart Memory ===\nNo results found.")
 
+            # F022 Phase 2: Cross-type graph expansion — find decisions linked to Heart results
+            if heart_types and heart_results and settings.graph_recall_enabled and settings.cross_type_linking_enabled:
+                heart_graph_decisions = []
+                seen_graph_ids: set = set()
+                for hr in heart_results[:3]:
+                    if hr.type in ("fact", "episode"):
+                        try:
+                            neighbors = await brain.neighbors(
+                                hr.id,
+                                node_type=hr.type,
+                                limit=2,
+                            )
+                            for n in neighbors:
+                                if n.node_type == "decision" and n.id not in seen_graph_ids:
+                                    heart_graph_decisions.append(n)
+                                    seen_graph_ids.add(n.id)
+                        except Exception:
+                            pass
+
+                if heart_graph_decisions:
+                    results_text.append("\n=== Graph-Connected Decisions ===")
+                    for i, n in enumerate(heart_graph_decisions, 1):
+                        decayed = n.edge_weight * settings.graph_recall_decay
+                        results_text.append(
+                            f"{i}. [via {n.edge_relation}] {n.description} (score: {decayed:.3f})"
+                        )
+
             # Search Brain decisions
             if search_all or "decision" in search_types:
                 decision_results = await brain.query(query, limit=limit)
-                if decision_results:
+
+                # F022: Graph expansion — expand top decisions
+                graph_expanded = []
+                if decision_results and settings.graph_recall_enabled:
+                    seen_ids = {d.id for d in decision_results}
+
+                    # F022 Phase 4: Check if spreading activation should be used
+                    use_spreading = False
+                    if settings.spreading_activation_enabled != "false":
+                        try:
+                            from nous.brain.spreading_activation import (
+                                compute_graph_density,
+                                should_use_spreading_activation,
+                                spreading_activation_search,
+                            )
+                            async with brain.db.session() as sa_session:
+                                density = await compute_graph_density(sa_session, brain.agent_id)
+                                use_spreading = should_use_spreading_activation(settings, density)
+                        except Exception:
+                            logger.debug("Density check failed, using 1-hop")
+
+                    if use_spreading:
+                        # Use spreading activation CTE for multi-hop expansion
+                        try:
+                            async with brain.db.session() as sa_session:
+                                seeds = [
+                                    (d.id, "decision", d.score or 0.5)
+                                    for d in decision_results[:settings.graph_recall_max_expand]
+                                ]
+                                activated = await spreading_activation_search(
+                                    sa_session, brain.agent_id, seeds, settings
+                                )
+                                seed_ids = {s[0] for s in seeds}
+                                for nid, ntype, activation in activated:
+                                    if nid not in seed_ids and nid not in seen_ids and activation > 0.1:
+                                        from nous.brain.schemas import NeighborResult
+                                        from datetime import UTC, datetime
+                                        graph_expanded.append(NeighborResult(
+                                            id=nid,
+                                            node_type=ntype,
+                                            description=f"[{ntype}] {str(nid)[:8]}",
+                                            edge_relation="spreading_activation",
+                                            edge_weight=activation,
+                                            created_at=datetime.now(UTC),
+                                        ))
+                                        seen_ids.add(nid)
+                        except Exception:
+                            logger.debug("Spreading activation failed, falling back to 1-hop")
+                            use_spreading = False
+
+                    if not use_spreading:
+                        # Fall back to 1-hop expansion
+                        for dec in decision_results[:settings.graph_recall_max_expand]:
+                            if dec.score is None:
+                                continue
+                            try:
+                                neighbors = await brain.neighbors(
+                                    dec.id,
+                                    node_type="decision",
+                                    limit=settings.graph_recall_max_neighbors,
+                                )
+                                for n in neighbors:
+                                    if n.id not in seen_ids:
+                                        graph_expanded.append(n)
+                                        seen_ids.add(n.id)
+                            except Exception:
+                                logger.debug("Graph expansion failed for decision %s", dec.id)
+
+                if decision_results or graph_expanded:
                     results_text.append("\n=== Brain Decisions ===")
                     for i, dec in enumerate(decision_results, 1):
                         score_str = f" (score: {dec.score:.3f})" if dec.score else ""
@@ -329,8 +428,44 @@ def create_nous_tools(brain: Brain, heart: Heart) -> dict[str, Any]:
                             f"{i}. {dec.description} | {dec.category} | {dec.stakes} | "
                             f"confidence: {dec.confidence:.2f}{score_str}"
                         )
+                    for j, n in enumerate(graph_expanded, len(decision_results) + 1):
+                        decayed_score = n.edge_weight * settings.graph_recall_decay
+                        results_text.append(
+                            f"{j}. [via graph: {n.edge_relation}] {n.description} "
+                            f"(score: {decayed_score:.3f})"
+                        )
                 else:
                     results_text.append("\n=== Brain Decisions ===\nNo results found.")
+
+            # F022 Phase 3: Surface contradictions among results
+            if settings.graph_recall_enabled and settings.contradiction_detection:
+                try:
+                    # Collect all decision IDs from results (including graph-expanded)
+                    all_ids: set = set()
+                    if search_all or "decision" in search_types:
+                        for d in (decision_results or []):
+                            all_ids.add(d.id)
+                        for n in graph_expanded:
+                            all_ids.add(n.id)
+
+                    if len(all_ids) >= 2:
+                        from nous.storage.models import GraphEdge as GE
+                        async with brain.db.session() as cs:
+                            cr = await cs.execute(
+                                select(GE).where(
+                                    GE.relation == "contradicts",
+                                    GE.source_id.in_(all_ids),
+                                    GE.target_id.in_(all_ids),
+                                )
+                            )
+                            for c in cr.scalars().all():
+                                results_text.append(
+                                    f"\nWarning: Contradiction detected between "
+                                    f"{c.source_type}({str(c.source_id)[:8]}) and "
+                                    f"{c.target_type}({str(c.target_id)[:8]})"
+                                )
+                except Exception:
+                    pass  # Non-critical
 
             if not results_text:
                 results_text.append("No results found.")
@@ -604,13 +739,13 @@ _RECALL_RECENT_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart) -> None:
+def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
     This is the main wiring function called at startup to register
     all 4 memory tools with their schemas.
     """
-    closures = create_nous_tools(brain, heart)
+    closures = create_nous_tools(brain, heart, settings=settings)
 
     dispatcher.register("record_decision", closures["record_decision"], _RECORD_DECISION_SCHEMA)
     dispatcher.register("learn_fact", closures["learn_fact"], _LEARN_FACT_SCHEMA)

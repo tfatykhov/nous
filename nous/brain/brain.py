@@ -30,6 +30,7 @@ from nous.brain.schemas import (
     DecisionSummary,
     GraphEdgeInfo,
     GuardrailResult,
+    NeighborResult,
     ReasonInput,
     RecordInput,
     ReviewInput,
@@ -954,15 +955,17 @@ class Brain:
         target_id: UUID,
         relation: str,
         weight: float = 1.0,
+        source_type: str = "decision",
+        target_type: str = "decision",
         session: AsyncSession | None = None,
     ) -> GraphEdgeInfo:
-        """Create a graph edge between two decisions."""
+        """Create a graph edge between two nodes."""
         if session is None:
             async with self.db.session() as session:
-                result = await self._link(source_id, target_id, relation, weight, False, session)
+                result = await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
                 await session.commit()
                 return result
-        return await self._link(source_id, target_id, relation, weight, False, session)
+        return await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
 
     async def _link(
         self,
@@ -971,11 +974,16 @@ class Brain:
         relation: str,
         weight: float,
         auto_linked: bool,
-        session: AsyncSession,
+        source_type: str = "decision",
+        target_type: str = "decision",
+        session: AsyncSession | None = None,
     ) -> GraphEdgeInfo:
         edge = GraphEdge(
             source_id=source_id,
             target_id=target_id,
+            source_type=source_type,
+            target_type=target_type,
+            agent_id=self.agent_id,
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
@@ -997,6 +1005,8 @@ class Brain:
         return GraphEdgeInfo(
             source_id=source_id,
             target_id=target_id,
+            source_type=source_type,
+            target_type=target_type,
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
@@ -1008,63 +1018,95 @@ class Brain:
 
     async def neighbors(
         self,
-        decision_id: UUID,
+        node_id: UUID,
+        node_type: str = "decision",
         relation: str | None = None,
         limit: int = 10,
         session: AsyncSession | None = None,
-    ) -> list[DecisionSummary]:
-        """Get decisions connected to the given decision via graph edges."""
+    ) -> list[NeighborResult]:
+        """Get nodes connected to the given node via graph edges."""
         if session is None:
             async with self.db.session() as session:
-                return await self._neighbors(decision_id, relation, limit, session)
-        return await self._neighbors(decision_id, relation, limit, session)
+                return await self._neighbors(node_id, node_type, relation, limit, session)
+        return await self._neighbors(node_id, node_type, relation, limit, session)
 
     async def _neighbors(
         self,
-        decision_id: UUID,
+        node_id: UUID,
+        node_type: str,
         relation: str | None,
         limit: int,
         session: AsyncSession,
-    ) -> list[DecisionSummary]:
-        # Find edges where this decision is source or target
-        source_q = select(GraphEdge.target_id.label("neighbor_id")).where(GraphEdge.source_id == decision_id)
-        target_q = select(GraphEdge.source_id.label("neighbor_id")).where(GraphEdge.target_id == decision_id)
+    ) -> list[NeighborResult]:
+        # Find edges where this node is source or target, matching node type
+        source_q = select(
+            GraphEdge.target_id.label("neighbor_id"),
+            GraphEdge.target_type.label("neighbor_type"),
+            GraphEdge.relation.label("edge_relation"),
+            GraphEdge.weight.label("edge_weight"),
+        ).where(
+            GraphEdge.source_id == node_id,
+            GraphEdge.source_type == node_type,
+            GraphEdge.agent_id == self.agent_id,
+        )
+
+        target_q = select(
+            GraphEdge.source_id.label("neighbor_id"),
+            GraphEdge.source_type.label("neighbor_type"),
+            GraphEdge.relation.label("edge_relation"),
+            GraphEdge.weight.label("edge_weight"),
+        ).where(
+            GraphEdge.target_id == node_id,
+            GraphEdge.target_type == node_type,
+            GraphEdge.agent_id == self.agent_id,
+        )
 
         if relation:
             source_q = source_q.where(GraphEdge.relation == relation)
             target_q = target_q.where(GraphEdge.relation == relation)
 
-        union_q = source_q.union(target_q).limit(limit)
+        union_q = source_q.union_all(target_q).limit(limit)
         result = await session.execute(union_q)
-        neighbor_ids = [row.neighbor_id for row in result]
+        rows = result.all()
 
-        if not neighbor_ids:
+        if not rows:
             return []
 
-        # Fetch decisions
-        dec_result = await session.execute(select(Decision).where(Decision.id.in_(neighbor_ids)))
-        decisions = dec_result.scalars().all()
+        # Build edge metadata map
+        edge_map: dict[UUID, tuple[str, str, float]] = {}
+        for r in rows:
+            edge_map[r.neighbor_id] = (r.neighbor_type, r.edge_relation, r.edge_weight or 1.0)
 
-        # Fetch tags (P2-17)
-        tag_result = await session.execute(select(DecisionTag).where(DecisionTag.decision_id.in_(neighbor_ids)))
-        tags_by_id: dict[UUID, list[str]] = defaultdict(list)
-        for t in tag_result.scalars().all():
-            tags_by_id[t.decision_id].append(t.tag)
-
-        return [
-            DecisionSummary(
-                id=d.id,
-                description=d.description,
-                confidence=d.confidence,
-                category=d.category,
-                stakes=d.stakes,
-                outcome=d.outcome or "pending",
-                pattern=d.pattern,
-                tags=tags_by_id.get(d.id, []),
-                created_at=d.created_at,
+        # Resolve decision neighbors
+        decision_ids = [r.neighbor_id for r in rows if r.neighbor_type == "decision"]
+        descriptions: dict[UUID, tuple[str, datetime]] = {}
+        if decision_ids:
+            dec_result = await session.execute(
+                select(Decision.id, Decision.description, Decision.created_at)
+                .where(Decision.id.in_(decision_ids))
             )
-            for d in decisions
-        ]
+            for d in dec_result.all():
+                descriptions[d.id] = (d.description, d.created_at)
+
+        # Build results
+        results = []
+        for r in rows:
+            ntype, rel, weight = edge_map[r.neighbor_id]
+            if ntype == "decision" and r.neighbor_id in descriptions:
+                desc, created = descriptions[r.neighbor_id]
+            else:
+                desc = f"[{ntype}] {r.neighbor_id}"
+                created = datetime.now(UTC)
+            results.append(NeighborResult(
+                id=r.neighbor_id,
+                node_type=ntype,
+                description=desc,
+                edge_relation=rel,
+                edge_weight=weight,
+                created_at=created,
+            ))
+
+        return results
 
     # ------------------------------------------------------------------
     # auto_link()
@@ -1146,6 +1188,9 @@ class Brain:
                 .values(
                     source_id=src,
                     target_id=tgt,
+                    source_type="decision",
+                    target_type="decision",
+                    agent_id=self.agent_id,
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,
@@ -1158,6 +1203,8 @@ class Brain:
                 GraphEdgeInfo(
                     source_id=src,
                     target_id=tgt,
+                    source_type="decision",
+                    target_type="decision",
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,

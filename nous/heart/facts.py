@@ -11,13 +11,14 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactSummary
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
-from nous.storage.models import Event, Fact
+from nous.storage.models import Event, Fact, GraphEdge
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,42 @@ class FactManager:
             data=data,
         )
         session.add(event)
+
+    async def _create_graph_edge(
+        self,
+        source_id: UUID,
+        target_id: UUID,
+        source_type: str,
+        target_type: str,
+        relation: str,
+        weight: float,
+        session: AsyncSession,
+    ) -> None:
+        """F022: Create a graph edge as side effect of fact operations.
+
+        Uses a nested savepoint so failures don't abort the outer transaction.
+        """
+        try:
+            async with session.begin_nested():
+                stmt = (
+                    pg_insert(GraphEdge)
+                    .values(
+                        source_id=source_id,
+                        target_id=target_id,
+                        source_type=source_type,
+                        target_type=target_type,
+                        agent_id=self.agent_id,
+                        relation=relation,
+                        weight=weight,
+                        auto_linked=True,
+                    )
+                    .on_conflict_do_nothing(
+                        index_elements=["source_id", "target_id", "relation"],
+                    )
+                )
+                await session.execute(stmt)
+        except Exception:
+            logger.debug("F022 graph edge creation failed for %s->%s", source_id, target_id)
 
     # ------------------------------------------------------------------
     # learn()
@@ -439,6 +476,11 @@ class FactManager:
         old_fact.active = False
         await session.flush()
 
+        # F022: Bridge — also create graph edge
+        await self._create_graph_edge(
+            new_detail.id, old_fact_id, "fact", "fact", "supersedes", 1.0, session
+        )
+
         await self._emit_event(
             session,
             "fact_superseded",
@@ -487,6 +529,11 @@ class FactManager:
         if new_fact_orm is not None:
             new_fact_orm.contradiction_of = fact_id
             await session.flush()
+
+        # F022: Bridge — also create graph edge
+        await self._create_graph_edge(
+            new_detail.id, fact_id, "fact", "fact", "contradicts", 1.0, session
+        )
 
         # Reduce confidence of old fact by 0.2 (min 0.0)
         old_confidence = old_fact.confidence or 1.0

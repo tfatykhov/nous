@@ -41,9 +41,11 @@ nous/
 │   │   ├── bridge.py           # Structure + function descriptions
 │   │   ├── calibration.py      # Brier scores, confidence tracking
 │   │   ├── embeddings.py       # pgvector embedding provider
+│   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── quality.py          # Decision quality scoring
-│   │   └── schemas.py          # Pydantic models
+│   │   ├── schemas.py          # Pydantic models
+│   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
 │   ├── heart/                  # Memory system organ
 │   │   ├── heart.py            # Core: learn, recall, episode lifecycle
 │   │   ├── episodes.py         # Episodic memory
@@ -70,10 +72,10 @@ nous/
 │       ├── tools.py            # Tool dispatcher + registration
 │       ├── builtin_tools.py    # bash, read_file, write_file
 │       └── web_tools.py        # web_search, web_fetch
-├── tests/                      # 500+ tests across 44 files
+├── tests/                      # 1250+ tests across 60 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)
-    ├── features/               # High-level feature specs (F001-F019)
+    ├── features/               # High-level feature specs (F001-F022)
     └── implementation/         # Build specs (001-014.1, all shipped)
 ```
 
@@ -99,6 +101,7 @@ nous/
 | 011.1 | Subtasks & Scheduling (F009) | #85 |
 | 011.2 | Subtask Result Delivery (F009) | — |
 | 014.1 | Context Quality Engine (F016+F017) | #122 |
+| F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
 
 ## How to Work
 
@@ -233,6 +236,16 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
+| `NOUS_GRAPH_RECALL_ENABLED` | `true` | Enable graph expansion in recall_deep |
+| `NOUS_GRAPH_RECALL_MAX_EXPAND` | `5` | Max seed results to expand |
+| `NOUS_GRAPH_RECALL_DECAY` | `0.7` | Score decay per graph hop |
+| `NOUS_GRAPH_RECALL_MAX_NEIGHBORS` | `3` | Max neighbors per seed |
+| `NOUS_CROSS_TYPE_LINKING_ENABLED` | `true` | Enable cross-type auto-linking |
+| `NOUS_CROSS_TYPE_THRESHOLD` | `0.80` | Cross-type similarity threshold |
+| `NOUS_CONTRADICTION_DETECTION` | `true` | Enable LLM contradiction detection |
+| `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20241022` | Model for contradiction classification |
+| `NOUS_SPREADING_ACTIVATION_ENABLED` | `auto` | Spreading activation (auto/true/false) |
+| `NOUS_SPREADING_ACTIVATION_DENSITY_THRESHOLD` | `3.0` | Density threshold for auto-enable |
 
 ### REST Endpoints
 

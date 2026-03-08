@@ -20,6 +20,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.brain.brain import Brain
+from nous.brain.graph_linker import GraphLinker
 from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
@@ -78,12 +79,14 @@ class EpisodeSummarizer:
         settings: Settings,
         bus: EventBus,
         http_client: httpx.AsyncClient | None = None,
+        graph_linker: GraphLinker | None = None,
     ):
         self._heart = heart
         self._brain = brain
         self._settings = settings
         self._bus = bus
         self._http = http_client
+        self._graph_linker = graph_linker
         bus.on("session_ended", self.handle)
 
     async def handle(self, event: Event) -> None:
@@ -127,6 +130,36 @@ class EpisodeSummarizer:
             ))
 
             logger.info("Episode %s summarized: %s", episode_id, summary.get("title", "?"))
+
+            # F022: Create deterministic graph edges for this episode
+            if self._graph_linker:
+                try:
+                    async with self._heart.db.session() as link_session:
+                        ep = await self._heart.get_episode(UUID(episode_id))
+                        decision_ids = ep.decision_ids if ep and hasattr(ep, "decision_ids") and ep.decision_ids else []
+
+                        # Get facts extracted from this episode
+                        from sqlalchemy import select as sa_select
+                        from nous.storage.models import Fact
+                        fact_result = await link_session.execute(
+                            sa_select(Fact.id).where(Fact.source_episode_id == UUID(episode_id))
+                        )
+                        fact_ids = [r[0] for r in fact_result.all()]
+
+                        if decision_ids or fact_ids:
+                            await self._graph_linker.link_episode_deterministic(
+                                episode_id=UUID(episode_id),
+                                decision_ids=decision_ids,
+                                fact_ids=fact_ids,
+                                session=link_session,
+                            )
+                            await link_session.commit()
+                            logger.debug(
+                                "F022: Linked episode %s to %d decisions, %d facts",
+                                episode_id, len(decision_ids), len(fact_ids),
+                            )
+                except Exception:
+                    logger.debug("F022 graph linking failed for episode %s", episode_id)
 
         except Exception:
             logger.exception("Failed to summarize episode %s", episode_id)

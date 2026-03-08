@@ -23,6 +23,7 @@
 |---------|------|--------|-------------|
 | F009 | [Async Subtasks](F009-async-subtasks.md) | ✅ Shipped | Background task queue — parallel execution, non-blocking chat, Postgres-backed workers, scheduled/recurring tasks |
 | F010 | [Memory Improvements](F010-memory-improvements.md) | ✅ Shipped | Episode summaries, clean decision descriptions, proactive fact learning, user-tagged episodes |
+| F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | ✅ Shipped | Polymorphic graph edges, cross-type linking, contradiction bridge, density-gated spreading activation |
 
 ### P0: Identity & Context
 | Feature | Name | Status | Description |
@@ -85,6 +86,7 @@ All shipped implementation specs with PR references:
 | 011.1 | Subtasks & Scheduling | ✅ Shipped | #85 — F009: subtask queue, worker pool, scheduling, time parser, 4 tools, 6 endpoints |
 | 011.2 | Subtask Result Delivery | ✅ Shipped | — subtask results auto-injected into parent session context, skip_episode for workers, delivered tracking |
 | 014.1 | Context Quality Engine (F016+F017) | ✅ Shipped | #122 — 4-tier pruning, relevance floor, staleness penalty, model-aware thresholds, usage tracking, pre-prune extraction |
+| 015 | Graph-Augmented Recall (F022) | ✅ Shipped | — polymorphic edges, 1-hop expansion, cross-type linking, contradiction bridge, spreading activation |
 
 ### Phase 2 — Quality (next to build)
 
@@ -113,17 +115,16 @@ All shipped implementation specs with PR references:
 | F015 | Growth Engine | Administrative self-improvement (Papert's Principle) |
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
 | F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | SmartCompress (ingestion-time statistical compression) + ReversibleCache (CCR-style cache for web_search/web_fetch) |
-| F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | Planned | Wire existing graph_edges into recall pipeline, cross-type edges, contradiction detection, spreading activation |
 | F021 | Dashboard | Visual growth tracking and cognitive state |
 
 ## Stats
 
 - **Total source:** ~34,000 lines of Python
-- **Test count:** 935+ tests across 57 test files
+- **Test count:** 1250+ tests across 60 test files
 - **Database:** 18 tables across 2 schemas (brain, heart)
 - **Tools:** 14 agent tools (record_decision, recall_deep, learn_fact, create_censor, store_identity, complete_initiation, spawn_task, schedule_task, list_tasks, cancel_task, bash, read_file, write_file, web_search, web_fetch)
 - **Endpoints:** 23 REST endpoints + MCP server + Telegram bot
-- **Feature specs:** 16 feature docs + 17 research notes
+- **Feature specs:** 17 feature docs + 17 research notes
 - **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors
 
 ## Research Notes
