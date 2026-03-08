@@ -45,7 +45,7 @@ class MockCognitiveLayer:
             context_token_estimate=100,
         )
 
-    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None):
+    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 
@@ -353,7 +353,7 @@ async def test_run_turn_safety_net(mock_cognitive, mock_settings, caplog):
     heart = MockHeart()
     r = AgentRunner(mock_cognitive, brain, heart, mock_settings)
 
-    # Set frame to "decision" (in _DECISION_FRAMES)
+    # Set frame to "decision" (in _REQUIRED_DECISION_FRAMES)
     mock_cognitive.preset_context = TurnContext(
         system_prompt="You are Nous.",
         frame=FrameSelection(
@@ -375,8 +375,44 @@ async def test_run_turn_safety_net(mock_cognitive, mock_settings, caplog):
         with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
             await r.run_turn(session_id, "Should I use caching?")
 
-        # Safety net should have logged a warning
-        assert any("Safety net" in record.message for record in caplog.records)
+        # Safety net should have logged a WARNING (decision frame is required)
+        safety_records = [r for r in caplog.records if "Safety net" in r.message]
+        assert safety_records
+        assert safety_records[0].levelno == logging.WARNING
+    finally:
+        await r.close()
+
+
+async def test_run_turn_safety_net_task_frame_debug(mock_cognitive, mock_settings, caplog):
+    """Missed record_decision in task frame -> DEBUG (not WARNING)."""
+    brain = MockBrain()
+    heart = MockHeart()
+    r = AgentRunner(mock_cognitive, brain, heart, mock_settings)
+
+    mock_cognitive.preset_context = TurnContext(
+        system_prompt="You are Nous.",
+        frame=FrameSelection(
+            frame_id="task",
+            frame_name="Task",
+            confidence=0.95,
+            match_method="pattern",
+        ),
+        decision_id=None,
+        active_censors=[],
+        context_token_estimate=100,
+    )
+
+    r._tool_loop = AsyncMock(return_value=("Done.", [], {"input_tokens": 100, "output_tokens": 50}))
+
+    try:
+        session_id = f"test-safety-task-{uuid.uuid4().hex[:8]}"
+        with caplog.at_level(logging.DEBUG, logger="nous.api.runner"):
+            await r.run_turn(session_id, "Run the migration")
+
+        safety_records = [r for r in caplog.records if "Safety net" in r.message]
+        assert safety_records
+        # Task frame should log at DEBUG, not WARNING
+        assert safety_records[0].levelno == logging.DEBUG
     finally:
         await r.close()
 

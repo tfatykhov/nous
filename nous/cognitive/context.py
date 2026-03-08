@@ -147,6 +147,18 @@ class ContextEngine:
         if _conv_msgs:
             _conv_msgs = _conv_msgs[-budget.conversation_window :]
 
+        # Tier 0: Current date/time — always injected
+        now_utc = datetime.now(timezone.utc)
+        datetime_text = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
+        sections.append(
+            ContextSection(
+                priority=0,
+                label="Current Date/Time",
+                content=datetime_text,
+                token_estimate=self._estimate_tokens(datetime_text),
+            )
+        )
+
         # 1. Identity (always included)
         # 008: Use identity_override from DB if available, fall back to static
         _effective_identity = identity_override or self._identity_prompt
@@ -180,6 +192,24 @@ class ContextEngine:
                     token_estimate=self._estimate_tokens(anti_halluc),
                 )
             )
+
+        # F020: Cache availability hints
+        if session_id and session:
+            try:
+                from nous.api.tool_cache import get_cache_hints
+                cache_hints = await get_cache_hints(session, session_id)
+                if cache_hints:
+                    hint_text = "Compressed results available:\n" + "\n".join(cache_hints)
+                    sections.append(
+                        ContextSection(
+                            priority=2,
+                            label="Cached Results",
+                            content=hint_text,
+                            token_estimate=self._estimate_tokens(hint_text),
+                        )
+                    )
+            except Exception:
+                logger.debug("Failed to load cache hints", exc_info=True)
 
         # 1b. User Profile (Tier 1 — always loaded, no semantic search)
         # Dedup against identity prompt to avoid repeating the same info

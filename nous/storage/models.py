@@ -611,3 +611,27 @@ class Schedule(Base):
     metadata_: Mapped[dict] = mapped_column(
         "metadata", JSONB, nullable=False, server_default="{}"
     )
+
+
+class ToolCache(Base):
+    """Cached original content of compressed tool results (F020)."""
+
+    __tablename__ = "tool_cache"
+    __table_args__ = (
+        UniqueConstraint("session_id", "hash_key", name="uq_tool_cache_session_hash"),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    hash_key: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_input: Mapped[dict | None] = mapped_column(JSONB)
+    original_content: Mapped[str] = mapped_column(Text, nullable=False)
+    compressed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    item_count: Mapped[int | None] = mapped_column(Integer)

@@ -161,6 +161,28 @@ async def test_build_decision_budget(context_engine, session):
 
 
 # ---------------------------------------------------------------------------
+# 2b. test_build_includes_datetime (Tier 0)
+# ---------------------------------------------------------------------------
+
+
+async def test_build_includes_datetime(context_engine, brain, heart, session):
+    """Current date/time section always present at priority 0."""
+    frame = _frame_selection()
+    sid = f"test-ctx-datetime-{uuid.uuid4().hex[:8]}"
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    result = await context_engine.build("nous-default", sid, "hello", frame, session=session)
+
+    datetime_sections = [s for s in result.sections if s.label == "Current Date/Time"]
+    assert len(datetime_sections) == 1
+    dt_section = datetime_sections[0]
+    assert dt_section.priority == 0
+    assert "UTC" in dt_section.content
+    # Should be the first section in the assembled prompt
+    assert result.system_prompt.startswith("## Current Date/Time")
+
+
+# ---------------------------------------------------------------------------
 # 3. test_build_includes_identity
 # ---------------------------------------------------------------------------
 

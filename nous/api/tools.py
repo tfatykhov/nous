@@ -65,6 +65,8 @@ class ToolDispatcher:
         try:
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
+            if session_id is not None and name == "cache_retrieve":
+                args = {**args, "session_id": session_id}
             result = await handler(**args)  # P0-6: **kwargs unpacking
             # P1-1: Extract text from MCP-format response
             return result["content"][0]["text"], False
@@ -615,6 +617,60 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart) 
     dispatcher.register("recall_deep", closures["recall_deep"], _RECALL_DEEP_SCHEMA)
     dispatcher.register("create_censor", closures["create_censor"], _CREATE_CENSOR_SCHEMA)
     dispatcher.register("recall_recent", closures["recall_recent"], _RECALL_RECENT_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# F020: cache_retrieve tool
+# ---------------------------------------------------------------------------
+
+_CACHE_RETRIEVE_SCHEMA = {
+    "description": "Retrieve original content from a previously compressed search or fetch result. Use when you see a [SmartCompressed] marker and need more detail.",
+    "type": "object",
+    "properties": {
+        "hash_key": {
+            "type": "string",
+            "description": "The hash key from the [SmartCompressed] marker (e.g., 'abc123de01234567')",
+        },
+        "query": {
+            "type": "string",
+            "description": "Optional: return only items matching this query instead of everything.",
+        },
+    },
+    "required": ["hash_key"],
+}
+
+CACHE_RETRIEVE_TOOL_DEF = {
+    "name": "cache_retrieve",
+    "description": _CACHE_RETRIEVE_SCHEMA["description"],
+    "input_schema": _CACHE_RETRIEVE_SCHEMA,
+}
+
+
+def register_cache_retrieve_tool(
+    dispatcher: ToolDispatcher,
+    db_session_factory,
+) -> None:
+    """Register the cache_retrieve tool (F020)."""
+    from nous.api.tool_cache import retrieve_cached_result
+
+    async def _cache_retrieve(
+        hash_key: str, query: str | None = None, session_id: str | None = None, **kwargs,
+    ) -> dict:
+        if not session_id:
+            return {"content": [{"type": "text", "text": "Error: no active session for cache lookup."}]}
+        try:
+            async with db_session_factory() as db_sess:
+                result = await retrieve_cached_result(db_sess, session_id, hash_key, query)
+                if result is None:
+                    text = f"No cached result found for hash key '{hash_key}'. It may have expired or the key may be incorrect."
+                else:
+                    text = result
+                return {"content": [{"type": "text", "text": text}]}
+        except Exception as e:
+            logger.exception("cache_retrieve error")
+            return {"content": [{"type": "text", "text": f"Error retrieving cached result: {e}"}]}
+
+    dispatcher.register("cache_retrieve", _cache_retrieve, _CACHE_RETRIEVE_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

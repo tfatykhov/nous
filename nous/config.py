@@ -134,6 +134,20 @@ class Settings(BaseSettings):
         default=10, validation_alias="NOUS_KEEPALIVE_INTERVAL"
     )  # Seconds between keepalive events during tool execution
 
+    # SmartCompress (F020 Phase 1)
+    smart_compress_enabled: bool = Field(
+        default=True, description="Enable ingestion-time tool output compression"
+    )
+    smart_compress_min_chars: int = Field(
+        default=500, description="Below this, never compress"
+    )
+    smart_compress_max_k: int = Field(
+        default=50, description="Max items to keep per compressed result"
+    )
+    smart_compress_elbow_threshold: float = Field(
+        default=0.3, description="Score cliff threshold for adaptive K"
+    )
+
     # Compaction: Layer 1 (Tool Pruning)
     tool_pruning_enabled: bool = Field(
         default=True, validation_alias="NOUS_TOOL_PRUNING_ENABLED"
