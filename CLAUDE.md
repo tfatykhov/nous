@@ -99,6 +99,7 @@ nous/
 | 011.1 | Subtasks & Scheduling (F009) | #85 |
 | 011.2 | Subtask Result Delivery (F009) | — |
 | 014.1 | Context Quality Engine (F016+F017) | #122 |
+| F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
 
 ## How to Work
 
@@ -233,6 +234,16 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
+| `NOUS_GRAPH_RECALL_ENABLED` | `true` | Enable graph expansion in recall_deep |
+| `NOUS_GRAPH_RECALL_MAX_EXPAND` | `5` | Max seed results to expand |
+| `NOUS_GRAPH_RECALL_DECAY` | `0.7` | Score decay per graph hop |
+| `NOUS_GRAPH_RECALL_MAX_NEIGHBORS` | `3` | Max neighbors per seed |
+| `NOUS_CROSS_TYPE_LINKING_ENABLED` | `true` | Enable cross-type auto-linking |
+| `NOUS_CROSS_TYPE_THRESHOLD` | `0.80` | Cross-type similarity threshold |
+| `NOUS_CONTRADICTION_DETECTION` | `true` | Enable LLM contradiction detection |
+| `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20241022` | Model for contradiction classification |
+| `NOUS_SPREADING_ACTIVATION_ENABLED` | `auto` | Spreading activation (auto/true/false) |
+| `NOUS_SPREADING_ACTIVATION_DENSITY_THRESHOLD` | `3.0` | Density threshold for auto-enable |
 
 ### REST Endpoints
 
