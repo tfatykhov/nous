@@ -104,9 +104,14 @@ async def create_components(settings: Settings) -> dict:
 
         try:
             from nous.handlers.episode_summarizer import EpisodeSummarizer
+            from nous.brain.graph_linker import GraphLinker
 
             if settings.episode_summary_enabled:
-                EpisodeSummarizer(heart, brain, settings, bus, handler_http)
+                graph_linker = GraphLinker(
+                    db=database, embedder=embedding_provider,
+                    settings=settings, agent_id=settings.agent_id,
+                )
+                EpisodeSummarizer(heart, brain, settings, bus, handler_http, graph_linker=graph_linker)
         except ImportError:
             logger.debug("EpisodeSummarizer not available yet")
 
