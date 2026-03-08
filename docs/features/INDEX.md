@@ -114,6 +114,7 @@ All shipped implementation specs with PR references:
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
 | F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | SmartCompress (ingestion-time statistical compression) + ReversibleCache (CCR-style cache for web_search/web_fetch) |
 | F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | Planned | Wire existing graph_edges into recall pipeline, cross-type edges, contradiction detection, spreading activation |
+| F023 | [Memory Admission Control](F023-memory-admission-control.md) | Planned | A-MAC-inspired 5-factor scoring gate on fact admission — grounding, novelty, type prior, recency, utility |
 | F021 | Dashboard | Visual growth tracking and cognitive state |
 
 ## Stats
