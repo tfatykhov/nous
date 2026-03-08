@@ -41,9 +41,11 @@ nous/
 │   │   ├── bridge.py           # Structure + function descriptions
 │   │   ├── calibration.py      # Brier scores, confidence tracking
 │   │   ├── embeddings.py       # pgvector embedding provider
+│   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── quality.py          # Decision quality scoring
-│   │   └── schemas.py          # Pydantic models
+│   │   ├── schemas.py          # Pydantic models
+│   │   └── spreading_activation.py  # Density-gated multi-hop graph traversal
 │   ├── heart/                  # Memory system organ
 │   │   ├── heart.py            # Core: learn, recall, episode lifecycle
 │   │   ├── episodes.py         # Episodic memory
@@ -70,10 +72,10 @@ nous/
 │       ├── tools.py            # Tool dispatcher + registration
 │       ├── builtin_tools.py    # bash, read_file, write_file
 │       └── web_tools.py        # web_search, web_fetch
-├── tests/                      # 500+ tests across 44 files
+├── tests/                      # 1250+ tests across 60 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)
-    ├── features/               # High-level feature specs (F001-F019)
+    ├── features/               # High-level feature specs (F001-F022)
     └── implementation/         # Build specs (001-014.1, all shipped)
 ```
 
