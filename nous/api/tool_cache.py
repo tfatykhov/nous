@@ -54,6 +54,11 @@ async def cache_compressed_result(
     await session.execute(stmt)
     await session.commit()
 
+    logger.info(
+        "Cached %s result [%s] for session %s (%d chars, %s items)",
+        tool_name, hash_key, session_id[:8], len(original_content),
+        item_count or "n/a",
+    )
     return hash_key
 
 
@@ -75,12 +80,22 @@ async def retrieve_cached_result(
     entry = result.scalar_one_or_none()
 
     if not entry:
+        logger.info("Cache miss [%s] for session %s", hash_key, session_id[:8])
         return None
 
     content = entry.original_content
 
     if query:
         content = _keyword_filter(content, query)
+        logger.info(
+            "Cache hit [%s] %s with filter %r → %d chars",
+            hash_key, entry.tool_name, query, len(content),
+        )
+    else:
+        logger.info(
+            "Cache hit [%s] %s → %d chars (full content)",
+            hash_key, entry.tool_name, len(content),
+        )
 
     return content
 
@@ -164,4 +179,7 @@ async def cleanup_session_cache(session: AsyncSession, session_id: str) -> int:
     stmt = delete(ToolCache).where(ToolCache.session_id == session_id)
     result = await session.execute(stmt)
     await session.commit()
-    return result.rowcount or 0
+    count = result.rowcount or 0
+    if count:
+        logger.info("Cleaned up %d cache entries for session %s", count, session_id[:8])
+    return count

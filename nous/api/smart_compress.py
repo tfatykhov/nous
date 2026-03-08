@@ -316,6 +316,7 @@ async def smart_compress(
     if len(result_text) < settings.smart_compress_min_chars:
         return passthrough
     if not is_crushable(result_text, min_chars=settings.smart_compress_min_chars):
+        logger.info("SmartCompress skip %s: not crushable (%d chars)", tool_name, len(result_text))
         return passthrough
 
     content_type = classify_content(result_text, min_chars=settings.smart_compress_min_chars)
@@ -354,10 +355,22 @@ async def smart_compress(
     if compressed_text == result_text:
         return passthrough
 
+    original_len = len(result_text)
+    compressed_len = len(compressed_text)
+    ratio = (1 - compressed_len / original_len) * 100 if original_len else 0
+    logger.info(
+        "SmartCompress %s [%s]: %d→%d chars (%.0f%% reduction, %s items)",
+        tool_name, content_type.value, original_len, compressed_len, ratio,
+        item_count or "n/a",
+    )
+
     from nous.api.tool_cache import NON_REFETCHABLE_TOOLS
+    cacheable = tool_name in NON_REFETCHABLE_TOOLS
+    if cacheable:
+        logger.info("SmartCompress %s: original queued for cache (non-refetchable)", tool_name)
     return SmartCompressResult(
         text=compressed_text,
         was_compressed=True,
-        original_text=result_text if tool_name in NON_REFETCHABLE_TOOLS else None,
+        original_text=result_text if cacheable else None,
         item_count=item_count,
     )
