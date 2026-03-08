@@ -94,6 +94,8 @@ class TaskScheduler:
                     priority="normal",
                     timeout=schedule.timeout_seconds,
                     notify=schedule.notify,
+                    model=schedule.model,
+                    frame_type=schedule.frame_type,
                     metadata={"schedule_id": schedule.id.hex},
                 )
 

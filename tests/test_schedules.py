@@ -185,6 +185,46 @@ class TestScheduleManager:
         assert updated.fire_count == 1
         assert updated.next_fire_at > now
 
+    async def test_schedule_notify_defaults_false(self, schedule_mgr: ScheduleManager):
+        from datetime import UTC, datetime, timedelta
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        schedule = await schedule_mgr.create(
+            task="Check status",
+            schedule_type="once",
+            fire_at=fire_at,
+        )
+        assert schedule.notify is False
+
+    async def test_create_schedule_with_model(self, schedule_mgr: ScheduleManager):
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        schedule = await schedule_mgr.create(
+            task="Research topic",
+            schedule_type="once",
+            fire_at=fire_at,
+            model="claude-haiku-3-5-20241022",
+        )
+        assert schedule.model == "claude-haiku-3-5-20241022"
+
+    async def test_create_schedule_with_frame_type(self, schedule_mgr: ScheduleManager):
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        schedule = await schedule_mgr.create(
+            task="Research topic",
+            schedule_type="once",
+            fire_at=fire_at,
+            frame_type="research",
+        )
+        assert schedule.frame_type == "research"
+
+    async def test_schedule_model_defaults_none(self, schedule_mgr: ScheduleManager):
+        fire_at = datetime.now(UTC) + timedelta(hours=1)
+        schedule = await schedule_mgr.create(
+            task="Check status",
+            schedule_type="once",
+            fire_at=fire_at,
+        )
+        assert schedule.model is None
+        assert schedule.frame_type is None
+
 
 # ---------------------------------------------------------------------------
 # TaskScheduler tests
@@ -311,3 +351,37 @@ class TestTaskScheduler:
 
         await scheduler.stop()
         assert scheduler._task is None
+
+
+class TestSchedulerModelPassthrough:
+    """Verify scheduler passes model/frame_type when creating subtasks."""
+
+    async def test_scheduler_passes_model_and_frame_type(self):
+        import uuid
+        from unittest.mock import AsyncMock, MagicMock
+
+        settings = Settings()
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.create = AsyncMock()
+
+        mock_schedule = MagicMock()
+        mock_schedule.id = uuid.uuid4()
+        mock_schedule.task = "Research AI papers"
+        mock_schedule.schedule_type = "once"
+        mock_schedule.timeout_seconds = 120
+        mock_schedule.notify = False
+        mock_schedule.created_by_session = "session-123"
+        mock_schedule.model = "claude-haiku-3-5-20241022"
+        mock_schedule.frame_type = "research"
+
+        mock_heart.schedules = AsyncMock()
+        mock_heart.schedules.get_due = AsyncMock(return_value=[mock_schedule])
+        mock_heart.schedules.deactivate = AsyncMock()
+
+        scheduler = TaskScheduler(heart=mock_heart, settings=settings)
+        await scheduler._fire_due_tasks()
+
+        create_kwargs = mock_heart.subtasks.create.call_args.kwargs
+        assert create_kwargs["model"] == "claude-haiku-3-5-20241022"
+        assert create_kwargs["frame_type"] == "research"
