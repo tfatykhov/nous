@@ -51,6 +51,11 @@ class MonitorEngine:
         self._settings = settings
         # P2-4: Track censors created per session to enforce cap
         self._session_censor_counts: dict[str, int] = {}
+        # F012: Track error→recovery pairs for procedure learning
+        self._error_recovery_pairs: dict[str, list[dict]] = {}
+        self._last_errors: dict[str, list[dict]] = {}
+        self._session_procedure_counts: dict[str, int] = {}
+        self._procedure_learner = None  # Set externally if F012 enabled
 
     async def assess(
         self,
@@ -168,6 +173,50 @@ class MonitorEngine:
 
             self._session_censor_counts[session_id] = session_count
 
+        # F012: Track error→recovery pairs for procedure learning
+        has_tool_errors = any(tr.error for tr in turn_result.tool_results)
+        if has_tool_errors:
+            # Record pending errors for this session
+            for tr in turn_result.tool_results:
+                if tr.error and not self._is_transient_error(tr.error):
+                    if session_id not in self._last_errors:
+                        self._last_errors[session_id] = []
+                    self._last_errors[session_id].append({
+                        "tool": tr.tool_name,
+                        "error": tr.error[:200],
+                    })
+        elif self._last_errors.get(session_id):
+            # Successful turn after errors = recovery
+            recovery_tools = [
+                tr.tool_name for tr in turn_result.tool_results if not tr.error
+            ]
+            if recovery_tools:
+                pending = self._last_errors.pop(session_id, [])
+                if session_id not in self._error_recovery_pairs:
+                    self._error_recovery_pairs[session_id] = []
+                for err_info in pending:
+                    self._error_recovery_pairs[session_id].append({
+                        "error": err_info,
+                        "recovery": recovery_tools,
+                        "context": turn_result.response_text[:200],
+                    })
+
+                # Check if trigger count reached
+                pairs = self._error_recovery_pairs[session_id]
+                trigger = getattr(self._settings, "procedure_monitor_trigger_count", 3)
+                session_proc_count = self._session_procedure_counts.get(session_id, 0)
+                max_per_session = getattr(self._settings, "procedure_max_per_session", 1)
+
+                if (
+                    len(pairs) >= trigger
+                    and session_proc_count < max_per_session
+                    and self._procedure_learner is not None
+                ):
+                    try:
+                        await self._try_create_recovery_procedure(session_id, pairs)
+                    except Exception:
+                        logger.warning("Recovery procedure creation failed")
+
         # 2. Record success thought if deliberation active and no errors
         if assessment.decision_id and turn_result.error is None:
             has_tool_errors = any(tr.error for tr in turn_result.tool_results)
@@ -195,6 +244,48 @@ class MonitorEngine:
         """
         error_lower = error.lower()
         return any(pattern in error_lower for pattern in _TRANSIENT_PATTERNS)
+
+    async def _try_create_recovery_procedure(
+        self, session_id: str, pairs: list[dict]
+    ) -> None:
+        """F012: Create a recovery procedure from error→recovery pairs."""
+        from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT
+
+        error_summary = "; ".join(
+            f"{p['error']['tool']}:{p['error']['error'][:50]}" for p in pairs[:5]
+        )
+        recovery_summary = "; ".join(
+            f"{','.join(p['recovery'])}" for p in pairs[:5]
+        )
+
+        result = await self._procedure_learner._call_llm(
+            _MONITOR_RECOVERY_PROMPT.format(
+                error_pattern=error_summary,
+                recovery_actions=recovery_summary,
+                context=pairs[-1].get("context", ""),
+            )
+        )
+        if result:
+            stored = await self._procedure_learner._is_duplicate(result)
+            if not stored:
+                from nous.heart.schemas import ProcedureInput
+                tags = result.get("tags", [])
+                tags.append("auto:monitor_recovery")
+                proc_input = ProcedureInput(
+                    name=result.get("name", "Recovery procedure"),
+                    domain=result.get("domain"),
+                    description=result.get("description"),
+                    goals=result.get("goals", []),
+                    core_patterns=result.get("core_patterns", []),
+                    core_tools=result.get("core_tools", []),
+                    core_concepts=result.get("core_concepts", []),
+                    implementation_notes=result.get("implementation_notes", []),
+                    tags=tags,
+                )
+                await self._procedure_learner._heart.store_procedure(proc_input)
+                count = self._session_procedure_counts.get(session_id, 0)
+                self._session_procedure_counts[session_id] = count + 1
+                logger.info("Created recovery procedure from %d error→recovery pairs", len(pairs))
 
     def _error_to_censor_text(self, tool_result: ToolResult) -> str:
         """Convert a tool error to a censor trigger pattern.

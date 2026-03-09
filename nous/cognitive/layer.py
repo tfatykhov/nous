@@ -543,6 +543,21 @@ class CognitiveLayer:
                         overlap_score=overlap,
                     )
 
+        # F012: Procedure reinforcement — record outcomes for procedures in context
+        if turn_context.recalled_procedure_ids:
+            has_any_error = turn_result.error is not None or any(
+                tr.error for tr in turn_result.tool_results
+            )
+            proc_outcome = "failure" if has_any_error else "success"
+            for proc_id_str in turn_context.recalled_procedure_ids:
+                try:
+                    from uuid import UUID as _UUID
+                    pid = _UUID(proc_id_str)
+                    await self._heart.activate_procedure(pid, session=session)
+                    await self._heart.record_procedure_outcome(pid, proc_outcome, session=session)
+                except Exception:
+                    logger.debug("Failed to reinforce procedure %s", proc_id_str)
+
         # 5. Update session metadata for significance tracking (005.5)
         meta = self._session_metadata.setdefault(session_id, SessionMetadata())
         meta.turn_count += 1
