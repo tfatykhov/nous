@@ -116,8 +116,14 @@ class ContextBudget(BaseModel):
     conversation_window: int = 5  # D7: Number of turns for dedup window
 
     @classmethod
-    def for_frame(cls, frame_id: str) -> ContextBudget:
-        """Return frame-adaptive budget with per-frame conversation windows (D7)."""
+    def for_frame(cls, frame_id: str, overrides: dict[str, int] | None = None) -> ContextBudget:
+        """Return frame-adaptive budget with per-frame conversation windows (D7).
+
+        Args:
+            frame_id: The cognitive frame type.
+            overrides: Optional dict of field overrides applied on top of
+                per-frame defaults (e.g. from Settings.context_budget_overrides).
+        """
         budgets = {
             "conversation": cls(total=3000, decisions=500, facts=500, procedures=0, episodes=0, conversation_window=3),
             "question": cls(total=6000, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=5),
@@ -126,7 +132,10 @@ class ContextBudget(BaseModel):
             "creative": cls(total=6000, censors=100, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=4),
             "debug": cls(total=10000, decisions=1500, facts=1000, procedures=2500, episodes=1000, conversation_window=6),
         }
-        return budgets.get(frame_id, cls())
+        budget = budgets.get(frame_id, cls())
+        if overrides:
+            budget.apply_overrides(overrides)
+        return budget
 
     def apply_overrides(self, overrides: dict[str, int]) -> None:
         """Apply budget overrides with REPLACE semantics (F6).

@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 
+    # Context budget overrides — JSON dict applied on top of per-frame defaults
+    # e.g. NOUS_CONTEXT_BUDGET_OVERRIDES='{"total": 12000, "decisions": 3000}'
+    context_budget_overrides: dict[str, int] = Field(default_factory=dict)
+
     # F017: Staleness penalty
     staleness_penalty_enabled: bool = True
     staleness_half_life_days: int = 14

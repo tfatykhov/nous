@@ -114,7 +114,10 @@ class ContextEngine:
         Pipeline order per memory type (F10):
         retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate
         """
-        budget = ContextBudget.for_frame(frame.frame_id)
+        budget = ContextBudget.for_frame(
+            frame.frame_id,
+            overrides=self._settings.context_budget_overrides or None,
+        )
         sections: list[ContextSection] = []
         _active_censor_names: list[str] = []
         recalled_ids: dict[str, list[str]] = {
