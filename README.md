@@ -144,7 +144,7 @@ graph TB
 
     subgraph "Medium (Knowledge)"
         FACTS[Facts<br/>Learned Knowledge]
-        KL["Procedures / K-Lines<br/>Context Bundles<br/><i>F012 — planned</i>"]
+        KL["Procedures / K-Lines<br/>Context Bundles<br/><i>F012 — shipped</i>"]
         EP[Episodes<br/>Multi-Session Projects]
     end
 
@@ -337,6 +337,7 @@ All core architecture is implemented and running:
 | Episode Summary Quality (008.3-008.4) | ✅ Shipped | Backfill + enhanced prompt, candidate_facts, smart truncation, decision context |
 | Context Pruning (F016) | ✅ Shipped | 4-tier tool pruning, anti-hallucination prompt, model-aware compaction, content-type decay profiles, pre-prune fact extraction |
 | Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
+| K-Line Learning (F012) | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
 **Stats:** ~44,000 lines of Python (21K production + 23K tests) · 1,200+ tests · 23 Postgres tables · Docker deployment
