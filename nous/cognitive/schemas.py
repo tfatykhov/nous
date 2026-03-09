@@ -101,8 +101,15 @@ class FrameSelection(BaseModel):
 
 
 class ContextBudget(BaseModel):
-    """Token allocation for context assembly."""
+    """Token and turn budgets for context assembly.
 
+    Token budgets (total, identity, … episodes): max estimated tokens per section.
+    Turn budget (conversation_window): number of recent user turns checked for
+    dedup so the context engine doesn't inject memories already visible in
+    the conversation.
+    """
+
+    # -- Token budgets (estimated tokens per section) --
     total: int = 8000
     identity: int = 500
     user_profile: int = 200  # Tier 1: preference/person/rule facts (always loaded)
@@ -113,7 +120,8 @@ class ContextBudget(BaseModel):
     facts: int = 1500
     procedures: int = 1500
     episodes: int = 1000
-    conversation_window: int = 5  # D7: Number of turns for dedup window
+    # -- Turn budget (not tokens) --
+    conversation_window: int = 5  # Recent user turns used for dedup
 
     @classmethod
     def for_frame(cls, frame_id: str, overrides: dict[str, int] | None = None) -> ContextBudget:
