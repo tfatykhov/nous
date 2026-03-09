@@ -234,6 +234,18 @@ class Settings(BaseSettings):
     spreading_activation_beta: float = 0.3
     spreading_activation_gamma: float = 0.2
 
+    # F012: Procedure Learning (K-Line auto-creation)
+    procedure_learning_enabled: bool = True
+    procedure_cluster_min_size: int = 3
+    procedure_similarity_threshold: float = 0.85
+    procedure_episode_similarity: float = 0.80
+    procedure_success_rate_min: float = 0.70
+    procedure_monitor_trigger_count: int = 3
+    procedure_max_per_sleep: int = 3
+    procedure_max_per_session: int = 1
+    procedure_staleness_days: int = 30
+    procedure_weakness_threshold: float = 0.30
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',
