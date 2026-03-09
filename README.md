@@ -289,10 +289,22 @@ Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for th
 | `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
 | `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
 | `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
+| `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame context budget defaults (see example below) |
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
+
+**Context Budget Overrides Example:**
+
+Each cognitive frame (task, question, decision, etc.) has built-in token budgets for how much context to assemble. Use `NOUS_CONTEXT_BUDGET_OVERRIDES` to tune these globally:
+
+```bash
+# Double the total budget and increase decision memory allocation
+NOUS_CONTEXT_BUDGET_OVERRIDES='{"total": 16000, "decisions": 4000, "facts": 3000}'
+```
+
+Available budget keys: `total`, `identity`, `user_profile`, `censors`, `frame`, `working_memory`, `decisions`, `facts`, `procedures`, `episodes`, `conversation_window`. Overrides apply on top of each frame's defaults — unspecified keys keep their per-frame values.
 
 ## Status
 
