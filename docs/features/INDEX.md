@@ -94,7 +94,7 @@ All shipped implementation specs with PR references:
 |---------|------|----------|-------------|
 | #38 | _is_informational() Phase 2 | P1 | Partially addressed by PR #76 (delete instead of abandon). Further tuning possible. |
 | #52 | Topic-Aware Recall v2 | P1 | Spike merged (#75). Full 008.2 spec exists if spike proves insufficient. |
-| F011 | [Skill Discovery](F011-skill-discovery.md) | P1 | Index workspace skills as procedures, auto-surface in RECALL based on task/frame. |
+| F011 | [Skill Discovery](F011-skill-discovery.md) | P1 | `learn_skill` tool acquires skills from URL/marketplace/local — registered as procedures, auto-surface in RECALL. No filesystem scanner. |
 | 010.1 | Health Dashboard | P1 | Enrich GET /status with episode outcome breakdown, fact health, decision stats. |
 
 ### Phase 3 — Growth
