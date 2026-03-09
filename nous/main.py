@@ -138,13 +138,33 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("SessionTimeoutMonitor not available yet")
 
+        sleep_handler = None
         try:
             from nous.handlers.sleep_handler import SleepHandler
 
             if settings.sleep_enabled:
-                SleepHandler(brain, heart, settings, bus, handler_http)
+                sleep_handler = SleepHandler(brain, heart, settings, bus, handler_http)
         except ImportError:
             logger.debug("SleepHandler not available yet")
+
+        # F012: Wire procedure learner into sleep handler + monitor
+        procedure_learner = None
+        if settings.procedure_learning_enabled:
+            try:
+                from nous.handlers.procedure_learner import ProcedureLearner
+
+                procedure_learner = ProcedureLearner(
+                    brain=brain, heart=heart, embeddings=embedding_provider,
+                    settings=settings, http_client=handler_http,
+                )
+                if sleep_handler is not None:
+                    sleep_handler._procedure_learner = procedure_learner
+                # Wire into monitor for pathway 3 (real-time recovery)
+                if cognitive._monitor is not None:
+                    cognitive._monitor._procedure_learner = procedure_learner
+                logger.info("F012: ProcedureLearner wired into sleep handler + monitor")
+            except ImportError:
+                logger.debug("ProcedureLearner not available yet")
 
         try:
             from nous.handlers.decision_reviewer import DecisionReviewer
