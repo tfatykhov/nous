@@ -6,7 +6,7 @@
 
 **A cognitive architecture for AI agents, grounded in Minsky's Society of Mind.**
 
-Nous is a framework for building AI agents that think, learn, and grow — not just respond. It uses [Cognition Engines](https://github.com/tfatykhov/cognition-agent-decisions) as its decision memory core, and implements Marvin Minsky's Society of Mind principles as first-class architectural components.
+Nous is a framework for building AI agents that think, learn, and grow — not just respond. It applies the decision intelligence principles proven by [Cognition Engines](https://github.com/tfatykhov/cognition-agent-decisions), and implements Marvin Minsky's Society of Mind principles as first-class architectural components.
 
 > *"To explain the mind, we have to show how minds are built from mindless stuff."* — Marvin Minsky
 
@@ -29,7 +29,7 @@ Nous is different. It gives agents:
 graph TB
     subgraph "Nous Agent"
         A[Stimulus] --> B[Frame Selection]
-        B --> C[K-Line Activation]
+        B --> C[Memory Recall]
         C --> D[Pre-Action Protocol]
         D --> E[Deliberation]
         E --> F[Action]
@@ -56,18 +56,18 @@ graph TB
 
 ### From Minsky
 
-| Concept | Chapter | Nous Implementation |
-|---------|---------|----------------------|
-| K-Lines | Ch 8 | Context bundles with level-bands (upper fringe / core / lower fringe) |
-| Censors | Ch 9 | Guardrails that block actions, not modify them |
-| Papert's Principle | Ch 10 | Administrative growth through detours, not replacements |
-| Frames | Ch 25 | One active frame at a time; explicit frame-switching |
-| B-Brains | Ch 6 | Self-monitoring layer that watches the agent think |
-| Parallel Bundles | Ch 18 | Multiple independent reasons > one logical chain |
-| Polynemes | Ch 19 | Tags as cross-agency activation signals |
-| Nemes | Ch 20 | Micro-features that constrain search (bridge-definitions) |
-| Pronomes | Ch 21 | Separation of assignment (what) from action (how) |
-| Attachment Learning | Ch 17 | Goal formation through reinforcement of subgoals |
+| Concept | Chapter | Nous Implementation | Status |
+|---------|---------|----------------------|--------|
+| K-Lines | Ch 8 | Context bundles with level-bands (upper fringe / core / lower fringe) | ✅ Shipped |
+| Censors | Ch 9 | Guardrails that block actions, not modify them | ✅ Shipped |
+| Papert's Principle | Ch 10 | Administrative growth through detours, not replacements | ✅ Shipped |
+| Frames | Ch 25 | One active frame at a time; explicit frame-switching | ✅ Shipped |
+| B-Brains | Ch 6 | Self-monitoring layer that watches the agent think | 🔄 Planned |
+| Parallel Bundles | Ch 18 | Multiple independent reasons > one logical chain | ✅ Shipped (decisions) |
+| Polynemes | Ch 19 | Tags as cross-agency activation signals | 🔄 Planned |
+| Nemes | Ch 20 | Micro-features that constrain search (bridge-definitions) | 🔄 Planned |
+| Pronomes | Ch 21 | Separation of assignment (what) from action (how) | 🔄 Planned |
+| Attachment Learning | Ch 17 | Goal formation through reinforcement of subgoals | 🔄 Planned |
 
 ### From Cognition Engines
 
@@ -97,7 +97,7 @@ Select a cognitive frame for interpreting the input. "Is this a bug report? A cr
 
 **Minsky insight:** You can only hold one frame at a time (Necker cube). Frame-switching is explicit, not automatic. For important decisions, spawn parallel frames via sub-agents (Devil's Advocate, Optimist, etc.).
 
-### 3. RECALL (K-Line Activation)
+### 3. RECALL (Hybrid Memory Search)
 Activate relevant K-lines — context bundles that reconstruct the mental state needed for this type of work. K-lines connect at three levels:
 
 - **Upper fringe** (goals): weakly attached, may not apply
@@ -182,11 +182,11 @@ This means:
 ```mermaid
 graph LR
     subgraph "Growth Levels"
-        L1[Level 1<br/>React to input]
-        L2[Level 2<br/>Remember past actions]
-        L3[Level 3<br/>Learn from outcomes]
-        L4[Level 4<br/>Monitor own thinking]
-        L5[Level 5<br/>Improve own processes]
+        L1[Level 1<br/>React to input ✅]
+        L2[Level 2<br/>Remember past actions ✅]
+        L3[Level 3<br/>Learn from outcomes ✅ ← current]
+        L4[Level 4<br/>Monitor own thinking 🔄]
+        L5[Level 5<br/>Improve own processes 🔄]
     end
 
     L1 -->|add memory| L2
@@ -195,7 +195,7 @@ graph LR
     L4 -->|add administrative growth| L5
 ```
 
-Most AI agents operate at Level 1-2. Nous targets Level 5.
+Most AI agents operate at Level 1-2. Nous is currently at **Level 3** (learning from outcomes via calibration). Levels 4-5 require B-Brain (self-monitoring) and administrative growth, both planned.
 
 ## Confidence & Calibration
 
@@ -208,9 +208,9 @@ Nous agents track their confidence and learn from it:
 
 **Fredkin's Paradox:** When two options seem equally good, the choice matters least. Stop agonizing at 0.50 confidence — pick one and move. Save deliberation energy for decisions where options are actually different.
 
-## Frame-Splitting Protocol
+## Frame-Splitting Protocol (🔄 Planned)
 
-For important decisions, Nous supports **parallel cognitive frames** via sub-agents:
+For important decisions, Nous will support **parallel cognitive frames** via sub-agents. The subtask infrastructure is in place; the multi-frame synthesis protocol is planned:
 
 ```mermaid
 graph TB
@@ -223,7 +223,7 @@ graph TB
     MAIN -->|synthesize| DEC[Decision]
 ```
 
-Each sub-agent is locked into a single interpretive frame. The main agent synthesizes their perspectives. This overcomes Minsky's "one frame at a time" limitation through parallel processing.
+Each sub-agent will be locked into a single interpretive frame. The main agent will synthesize their perspectives. This will overcome Minsky's "one frame at a time" limitation through parallel processing. The subtask spawning infrastructure (`spawn_task`) already exists — what's needed is the frame-locking and synthesis protocol on top.
 
 ## Relationship to Cognition Engines
 
@@ -326,6 +326,7 @@ All core architecture is implemented and running:
 | Event Bus (F006) | ✅ Shipped | In-process async bus with automated handlers |
 | Memory Improvements (F010) | ✅ Shipped | Episode summaries, fact extraction, user tagging |
 | Context Quality (006.2) | ✅ Shipped | Fact supersession, episode dedup, abandoned filtering |
+| Sleep Consolidation (F007) | ✅ Shipped | 5-phase biological sleep cycle: memory decay, consolidation, pattern extraction, optimization, integrity checks |
 | Extended Thinking (007) | ✅ Shipped | Adaptive thinking, interleaved reasoning, thinking indicators |
 | Context Recall (007.2-007.5) | ✅ Shipped | Topic-aware recall, informational detection, relevance thresholds |
 | Agent Identity (008/F018) | ✅ Shipped | DB-backed identity, initiation protocol, tiered context, REST API |
@@ -338,7 +339,7 @@ All core architecture is implemented and running:
 | Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
-**Stats:** ~21,000 lines of Python · 1,200+ tests · 23 Postgres tables · Docker deployment
+**Stats:** ~44,000 lines of Python (21K production + 23K tests) · 1,200+ tests · 23 Postgres tables · Docker deployment
 
 See [Feature Index](docs/features/INDEX.md) for the full breakdown.
 
@@ -349,5 +350,5 @@ Apache 2.0
 ## Acknowledgments
 
 - **Marvin Minsky** — *Society of Mind* (1986) provides the theoretical foundation
-- **Cognition Engines** — decision intelligence substrate
+- **Cognition Engines** — proved the decision intelligence principles that Nous applies independently
 - Built with curiosity and too much coffee ☕
