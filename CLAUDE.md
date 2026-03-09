@@ -17,7 +17,7 @@ Cognitive Layer (hooks into LLM calls)
 
 Runtime: Direct Anthropic API + tool dispatch loop
 Storage: PostgreSQL + pgvector (one DB, three schemas: brain/heart/system)
-API: REST (12 endpoints) + MCP server + Telegram bot (streaming)
+API: REST (23 endpoints) + MCP server + Telegram bot (streaming)
 ```
 
 ## Project Structure
@@ -27,15 +27,19 @@ nous/
 ├── docker-compose.yml          # Nous agent + Postgres + pgvector
 ├── Dockerfile                  # Python container with OAT support
 ├── sql/
-│   ├── init.sql                # Full schema (18 tables, 3 schemas)
+│   ├── init.sql                # Base schema (19 tables, 3 schemas)
+│   ├── migrations/             # Schema migrations (006-016)
 │   └── seed.sql                # Default agent, frames, guardrails
-├── nous/                       # Python package (~11,800 lines)
+├── nous/                       # Python package (~21,000 lines)
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
 │   ├── telegram_bot.py         # Telegram interface (streaming + usage)
+│   ├── events.py               # Event bus (async pub/sub)
+│   ├── utils.py                # Shared utilities
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
-│   │   └── models.py           # ORM models for all 18 tables
+│   │   ├── models.py           # ORM models for all 23 tables
+│   │   └── migrator.py         # Schema migration runner
 │   ├── brain/                  # Decision intelligence organ
 │   │   ├── brain.py            # Core: record, query, review, calibrate
 │   │   ├── bridge.py           # Structure + function descriptions
@@ -54,6 +58,8 @@ nous/
 │   │   ├── censors.py          # Guardrail censors
 │   │   ├── working_memory.py   # Short-term scratch space
 │   │   ├── search.py           # Full-text + vector search
+│   │   ├── subtasks.py         # Subtask CRUD operations
+│   │   ├── schedules.py        # Schedule CRUD operations
 │   │   └── schemas.py          # Pydantic models
 │   ├── cognitive/              # Cognitive layer (Nous Loop)
 │   │   ├── layer.py            # pre_turn / post_turn / end_session
@@ -65,25 +71,45 @@ nous/
 │   │   ├── monitor.py          # Post-turn self-assessment
 │   │   ├── usage_tracker.py    # Context usage feedback loop
 │   │   └── schemas.py          # TurnContext, TurnResult, etc.
+│   ├── handlers/               # Event bus handlers
+│   │   ├── episode_summarizer.py  # Episode summary generation
+│   │   ├── fact_extractor.py      # Fact extraction from conversations
+│   │   ├── knowledge_extractor.py # Pre-prune fact extraction
+│   │   ├── decision_reviewer.py   # Automated decision review
+│   │   ├── session_monitor.py     # Session timeout monitoring
+│   │   ├── sleep_handler.py       # Sleep/reflection handler
+│   │   ├── subtask_worker.py      # Async subtask execution
+│   │   ├── task_scheduler.py      # Cron/one-shot scheduling
+│   │   └── time_parser.py         # Natural language time parsing
+│   ├── identity/               # Agent identity system (F018)
+│   │   ├── manager.py          # Identity section CRUD
+│   │   ├── protocol.py         # Initiation protocol
+│   │   └── tools.py            # Identity-related tools
 │   └── api/                    # External interfaces
-│       ├── rest.py             # Starlette REST API (12 endpoints)
+│       ├── rest.py             # Starlette REST API (23 endpoints)
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration
 │       ├── builtin_tools.py    # bash, read_file, write_file
-│       └── web_tools.py        # web_search, web_fetch
-├── tests/                      # 1250+ tests across 60 files
+│       ├── web_tools.py        # web_search, web_fetch
+│       ├── compaction.py       # History compaction engine
+│       ├── smart_compress.py   # Smart compression for tool results
+│       ├── tool_cache.py       # Tool result caching
+│       └── models.py           # API request/response models
+├── tests/                      # 1200+ tests across 66 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)
     ├── features/               # High-level feature specs (F001-F022)
-    └── implementation/         # Build specs (001-014.1, all shipped)
+    ├── implementation/         # Build specs (001-014.1, all shipped)
+    ├── plans/                  # Implementation plans
+    └── reviews/                # Code review documents
 ```
 
 ## What's Shipped (v0.1.0)
 
 | Spec | Component | PR |
 |------|-----------|----|
-| 001 | Postgres scaffold (18 tables, 3 schemas) | #1 |
+| 001 | Postgres scaffold (19 base + 4 migration tables, 3 schemas) | #1 |
 | 002 | Brain module (decisions, deliberation, calibration, guardrails) | #2 |
 | 003 | Heart module (episodes, facts, procedures, censors, working memory) | #3 |
 | 003.1 | Heart enhancements (contradiction detection, domain compaction) | #6 |
@@ -137,7 +163,7 @@ nous/
 
 ### Database
 
-- Three schemas: `brain`, `heart`, `system` (18 tables total)
+- Three schemas: `brain`, `heart`, `nous_system` (23 tables total)
 - All tables are agent-scoped (`agent_id` column) for multi-agent readiness
 - Use `vector(1536)` for embeddings (text-embedding-3-small)
 - Full-text search via `tsvector` + GIN indexes

@@ -37,12 +37,11 @@ graph TB
         G --> H[Memory Update]
     end
 
-    subgraph "Cognition Engines (Memory Core)"
-        D <--> CE[Decision Memory]
+    subgraph "Brain (Decision Memory)"
+        D <--> CE[Decisions & Calibration]
         G <--> CE
         H <--> CE
-        CE --- SQ[(SQLite)]
-        CE --- CH[(ChromaDB)]
+        CE --- PG[(PostgreSQL + pgvector)]
     end
 
     subgraph "Society of Mind Layers"
@@ -145,7 +144,7 @@ graph TB
 
     subgraph "Medium (Knowledge)"
         FACTS[Facts<br/>Learned Knowledge]
-        KL["Procedures / K-Lines<br/>Context Bundles<br/><i>F011 — planned</i>"]
+        KL["Procedures / K-Lines<br/>Context Bundles<br/><i>F012 — planned</i>"]
         EP[Episodes<br/>Multi-Session Projects]
     end
 
@@ -306,7 +305,7 @@ All core architecture is implemented and running:
 | Brain (F001) | ✅ Shipped | Decision recording, deliberation traces, calibration, guardrails, graph |
 | Heart (F002) | ✅ Shipped | Episodes, facts, procedures, censors, working memory |
 | Cognitive Layer (F003) | ✅ Shipped | Frame selection, recall, deliberation, monitoring, reflection |
-| Runtime (F004) | ✅ Shipped | REST API (15 endpoints), MCP server, Telegram bot |
+| Runtime (F004) | ✅ Shipped | REST API (23 endpoints), MCP server, Telegram bot |
 | Context Engine (F005) | ✅ Shipped | Tiered context (always-on identity + search thresholds), token budgets, dedup |
 | Event Bus (F006) | ✅ Shipped | In-process async bus with automated handlers |
 | Memory Improvements (F010) | ✅ Shipped | Episode summaries, fact extraction, user tagging |
@@ -323,7 +322,7 @@ All core architecture is implemented and running:
 | Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
-**Stats:** ~40,000 lines of Python · 1,000+ tests · 18 Postgres tables · Docker deployment
+**Stats:** ~21,000 lines of Python · 1,200+ tests · 23 Postgres tables · Docker deployment
 
 See [Feature Index](docs/features/INDEX.md) for the full breakdown.
 
