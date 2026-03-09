@@ -127,6 +127,7 @@ nous/
 | 011.1 | Subtasks & Scheduling (F009) | #85 |
 | 011.2 | Subtask Result Delivery (F009) | — |
 | 014.1 | Context Quality Engine (F016+F017) | #122 |
+| F012 | K-Line Procedure Learning (auto-create procedures from decision clusters, monitor reinforcement) | #134 |
 | F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
 
 ## How to Work
