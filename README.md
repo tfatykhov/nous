@@ -144,7 +144,7 @@ graph TB
 
     subgraph "Medium (Knowledge)"
         FACTS[Facts<br/>Learned Knowledge]
-        KL["Procedures / K-Lines<br/>Context Bundles<br/><i>F012 — planned</i>"]
+        KL["Procedures / K-Lines<br/>Context Bundles<br/><i>F012 — shipped</i>"]
         EP[Episodes<br/>Multi-Session Projects]
     end
 
@@ -289,10 +289,26 @@ Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for th
 | `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
 | `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
 | `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
+| `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame context budget defaults (see example below) |
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
+
+**Context Budget Overrides Example:**
+
+Each cognitive frame (task, question, decision, etc.) has built-in budgets for context assembly. Use `NOUS_CONTEXT_BUDGET_OVERRIDES` to tune these globally:
+
+```bash
+# Double the total budget and increase decision memory allocation
+NOUS_CONTEXT_BUDGET_OVERRIDES='{"total": 16000, "decisions": 4000, "facts": 3000}'
+```
+
+**Token budgets** (max estimated tokens per section): `total`, `identity`, `user_profile`, `censors`, `frame`, `working_memory`, `decisions`, `facts`, `procedures`, `episodes`.
+
+**Turn budget** (not tokens): `conversation_window` — number of recent user turns checked for dedup, so the context engine doesn't inject memories already visible in the conversation.
+
+Overrides apply on top of each frame's defaults — unspecified keys keep their per-frame values.
 
 ## Status
 
@@ -321,6 +337,7 @@ All core architecture is implemented and running:
 | Episode Summary Quality (008.3-008.4) | ✅ Shipped | Backfill + enhanced prompt, candidate_facts, smart truncation, decision context |
 | Context Pruning (F016) | ✅ Shipped | 4-tier tool pruning, anti-hallucination prompt, model-aware compaction, content-type decay profiles, pre-prune fact extraction |
 | Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
+| K-Line Learning (F012) | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
 **Stats:** ~44,000 lines of Python (21K production + 23K tests) · 1,200+ tests · 23 Postgres tables · Docker deployment

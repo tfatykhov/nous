@@ -96,6 +96,7 @@ class SleepHandler:
         self._interrupted = False
         self._sleeping = False
         self._sleep_task: asyncio.Task | None = None
+        self._procedure_learner = None  # F012: Set externally if enabled
 
         bus.on("sleep_started", self.handle)
         bus.on("message_received", self._on_wake)
@@ -281,11 +282,17 @@ class SleepHandler:
             logger.warning("Reflection phase failed")
 
     async def _phase_generalize(self) -> None:
-        """Phase 5: Merge similar facts into generalized facts."""
-        if not self._http:
-            return
-        try:
-            # Stub — needs Heart.find_fact_clusters() for full implementation
-            logger.debug("Sleep phase: generalize facts (stub)")
-        except Exception:
-            logger.warning("Generalize phase failed")
+        """Phase 5: K-line learning — auto-create procedures from patterns."""
+        if self._procedure_learner:
+            try:
+                stats = await self._procedure_learner.run_sleep_learning()
+                logger.info(
+                    "Sleep generalize: %d decisions, %d episodes, %d reviewed",
+                    stats.get("decisions_learned", 0),
+                    stats.get("episodes_learned", 0),
+                    stats.get("weak_reviewed", 0),
+                )
+            except Exception:
+                logger.warning("Generalize phase (procedure learning) failed")
+        else:
+            logger.debug("Sleep phase: generalize (no procedure learner configured)")

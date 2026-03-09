@@ -161,6 +161,33 @@ async def test_build_decision_budget(context_engine, session):
 
 
 # ---------------------------------------------------------------------------
+# 2a. test_for_frame_with_overrides
+# ---------------------------------------------------------------------------
+
+
+async def test_for_frame_with_overrides():
+    """Settings-based overrides apply on top of per-frame defaults."""
+    budget = ContextBudget.for_frame("task", overrides={"total": 16000, "decisions": 4000})
+    assert budget.total == 16000
+    assert budget.decisions == 4000
+    # Non-overridden fields keep frame defaults
+    assert budget.facts == 1500
+    assert budget.conversation_window == 5
+
+
+async def test_for_frame_empty_overrides():
+    """Empty overrides dict doesn't change anything."""
+    budget = ContextBudget.for_frame("task", overrides={})
+    assert budget.total == 8000
+
+
+async def test_for_frame_overrides_none():
+    """None overrides doesn't change anything."""
+    budget = ContextBudget.for_frame("conversation", overrides=None)
+    assert budget.total == 3000
+
+
+# ---------------------------------------------------------------------------
 # 2b. test_build_includes_datetime (Tier 0)
 # ---------------------------------------------------------------------------
 

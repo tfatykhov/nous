@@ -258,6 +258,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
 | `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
 | `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
+| `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame budget defaults (e.g. `{"total": 12000, "decisions": 3000}`) |
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |

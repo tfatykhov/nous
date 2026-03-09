@@ -103,7 +103,7 @@ All shipped implementation specs with PR references:
 |---------|------|----------|-------------|
 | F007 | Metrics & Growth | P2 | Calibration, Brier scores, outcome tracking. Decision data now clean (27 real decisions). |
 | F008 | Memory Lifecycle | P2 | Shelved — system too young. Revisit when data grows. Specs 009.1-009.4 written. |
-| F012 | K-Line Learning | P2 | Auto-create procedures from repeated patterns. |
+| F012 | K-Line Learning | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery. 3 pathways: sleep-cycle clustering + real-time monitor recovery. |
 | 008.1-P4 | Adaptive Compaction | P2 | LLM-powered summarization with configurable triggers. Spec written. |
 
 ### Future
