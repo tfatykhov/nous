@@ -25,7 +25,8 @@ from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.schemas import CensorInput, FactInput
+from nous.heart.schemas import CensorInput, FactInput, ProcedureInput
+from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
 
@@ -572,12 +573,93 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("recall_recent tool failed")
             return {"content": [{"type": "text", "text": f"Error fetching recent episodes: {e}"}]}
 
+    # F011: learn_skill tool — register skills from URL, local path, or inline markdown
+    _skill_parser = SkillParser()
+
+    async def learn_skill(
+        source: str,
+        content: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a skill from a URL, local path, or raw markdown.
+
+        Args:
+            source: URL, local file path, or 'inline' for raw content
+            content: Raw SKILL.md markdown when source is 'inline'
+
+        Returns:
+            MCP-compliant response with skill registration result
+        """
+        try:
+            # 1. Fetch content
+            if source == "inline":
+                if not content:
+                    return {"content": [{"type": "text", "text": "Error: 'content' is required when source is 'inline'"}]}
+                markdown = content
+            elif source.startswith(("http://", "https://")):
+                # Fetch from URL
+                import httpx as _httpx
+                async with _httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(source)
+                    resp.raise_for_status()
+                    markdown = resp.text
+            else:
+                # Local file path
+                import os
+                workspace = settings.workspace_dir if settings else "."
+                path = os.path.join(workspace, source) if not os.path.isabs(source) else source
+                if not os.path.exists(path):
+                    return {"content": [{"type": "text", "text": f"Error: file not found: {path}"}]}
+                with open(path) as f:
+                    markdown = f.read()
+
+            # 2. Parse
+            manifest = _skill_parser.parse(markdown, source_hint=source if source != "inline" else None)
+
+            # 3. Check for existing procedure with same name (dedup)
+            existing = await heart.search_procedures(manifest.name, limit=5)
+            updated = False
+            for proc in existing:
+                if proc.name == manifest.name:
+                    # Update: retire old, create new
+                    await heart.retire_procedure(proc.id)
+                    updated = True
+                    break
+
+            # 4. Convert to ProcedureInput and store
+            proc_input = _skill_parser.to_procedure_input(manifest)
+            result = await heart.store_procedure(proc_input)
+
+            action = "updated" if updated else "registered"
+            active_str = "active" if result.active else "inactive (missing requirements)"
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Skill {action} successfully.\n"
+                            f"Name: {manifest.name}\n"
+                            f"ID: {result.id}\n"
+                            f"Domain: {manifest.domain}\n"
+                            f"Status: {active_str}\n"
+                            f"Triggers: {', '.join(manifest.triggers) if manifest.triggers else 'none'}"
+                        ),
+                    }
+                ]
+            }
+
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Parse error: {e}"}]}
+        except Exception as e:
+            logger.exception("learn_skill tool failed")
+            return {"content": [{"type": "text", "text": f"Error learning skill: {e}"}]}
+
     return {
         "record_decision": record_decision,
         "learn_fact": learn_fact,
         "recall_deep": recall_deep,
         "create_censor": create_censor,
         "recall_recent": recall_recent,
+        "learn_skill": learn_skill,
     }
 
 
@@ -739,11 +821,34 @@ _RECALL_RECENT_SCHEMA: dict[str, Any] = {
 }
 
 
+_LEARN_SKILL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Register a skill from a URL, local file path, or raw markdown. "
+        "Skills are stored as procedures and auto-activate during recall when relevant to the task."
+    ),
+    "properties": {
+        "source": {
+            "type": "string",
+            "description": (
+                "URL (https://...), local file path relative to workspace, "
+                "or 'inline' for raw content"
+            ),
+        },
+        "content": {
+            "type": "string",
+            "description": "Raw SKILL.md markdown when source is 'inline'",
+        },
+    },
+    "required": ["source"],
+}
+
+
 def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
     This is the main wiring function called at startup to register
-    all 4 memory tools with their schemas.
+    all memory tools with their schemas.
     """
     closures = create_nous_tools(brain, heart, settings=settings)
 
@@ -752,6 +857,7 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
     dispatcher.register("recall_deep", closures["recall_deep"], _RECALL_DEEP_SCHEMA)
     dispatcher.register("create_censor", closures["create_censor"], _CREATE_CENSOR_SCHEMA)
     dispatcher.register("recall_recent", closures["recall_recent"], _RECALL_RECENT_SCHEMA)
+    dispatcher.register("learn_skill", closures["learn_skill"], _LEARN_SKILL_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

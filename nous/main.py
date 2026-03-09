@@ -200,6 +200,13 @@ async def create_components(settings: Settings) -> dict:
         if decision_reviewer:
             await decision_reviewer.start()
 
+    # F011: Bootstrap local skills (one-time, only if DB has no skills)
+    try:
+        from nous.skills.bootstrap import bootstrap_local_skills
+        await bootstrap_local_skills(settings.workspace_dir, heart)
+    except Exception:
+        logger.debug("Skill bootstrap skipped or failed (non-fatal)")
+
     # Create tool dispatcher and register all tools
     dispatcher = ToolDispatcher()
     register_nous_tools(dispatcher, brain, heart, settings=settings)

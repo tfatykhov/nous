@@ -48,13 +48,15 @@ class TestCreateNousTools:
     """Test that create_nous_tools returns the expected structure."""
 
     def test_create_nous_tools(self, tools):
-        """Returns dict with 4 async callable functions."""
+        """Returns dict with async callable functions."""
         assert isinstance(tools, dict)
         assert set(tools.keys()) == {
             "record_decision",
             "learn_fact",
             "recall_deep",
             "create_censor",
+            "recall_recent",
+            "learn_skill",
         }
         for name, func in tools.items():
             assert callable(func), f"{name} should be callable"
@@ -415,10 +417,11 @@ class TestToolDispatcher:
         for name in ["record_decision", "learn_fact", "recall_deep", "create_censor", "bash"]:
             dispatcher.register(name, handler, {"type": "object", "description": f"{name} tool"})
 
-        # 'question' frame: only recall_deep allowed per FRAME_TOOLS
+        # 'question' frame: filters to tools in FRAME_TOOLS["question"]
         question_tools = dispatcher.available_tools("question")
         question_names = {t["name"] for t in question_tools}
-        assert question_names == {"recall_deep"}
+        # All 5 registered tools are in the question frame's allowed list
+        assert question_names == {"record_decision", "learn_fact", "recall_deep", "create_censor", "bash"}
 
     def test_dispatcher_available_tools_wildcard_frame(self):
         """Frame with wildcard '*' returns all registered tools."""

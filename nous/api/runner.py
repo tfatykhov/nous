@@ -39,8 +39,8 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "learn_fact", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
-    "question": ["recall_deep", "recall_recent", "bash", "read_file", "write_file", "record_decision", "learn_fact", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python"],
+    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
+    "question": ["recall_deep", "recall_recent", "bash", "read_file", "write_file", "record_decision", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python"],
     "decision": ["record_decision", "recall_deep", "recall_recent", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task"],
     "creative": ["learn_fact", "recall_deep", "recall_recent", "write_file", "web_search", "cache_retrieve"],
     "task": ["*"],  # All tools
