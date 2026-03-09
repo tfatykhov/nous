@@ -297,14 +297,18 @@ Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for th
 
 **Context Budget Overrides Example:**
 
-Each cognitive frame (task, question, decision, etc.) has built-in token budgets for how much context to assemble. Use `NOUS_CONTEXT_BUDGET_OVERRIDES` to tune these globally:
+Each cognitive frame (task, question, decision, etc.) has built-in budgets for context assembly. Use `NOUS_CONTEXT_BUDGET_OVERRIDES` to tune these globally:
 
 ```bash
 # Double the total budget and increase decision memory allocation
 NOUS_CONTEXT_BUDGET_OVERRIDES='{"total": 16000, "decisions": 4000, "facts": 3000}'
 ```
 
-Available budget keys: `total`, `identity`, `user_profile`, `censors`, `frame`, `working_memory`, `decisions`, `facts`, `procedures`, `episodes`, `conversation_window`. Overrides apply on top of each frame's defaults — unspecified keys keep their per-frame values.
+**Token budgets** (max estimated tokens per section): `total`, `identity`, `user_profile`, `censors`, `frame`, `working_memory`, `decisions`, `facts`, `procedures`, `episodes`.
+
+**Turn budget** (not tokens): `conversation_window` — number of recent user turns checked for dedup, so the context engine doesn't inject memories already visible in the conversation.
+
+Overrides apply on top of each frame's defaults — unspecified keys keep their per-frame values.
 
 ## Status
 
