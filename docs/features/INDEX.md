@@ -87,6 +87,7 @@ All shipped implementation specs with PR references:
 | 011.2 | Subtask Result Delivery | ✅ Shipped | — subtask results auto-injected into parent session context, skip_episode for workers, delivered tracking |
 | 014.1 | Context Quality Engine (F016+F017) | ✅ Shipped | #122 — 4-tier pruning, relevance floor, staleness penalty, model-aware thresholds, usage tracking, pre-prune extraction |
 | 015 | Graph-Augmented Recall (F022) | ✅ Shipped | — polymorphic edges, 1-hop expansion, cross-type linking, contradiction bridge, spreading activation |
+| F011 | Skill Discovery v2 | ✅ Shipped | — learn_skill tool, SkillParser, bootstrap, FRAME_TOOLS wiring |
 
 ### Phase 2 — Quality (next to build)
 
@@ -94,7 +95,7 @@ All shipped implementation specs with PR references:
 |---------|------|----------|-------------|
 | #38 | _is_informational() Phase 2 | P1 | Partially addressed by PR #76 (delete instead of abandon). Further tuning possible. |
 | #52 | Topic-Aware Recall v2 | P1 | Spike merged (#75). Full 008.2 spec exists if spike proves insufficient. |
-| F011 | [Skill Discovery](F011-skill-discovery.md) | P1 | `learn_skill` tool acquires skills from URL/marketplace/local — registered as procedures, auto-surface in RECALL. No filesystem scanner. |
+| F011 | [Skill Discovery](F011-skill-discovery.md) | ✅ Shipped | `learn_skill` tool acquires skills from URL/marketplace/local — registered as procedures, auto-surface in RECALL. No filesystem scanner. |
 | 010.1 | Health Dashboard | P1 | Enrich GET /status with episode outcome breakdown, fact health, decision stats. |
 
 ### Phase 3 — Growth
@@ -122,7 +123,7 @@ All shipped implementation specs with PR references:
 - **Total source:** ~34,000 lines of Python
 - **Test count:** 1250+ tests across 60 test files
 - **Database:** 18 tables across 2 schemas (brain, heart)
-- **Tools:** 14 agent tools (record_decision, recall_deep, learn_fact, create_censor, store_identity, complete_initiation, spawn_task, schedule_task, list_tasks, cancel_task, bash, read_file, write_file, web_search, web_fetch)
+- **Tools:** 15 agent tools (record_decision, recall_deep, learn_fact, learn_skill, create_censor, store_identity, complete_initiation, spawn_task, schedule_task, list_tasks, cancel_task, bash, read_file, write_file, web_search, web_fetch)
 - **Endpoints:** 23 REST endpoints + MCP server + Telegram bot
 - **Feature specs:** 17 feature docs + 17 research notes
 - **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors

@@ -1,6 +1,6 @@
 # F011 — Skill Discovery & Auto-Activation
 
-> **Status:** Planned
+> **Status:** Shipped
 > **Priority:** P1
 > **Depends on:** F003 (Cognitive Layer), F002 (Heart — Procedures), F012 (K-Line Learning)
 > **Estimated effort:** ~4-6 hours

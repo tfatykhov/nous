@@ -81,6 +81,9 @@ nous/
 │   │   ├── subtask_worker.py      # Async subtask execution
 │   │   ├── task_scheduler.py      # Cron/one-shot scheduling
 │   │   └── time_parser.py         # Natural language time parsing
+│   ├── skills/                 # Skill discovery system (F011)
+│   │   ├── parser.py           # SkillParser + SkillManifest
+│   │   └── bootstrap.py        # One-time local skill registration
 │   ├── identity/               # Agent identity system (F018)
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
@@ -128,6 +131,7 @@ nous/
 | 011.2 | Subtask Result Delivery (F009) | — |
 | 014.1 | Context Quality Engine (F016+F017) | #122 |
 | F012 | K-Line Procedure Learning (auto-create procedures from decision clusters, monitor reinforcement) | #134 |
+| F011 | Skill Discovery v2 (learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL) | — |
 | F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
 
 ## How to Work
@@ -305,6 +309,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `record_decision` | decision, task, debug, conversation, question | Record a decision with confidence + reasoning |
 | `recall_deep` | all | Search memory (decisions, facts, episodes) |
 | `learn_fact` | conversation, question, creative, task | Store a new fact |
+| `learn_skill` | conversation, question, task | Register a skill from URL, local path, or inline markdown |
 | `create_censor` | all | Create a guardrail censor |
 | `bash` | task, debug, conversation, question | Execute shell commands |
 | `read_file` | task, debug, question | Read file contents |
