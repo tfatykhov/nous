@@ -201,9 +201,9 @@ class TestScheduleManager:
             task="Research topic",
             schedule_type="once",
             fire_at=fire_at,
-            model="claude-haiku-3-5-20241022",
+            model="claude-haiku-4-5-20251001",
         )
-        assert schedule.model == "claude-haiku-3-5-20241022"
+        assert schedule.model == "claude-haiku-4-5-20251001"
 
     async def test_create_schedule_with_frame_type(self, schedule_mgr: ScheduleManager):
         fire_at = datetime.now(UTC) + timedelta(hours=1)
@@ -372,7 +372,7 @@ class TestSchedulerModelPassthrough:
         mock_schedule.timeout_seconds = 120
         mock_schedule.notify = False
         mock_schedule.created_by_session = "session-123"
-        mock_schedule.model = "claude-haiku-3-5-20241022"
+        mock_schedule.model = "claude-haiku-4-5-20251001"
         mock_schedule.frame_type = "research"
 
         mock_heart.schedules = AsyncMock()
@@ -383,5 +383,5 @@ class TestSchedulerModelPassthrough:
         await scheduler._fire_due_tasks()
 
         create_kwargs = mock_heart.subtasks.create.call_args.kwargs
-        assert create_kwargs["model"] == "claude-haiku-3-5-20241022"
+        assert create_kwargs["model"] == "claude-haiku-4-5-20251001"
         assert create_kwargs["frame_type"] == "research"

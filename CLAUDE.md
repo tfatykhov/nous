@@ -245,7 +245,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_TELEGRAM_CHAT_ID` | — | Telegram chat ID for subtask notifications |
 | `NOUS_SUBTASK_TOOL_CALL_LIMIT` | `20` | Max tool calls per subtask execution |
 | `NOUS_INLINE_SUBTASK_TIMEOUT` | `90` | Default timeout for inline (await_result) subtasks |
-| `NOUS_FRAME_DEFAULT_MODELS` | `{"research":"claude-haiku-3-5-20241022"}` | JSON map of frame type to default model |
+| `NOUS_FRAME_DEFAULT_MODELS` | `{}` | JSON map of frame type to default model (falls back to `NOUS_BACKGROUND_MODEL`) |
 | `NOUS_PROGRAMMATIC_TOOLS_ENABLED` | `true` | Enable run_python tool for client-side code execution |
 | `NOUS_PROGRAMMATIC_TOOLS_TIMEOUT` | `10` | Timeout in seconds for run_python code execution |
 | `NOUS_CONTEXT_WINDOW` | auto | Override model context window size in tokens (0 = auto-detect from model name) |
@@ -275,7 +275,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CROSS_TYPE_LINKING_ENABLED` | `true` | Enable cross-type auto-linking |
 | `NOUS_CROSS_TYPE_THRESHOLD` | `0.80` | Cross-type similarity threshold |
 | `NOUS_CONTRADICTION_DETECTION` | `true` | Enable LLM contradiction detection |
-| `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20241022` | Model for contradiction classification |
+| `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20251001` | Model for contradiction classification |
 | `NOUS_SPREADING_ACTIVATION_ENABLED` | `auto` | Spreading activation (auto/true/false) |
 | `NOUS_SPREADING_ACTIVATION_DENSITY_THRESHOLD` | `3.0` | Density threshold for auto-enable |
 

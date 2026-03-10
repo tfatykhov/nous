@@ -76,13 +76,13 @@ class TestSubtaskModel:
             priority=100,
             timeout_seconds=120,
             frame_type="research",
-            model="claude-haiku-3-5-20241022",
+            model="claude-haiku-4-5-20251001",
         )
         session.add(subtask)
         await session.flush()
 
         assert subtask.frame_type == "research"
-        assert subtask.model == "claude-haiku-3-5-20241022"
+        assert subtask.model == "claude-haiku-4-5-20251001"
 
     async def test_subtask_frame_type_nullable(self, session: AsyncSession):
         """012.2: frame_type and model are optional (backward compat)."""
@@ -218,13 +218,13 @@ class TestWorkerEnhancements:
         subtask.parent_session_id = None
         subtask.timeout_seconds = 60
         subtask.frame_type = "research"
-        subtask.model = "claude-haiku-3-5-20241022"
+        subtask.model = "claude-haiku-4-5-20251001"
         subtask.notify = False
 
         await pool._execute_subtask(subtask)
 
         call_kwargs = mock_runner.run_turn.call_args.kwargs
-        assert call_kwargs.get("model_override") == "claude-haiku-3-5-20241022"
+        assert call_kwargs.get("model_override") == "claude-haiku-4-5-20251001"
 
     async def test_worker_uses_shared_prefix(self):
         """Worker should use build_subtask_prefix for system_prompt_prefix."""
@@ -306,12 +306,12 @@ class TestSpawnTaskEnhancements:
         tools = create_subtask_tools(heart, settings)
         result = await tools["spawn_task"](
             task="Quick lookup",
-            model="claude-haiku-3-5-20241022",
+            model="claude-haiku-4-5-20251001",
             _session_id="test-session",
         )
 
         call_kwargs = heart.subtasks.create.call_args.kwargs
-        assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+        assert call_kwargs.get("model") == "claude-haiku-4-5-20251001"
 
     async def test_spawn_without_new_params(self, settings):
         """Backward compat: existing spawn_task calls still work."""
@@ -349,7 +349,7 @@ class TestSpawnTaskEnhancements:
         )
 
         call_kwargs = heart.subtasks.create.call_args.kwargs
-        assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+        assert call_kwargs.get("model") == "claude-haiku-4-5-20251001"
 
 
 class TestRunnerSubtaskGuardrails:
@@ -415,18 +415,18 @@ class TestSubtaskManagerEnhancements:
     async def test_create_with_model(self, subtask_mgr: SubtaskManager):
         subtask = await subtask_mgr.create(
             task="Quick lookup",
-            model="claude-haiku-3-5-20241022",
+            model="claude-haiku-4-5-20251001",
         )
-        assert subtask.model == "claude-haiku-3-5-20241022"
+        assert subtask.model == "claude-haiku-4-5-20251001"
 
     async def test_create_with_frame_type_and_model(self, subtask_mgr: SubtaskManager):
         subtask = await subtask_mgr.create(
             task="Research with haiku",
             frame_type="research",
-            model="claude-haiku-3-5-20241022",
+            model="claude-haiku-4-5-20251001",
         )
         assert subtask.frame_type == "research"
-        assert subtask.model == "claude-haiku-3-5-20241022"
+        assert subtask.model == "claude-haiku-4-5-20251001"
 
     async def test_create_without_new_params_backward_compat(self, subtask_mgr: SubtaskManager):
         subtask = await subtask_mgr.create(task="Normal task")
@@ -830,7 +830,7 @@ class TestSubtaskWorkerPool:
         self, mock_runner, worker_heart, worker_settings, mock_bus
     ):
         """Worker should pass background_model when subtask has no model set."""
-        worker_settings.background_model = "claude-haiku-3-5-20241022"
+        worker_settings.background_model = "claude-haiku-4-5-20251001"
         pool = SubtaskWorkerPool(
             runner=mock_runner,
             heart=worker_heart,
@@ -844,13 +844,13 @@ class TestSubtaskWorkerPool:
         await pool._execute_subtask(dequeued)
 
         call_kwargs = mock_runner.run_turn.call_args.kwargs
-        assert call_kwargs["model_override"] == "claude-haiku-3-5-20241022"
+        assert call_kwargs["model_override"] == "claude-haiku-4-5-20251001"
 
     async def test_worker_uses_explicit_model_over_background(
         self, mock_runner, worker_heart, worker_settings, mock_bus
     ):
         """Worker should prefer explicit model over background_model."""
-        worker_settings.background_model = "claude-haiku-3-5-20241022"
+        worker_settings.background_model = "claude-haiku-4-5-20251001"
         pool = SubtaskWorkerPool(
             runner=mock_runner,
             heart=worker_heart,
@@ -1128,19 +1128,19 @@ class TestSubtaskConfigDefaults:
         s = Settings()
         assert s.subtask_tool_call_limit == 20
         assert s.inline_subtask_timeout == 90
-        assert s.frame_default_models == {"research": "claude-haiku-3-5-20241022"}
+        assert s.frame_default_models == {}
 
     def test_custom_values(self):
         """Settings accepts custom values for subtask constants."""
         s = Settings(
             subtask_tool_call_limit=30,
             inline_subtask_timeout=120,
-            frame_default_models={"research": "claude-haiku-3-5-20241022", "task": "claude-sonnet-4-5-20250514"},
+            frame_default_models={"research": "claude-haiku-4-5-20251001", "task": "claude-sonnet-4-5-20250514"},
         )
         assert s.subtask_tool_call_limit == 30
         assert s.inline_subtask_timeout == 120
         assert s.frame_default_models == {
-            "research": "claude-haiku-3-5-20241022",
+            "research": "claude-haiku-4-5-20251001",
             "task": "claude-sonnet-4-5-20250514",
         }
 
@@ -1154,7 +1154,7 @@ class TestSubtaskConfigDefaults:
         from nous.api.tools import create_subtask_tools
 
         custom_settings = Settings(
-            frame_default_models={"debug": "claude-haiku-3-5-20241022"},
+            frame_default_models={"debug": "claude-haiku-4-5-20251001"},
         )
 
         heart = MagicMock()
@@ -1172,7 +1172,7 @@ class TestSubtaskConfigDefaults:
                 _session_id="test",
             )
             call_kwargs = heart.subtasks.create.call_args.kwargs
-            assert call_kwargs.get("model") == "claude-haiku-3-5-20241022"
+            assert call_kwargs.get("model") == "claude-haiku-4-5-20251001"
 
         asyncio.get_event_loop().run_until_complete(_run())
 

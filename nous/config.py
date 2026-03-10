@@ -206,7 +206,7 @@ class Settings(BaseSettings):
     subtask_tool_call_limit: int = 20
     inline_subtask_timeout: int = 90  # seconds
     frame_default_models: dict[str, str] = Field(
-        default_factory=lambda: {"research": "claude-haiku-3-5-20241022"},
+        default_factory=dict,
     )
 
     # F022: Graph-Augmented Recall
@@ -223,7 +223,7 @@ class Settings(BaseSettings):
     # F022 Phase 3: Contradiction detection
     contradiction_detection: bool = True
     contradiction_similarity_threshold: float = 0.85
-    contradiction_model: str = "claude-haiku-4-5-20241022"
+    contradiction_model: str = "claude-haiku-4-5-20251001"
 
     # F022 Phase 4: Spreading activation
     spreading_activation_enabled: str = "auto"  # "auto", "true", "false"
