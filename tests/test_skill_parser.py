@@ -546,6 +546,70 @@ class TestRequiresValidation:
         assert "inactive" not in text.lower()
 
 
+class TestBootstrapReactivation:
+    @pytest.mark.asyncio
+    async def test_reactivate_skill_with_satisfied_requires(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from nous.skills.bootstrap import reactivate_skills
+        import os
+
+        heart = MagicMock()
+
+        inactive_proc = MagicMock()
+        inactive_proc.id = uuid4()
+        inactive_proc.name = "serper-search"
+        inactive_proc.active = False
+        inactive_proc.core_concepts = ["research", "SERPER_API_KEY"]
+        inactive_proc.tags = ["skill"]
+
+        heart.list_inactive_skill_procedures = AsyncMock(return_value=[inactive_proc])
+        heart.reactivate_procedure = AsyncMock()
+
+        os.environ["SERPER_API_KEY"] = "test-key"
+        try:
+            count = await reactivate_skills(heart)
+            assert count == 1
+            heart.reactivate_procedure.assert_called_once()
+        finally:
+            os.environ.pop("SERPER_API_KEY", None)
+
+    @pytest.mark.asyncio
+    async def test_no_reactivation_when_requires_still_missing(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from nous.skills.bootstrap import reactivate_skills
+        import os
+
+        heart = MagicMock()
+
+        inactive_proc = MagicMock()
+        inactive_proc.id = uuid4()
+        inactive_proc.name = "missing-deps"
+        inactive_proc.core_concepts = ["general", "NONEXISTENT_API_KEY"]
+        inactive_proc.tags = ["skill"]
+
+        heart.list_inactive_skill_procedures = AsyncMock(return_value=[inactive_proc])
+        heart.reactivate_procedure = AsyncMock()
+
+        os.environ.pop("NONEXISTENT_API_KEY", None)
+
+        count = await reactivate_skills(heart)
+        assert count == 0
+        heart.reactivate_procedure.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_inactive_skills_returns_zero(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from nous.skills.bootstrap import reactivate_skills
+
+        heart = MagicMock()
+        heart.list_inactive_skill_procedures = AsyncMock(return_value=[])
+
+        count = await reactivate_skills(heart)
+        assert count == 0
+
+
 class TestActiveFilter:
     @pytest.mark.asyncio
     async def test_search_passes_active_filter_to_hybrid_search(self):

@@ -274,6 +274,45 @@ class ProcedureManager:
         procedure.active = False
         await session.flush()
 
+    # ------------------------------------------------------------------
+    # reactivate()
+    # ------------------------------------------------------------------
+
+    async def reactivate(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
+        """Set an inactive procedure back to active."""
+        if session is None:
+            async with self.db.session() as session:
+                await self._reactivate(procedure_id, session)
+                await session.commit()
+                return
+        await self._reactivate(procedure_id, session)
+
+    async def _reactivate(self, procedure_id: UUID, session: AsyncSession) -> None:
+        procedure = await self._get_procedure_orm(procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {procedure_id} not found")
+        procedure.active = True
+
+    # ------------------------------------------------------------------
+    # list_inactive_skills()
+    # ------------------------------------------------------------------
+
+    async def list_inactive_skills(self, session: AsyncSession | None = None) -> list[ProcedureDetail]:
+        """List inactive procedures tagged as 'skill'."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_inactive_skills(session)
+        return await self._list_inactive_skills(session)
+
+    async def _list_inactive_skills(self, session: AsyncSession) -> list[ProcedureDetail]:
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == False)  # noqa: E712
+            .where(Procedure.tags.contains(["skill"]))
+        )
+        return [self._to_detail(p) for p in result.scalars().all()]
+
     async def get_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
         """Fetch active procedure by exact name match."""
         if session is None:

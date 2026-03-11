@@ -321,6 +321,14 @@ class Heart:
         """Fetch active procedure by exact name."""
         return await self.procedures.get_by_name(name, session)
 
+    async def reactivate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
+        """Reactivate an inactive procedure."""
+        await self.procedures.reactivate(procedure_id, session)
+
+    async def list_inactive_skill_procedures(self, session: AsyncSession | None = None) -> list[ProcedureDetail]:
+        """List inactive skill procedures."""
+        return await self.procedures.list_inactive_skills(session)
+
     # ==================================================================
     # Censors
     # ==================================================================

@@ -7,6 +7,7 @@ After that, the filesystem is irrelevant — skills live in the DB.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from nous.heart.heart import Heart
@@ -81,3 +82,36 @@ async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
         logger.info("Bootstrapped %d local skills into procedures DB", registered)
 
     return registered
+
+
+async def reactivate_skills(heart: Heart) -> int:
+    """Re-check inactive skill procedures and reactivate if requires are now satisfied.
+
+    Called at startup. Checks core_concepts for env var names (uppercase with underscores)
+    and verifies they exist in os.environ.
+
+    Returns:
+        Number of skills reactivated
+    """
+    inactive = await heart.list_inactive_skill_procedures()
+    if not inactive:
+        return 0
+
+    reactivated = 0
+    for proc in inactive:
+        concepts = proc.core_concepts or []
+        # Env var names are uppercase strings with underscores
+        requires = [c for c in concepts if c == c.upper() and "_" in c]
+        if not requires:
+            continue
+
+        missing = [var for var in requires if not os.environ.get(var)]
+        if not missing:
+            await heart.reactivate_procedure(proc.id)
+            logger.info("Reactivated skill %s — all requires now satisfied", proc.name)
+            reactivated += 1
+
+    if reactivated:
+        logger.info("Reactivated %d skills at startup", reactivated)
+
+    return reactivated
