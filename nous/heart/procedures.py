@@ -213,10 +213,10 @@ class ProcedureManager:
             except Exception:
                 logger.warning("Embedding generation failed for procedure search")
 
-        extra_where = ""
+        extra_where = " AND t.active = true"
         extra_params: dict = {}
         if domain:
-            extra_where = " AND t.domain = :domain"
+            extra_where += " AND t.domain = :domain"
             extra_params["domain"] = domain
 
         results = await hybrid_search(

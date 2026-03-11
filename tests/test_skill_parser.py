@@ -368,3 +368,25 @@ class TestProcedureSummaryDescription:
             effectiveness=None,
         )
         assert summary.description is None
+
+
+# ---------------------------------------------------------------------------
+# Active filter in search_procedures
+# ---------------------------------------------------------------------------
+
+class TestActiveFilter:
+    @pytest.mark.asyncio
+    async def test_search_passes_active_filter_to_hybrid_search(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from nous.heart.procedures import ProcedureManager
+
+        db = MagicMock()
+        mgr = ProcedureManager(db, embeddings=None, agent_id="test-agent")
+        mock_session = MagicMock()
+
+        with patch("nous.heart.procedures.hybrid_search", new_callable=AsyncMock) as mock_hs:
+            mock_hs.return_value = []
+            await mgr._search("test query", 10, None, mock_session)
+
+            _, kwargs = mock_hs.call_args
+            assert "active" in kwargs.get("extra_where", "")
