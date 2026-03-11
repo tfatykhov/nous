@@ -224,8 +224,10 @@ class SkillParser:
     def to_procedure_input(self, manifest: SkillManifest) -> ProcedureInput:
         """Convert SkillManifest to ProcedureInput for heart.store_procedure()."""
         impl_notes = []
-        if manifest.source_url:
+        if manifest.source_url and manifest.source_url != "inline":
             impl_notes.append(f"source:{manifest.source_url}")
+        elif manifest.source_url == "inline":
+            impl_notes.append("source:inline")
         else:
             impl_notes.append("source:local")
         if manifest.version:
@@ -238,6 +240,8 @@ class SkillParser:
         tags.extend(manifest.frames)
         if manifest.source_url and ("clawhub" in manifest.source_url or "marketplace" in manifest.source_url):
             tags.append("marketplace")
+        elif manifest.source_url == "inline":
+            tags.append("inline")
         else:
             tags.append("local")
 

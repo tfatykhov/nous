@@ -613,7 +613,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     markdown = f.read()
 
             # 2. Parse
-            manifest = _skill_parser.parse(markdown, source_hint=source if source != "inline" else None)
+            manifest = _skill_parser.parse(markdown, source_hint=source)
 
             # 3. Check for existing procedure with same name (dedup)
             existing = await heart.get_procedure_by_name(manifest.name)

@@ -392,6 +392,27 @@ class TestGetProcedureByName:
         assert result is None
 
 
+class TestInlineProvenance:
+    def test_inline_source_tag(self):
+        parser = SkillParser()
+        md = "---\nname: agent-skill\ndescription: created by agent\n---\nBody"
+        manifest = parser.parse(md, source_hint="inline")
+        proc = parser.to_procedure_input(manifest)
+
+        assert "inline" in proc.tags
+        assert "local" not in proc.tags
+        assert any("source:inline" in n for n in proc.implementation_notes)
+
+    def test_local_source_tag_unchanged(self):
+        parser = SkillParser()
+        md = "---\nname: local-skill\ndescription: from disk\n---\nBody"
+        manifest = parser.parse(md)
+        proc = parser.to_procedure_input(manifest)
+
+        assert "local" in proc.tags
+        assert "inline" not in proc.tags
+
+
 class TestLenientParser:
     def setup_method(self):
         self.parser = SkillParser()
