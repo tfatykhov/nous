@@ -59,11 +59,14 @@ class MCPTransportManager:
         self._task_group = anyio.create_task_group()
         await self._task_group.__aenter__()
 
+        ready_event = anyio.Event()
+
         async def _run_server(
             transport: StreamableHTTPServerTransport,
             server: Server,
         ) -> None:
             async with transport.connect() as (read_stream, write_stream):
+                ready_event.set()
                 init_options = server.create_initialization_options()
                 await server.run(
                     read_stream,
@@ -73,6 +76,7 @@ class MCPTransportManager:
                 )
 
         self._task_group.start_soon(_run_server, self._transport, self.server)
+        await ready_event.wait()
         self._started = True
 
     async def handle_request(self, scope: Any, receive: Any, send: Any) -> None:
