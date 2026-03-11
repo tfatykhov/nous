@@ -273,6 +273,26 @@ class ProcedureManager:
         procedure.active = False
         await session.flush()
 
+    async def get_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
+        """Fetch active procedure by exact name match."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_by_name(name, session)
+        return await self._get_by_name(name, session)
+
+    async def _get_by_name(self, name: str, session: AsyncSession) -> ProcedureDetail | None:
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.name == name)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == True)  # noqa: E712
+            .limit(1)
+        )
+        procedure = result.scalars().first()
+        if procedure is None:
+            return None
+        return self._to_detail(procedure)
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

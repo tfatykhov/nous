@@ -248,6 +248,7 @@ class TestLearnSkillTool:
 
         heart = MagicMock()
         heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
 
         mock_detail = MagicMock()
         mock_detail.id = uuid4()
@@ -308,15 +309,14 @@ class TestLearnSkillTool:
 
     @pytest.mark.asyncio
     async def test_learn_skill_dedup_updates(self, mock_brain, mock_heart, mock_settings):
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
         from nous.api.tools import create_nous_tools
 
-        # Simulate existing procedure with same name
         existing = MagicMock()
         existing.name = "serper-search"
         existing.id = uuid4()
-        mock_heart.search_procedures.return_value = [existing]
+        mock_heart.get_procedure_by_name = AsyncMock(return_value=existing)
 
         tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
         result = await tools["learn_skill"](source="inline", content=FULL_SKILL_MD)
@@ -373,6 +373,24 @@ class TestProcedureSummaryDescription:
 # ---------------------------------------------------------------------------
 # Active filter in search_procedures
 # ---------------------------------------------------------------------------
+
+class TestGetProcedureByName:
+    @pytest.mark.asyncio
+    async def test_get_by_name_returns_none_when_not_found(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from nous.heart.procedures import ProcedureManager
+
+        db = MagicMock()
+        mgr = ProcedureManager(db, embeddings=None, agent_id="test-agent")
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        result = await mgr._get_by_name("nonexistent", mock_session)
+        assert result is None
+
 
 class TestActiveFilter:
     @pytest.mark.asyncio

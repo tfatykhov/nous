@@ -616,14 +616,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             manifest = _skill_parser.parse(markdown, source_hint=source if source != "inline" else None)
 
             # 3. Check for existing procedure with same name (dedup)
-            existing = await heart.search_procedures(manifest.name, limit=5)
+            existing = await heart.get_procedure_by_name(manifest.name)
             updated = False
-            for proc in existing:
-                if proc.name == manifest.name:
-                    # Update: retire old, create new
-                    await heart.retire_procedure(proc.id)
-                    updated = True
-                    break
+            if existing:
+                await heart.retire_procedure(existing.id)
+                updated = True
 
             # 4. Convert to ProcedureInput and store
             proc_input = _skill_parser.to_procedure_input(manifest)

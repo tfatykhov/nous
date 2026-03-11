@@ -317,6 +317,10 @@ class Heart:
         """Retire a procedure."""
         await self.procedures.retire(procedure_id, session)
 
+    async def get_procedure_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
+        """Fetch active procedure by exact name."""
+        return await self.procedures.get_by_name(name, session)
+
     # ==================================================================
     # Censors
     # ==================================================================
