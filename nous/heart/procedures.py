@@ -292,6 +292,7 @@ class ProcedureManager:
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
         procedure.active = True
+        await session.flush()
 
     # ------------------------------------------------------------------
     # list_inactive_skills()
@@ -325,7 +326,6 @@ class ProcedureManager:
             select(Procedure)
             .where(Procedure.name == name)
             .where(Procedure.agent_id == self.agent_id)
-            .where(Procedure.active == True)  # noqa: E712
             .limit(1)
         )
         procedure = result.scalars().first()

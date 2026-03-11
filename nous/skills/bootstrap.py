@@ -79,8 +79,8 @@ async def reactivate_skills(heart: Heart) -> int:
     reactivated = 0
     for proc in inactive:
         concepts = proc.core_concepts or []
-        # Env var names are uppercase strings with underscores
-        requires = [c for c in concepts if c == c.upper() and "_" in c]
+        # Extract requires from prefixed core_concepts (e.g. "requires:SERPER_API_KEY")
+        requires = [c.removeprefix("requires:") for c in concepts if c.startswith("requires:")]
         if not requires:
             continue
 

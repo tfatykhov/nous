@@ -197,7 +197,7 @@ class TestToProcedureInput:
         assert proc.core_tools == ["web_search", "web_fetch"]
         assert proc.core_patterns == ["web search", "google", "find online", "research", "look up"]
         assert "research" in proc.core_concepts
-        assert "SERPER_API_KEY" in proc.core_concepts
+        assert "requires:SERPER_API_KEY" in proc.core_concepts
 
     def test_tags_include_skill_and_frames(self):
         manifest = self.parser.parse(FULL_SKILL_MD)
@@ -560,7 +560,7 @@ class TestBootstrapReactivation:
         inactive_proc.id = uuid4()
         inactive_proc.name = "serper-search"
         inactive_proc.active = False
-        inactive_proc.core_concepts = ["research", "SERPER_API_KEY"]
+        inactive_proc.core_concepts = ["research", "requires:SERPER_API_KEY"]
         inactive_proc.tags = ["skill"]
 
         heart.list_inactive_skill_procedures = AsyncMock(return_value=[inactive_proc])
@@ -586,7 +586,7 @@ class TestBootstrapReactivation:
         inactive_proc = MagicMock()
         inactive_proc.id = uuid4()
         inactive_proc.name = "missing-deps"
-        inactive_proc.core_concepts = ["general", "NONEXISTENT_API_KEY"]
+        inactive_proc.core_concepts = ["general", "requires:NONEXISTENT_API_KEY"]
         inactive_proc.tags = ["skill"]
 
         heart.list_inactive_skill_procedures = AsyncMock(return_value=[inactive_proc])

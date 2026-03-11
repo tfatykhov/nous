@@ -252,7 +252,7 @@ class SkillParser:
             goals=manifest.triggers,
             core_tools=manifest.tools,
             core_patterns=manifest.triggers,
-            core_concepts=[manifest.domain] + manifest.requires,
+            core_concepts=[manifest.domain] + [f"requires:{r}" for r in manifest.requires],
             implementation_notes=impl_notes,
             tags=tags,
         )
