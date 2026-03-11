@@ -609,7 +609,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 path = os.path.join(workspace, source) if not os.path.isabs(source) else source
                 if not os.path.exists(path):
                     return {"content": [{"type": "text", "text": f"Error: file not found: {path}"}]}
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     markdown = f.read()
 
             # 2. Parse
@@ -638,6 +638,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 active_str = f"inactive (missing: {', '.join(missing_requires)})"
             else:
                 active_str = "active"
+            warnings_text = ""
+            if manifest.warnings:
+                warnings_text = "\nWarnings:\n" + "\n".join(f"  - {w}" for w in manifest.warnings)
             return {
                 "content": [
                     {
@@ -649,6 +652,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Domain: {manifest.domain}\n"
                             f"Status: {active_str}\n"
                             f"Triggers: {', '.join(manifest.triggers) if manifest.triggers else 'none'}"
+                            f"{warnings_text}"
                         ),
                     }
                 ]

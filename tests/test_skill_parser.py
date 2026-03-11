@@ -610,6 +610,61 @@ class TestBootstrapReactivation:
         assert count == 0
 
 
+class TestLearnSkillWarnings:
+    @pytest.fixture
+    def mock_heart(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+        mock_detail = MagicMock()
+        mock_detail.id = uuid4()
+        mock_detail.active = True
+        heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.retire_procedure = AsyncMock()
+        return heart
+
+    @pytest.fixture
+    def mock_brain(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_settings(self):
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.workspace_dir = "."
+        return s
+
+    @pytest.mark.asyncio
+    async def test_warnings_included_in_response(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+
+        # Markdown with leading whitespace triggers lenient parse + warning
+        md = "\n\n---\nname: test-warn\ndescription: test warnings\n---\nBody"
+        result = await tools["learn_skill"](source="inline", content=md)
+
+        text = result["content"][0]["text"]
+        assert "registered successfully" in text
+        assert "warning" in text.lower() or "Warning" in text
+
+    @pytest.mark.asyncio
+    async def test_no_warnings_for_clean_markdown(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+
+        md = "---\nname: clean-skill\ndescription: no issues\n---\nBody"
+        result = await tools["learn_skill"](source="inline", content=md)
+
+        text = result["content"][0]["text"]
+        assert "registered successfully" in text
+        assert "Warning" not in text
+
+
 class TestActiveFilter:
     @pytest.mark.asyncio
     async def test_search_passes_active_filter_to_hybrid_search(self):
