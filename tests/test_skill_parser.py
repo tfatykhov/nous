@@ -681,3 +681,82 @@ class TestActiveFilter:
 
             _, kwargs = mock_hs.call_args
             assert "active" in kwargs.get("extra_where", "")
+
+
+class TestGetProcedureTool:
+    @pytest.fixture
+    def mock_heart(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+
+        mock_detail = MagicMock()
+        mock_detail.id = uuid4()
+        mock_detail.name = "serper-search"
+        mock_detail.domain = "research"
+        mock_detail.description = "Google search via Serper.dev API"
+        mock_detail.goals = ["web search", "google"]
+        mock_detail.core_tools = ["web_search", "web_fetch"]
+        mock_detail.implementation_notes = ["source:https://clawhub.com/skills/serper", "Use this skill when searching"]
+        mock_detail.activation_count = 3
+        mock_detail.active = True
+        mock_detail.effectiveness = 0.8
+        heart.get_procedure = AsyncMock(return_value=mock_detail)
+        heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.retire_procedure = AsyncMock()
+
+        return heart
+
+    @pytest.fixture
+    def mock_brain(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_settings(self):
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.workspace_dir = "."
+        return s
+
+    @pytest.mark.asyncio
+    async def test_get_procedure_returns_full_details(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        proc_id = str(mock_heart.get_procedure.return_value.id)
+        result = await tools["get_procedure"](procedure_id=proc_id)
+
+        text = result["content"][0]["text"]
+        assert "serper-search" in text
+        assert "Google search via Serper.dev API" in text
+        assert "web search" in text
+        assert "web_search" in text
+        assert "Use this skill when searching" in text
+        assert "active" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_get_procedure_not_found(self, mock_brain, mock_heart, mock_settings):
+        from unittest.mock import AsyncMock
+        from nous.api.tools import create_nous_tools
+
+        mock_heart.get_procedure = AsyncMock(side_effect=ValueError("Procedure xyz not found"))
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["get_procedure"](procedure_id="00000000-0000-0000-0000-000000000000")
+
+        text = result["content"][0]["text"]
+        assert "Error" in text
+
+    @pytest.mark.asyncio
+    async def test_get_procedure_invalid_uuid(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["get_procedure"](procedure_id="not-a-uuid")
+
+        text = result["content"][0]["text"]
+        assert "Error" in text

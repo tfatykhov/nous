@@ -664,6 +664,50 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("learn_skill tool failed")
             return {"content": [{"type": "text", "text": f"Error learning skill: {e}"}]}
 
+    async def get_procedure(
+        procedure_id: str,
+    ) -> dict[str, Any]:
+        """Fetch full procedure/skill details by ID.
+
+        Use after recall_deep returns a procedure result to read the full
+        skill body, triggers, tools, and implementation notes.
+
+        Args:
+            procedure_id: UUID of the procedure (from recall_deep results)
+
+        Returns:
+            MCP-compliant response with full procedure details
+        """
+        try:
+            from uuid import UUID as _UUID
+            pid = _UUID(procedure_id)
+            detail = await heart.get_procedure(pid)
+
+            lines = [
+                f"**{detail.name}** ({detail.domain or 'general'})",
+            ]
+            if detail.description:
+                lines.append(f"Description: {detail.description}")
+            if detail.goals:
+                lines.append(f"Triggers: {', '.join(detail.goals)}")
+            if detail.core_tools:
+                lines.append(f"Tools: {', '.join(detail.core_tools)}")
+            if detail.implementation_notes:
+                lines.append("")
+                for note in detail.implementation_notes:
+                    lines.append(note)
+            lines.append(f"\nActivated: {detail.activation_count}x | Status: {'active' if detail.active else 'inactive'}")
+            if detail.effectiveness is not None:
+                lines.append(f"Effectiveness: {detail.effectiveness:.0%}")
+
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+        except Exception as e:
+            logger.exception("get_procedure tool failed")
+            return {"content": [{"type": "text", "text": f"Error fetching procedure: {e}"}]}
+
     return {
         "record_decision": record_decision,
         "learn_fact": learn_fact,
@@ -671,6 +715,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "create_censor": create_censor,
         "recall_recent": recall_recent,
         "learn_skill": learn_skill,
+        "get_procedure": get_procedure,
     }
 
 
@@ -854,6 +899,21 @@ _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "required": ["source"],
 }
 
+_GET_PROCEDURE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Fetch full procedure/skill details by ID. Use after recall_deep returns a "
+        "procedure result to read the full skill body, triggers, tools, and instructions."
+    ),
+    "properties": {
+        "procedure_id": {
+            "type": "string",
+            "description": "UUID of the procedure (from recall_deep results metadata)",
+        },
+    },
+    "required": ["procedure_id"],
+}
+
 
 def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
     """Create Nous memory tools and register them with the dispatcher.
@@ -869,6 +929,7 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
     dispatcher.register("create_censor", closures["create_censor"], _CREATE_CENSOR_SCHEMA)
     dispatcher.register("recall_recent", closures["recall_recent"], _RECALL_RECENT_SCHEMA)
     dispatcher.register("learn_skill", closures["learn_skill"], _LEARN_SKILL_SCHEMA)
+    dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

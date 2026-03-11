@@ -674,10 +674,11 @@ class Heart:
                 },
             )
         elif isinstance(item, ProcedureSummary):
+            summary = f"{item.name}: {item.description}" if item.description else item.name
             return RecallResult(
                 type="procedure",
                 id=item.id,
-                summary=item.name,
+                summary=summary,
                 score=score,
                 metadata={
                     "domain": item.domain,
