@@ -392,6 +392,47 @@ class TestGetProcedureByName:
         assert result is None
 
 
+class TestLenientParser:
+    def setup_method(self):
+        self.parser = SkillParser()
+
+    def test_leading_whitespace_before_frontmatter(self):
+        md = "\n\n---\nname: test\ndescription: test skill\n---\nBody"
+        manifest = self.parser.parse(md)
+        assert manifest.name == "test"
+        assert len(manifest.warnings) > 0
+        assert any("whitespace" in w for w in manifest.warnings)
+
+    def test_fenced_yaml_block(self):
+        md = "```yaml\nname: test\ndescription: test skill\n```\nBody"
+        manifest = self.parser.parse(md)
+        assert manifest.name == "test"
+        assert len(manifest.warnings) > 0
+        assert any("fenced" in w.lower() or "yaml" in w.lower() for w in manifest.warnings)
+
+    def test_missing_closing_delimiter(self):
+        md = "---\nname: test\ndescription: test skill\n\n## When to Use\nUse this."
+        manifest = self.parser.parse(md)
+        assert manifest.name == "test"
+        assert len(manifest.warnings) > 0
+        assert any("closing" in w.lower() or "---" in w for w in manifest.warnings)
+
+    def test_strict_parse_no_warnings(self):
+        md = "---\nname: test\ndescription: test skill\n---\nBody"
+        manifest = self.parser.parse(md)
+        assert manifest.warnings == []
+
+    def test_lenient_still_requires_name(self):
+        md = "\n---\ndescription: no name\n---\nBody"
+        with pytest.raises(ValueError, match="name"):
+            self.parser.parse(md)
+
+    def test_lenient_still_requires_description(self):
+        md = "\n---\nname: test\n---\nBody"
+        with pytest.raises(ValueError, match="description"):
+            self.parser.parse(md)
+
+
 class TestActiveFilter:
     @pytest.mark.asyncio
     async def test_search_passes_active_filter_to_hybrid_search(self):
