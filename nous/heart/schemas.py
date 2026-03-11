@@ -154,6 +154,7 @@ class ProcedureInput(BaseModel):
     core_concepts: list[str] = []  # Core
     implementation_notes: list[str] = []  # Lower fringe
     tags: list[str] = []
+    active: bool | None = None  # None = use default (True), False = register as inactive
 
 
 class ProcedureDetail(BaseModel):
@@ -188,6 +189,7 @@ class ProcedureSummary(BaseModel):
     id: UUID
     name: str
     domain: str | None
+    description: str | None = None
     activation_count: int
     effectiveness: float | None
     score: float | None = None

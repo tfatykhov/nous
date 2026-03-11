@@ -26,10 +26,17 @@ class SkillManifest:
     version: str | None = None
     raw_content: str = ""
     first_section: str = ""
+    warnings: list[str] = field(default_factory=list)
 
 
 # Regex for YAML frontmatter block
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+
+# Lenient: fenced yaml block
+_FENCED_YAML_RE = re.compile(r"^```ya?ml\s*\n(.*?)\n```\s*\n?", re.DOTALL)
+
+# Lenient: frontmatter with missing closing --- (end at first ## or EOF)
+_OPEN_FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)(?=\n##\s+|\Z)", re.DOTALL)
 
 # Regex for first H2 section
 _FIRST_H2_RE = re.compile(r"^##\s+.+?\n(.*?)(?=\n##\s+|\Z)", re.MULTILINE | re.DOTALL)
@@ -118,23 +125,61 @@ class SkillParser:
     def parse(self, markdown: str, source_hint: str | None = None) -> SkillManifest:
         """Parse SKILL.md markdown into SkillManifest.
 
+        Tries strict frontmatter parsing first (--- ... ---).
+        Falls back to lenient modes: strips whitespace, accepts ```yaml blocks,
+        handles missing closing ---.
+
         Args:
             markdown: Full SKILL.md content
             source_hint: Optional source URL or path for attribution
 
         Raises:
-            ValueError: If frontmatter is missing or required fields absent
+            ValueError: If frontmatter cannot be extracted or required fields missing
         """
-        fm_match = _FRONTMATTER_RE.match(markdown)
+        warnings: list[str] = []
+        text = markdown
+
+        # Strict parse first
+        fm_match = _FRONTMATTER_RE.match(text)
+
         if not fm_match:
-            raise ValueError("SKILL.md must start with YAML frontmatter (--- ... ---)")
+            # Lenient: strip leading whitespace/blank lines
+            stripped = text.lstrip()
+            if stripped != text:
+                fm_match = _FRONTMATTER_RE.match(stripped)
+                if fm_match:
+                    text = stripped
+                    warnings.append("Auto-corrected: stripped leading whitespace before frontmatter")
+
+        if not fm_match:
+            # Lenient: fenced yaml block
+            stripped = text.lstrip()
+            fm_match = _FENCED_YAML_RE.match(stripped)
+            if fm_match:
+                text = stripped
+                warnings.append("Auto-corrected: parsed ```yaml fenced block as frontmatter")
+
+        if not fm_match:
+            # Lenient: missing closing ---
+            stripped = text.lstrip()
+            fm_match = _OPEN_FRONTMATTER_RE.match(stripped)
+            if fm_match:
+                text = stripped
+                warnings.append("Auto-corrected: missing closing --- delimiter")
+
+        if not fm_match:
+            raise ValueError(
+                "SKILL.md must start with YAML frontmatter (--- ... ---). "
+                "Also accepts ```yaml fenced blocks. "
+                "Ensure the first non-blank line is --- or ```yaml."
+            )
 
         fm_text = fm_match.group(1)
-        body = markdown[fm_match.end():]
+        body = text[fm_match.end():]
 
         data = _parse_frontmatter(fm_text)
 
-        # Required fields
+        # Required fields — specific error messages
         name = data.get("name")
         if not name or not isinstance(name, str):
             raise ValueError("Frontmatter must include 'name' (string)")
@@ -173,13 +218,16 @@ class SkillParser:
             version=version if isinstance(version, str) else None,
             raw_content=body.strip(),
             first_section=first_section,
+            warnings=warnings,
         )
 
     def to_procedure_input(self, manifest: SkillManifest) -> ProcedureInput:
         """Convert SkillManifest to ProcedureInput for heart.store_procedure()."""
         impl_notes = []
-        if manifest.source_url:
+        if manifest.source_url and manifest.source_url != "inline":
             impl_notes.append(f"source:{manifest.source_url}")
+        elif manifest.source_url == "inline":
+            impl_notes.append("source:inline")
         else:
             impl_notes.append("source:local")
         if manifest.version:
@@ -192,6 +240,8 @@ class SkillParser:
         tags.extend(manifest.frames)
         if manifest.source_url and ("clawhub" in manifest.source_url or "marketplace" in manifest.source_url):
             tags.append("marketplace")
+        elif manifest.source_url == "inline":
+            tags.append("inline")
         else:
             tags.append("local")
 
@@ -202,7 +252,7 @@ class SkillParser:
             goals=manifest.triggers,
             core_tools=manifest.tools,
             core_patterns=manifest.triggers,
-            core_concepts=[manifest.domain] + manifest.requires,
+            core_concepts=[manifest.domain] + [f"requires:{r}" for r in manifest.requires],
             implementation_notes=impl_notes,
             tags=tags,
         )

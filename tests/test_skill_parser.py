@@ -197,7 +197,7 @@ class TestToProcedureInput:
         assert proc.core_tools == ["web_search", "web_fetch"]
         assert proc.core_patterns == ["web search", "google", "find online", "research", "look up"]
         assert "research" in proc.core_concepts
-        assert "SERPER_API_KEY" in proc.core_concepts
+        assert "requires:SERPER_API_KEY" in proc.core_concepts
 
     def test_tags_include_skill_and_frames(self):
         manifest = self.parser.parse(FULL_SKILL_MD)
@@ -248,6 +248,7 @@ class TestLearnSkillTool:
 
         heart = MagicMock()
         heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
 
         mock_detail = MagicMock()
         mock_detail.id = uuid4()
@@ -308,15 +309,14 @@ class TestLearnSkillTool:
 
     @pytest.mark.asyncio
     async def test_learn_skill_dedup_updates(self, mock_brain, mock_heart, mock_settings):
-        from unittest.mock import MagicMock
+        from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
         from nous.api.tools import create_nous_tools
 
-        # Simulate existing procedure with same name
         existing = MagicMock()
         existing.name = "serper-search"
         existing.id = uuid4()
-        mock_heart.search_procedures.return_value = [existing]
+        mock_heart.get_procedure_by_name = AsyncMock(return_value=existing)
 
         tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
         result = await tools["learn_skill"](source="inline", content=FULL_SKILL_MD)
@@ -335,3 +335,428 @@ class TestLearnSkillTool:
 
         text = result["content"][0]["text"]
         assert "not found" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# ProcedureSummary description field
+# ---------------------------------------------------------------------------
+
+class TestProcedureSummaryDescription:
+    def test_summary_has_description_field(self):
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+
+        summary = ProcedureSummary(
+            id=uuid4(),
+            name="test-skill",
+            domain="general",
+            activation_count=0,
+            effectiveness=None,
+            description="A test skill description",
+        )
+        assert summary.description == "A test skill description"
+
+    def test_summary_description_defaults_none(self):
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+
+        summary = ProcedureSummary(
+            id=uuid4(),
+            name="test-skill",
+            domain="general",
+            activation_count=0,
+            effectiveness=None,
+        )
+        assert summary.description is None
+
+
+# ---------------------------------------------------------------------------
+# Active filter in search_procedures
+# ---------------------------------------------------------------------------
+
+class TestGetProcedureByName:
+    @pytest.mark.asyncio
+    async def test_get_by_name_returns_none_when_not_found(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from nous.heart.procedures import ProcedureManager
+
+        db = MagicMock()
+        mgr = ProcedureManager(db, embeddings=None, agent_id="test-agent")
+
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = None
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        result = await mgr._get_by_name("nonexistent", mock_session)
+        assert result is None
+
+
+class TestInlineProvenance:
+    def test_inline_source_tag(self):
+        parser = SkillParser()
+        md = "---\nname: agent-skill\ndescription: created by agent\n---\nBody"
+        manifest = parser.parse(md, source_hint="inline")
+        proc = parser.to_procedure_input(manifest)
+
+        assert "inline" in proc.tags
+        assert "local" not in proc.tags
+        assert any("source:inline" in n for n in proc.implementation_notes)
+
+    def test_local_source_tag_unchanged(self):
+        parser = SkillParser()
+        md = "---\nname: local-skill\ndescription: from disk\n---\nBody"
+        manifest = parser.parse(md)
+        proc = parser.to_procedure_input(manifest)
+
+        assert "local" in proc.tags
+        assert "inline" not in proc.tags
+
+
+class TestLenientParser:
+    def setup_method(self):
+        self.parser = SkillParser()
+
+    def test_leading_whitespace_before_frontmatter(self):
+        md = "\n\n---\nname: test\ndescription: test skill\n---\nBody"
+        manifest = self.parser.parse(md)
+        assert manifest.name == "test"
+        assert len(manifest.warnings) > 0
+        assert any("whitespace" in w for w in manifest.warnings)
+
+    def test_fenced_yaml_block(self):
+        md = "```yaml\nname: test\ndescription: test skill\n```\nBody"
+        manifest = self.parser.parse(md)
+        assert manifest.name == "test"
+        assert len(manifest.warnings) > 0
+        assert any("fenced" in w.lower() or "yaml" in w.lower() for w in manifest.warnings)
+
+    def test_missing_closing_delimiter(self):
+        md = "---\nname: test\ndescription: test skill\n\n## When to Use\nUse this."
+        manifest = self.parser.parse(md)
+        assert manifest.name == "test"
+        assert len(manifest.warnings) > 0
+        assert any("closing" in w.lower() or "---" in w for w in manifest.warnings)
+
+    def test_strict_parse_no_warnings(self):
+        md = "---\nname: test\ndescription: test skill\n---\nBody"
+        manifest = self.parser.parse(md)
+        assert manifest.warnings == []
+
+    def test_lenient_still_requires_name(self):
+        md = "\n---\ndescription: no name\n---\nBody"
+        with pytest.raises(ValueError, match="name"):
+            self.parser.parse(md)
+
+    def test_lenient_still_requires_description(self):
+        md = "\n---\nname: test\n---\nBody"
+        with pytest.raises(ValueError, match="description"):
+            self.parser.parse(md)
+
+
+class TestRequiresValidation:
+    @pytest.fixture
+    def mock_heart(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+        mock_detail = MagicMock()
+        mock_detail.id = uuid4()
+        mock_detail.active = False  # will be False for missing requires
+        heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.retire_procedure = AsyncMock()
+        return heart
+
+    @pytest.fixture
+    def mock_brain(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_settings(self):
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.workspace_dir = "."
+        return s
+
+    @pytest.mark.asyncio
+    async def test_missing_requires_registers_inactive(self, mock_brain, mock_heart, mock_settings):
+        import os
+        from nous.api.tools import create_nous_tools
+
+        os.environ.pop("SERPER_API_KEY", None)
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["learn_skill"](source="inline", content=FULL_SKILL_MD)
+
+        text = result["content"][0]["text"]
+        assert "inactive" in text.lower()
+        assert "SERPER_API_KEY" in text
+
+        # Verify store_procedure was called with active=False
+        call_args = mock_heart.store_procedure.call_args
+        proc_input = call_args[0][0]
+        assert proc_input.active is False
+
+    @pytest.mark.asyncio
+    async def test_satisfied_requires_registers_active(self, mock_brain, mock_heart, mock_settings):
+        import os
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+        from nous.api.tools import create_nous_tools
+
+        os.environ["SERPER_API_KEY"] = "test-key"
+        try:
+            # Override mock to return active=True
+            active_detail = MagicMock()
+            active_detail.id = uuid4()
+            active_detail.active = True
+            mock_heart.store_procedure.return_value = active_detail
+
+            tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+            result = await tools["learn_skill"](source="inline", content=FULL_SKILL_MD)
+
+            text = result["content"][0]["text"]
+            assert "active" in text.lower()
+            assert "inactive" not in text.lower()
+        finally:
+            os.environ.pop("SERPER_API_KEY", None)
+
+    @pytest.mark.asyncio
+    async def test_no_requires_registers_active(self, mock_brain, mock_heart, mock_settings):
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+        from nous.api.tools import create_nous_tools
+
+        # Use skill markdown without requires
+        md = "---\nname: simple-skill\ndescription: no deps\n---\nBody"
+
+        active_detail = MagicMock()
+        active_detail.id = uuid4()
+        active_detail.active = True
+        mock_heart.store_procedure.return_value = active_detail
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["learn_skill"](source="inline", content=md)
+
+        text = result["content"][0]["text"]
+        assert "active" in text.lower()
+        assert "inactive" not in text.lower()
+
+
+class TestBootstrapReactivation:
+    @pytest.mark.asyncio
+    async def test_reactivate_skill_with_satisfied_requires(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from nous.skills.bootstrap import reactivate_skills
+        import os
+
+        heart = MagicMock()
+
+        inactive_proc = MagicMock()
+        inactive_proc.id = uuid4()
+        inactive_proc.name = "serper-search"
+        inactive_proc.active = False
+        inactive_proc.core_concepts = ["research", "requires:SERPER_API_KEY"]
+        inactive_proc.tags = ["skill"]
+
+        heart.list_inactive_skill_procedures = AsyncMock(return_value=[inactive_proc])
+        heart.reactivate_procedure = AsyncMock()
+
+        os.environ["SERPER_API_KEY"] = "test-key"
+        try:
+            count = await reactivate_skills(heart)
+            assert count == 1
+            heart.reactivate_procedure.assert_called_once()
+        finally:
+            os.environ.pop("SERPER_API_KEY", None)
+
+    @pytest.mark.asyncio
+    async def test_no_reactivation_when_requires_still_missing(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        from nous.skills.bootstrap import reactivate_skills
+        import os
+
+        heart = MagicMock()
+
+        inactive_proc = MagicMock()
+        inactive_proc.id = uuid4()
+        inactive_proc.name = "missing-deps"
+        inactive_proc.core_concepts = ["general", "requires:NONEXISTENT_API_KEY"]
+        inactive_proc.tags = ["skill"]
+
+        heart.list_inactive_skill_procedures = AsyncMock(return_value=[inactive_proc])
+        heart.reactivate_procedure = AsyncMock()
+
+        os.environ.pop("NONEXISTENT_API_KEY", None)
+
+        count = await reactivate_skills(heart)
+        assert count == 0
+        heart.reactivate_procedure.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_inactive_skills_returns_zero(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from nous.skills.bootstrap import reactivate_skills
+
+        heart = MagicMock()
+        heart.list_inactive_skill_procedures = AsyncMock(return_value=[])
+
+        count = await reactivate_skills(heart)
+        assert count == 0
+
+
+class TestLearnSkillWarnings:
+    @pytest.fixture
+    def mock_heart(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+        mock_detail = MagicMock()
+        mock_detail.id = uuid4()
+        mock_detail.active = True
+        heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.retire_procedure = AsyncMock()
+        return heart
+
+    @pytest.fixture
+    def mock_brain(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_settings(self):
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.workspace_dir = "."
+        return s
+
+    @pytest.mark.asyncio
+    async def test_warnings_included_in_response(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+
+        # Markdown with leading whitespace triggers lenient parse + warning
+        md = "\n\n---\nname: test-warn\ndescription: test warnings\n---\nBody"
+        result = await tools["learn_skill"](source="inline", content=md)
+
+        text = result["content"][0]["text"]
+        assert "registered successfully" in text
+        assert "warning" in text.lower() or "Warning" in text
+
+    @pytest.mark.asyncio
+    async def test_no_warnings_for_clean_markdown(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+
+        md = "---\nname: clean-skill\ndescription: no issues\n---\nBody"
+        result = await tools["learn_skill"](source="inline", content=md)
+
+        text = result["content"][0]["text"]
+        assert "registered successfully" in text
+        assert "Warning" not in text
+
+
+class TestActiveFilter:
+    @pytest.mark.asyncio
+    async def test_search_passes_active_filter_to_hybrid_search(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from nous.heart.procedures import ProcedureManager
+
+        db = MagicMock()
+        mgr = ProcedureManager(db, embeddings=None, agent_id="test-agent")
+        mock_session = MagicMock()
+
+        with patch("nous.heart.procedures.hybrid_search", new_callable=AsyncMock) as mock_hs:
+            mock_hs.return_value = []
+            await mgr._search("test query", 10, None, mock_session)
+
+            _, kwargs = mock_hs.call_args
+            assert "active" in kwargs.get("extra_where", "")
+
+
+class TestGetProcedureTool:
+    @pytest.fixture
+    def mock_heart(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+
+        mock_detail = MagicMock()
+        mock_detail.id = uuid4()
+        mock_detail.name = "serper-search"
+        mock_detail.domain = "research"
+        mock_detail.description = "Google search via Serper.dev API"
+        mock_detail.goals = ["web search", "google"]
+        mock_detail.core_tools = ["web_search", "web_fetch"]
+        mock_detail.implementation_notes = ["source:https://clawhub.com/skills/serper", "Use this skill when searching"]
+        mock_detail.activation_count = 3
+        mock_detail.active = True
+        mock_detail.effectiveness = 0.8
+        heart.get_procedure = AsyncMock(return_value=mock_detail)
+        heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.retire_procedure = AsyncMock()
+
+        return heart
+
+    @pytest.fixture
+    def mock_brain(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_settings(self):
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.workspace_dir = "."
+        return s
+
+    @pytest.mark.asyncio
+    async def test_get_procedure_returns_full_details(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        proc_id = str(mock_heart.get_procedure.return_value.id)
+        result = await tools["get_procedure"](procedure_id=proc_id)
+
+        text = result["content"][0]["text"]
+        assert "serper-search" in text
+        assert "Google search via Serper.dev API" in text
+        assert "web search" in text
+        assert "web_search" in text
+        assert "Use this skill when searching" in text
+        assert "active" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_get_procedure_not_found(self, mock_brain, mock_heart, mock_settings):
+        from unittest.mock import AsyncMock
+        from nous.api.tools import create_nous_tools
+
+        mock_heart.get_procedure = AsyncMock(side_effect=ValueError("Procedure xyz not found"))
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["get_procedure"](procedure_id="00000000-0000-0000-0000-000000000000")
+
+        text = result["content"][0]["text"]
+        assert "Error" in text
+
+    @pytest.mark.asyncio
+    async def test_get_procedure_invalid_uuid(self, mock_brain, mock_heart, mock_settings):
+        from nous.api.tools import create_nous_tools
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["get_procedure"](procedure_id="not-a-uuid")
+
+        text = result["content"][0]["text"]
+        assert "Error" in text

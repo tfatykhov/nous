@@ -83,6 +83,7 @@ class ProcedureManager:
             implementation_notes=input.implementation_notes or None,
             tags=input.tags or None,
             embedding=embedding,
+            active=input.active if input.active is not None else True,
         )
         session.add(procedure)
         await session.flush()
@@ -213,10 +214,10 @@ class ProcedureManager:
             except Exception:
                 logger.warning("Embedding generation failed for procedure search")
 
-        extra_where = ""
+        extra_where = " AND t.active = true"
         extra_params: dict = {}
         if domain:
-            extra_where = " AND t.domain = :domain"
+            extra_where += " AND t.domain = :domain"
             extra_params["domain"] = domain
 
         results = await hybrid_search(
@@ -244,6 +245,7 @@ class ProcedureManager:
                 id=p.id,
                 name=p.name,
                 domain=p.domain,
+                description=p.description,
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
                 score=scores.get(p.id),
@@ -271,6 +273,65 @@ class ProcedureManager:
             raise ValueError(f"Procedure {procedure_id} not found")
         procedure.active = False
         await session.flush()
+
+    # ------------------------------------------------------------------
+    # reactivate()
+    # ------------------------------------------------------------------
+
+    async def reactivate(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
+        """Set an inactive procedure back to active."""
+        if session is None:
+            async with self.db.session() as session:
+                await self._reactivate(procedure_id, session)
+                await session.commit()
+                return
+        await self._reactivate(procedure_id, session)
+
+    async def _reactivate(self, procedure_id: UUID, session: AsyncSession) -> None:
+        procedure = await self._get_procedure_orm(procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {procedure_id} not found")
+        procedure.active = True
+        await session.flush()
+
+    # ------------------------------------------------------------------
+    # list_inactive_skills()
+    # ------------------------------------------------------------------
+
+    async def list_inactive_skills(self, session: AsyncSession | None = None) -> list[ProcedureDetail]:
+        """List inactive procedures tagged as 'skill'."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_inactive_skills(session)
+        return await self._list_inactive_skills(session)
+
+    async def _list_inactive_skills(self, session: AsyncSession) -> list[ProcedureDetail]:
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == False)  # noqa: E712
+            .where(Procedure.tags.contains(["skill"]))
+        )
+        return [self._to_detail(p) for p in result.scalars().all()]
+
+    async def get_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
+        """Fetch active procedure by exact name match."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_by_name(name, session)
+        return await self._get_by_name(name, session)
+
+    async def _get_by_name(self, name: str, session: AsyncSession) -> ProcedureDetail | None:
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.name == name)
+            .where(Procedure.agent_id == self.agent_id)
+            .limit(1)
+        )
+        procedure = result.scalars().first()
+        if procedure is None:
+            return None
+        return self._to_detail(procedure)
 
     # ------------------------------------------------------------------
     # Private helpers

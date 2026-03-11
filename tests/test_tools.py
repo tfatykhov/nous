@@ -57,6 +57,7 @@ class TestCreateNousTools:
             "create_censor",
             "recall_recent",
             "learn_skill",
+            "get_procedure",
         }
         for name, func in tools.items():
             assert callable(func), f"{name} should be callable"
