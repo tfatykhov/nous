@@ -244,6 +244,7 @@ class ProcedureManager:
                 id=p.id,
                 name=p.name,
                 domain=p.domain,
+                description=p.description,
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
                 score=scores.get(p.id),

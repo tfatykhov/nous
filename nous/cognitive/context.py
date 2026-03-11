@@ -757,20 +757,17 @@ class ContextEngine:
         return "\n".join(lines)
 
     def _format_procedures(self, procedures: list) -> str:
-        """Format procedures for context.
-
-        P2-8: Use name + domain + description (not core_patterns).
-        ProcedureSummary has: name, domain, activation_count, effectiveness.
-        Format: - **{name}** ({domain}): activated {count}x
-        """
+        """Format procedures for context."""
         lines = []
         for p in procedures:
             name = getattr(p, "name", "")
             domain = getattr(p, "domain", None) or "general"
+            desc = getattr(p, "description", None) or ""
             count = getattr(p, "activation_count", 0)
             eff = getattr(p, "effectiveness", None)
             eff_str = f", effectiveness: {eff:.0%}" if eff is not None else ""
-            lines.append(f"- **{name}** ({domain}): activated {count}x{eff_str}")
+            desc_str = f": {desc} | " if desc else ": "
+            lines.append(f"- **{name}** ({domain}){desc_str}activated {count}x{eff_str}")
         return "\n".join(lines)
 
     def _format_episodes(self, episodes: list) -> str:

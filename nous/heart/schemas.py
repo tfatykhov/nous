@@ -188,6 +188,7 @@ class ProcedureSummary(BaseModel):
     id: UUID
     name: str
     domain: str | None
+    description: str | None = None
     activation_count: int
     effectiveness: float | None
     score: float | None = None

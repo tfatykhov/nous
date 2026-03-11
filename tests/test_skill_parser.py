@@ -335,3 +335,36 @@ class TestLearnSkillTool:
 
         text = result["content"][0]["text"]
         assert "not found" in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# ProcedureSummary description field
+# ---------------------------------------------------------------------------
+
+class TestProcedureSummaryDescription:
+    def test_summary_has_description_field(self):
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+
+        summary = ProcedureSummary(
+            id=uuid4(),
+            name="test-skill",
+            domain="general",
+            activation_count=0,
+            effectiveness=None,
+            description="A test skill description",
+        )
+        assert summary.description == "A test skill description"
+
+    def test_summary_description_defaults_none(self):
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+
+        summary = ProcedureSummary(
+            id=uuid4(),
+            name="test-skill",
+            domain="general",
+            activation_count=0,
+            effectiveness=None,
+        )
+        assert summary.description is None
