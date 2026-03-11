@@ -615,6 +615,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # 2. Parse
             manifest = _skill_parser.parse(markdown, source_hint=source)
 
+            # 2b. Check requires (env var validation)
+            import os as _os
+            missing_requires = [var for var in manifest.requires if not _os.environ.get(var)]
+            skill_active = len(missing_requires) == 0
+
             # 3. Check for existing procedure with same name (dedup)
             existing = await heart.get_procedure_by_name(manifest.name)
             updated = False
@@ -624,10 +629,15 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             # 4. Convert to ProcedureInput and store
             proc_input = _skill_parser.to_procedure_input(manifest)
+            if not skill_active:
+                proc_input.active = False
             result = await heart.store_procedure(proc_input)
 
             action = "updated" if updated else "registered"
-            active_str = "active" if result.active else "inactive (missing requirements)"
+            if not skill_active:
+                active_str = f"inactive (missing: {', '.join(missing_requires)})"
+            else:
+                active_str = "active"
             return {
                 "content": [
                     {

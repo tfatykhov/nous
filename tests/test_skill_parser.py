@@ -454,6 +454,98 @@ class TestLenientParser:
             self.parser.parse(md)
 
 
+class TestRequiresValidation:
+    @pytest.fixture
+    def mock_heart(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+        mock_detail = MagicMock()
+        mock_detail.id = uuid4()
+        mock_detail.active = False  # will be False for missing requires
+        heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.retire_procedure = AsyncMock()
+        return heart
+
+    @pytest.fixture
+    def mock_brain(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_settings(self):
+        from unittest.mock import MagicMock
+        s = MagicMock()
+        s.workspace_dir = "."
+        return s
+
+    @pytest.mark.asyncio
+    async def test_missing_requires_registers_inactive(self, mock_brain, mock_heart, mock_settings):
+        import os
+        from nous.api.tools import create_nous_tools
+
+        os.environ.pop("SERPER_API_KEY", None)
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["learn_skill"](source="inline", content=FULL_SKILL_MD)
+
+        text = result["content"][0]["text"]
+        assert "inactive" in text.lower()
+        assert "SERPER_API_KEY" in text
+
+        # Verify store_procedure was called with active=False
+        call_args = mock_heart.store_procedure.call_args
+        proc_input = call_args[0][0]
+        assert proc_input.active is False
+
+    @pytest.mark.asyncio
+    async def test_satisfied_requires_registers_active(self, mock_brain, mock_heart, mock_settings):
+        import os
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+        from nous.api.tools import create_nous_tools
+
+        os.environ["SERPER_API_KEY"] = "test-key"
+        try:
+            # Override mock to return active=True
+            active_detail = MagicMock()
+            active_detail.id = uuid4()
+            active_detail.active = True
+            mock_heart.store_procedure.return_value = active_detail
+
+            tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+            result = await tools["learn_skill"](source="inline", content=FULL_SKILL_MD)
+
+            text = result["content"][0]["text"]
+            assert "active" in text.lower()
+            assert "inactive" not in text.lower()
+        finally:
+            os.environ.pop("SERPER_API_KEY", None)
+
+    @pytest.mark.asyncio
+    async def test_no_requires_registers_active(self, mock_brain, mock_heart, mock_settings):
+        from unittest.mock import MagicMock
+        from uuid import uuid4
+        from nous.api.tools import create_nous_tools
+
+        # Use skill markdown without requires
+        md = "---\nname: simple-skill\ndescription: no deps\n---\nBody"
+
+        active_detail = MagicMock()
+        active_detail.id = uuid4()
+        active_detail.active = True
+        mock_heart.store_procedure.return_value = active_detail
+
+        tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
+        result = await tools["learn_skill"](source="inline", content=md)
+
+        text = result["content"][0]["text"]
+        assert "active" in text.lower()
+        assert "inactive" not in text.lower()
+
+
 class TestActiveFilter:
     @pytest.mark.asyncio
     async def test_search_passes_active_filter_to_hybrid_search(self):

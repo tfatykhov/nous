@@ -83,6 +83,7 @@ class ProcedureManager:
             implementation_notes=input.implementation_notes or None,
             tags=input.tags or None,
             embedding=embedding,
+            active=input.active if input.active is not None else True,
         )
         session.add(procedure)
         await session.flush()
