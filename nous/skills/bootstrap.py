@@ -1,7 +1,7 @@
-"""One-time bootstrap of local SKILL.md files into the procedures DB.
+"""Bootstrap local SKILL.md files into the procedures DB.
 
-F011 v2: Runs once when the DB has zero skill-tagged procedures.
-After that, the filesystem is irrelevant — skills live in the DB.
+F011 v2: Scans workspace skills directory, deduplicates by exact name match,
+and stores new skill procedures. Skills live in the DB after registration.
 """
 
 from __future__ import annotations
@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
-    """Register local SKILL.md files when DB has no skills yet.
+    """Register local SKILL.md files into the procedures DB.
 
     Scans {workspace_dir}/skills/*/SKILL.md for skill manifests.
-    Only runs if no procedures with tag 'skill' exist in the DB.
+    Each skill is deduped by exact name match before storing.
 
     Returns:
         Number of skills registered
@@ -29,27 +29,6 @@ async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
     if not skills_dir.exists():
         return 0
 
-    # Check if any skills already exist
-    existing = await heart.search_procedures("skill", limit=1)
-    has_skills = any(
-        "skill" in (getattr(p, "tags", None) or [])
-        for p in existing
-    )
-    # Fallback: search by name pattern
-    if not has_skills and existing:
-        # If search returned results but none tagged, still skip
-        # (there might be non-skill procedures)
-        pass
-
-    # More reliable check: search specifically for skill-tagged procedures
-    # Since search_procedures uses text/embedding search, we need a broader approach
-    all_procs = await heart.search_procedures("skill registration", limit=20)
-    for p in all_procs:
-        # ProcedureSummary doesn't have tags — check by name convention
-        # This is imperfect but good enough for bootstrap guard
-        pass
-
-    # Simplest guard: just scan and deduplicate by name at registration time
     parser = SkillParser()
     registered = 0
 
@@ -65,8 +44,8 @@ async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
             manifest = parser.parse(markdown, source_hint=str(skill_md))
 
             # Dedup: check if procedure with this name already exists
-            existing_procs = await heart.search_procedures(manifest.name, limit=5)
-            if any(p.name == manifest.name for p in existing_procs):
+            existing = await heart.get_procedure_by_name(manifest.name)
+            if existing:
                 logger.debug("Skill %s already registered, skipping", manifest.name)
                 continue
 
