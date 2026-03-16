@@ -44,6 +44,7 @@ from nous.heart.schemas import (
 from nous.heart.schedules import ScheduleManager
 from nous.heart.subtasks import SubtaskManager
 from nous.heart.working_memory import WorkingMemoryManager
+from nous.events import Event, EventBus
 from nous.storage.database import Database
 from nous.storage.models import ConversationState
 
@@ -79,6 +80,11 @@ class Heart:
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
         self.subtasks = SubtaskManager(database, settings.agent_id)
         self.schedules = ScheduleManager(database, settings.agent_id)
+
+        # F022 Phase 2: Optional EventBus for fact_learned emission.
+        # Injected post-construction in main.py (not a constructor param
+        # to keep Heart's interface stable).
+        self._bus: EventBus | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle (P2-2)
@@ -209,12 +215,28 @@ class Heart:
             encoded_frame: Active frame when fact was learned (003.2).
             encoded_censors: Active censors when fact was learned (003.2).
         """
-        return await self.facts.learn(
+        result = await self.facts.learn(
             input,
             session=session,
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
         )
+
+        # F022 Phase 2: Emit on in-process EventBus for cross-type graph linking.
+        # The DB audit event (via FactManager._emit_event) does NOT reach the bus.
+        if self._bus is not None:
+            await self._bus.emit(Event(
+                type="fact_learned",
+                agent_id=self.agent_id,
+                data={
+                    "fact_id": str(result.id),
+                    "content": result.content,
+                    "category": result.category,
+                    "subject": result.subject,
+                },
+            ))
+
+        return result
 
     async def confirm_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> FactDetail:
         """Confirm a fact is still true."""
