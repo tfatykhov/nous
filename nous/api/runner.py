@@ -606,29 +606,56 @@ class AgentRunner:
 
         payload = self._build_api_payload(system_prompt, messages, tools, stream=True)
 
-        async with self._http.stream("POST", "/v1/messages", json=payload) as response:
-            if response.status_code != 200:
-                error_body = await response.aread()
-                error_text = error_body.decode()[:500]
-                logger.info(
-                    "Anthropic streaming API %d: %s (request_id=%s)",
-                    response.status_code,
-                    error_text,
-                    response.headers.get("request-id", "n/a"),
-                )
-                yield StreamEvent(type="error", text=error_text)
-                return
+        # Retry loop matching _call_api: 1 retry for 429/500/529
+        for attempt in range(2):
+            try:
+                async with self._http.stream("POST", "/v1/messages", json=payload) as response:
+                    if response.status_code != 200:
+                        error_body = await response.aread()
+                        error_text = error_body.decode()[:500]
+                        logger.info(
+                            "Anthropic streaming API %d: %s (request_id=%s)",
+                            response.status_code,
+                            error_text,
+                            response.headers.get("request-id", "n/a"),
+                        )
 
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = json.loads(line[6:])
-                event = _parse_sse_event(data)
-                if event:
-                    if event.type == "error":
-                        yield event
+                        if response.status_code in (429, 500, 529) and attempt == 0:
+                            retry_after = float(response.headers.get("retry-after", "1"))
+                            retry_after = min(retry_after, 30.0)
+                            logger.warning(
+                                "Streaming API error %d, retrying in %.1fs",
+                                response.status_code,
+                                retry_after,
+                            )
+                            await asyncio.sleep(retry_after)
+                            continue
+
+                        yield StreamEvent(type="error", text=error_text)
                         return
-                    yield event
+
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data = json.loads(line[6:])
+                        event = _parse_sse_event(data)
+                        if event:
+                            if event.type == "error":
+                                yield event
+                                return
+                            yield event
+                    return  # successful stream complete
+
+            except httpx.TimeoutException as e:
+                if attempt == 0:
+                    logger.warning("Streaming API timeout, retrying: %s", e)
+                    await asyncio.sleep(1)
+                    continue
+                yield StreamEvent(type="error", text=f"Stream timeout: {e}")
+                return
+            except httpx.HTTPError as e:
+                yield StreamEvent(type="error", text=f"Stream HTTP error: {e}")
+                return
 
     # ------------------------------------------------------------------
     # Streaming chat
