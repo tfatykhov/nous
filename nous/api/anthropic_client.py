@@ -281,7 +281,6 @@ class HttpxAnthropicClient:
             "claude-code-20250219",
             "fine-grained-tool-streaming-2025-05-14",
             "interleaved-thinking-2025-05-14",
-            "prompt-caching-2024-07-31",
         ]
         if is_oat:
             beta_features.append("oauth-2025-04-20")
@@ -520,7 +519,6 @@ class SdkAnthropicClient:
             "claude-code-20250219",
             "fine-grained-tool-streaming-2025-05-14",
             "interleaved-thinking-2025-05-14",
-            "prompt-caching-2024-07-31",
         ]
         if is_oat:
             beta_features.append("oauth-2025-04-20")
