@@ -70,6 +70,8 @@ class ToolDispatcher:
                 args = {**args, "_session_id": session_id}
             if session_id is not None and name == "cache_retrieve":
                 args = {**args, "session_id": session_id}
+            if session_id is not None and name == "run_python":
+                args = {**args, "_session_id": session_id}
             result = await handler(**args)  # P0-6: **kwargs unpacking
             # P1-1: Extract text from MCP-format response
             return result["content"][0]["text"], False
@@ -1477,11 +1479,21 @@ SAFE_BUILTINS = {
 _MAX_WRITES = 5
 
 
-def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) -> dict[str, Any]:
+def create_programmatic_tools(
+    brain: Brain,
+    heart: Heart,
+    settings: Settings,
+    episode_id_resolver: "Callable[[str], str | None] | None" = None,
+) -> dict[str, Any]:
     """Create run_python tool closure for client-side programmatic execution.
 
     Returns a dict with a single "run_python" async callable.
     The closure captures heart (for memory wrappers) and settings (for timeout).
+
+    episode_id_resolver: optional callable(session_id) -> episode_id_str | None.
+    When provided, run_python captures the active episode at call time and
+    injects it into the _learn_fact closure so script-learned facts get
+    fact→episode edges (F022 P2-1 fix).
     """
     import asyncio
     import builtins
@@ -1496,10 +1508,16 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
     import re
     import statistics
 
-    async def run_python(code: str) -> dict[str, Any]:
+    async def run_python(code: str, _session_id: str | None = None) -> dict[str, Any]:
         """Execute Python code with Nous memory functions in scope."""
         write_count = {"n": 0}
         output_buf = io.StringIO()
+        # F022 P2-1: Capture active episode at call time so _learn_fact can
+        # link script-learned facts to the current episode without the model
+        # needing to pass the UUID.
+        _active_episode_id: str | None = None
+        if _session_id and episode_id_resolver is not None:
+            _active_episode_id = episode_id_resolver(_session_id)
 
         # Get the running event loop so threads can schedule DB coroutines back on it.
         # Using run_coroutine_threadsafe instead of asyncio.run() prevents deadlocks:
@@ -1540,9 +1558,12 @@ def create_programmatic_tools(brain: Brain, heart: Heart, settings: Settings) ->
             if write_count["n"] >= _MAX_WRITES:
                 raise RuntimeError(f"learn_fact write cap ({_MAX_WRITES}) exceeded")
             write_count["n"] += 1
+            from uuid import UUID as _UUID
+            ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
             _schedule(heart.learn(FactInput(
                 content=content, category=category,
                 subject=subject, confidence=confidence,
+                source_episode_id=ep_uuid,
             )))
             return f"stored: {content[:60]}"
 
@@ -1618,10 +1639,20 @@ _RUN_PYTHON_SCHEMA: dict[str, Any] = {
 
 
 def register_programmatic_tools(
-    dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings,
+    dispatcher: ToolDispatcher,
+    brain: Brain,
+    heart: Heart,
+    settings: Settings,
+    cognitive: "Any | None" = None,
 ) -> None:
-    """Register run_python tool if programmatic tools are enabled."""
+    """Register run_python tool if programmatic tools are enabled.
+
+    cognitive: optional CognitiveLayer; when provided, run_python gains
+    access to the active episode ID so script-learned facts get fact→episode
+    edges (F022 P2-1).
+    """
     if not settings.programmatic_tools_enabled:
         return
-    closures = create_programmatic_tools(brain, heart, settings)
+    resolver = cognitive.get_active_episode_id if cognitive is not None else None
+    closures = create_programmatic_tools(brain, heart, settings, episode_id_resolver=resolver)
     dispatcher.register("run_python", closures["run_python"], _RUN_PYTHON_SCHEMA)

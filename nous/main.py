@@ -259,7 +259,7 @@ async def create_components(settings: Settings) -> dict:
     # 012.3: Register programmatic tool calling (run_python)
     if settings.programmatic_tools_enabled:
         from nous.api.tools import register_programmatic_tools
-        register_programmatic_tools(dispatcher, brain, heart, settings)
+        register_programmatic_tools(dispatcher, brain, heart, settings, cognitive=cognitive)
 
     # 011.1: Start SubtaskWorkerPool (needs runner + bus)
     subtask_pool = None

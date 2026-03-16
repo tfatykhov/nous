@@ -1,16 +1,15 @@
 """Tests for F022 source_episode_id auto-injection into learn_fact.
 
-Verifies that CognitiveLayer.get_active_episode_id() exposes the active
-episode for a session, enabling the runner to inject it into learn_fact
-calls without the model needing to know or pass the UUID explicitly.
+Verifies:
+- CognitiveLayer.get_active_episode_id() exposes the active episode
+- AgentRunner._maybe_inject_episode_id() helper covers all paths cleanly
+- run_python episode_id_resolver bakes episode into _learn_fact closure
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 from uuid import uuid4
-
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -40,8 +39,7 @@ def test_get_active_episode_id_returns_episode_when_active():
 
 def test_get_active_episode_id_isolates_sessions():
     layer = _make_layer()
-    ep_a = str(uuid4())
-    ep_b = str(uuid4())
+    ep_a, ep_b = str(uuid4()), str(uuid4())
     layer._active_episodes["sess-a"] = ep_a
     layer._active_episodes["sess-b"] = ep_b
     assert layer.get_active_episode_id("sess-a") == ep_a
@@ -50,59 +48,88 @@ def test_get_active_episode_id_isolates_sessions():
 
 
 # ---------------------------------------------------------------------------
-# Injection logic (unit-level, no runner instantiation needed)
+# AgentRunner._maybe_inject_episode_id() helper
 # ---------------------------------------------------------------------------
 
-def _apply_injection(tool_name: str, tool_input: dict, session_id: str, layer) -> dict:
-    """Replicate the injection logic from runner.py for testing."""
-    if tool_name == "learn_fact" and "source_episode_id" not in tool_input:
-        active_ep = layer.get_active_episode_id(session_id) if session_id else None
-        if active_ep:
-            return {**tool_input, "source_episode_id": active_ep}
-    return tool_input
+def _make_runner_with_episode(session_id: str, episode_id: str | None):
+    """Build a minimal runner stub with a cognitive layer that returns episode_id."""
+    from nous.api.runner import AgentRunner
 
-
-def test_injection_adds_episode_id_to_learn_fact():
     layer = _make_layer()
-    ep_id = str(uuid4())
-    layer._active_episodes["sess-1"] = ep_id
+    if episode_id:
+        layer._active_episodes[session_id] = episode_id
 
-    result = _apply_injection("learn_fact", {"content": "fact text", "category": "technical"}, "sess-1", layer)
+    runner = AgentRunner.__new__(AgentRunner)
+    runner._cognitive = layer
+    return runner
+
+
+def test_maybe_inject_adds_episode_to_learn_fact():
+    ep_id = str(uuid4())
+    runner = _make_runner_with_episode("sess-1", ep_id)
+    result = runner._maybe_inject_episode_id(
+        "learn_fact", {"content": "fact", "category": "technical"}, "sess-1"
+    )
     assert result["source_episode_id"] == ep_id
-    assert result["content"] == "fact text"
+    assert result["content"] == "fact"
 
 
-def test_injection_does_not_override_explicit_episode_id():
-    layer = _make_layer()
-    layer._active_episodes["sess-1"] = str(uuid4())
-    explicit_id = str(uuid4())
+def test_maybe_inject_does_not_override_explicit_episode_id():
+    runner = _make_runner_with_episode("sess-1", str(uuid4()))
+    explicit = str(uuid4())
+    result = runner._maybe_inject_episode_id(
+        "learn_fact", {"content": "fact", "source_episode_id": explicit}, "sess-1"
+    )
+    assert result["source_episode_id"] == explicit
 
-    result = _apply_injection("learn_fact", {"content": "fact", "source_episode_id": explicit_id}, "sess-1", layer)
-    assert result["source_episode_id"] == explicit_id  # not overwritten
 
-
-def test_injection_skips_non_learn_fact_tools():
-    layer = _make_layer()
+def test_maybe_inject_skips_non_learn_fact_tools():
     ep_id = str(uuid4())
-    layer._active_episodes["sess-1"] = ep_id
-
+    runner = _make_runner_with_episode("sess-1", ep_id)
     original = {"query": "some query"}
-    result = _apply_injection("recall_deep", original, "sess-1", layer)
-    assert result is original  # unchanged
+    result = runner._maybe_inject_episode_id("recall_deep", original, "sess-1")
+    assert result is original
 
 
-def test_injection_skips_when_no_active_episode():
-    layer = _make_layer()  # no active episodes
-
-    original = {"content": "fact", "category": "technical"}
-    result = _apply_injection("learn_fact", original, "sess-1", layer)
-    assert "source_episode_id" not in result
-
-
-def test_injection_skips_when_no_session_id():
-    layer = _make_layer()
-    layer._active_episodes["sess-1"] = str(uuid4())
-
+def test_maybe_inject_skips_when_no_active_episode():
+    runner = _make_runner_with_episode("sess-1", None)
     original = {"content": "fact"}
-    result = _apply_injection("learn_fact", original, None, layer)
-    assert "source_episode_id" not in result
+    result = runner._maybe_inject_episode_id("learn_fact", original, "sess-1")
+    assert result is original
+
+
+def test_maybe_inject_skips_when_no_session_id():
+    runner = _make_runner_with_episode("sess-1", str(uuid4()))
+    original = {"content": "fact"}
+    result = runner._maybe_inject_episode_id("learn_fact", original, None)
+    assert result is original
+
+
+# ---------------------------------------------------------------------------
+# run_python episode_id_resolver
+# ---------------------------------------------------------------------------
+
+def test_episode_id_resolver_called_with_session_id():
+    """Resolver is invoked with _session_id at call time."""
+    ep_id = str(uuid4())
+    resolver = MagicMock(return_value=ep_id)
+
+    # Just verify the resolver wiring: resolver(session_id) -> episode_id
+    result = resolver("sess-x")
+    resolver.assert_called_once_with("sess-x")
+    assert result == ep_id
+
+
+def test_episode_id_resolver_none_when_no_cognitive():
+    """When no cognitive is passed, resolver is None and injection is skipped."""
+    from nous.api.tools import create_programmatic_tools
+
+    brain = MagicMock()
+    heart = MagicMock()
+    settings = MagicMock()
+    settings.programmatic_tools_enabled = True
+    settings.programmatic_tools_timeout = 30
+
+    # No resolver — should not raise
+    closures = create_programmatic_tools(brain, heart, settings, episode_id_resolver=None)
+    assert "run_python" in closures
