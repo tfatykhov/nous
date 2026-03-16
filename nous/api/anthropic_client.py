@@ -532,10 +532,19 @@ class SdkAnthropicClient:
             default_headers["anthropic-dangerous-direct-browser-access"] = "true"
         kwargs["default_headers"] = default_headers
 
+        # Pass a custom httpx client with HTTP/2 enabled
+        kwargs["http_client"] = httpx.AsyncClient(
+            http2=True,
+            limits=httpx.Limits(
+                max_connections=5,
+                max_keepalive_connections=2,
+            ),
+        )
+
         self._client = AsyncAnthropic(**kwargs)
 
         auth_type = "OAT/subscription" if is_oat else ("Bearer token" if auth_token else "API key")
-        logger.info("Anthropic SDK client initialized (auth: %s)", auth_type)
+        logger.info("Anthropic SDK client initialized (auth: %s, http2: true)", auth_type)
 
     async def close(self) -> None:
         if self._client:
