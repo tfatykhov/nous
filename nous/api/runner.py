@@ -548,6 +548,14 @@ class AgentRunner:
                     error_type = "http_error"
                     error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
 
+                logger.info(
+                    "Anthropic API %d %s: %s (request_id=%s)",
+                    response.status_code,
+                    error_type,
+                    error_msg,
+                    response.headers.get("request-id", "n/a"),
+                )
+
                 # Retry on 429 (rate limit) or 500/529 (server error)
                 if response.status_code in (429, 500, 529) and attempt == 0:
                     retry_after = float(response.headers.get("retry-after", "1"))
@@ -601,7 +609,14 @@ class AgentRunner:
         async with self._http.stream("POST", "/v1/messages", json=payload) as response:
             if response.status_code != 200:
                 error_body = await response.aread()
-                yield StreamEvent(type="error", text=error_body.decode()[:500])
+                error_text = error_body.decode()[:500]
+                logger.info(
+                    "Anthropic streaming API %d: %s (request_id=%s)",
+                    response.status_code,
+                    error_text,
+                    response.headers.get("request-id", "n/a"),
+                )
+                yield StreamEvent(type="error", text=error_text)
                 return
 
             async for line in response.aiter_lines():
