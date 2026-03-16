@@ -71,12 +71,22 @@ class StreamEvent:
 
 
 def _should_retry(status_code: int, headers: httpx.Headers) -> bool:
-    """Decide whether to retry based on x-should-retry header and status code."""
+    """Always retry on retryable status codes. Log x-should-retry header if present."""
     should = headers.get("x-should-retry")
+    is_retryable = status_code in (408, 409, 429) or status_code >= 500
+
     if should is not None:
-        return should.lower() == "true"
-    # Default: retry on 408, 409, 429, and any 5xx
-    return status_code in (408, 409, 429) or status_code >= 500
+        if should.lower() == "true":
+            logger.info("x-should-retry: true (status %d)", status_code)
+            return True
+        else:
+            # Log but ignore — we always retry on retryable status codes
+            logger.info(
+                "x-should-retry: false (status %d) — retrying anyway per policy",
+                status_code,
+            )
+
+    return is_retryable
 
 
 def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
@@ -89,22 +99,33 @@ def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
     from email.utils import parsedate_to_datetime
 
     if response is not None:
-        # 1. retry-after-ms (milliseconds)
         retry_ms = response.headers.get("retry-after-ms")
+        retry_after = response.headers.get("retry-after")
+        should_retry = response.headers.get("x-should-retry")
+
+        logger.info(
+            "Retry headers: x-should-retry=%s, retry-after-ms=%s, retry-after=%s",
+            should_retry,
+            retry_ms,
+            retry_after,
+        )
+
+        # 1. retry-after-ms (milliseconds)
         if retry_ms is not None:
             try:
                 delay = float(retry_ms) / 1000.0
                 if 0 <= delay <= _HEADER_DELAY_MAX:
+                    logger.info("Using retry-after-ms: %.3fs", delay)
                     return delay
             except (ValueError, OverflowError):
                 pass
 
         # 2. Retry-After (seconds or HTTP date)
-        retry_after = response.headers.get("retry-after")
         if retry_after is not None:
             try:
                 delay = float(retry_after)
                 if 0 <= delay <= _HEADER_DELAY_MAX:
+                    logger.info("Using Retry-After: %.1fs", delay)
                     return delay
             except ValueError:
                 # Try parsing as HTTP date
@@ -113,6 +134,7 @@ def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
                     target = parsedate_to_datetime(retry_after)
                     delay = (target - datetime.now(timezone.utc)).total_seconds()
                     if 0 <= delay <= _HEADER_DELAY_MAX:
+                        logger.info("Using Retry-After (date): %.1fs", delay)
                         return delay
                 except (ValueError, TypeError):
                     pass
