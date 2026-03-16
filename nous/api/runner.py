@@ -32,9 +32,9 @@ logger = logging.getLogger(__name__)
 
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
-_MAX_RETRIES = 2  # initial + 2 retries = 3 attempts total
-_BACKOFF_DELAYS = (0.5, 1.0)  # base delays per retry attempt
-_BACKOFF_CAP = 8.0  # max exponential backoff
+_MAX_RETRIES = 5  # initial + 5 retries = 6 attempts total
+_BACKOFF_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)  # base delays per retry attempt
+_BACKOFF_CAP = 30.0  # max exponential backoff
 _HEADER_DELAY_MAX = 60.0  # max delay from retry-after headers
 
 # Frame types where record_decision is expected
