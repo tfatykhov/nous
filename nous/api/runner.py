@@ -307,6 +307,33 @@ class AgentRunner:
         skip_thinking=True omits thinking params (for utility calls like reflection).
         model_override replaces the default model (used by compaction summarization).
         """
+        # Add cache_control to last user message for prompt caching
+        cached_messages = list(messages)
+        for i in range(len(cached_messages) - 1, -1, -1):
+            if cached_messages[i].get("role") == "user":
+                msg = cached_messages[i]
+                content = msg.get("content")
+                if isinstance(content, str):
+                    cached_messages[i] = {
+                        **msg,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                elif isinstance(content, list) and content:
+                    # Content is already a list of blocks (e.g. tool_result blocks)
+                    # Add cache_control to the last block
+                    last_block = {**content[-1], "cache_control": {"type": "ephemeral"}}
+                    cached_messages[i] = {
+                        **msg,
+                        "content": content[:-1] + [last_block],
+                    }
+                break
+
         payload: dict[str, Any] = {
             "model": model_override or self._settings.model,
             "max_tokens": self._settings.max_tokens,
@@ -322,7 +349,7 @@ class AgentRunner:
                     "cache_control": {"type": "ephemeral"},
                 },
             ],
-            "messages": messages,
+            "messages": cached_messages,
         }
         if tools:
             payload["tools"] = tools
