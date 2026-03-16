@@ -635,6 +635,11 @@ class AgentRunner:
                     error_msg,
                     response.headers.get("request-id", "n/a"),
                 )
+                if response.status_code >= 500:
+                    logger.info(
+                        "Anthropic API response headers: %s",
+                        dict(response.headers),
+                    )
 
                 # Retry based on x-should-retry header or retryable status codes
                 if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
@@ -701,6 +706,11 @@ class AgentRunner:
                             error_text,
                             response.headers.get("request-id", "n/a"),
                         )
+                        if response.status_code >= 500:
+                            logger.info(
+                                "Anthropic streaming API response headers: %s",
+                                dict(response.headers),
+                            )
 
                         if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
                             delay = _retry_delay(attempt, response)
