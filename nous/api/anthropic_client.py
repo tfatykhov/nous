@@ -552,6 +552,7 @@ class SdkAnthropicClient:
         try:
             message = await self._client.messages.create(**kwargs)
         except Exception as e:
+            self._log_sdk_error(e)
             raise RuntimeError(f"Anthropic SDK error: {e}") from e
 
         # Convert SDK Message to our ApiResponse
@@ -589,7 +590,37 @@ class SdkAnthropicClient:
                         return
                     yield converted
         except Exception as e:
+            self._log_sdk_error(e)
             yield StreamEvent(type="error", text=f"SDK stream error: {e}")
+
+    @staticmethod
+    def _log_sdk_error(e: Exception) -> None:
+        """Log detailed error info from Anthropic SDK exceptions."""
+        # APIStatusError has status_code, request_id, body, response
+        status = getattr(e, "status_code", None)
+        request_id = getattr(e, "request_id", None)
+        body = getattr(e, "body", None)
+        response = getattr(e, "response", None)
+
+        if status is not None:
+            error_type = "unknown"
+            error_msg = str(e)
+            if isinstance(body, dict):
+                error_info = body.get("error", {})
+                error_type = error_info.get("type", "unknown")
+                error_msg = error_info.get("message", str(e))
+
+            logger.error(
+                "Anthropic SDK %d %s: %s (request_id=%s)",
+                status, error_type, error_msg, request_id or "n/a",
+            )
+            if status >= 500 and response is not None:
+                logger.info(
+                    "Anthropic SDK response headers: %s",
+                    dict(response.headers),
+                )
+        else:
+            logger.error("Anthropic SDK error: %s", e)
 
     def _payload_to_kwargs(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Convert our payload dict to SDK messages.create() kwargs."""
