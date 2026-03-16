@@ -327,8 +327,8 @@ class AgentRunner:
             pool=10.0,
         )
         limits = httpx.Limits(
-            max_connections=10,
-            max_keepalive_connections=5,
+            max_connections=5,       # 1 active stream + 2 subtask + 2 buffer
+            max_keepalive_connections=2,  # 1 warm connection ready, no idle hoarding
         )
 
         self._http = httpx.AsyncClient(
