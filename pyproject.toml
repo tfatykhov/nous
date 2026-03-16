@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.27,<1.0",
     "cel-python>=0.4,<1.0",
     "croniter>=6.0.0",
+    "h2>=4.3.0",
 ]
 
 [project.optional-dependencies]

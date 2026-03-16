@@ -336,10 +336,11 @@ class AgentRunner:
             headers=headers,
             timeout=timeout,
             limits=limits,
+            http2=True,
         )
 
         auth_type = "OAT/subscription" if is_oat else ("Bearer token" if auth_token else "API key")
-        logger.info("httpx client initialized (auth: %s)", auth_type)
+        logger.info("httpx client initialized (auth: %s, http2: true)", auth_type)
 
     async def close(self) -> None:
         """Clean up httpx client."""
