@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
-_RETRYABLE_STATUSES = (429, 500, 529)
-_MAX_RETRIES = 3  # initial + 3 retries = 4 attempts total
-_BACKOFF_BASE = 1.0  # seconds; exponential: 1s, 2s, 4s
-_BACKOFF_CAP = 30.0  # max backoff (retry-after header can override up to this cap)
+_MAX_RETRIES = 2  # initial + 2 retries = 3 attempts total
+_BACKOFF_DELAYS = (0.5, 1.0)  # base delays per retry attempt
+_BACKOFF_CAP = 8.0  # max exponential backoff
+_HEADER_DELAY_MAX = 60.0  # max delay from retry-after headers
 
 # Frame types where record_decision is expected
 _REQUIRED_DECISION_FRAMES = frozenset({"decision"})
@@ -70,13 +70,57 @@ class StreamEvent:
     usage: dict[str, int] | None = None
 
 
+def _should_retry(status_code: int, headers: httpx.Headers) -> bool:
+    """Decide whether to retry based on x-should-retry header and status code."""
+    should = headers.get("x-should-retry")
+    if should is not None:
+        return should.lower() == "true"
+    # Default: retry on 408, 409, 429, and any 5xx
+    return status_code in (408, 409, 429) or status_code >= 500
+
+
 def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
-    """Compute retry delay with exponential backoff, respecting retry-after header."""
+    """Compute retry delay from headers or exponential backoff with jitter.
+
+    Priority: retry-after-ms → Retry-After → exponential backoff.
+    Header delays between 0-60s are used as-is; otherwise fall back to backoff.
+    """
+    import random
+    from email.utils import parsedate_to_datetime
+
     if response is not None:
+        # 1. retry-after-ms (milliseconds)
+        retry_ms = response.headers.get("retry-after-ms")
+        if retry_ms is not None:
+            try:
+                delay = float(retry_ms) / 1000.0
+                if 0 <= delay <= _HEADER_DELAY_MAX:
+                    return delay
+            except (ValueError, OverflowError):
+                pass
+
+        # 2. Retry-After (seconds or HTTP date)
         retry_after = response.headers.get("retry-after")
-        if retry_after:
-            return min(float(retry_after), _BACKOFF_CAP)
-    return min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+        if retry_after is not None:
+            try:
+                delay = float(retry_after)
+                if 0 <= delay <= _HEADER_DELAY_MAX:
+                    return delay
+            except ValueError:
+                # Try parsing as HTTP date
+                try:
+                    from datetime import datetime, timezone
+                    target = parsedate_to_datetime(retry_after)
+                    delay = (target - datetime.now(timezone.utc)).total_seconds()
+                    if 0 <= delay <= _HEADER_DELAY_MAX:
+                        return delay
+                except (ValueError, TypeError):
+                    pass
+
+    # 3. Exponential backoff with jitter (0.75-1.0)
+    base = _BACKOFF_DELAYS[min(attempt, len(_BACKOFF_DELAYS) - 1)]
+    jitter = random.uniform(0.75, 1.0)
+    return min(base * jitter, _BACKOFF_CAP)
 
 
 def _parse_sse_event(data: dict[str, Any]) -> StreamEvent | None:
@@ -523,12 +567,12 @@ class AgentRunner:
         skip_thinking: bool = False,
         model_override: str | None = None,
     ) -> ApiResponse:
-        """Call Anthropic Messages API with retry for 429/500/529.
+        """Call Anthropic Messages API with retry and exponential backoff.
 
+        Retries up to _MAX_RETRIES times on retryable errors (408, 409, 429, 5xx).
+        Respects x-should-retry, retry-after-ms, and Retry-After headers.
         Returns parsed ApiResponse with content blocks and stop_reason.
         Raises RuntimeError on persistent errors.
-        skip_thinking=True omits thinking params (for utility calls like reflection).
-        model_override replaces the default model (used by compaction summarization).
         """
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
@@ -538,7 +582,7 @@ class AgentRunner:
             skip_thinking=skip_thinking, model_override=model_override,
         )
 
-        # Retry with exponential backoff for 429/500/529
+        # Retry with exponential backoff (x-should-retry / 408 / 409 / 429 / 5xx)
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
@@ -569,8 +613,8 @@ class AgentRunner:
                     response.headers.get("request-id", "n/a"),
                 )
 
-                # Retry on 429 (rate limit) or 500/529 (server error)
-                if response.status_code in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                # Retry based on x-should-retry header or retryable status codes
+                if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
                     delay = _retry_delay(attempt, response)
                     logger.warning(
                         "API error %d (%s), retry %d/%d in %.1fs: %s",
@@ -621,7 +665,7 @@ class AgentRunner:
 
         payload = self._build_api_payload(system_prompt, messages, tools, stream=True)
 
-        # Retry with exponential backoff for 429/500/529 (matching _call_api)
+        # Retry with exponential backoff (matching _call_api)
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 async with self._http.stream("POST", "/v1/messages", json=payload) as response:
@@ -635,7 +679,7 @@ class AgentRunner:
                             response.headers.get("request-id", "n/a"),
                         )
 
-                        if response.status_code in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                        if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
                             delay = _retry_delay(attempt, response)
                             logger.warning(
                                 "Streaming API error %d, retry %d/%d in %.1fs",
