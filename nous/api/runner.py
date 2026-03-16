@@ -281,6 +281,16 @@ class AgentRunner:
         headers: dict[str, str] = {
             "anthropic-version": _API_VERSION,
             "content-type": "application/json",
+            "accept": "application/json",
+            "user-agent": "claude-cli/2.1.2 (external, cli)",
+            "User-Agent": "Anthropic/JS 0.73.0",
+            "x-app": "cli",
+            "X-Stainless-Lang": "js",
+            "X-Stainless-Package-Version": "0.73.0",
+            "X-Stainless-OS": "Linux",
+            "X-Stainless-Arch": "x64",
+            "X-Stainless-Runtime": "node",
+            "X-Stainless-Runtime-Version": "v22.22.0",
         }
 
         # Auth header selection (D1 + OAT detection)
@@ -310,14 +320,15 @@ class AgentRunner:
                 "API calls will fail"
             )
 
-        # Build beta features list (combines OAT + interleaved thinking)
-        beta_features: list[str] = []
+        # Build beta features list
+        beta_features: list[str] = [
+            "claude-code-20250219",
+            "fine-grained-tool-streaming-2025-05-14",
+            "interleaved-thinking-2025-05-14",
+        ]
         if is_oat:
             beta_features.append("oauth-2025-04-20")
-        if settings.thinking_mode != "off":
-            beta_features.append("interleaved-thinking-2025-05-14")
-        if beta_features:
-            headers["anthropic-beta"] = ",".join(beta_features)
+        headers["anthropic-beta"] = ",".join(beta_features)
 
         # Create httpx client with timeout and connection limits
         timeout = httpx.Timeout(
@@ -609,7 +620,10 @@ class AgentRunner:
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                response = await self._http.post("/v1/messages", json=payload)
+                response = await self._http.post(
+                    "/v1/messages", json=payload,
+                    headers={"X-Stainless-Retry-Count": str(attempt)},
+                )
 
                 if response.status_code == 200:
                     data = response.json()
@@ -696,7 +710,10 @@ class AgentRunner:
         # Retry with exponential backoff (matching _call_api)
         for attempt in range(_MAX_RETRIES + 1):
             try:
-                async with self._http.stream("POST", "/v1/messages", json=payload) as response:
+                async with self._http.stream(
+                    "POST", "/v1/messages", json=payload,
+                    headers={"X-Stainless-Retry-Count": str(attempt)},
+                ) as response:
                     if response.status_code != 200:
                         error_body = await response.aread()
                         error_text = error_body.decode()[:500]
