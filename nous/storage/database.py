@@ -19,6 +19,7 @@ class Database:
             settings.db_url,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
+            pool_pre_ping=True,
             echo=settings.log_level == "debug",
         )
         self.session_factory = async_sessionmaker(self.engine, class_=AsyncSession, expire_on_commit=False)
