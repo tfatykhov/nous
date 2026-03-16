@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
+_RETRYABLE_STATUSES = (429, 500, 529)
+_MAX_RETRIES = 3  # initial + 3 retries = 4 attempts total
+_BACKOFF_BASE = 1.0  # seconds; exponential: 1s, 2s, 4s
+_BACKOFF_CAP = 30.0  # max backoff (retry-after header can override up to this cap)
 
 # Frame types where record_decision is expected
 _REQUIRED_DECISION_FRAMES = frozenset({"decision"})
@@ -64,6 +68,15 @@ class StreamEvent:
     stop_reason: str = ""
     block_index: int = 0
     usage: dict[str, int] | None = None
+
+
+def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
+    """Compute retry delay with exponential backoff, respecting retry-after header."""
+    if response is not None:
+        retry_after = response.headers.get("retry-after")
+        if retry_after:
+            return min(float(retry_after), _BACKOFF_CAP)
+    return min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
 
 
 def _parse_sse_event(data: dict[str, Any]) -> StreamEvent | None:
@@ -525,9 +538,9 @@ class AgentRunner:
             skip_thinking=skip_thinking, model_override=model_override,
         )
 
-        # Simple retry: 1x for 429/500/529
+        # Retry with exponential backoff for 429/500/529
         last_error: Exception | None = None
-        for attempt in range(2):  # max 2 attempts (initial + 1 retry)
+        for attempt in range(_MAX_RETRIES + 1):
             try:
                 response = await self._http.post("/v1/messages", json=payload)
 
@@ -557,17 +570,18 @@ class AgentRunner:
                 )
 
                 # Retry on 429 (rate limit) or 500/529 (server error)
-                if response.status_code in (429, 500, 529) and attempt == 0:
-                    retry_after = float(response.headers.get("retry-after", "1"))
-                    retry_after = min(retry_after, 30.0)  # Cap at 30s
+                if response.status_code in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                    delay = _retry_delay(attempt, response)
                     logger.warning(
-                        "API error %d (%s), retrying in %.1fs: %s",
+                        "API error %d (%s), retry %d/%d in %.1fs: %s",
                         response.status_code,
                         error_type,
-                        retry_after,
+                        attempt + 1,
+                        _MAX_RETRIES,
+                        delay,
                         error_msg,
                     )
-                    await asyncio.sleep(retry_after)
+                    await asyncio.sleep(delay)
                     continue
 
                 last_error = RuntimeError(
@@ -577,9 +591,10 @@ class AgentRunner:
 
             except httpx.TimeoutException as e:
                 last_error = RuntimeError(f"API request timed out: {e}")
-                if attempt == 0:
-                    logger.warning("API timeout, retrying: %s", e)
-                    await asyncio.sleep(1)
+                if attempt < _MAX_RETRIES:
+                    delay = _retry_delay(attempt)
+                    logger.warning("API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
+                    await asyncio.sleep(delay)
                     continue
             except httpx.HTTPError as e:
                 last_error = RuntimeError(f"HTTP error: {e}")
@@ -606,8 +621,8 @@ class AgentRunner:
 
         payload = self._build_api_payload(system_prompt, messages, tools, stream=True)
 
-        # Retry loop matching _call_api: 1 retry for 429/500/529
-        for attempt in range(2):
+        # Retry with exponential backoff for 429/500/529 (matching _call_api)
+        for attempt in range(_MAX_RETRIES + 1):
             try:
                 async with self._http.stream("POST", "/v1/messages", json=payload) as response:
                     if response.status_code != 200:
@@ -620,15 +635,16 @@ class AgentRunner:
                             response.headers.get("request-id", "n/a"),
                         )
 
-                        if response.status_code in (429, 500, 529) and attempt == 0:
-                            retry_after = float(response.headers.get("retry-after", "1"))
-                            retry_after = min(retry_after, 30.0)
+                        if response.status_code in _RETRYABLE_STATUSES and attempt < _MAX_RETRIES:
+                            delay = _retry_delay(attempt, response)
                             logger.warning(
-                                "Streaming API error %d, retrying in %.1fs",
+                                "Streaming API error %d, retry %d/%d in %.1fs",
                                 response.status_code,
-                                retry_after,
+                                attempt + 1,
+                                _MAX_RETRIES,
+                                delay,
                             )
-                            await asyncio.sleep(retry_after)
+                            await asyncio.sleep(delay)
                             continue
 
                         yield StreamEvent(type="error", text=error_text)
@@ -647,9 +663,10 @@ class AgentRunner:
                     return  # successful stream complete
 
             except httpx.TimeoutException as e:
-                if attempt == 0:
-                    logger.warning("Streaming API timeout, retrying: %s", e)
-                    await asyncio.sleep(1)
+                if attempt < _MAX_RETRIES:
+                    delay = _retry_delay(attempt)
+                    logger.warning("Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
+                    await asyncio.sleep(delay)
                     continue
                 yield StreamEvent(type="error", text=f"Stream timeout: {e}")
                 return
