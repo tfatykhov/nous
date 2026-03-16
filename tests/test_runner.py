@@ -113,8 +113,8 @@ async def runner(mock_cognitive, mock_settings):
     heart = MockHeart()
     r = AgentRunner(mock_cognitive, brain, heart, mock_settings)
 
-    # Mock _tool_loop to return a simple text response with no tool calls
-    r._tool_loop = AsyncMock(return_value=("Hello from Nous!", [], {"input_tokens": 100, "output_tokens": 50}))
+    # Mock _tool_loop to return (text, tool_results, usage, thinking_blocks)
+    r._tool_loop = AsyncMock(return_value=("Hello from Nous!", [], {"input_tokens": 100, "output_tokens": 50}, []))
 
     yield r
     await r.close()
@@ -254,7 +254,7 @@ async def test_run_turn_with_tool_calls(mock_cognitive, mock_settings):
             result="Fact learned successfully.\nID: def456",
         ),
     ]
-    r._tool_loop = AsyncMock(return_value=("Done with tools.", tool_results, {"input_tokens": 200, "output_tokens": 100}))
+    r._tool_loop = AsyncMock(return_value=("Done with tools.", tool_results, {"input_tokens": 200, "output_tokens": 100}, []))
 
     try:
         session_id = f"test-tools-{uuid.uuid4().hex[:8]}"
@@ -288,7 +288,7 @@ async def test_run_turn_with_tool_error(mock_cognitive, mock_settings):
             error="Error recording decision: validation failed",
         ),
     ]
-    r._tool_loop = AsyncMock(return_value=("Tool had an error.", tool_results, {"input_tokens": 200, "output_tokens": 100}))
+    r._tool_loop = AsyncMock(return_value=("Tool had an error.", tool_results, {"input_tokens": 200, "output_tokens": 100}, []))
 
     try:
         session_id = f"test-tool-err-{uuid.uuid4().hex[:8]}"
@@ -331,7 +331,7 @@ async def test_run_turn_frame_instructions(mock_cognitive, mock_settings):
         context_token_estimate=100,
     )
 
-    r._tool_loop = AsyncMock(return_value=("Decision made.", [], {"input_tokens": 100, "output_tokens": 50}))
+    r._tool_loop = AsyncMock(return_value=("Decision made.", [], {"input_tokens": 100, "output_tokens": 50}, []))
 
     try:
         session_id = f"test-frame-{uuid.uuid4().hex[:8]}"
@@ -368,7 +368,7 @@ async def test_run_turn_safety_net(mock_cognitive, mock_settings, caplog):
     )
 
     # Return response with NO tool calls (record_decision not called)
-    r._tool_loop = AsyncMock(return_value=("I decided to use caching.", [], {"input_tokens": 100, "output_tokens": 50}))
+    r._tool_loop = AsyncMock(return_value=("I decided to use caching.", [], {"input_tokens": 100, "output_tokens": 50}, []))
 
     try:
         session_id = f"test-safety-{uuid.uuid4().hex[:8]}"
@@ -402,7 +402,7 @@ async def test_run_turn_safety_net_task_frame_debug(mock_cognitive, mock_setting
         context_token_estimate=100,
     )
 
-    r._tool_loop = AsyncMock(return_value=("Done.", [], {"input_tokens": 100, "output_tokens": 50}))
+    r._tool_loop = AsyncMock(return_value=("Done.", [], {"input_tokens": 100, "output_tokens": 50}, []))
 
     try:
         session_id = f"test-safety-task-{uuid.uuid4().hex[:8]}"
@@ -448,7 +448,7 @@ async def test_end_conversation_with_reflection(mock_cognitive, mock_settings):
     # Mock _tool_loop for the 3 run_turn calls
     turn_counter = 0
 
-    async def mock_tool_loop(system_prompt, conversation, frame_id):
+    async def mock_tool_loop(system_prompt, conversation, frame_id, **kwargs):
         nonlocal turn_counter
         turn_counter += 1
         return (f"Response {turn_counter}", [], {}, [])
@@ -508,18 +508,20 @@ async def test_start_credentials_api_key(mock_cognitive):
     settings = Settings(
         ANTHROPIC_API_KEY="test-api-key-abc",
         agent_id="test-agent",
+        api_backend="httpx",
     )
     r = AgentRunner(mock_cognitive, brain, heart, settings)
 
     await r.start()
     try:
         # Verify httpx client was created with x-api-key header
-        assert r._http is not None
-        assert r._http.headers.get("x-api-key") == "test-api-key-abc"
-        assert r._http.headers.get("anthropic-version") == "2023-06-01"
-        assert r._http.headers.get("content-type") == "application/json"
+        http = r._api._http
+        assert http is not None
+        assert http.headers.get("x-api-key") == "test-api-key-abc"
+        assert http.headers.get("anthropic-version") == "2023-06-01"
+        assert http.headers.get("content-type") == "application/json"
         # No authorization header when only API key set
-        assert "authorization" not in r._http.headers
+        assert "authorization" not in http.headers
     finally:
         await r.close()
 
@@ -532,16 +534,18 @@ async def test_start_credentials_auth_token(mock_cognitive):
         ANTHROPIC_API_KEY="test-api-key",
         ANTHROPIC_AUTH_TOKEN="test-auth-token-xyz",
         agent_id="test-agent",
+        api_backend="httpx",
     )
     r = AgentRunner(mock_cognitive, brain, heart, settings)
 
     await r.start()
     try:
         # Bearer token takes precedence
-        assert r._http is not None
-        assert r._http.headers.get("authorization") == "Bearer test-auth-token-xyz"
+        http = r._api._http
+        assert http is not None
+        assert http.headers.get("authorization") == "Bearer test-auth-token-xyz"
         # x-api-key should NOT be set when auth_token is present
-        assert "x-api-key" not in r._http.headers
+        assert "x-api-key" not in http.headers
     finally:
         await r.close()
 
@@ -550,18 +554,19 @@ async def test_start_credentials_none(mock_cognitive, caplog):
     """start() with no credentials logs a warning but doesn't raise."""
     brain = MockBrain()
     heart = MockHeart()
-    settings = Settings(agent_id="test-agent")
+    settings = Settings(agent_id="test-agent", api_backend="httpx")
     r = AgentRunner(mock_cognitive, brain, heart, settings)
 
-    with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
+    with caplog.at_level(logging.WARNING, logger="nous.api.anthropic_client"):
         await r.start()
 
     try:
         # Should have logged a warning about missing credentials
         assert any("API calls will fail" in record.message for record in caplog.records)
         # Client should still be created (just without auth headers)
-        assert r._http is not None
-        assert r._http.headers.get("anthropic-version") == "2023-06-01"
+        http = r._api._http
+        assert http is not None
+        assert http.headers.get("anthropic-version") == "2023-06-01"
     finally:
         await r.close()
 
@@ -576,7 +581,7 @@ async def test_lru_eviction(mock_cognitive, mock_settings):
     brain = MockBrain()
     heart = MockHeart()
     r = AgentRunner(mock_cognitive, brain, heart, mock_settings)
-    r._tool_loop = AsyncMock(return_value=("OK", [], {"input_tokens": 100, "output_tokens": 50}))
+    r._tool_loop = AsyncMock(return_value=("OK", [], {"input_tokens": 100, "output_tokens": 50}, []))
 
     try:
         # Create MAX_CONVERSATIONS + 1 conversations
@@ -791,24 +796,28 @@ def test_parse_signature_delta():
 
 async def test_start_thinking_beta_header(mock_cognitive):
     """start() adds interleaved-thinking beta header when thinking enabled."""
-    s = Settings(ANTHROPIC_API_KEY="test-api-key", thinking_mode="adaptive")
+    s = Settings(ANTHROPIC_API_KEY="test-api-key", thinking_mode="adaptive", api_backend="httpx")
     r = AgentRunner(mock_cognitive, MockBrain(), MockHeart(), s)
     await r.start()
     try:
-        assert "anthropic-beta" in r._http.headers
-        assert "interleaved-thinking-2025-05-14" in r._http.headers["anthropic-beta"]
+        http = r._api._http
+        assert "anthropic-beta" in http.headers
+        assert "interleaved-thinking-2025-05-14" in http.headers["anthropic-beta"]
     finally:
         await r.close()
 
 
 async def test_start_no_thinking_no_beta(mock_cognitive):
-    """start() does NOT add thinking beta header when thinking is off."""
-    s = Settings(ANTHROPIC_API_KEY="test-api-key", thinking_mode="off")
+    """start() still has beta headers (claude-code, fine-grained-tool-streaming, etc.)."""
+    s = Settings(ANTHROPIC_API_KEY="test-api-key", thinking_mode="off", api_backend="httpx")
     r = AgentRunner(mock_cognitive, MockBrain(), MockHeart(), s)
     await r.start()
     try:
-        # No beta header at all (no OAT, no thinking)
-        assert "anthropic-beta" not in r._http.headers
+        http = r._api._http
+        # Beta headers are always present (claude-code, fine-grained-tool-streaming, etc.)
+        assert "anthropic-beta" in http.headers
+        # But interleaved-thinking is always included for forward compat
+        assert "interleaved-thinking-2025-05-14" in http.headers["anthropic-beta"]
     finally:
         await r.close()
 
@@ -820,11 +829,12 @@ async def test_start_oat_plus_thinking_headers(mock_cognitive):
         thinking_mode="manual",
         thinking_budget=8000,
         max_tokens=16000,
+        api_backend="httpx",
     )
     r = AgentRunner(mock_cognitive, MockBrain(), MockHeart(), s)
     await r.start()
     try:
-        beta = r._http.headers["anthropic-beta"]
+        beta = r._api._http.headers["anthropic-beta"]
         assert "oauth-2025-04-20" in beta
         assert "interleaved-thinking-2025-05-14" in beta
     finally:
@@ -849,7 +859,7 @@ async def test_tool_loop_preserves_thinking_blocks(mock_cognitive):
     # second call returns text (stop_reason=end_turn)
     call_count = 0
 
-    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False):
+    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False, model_override=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -872,7 +882,7 @@ async def test_tool_loop_preserves_thinking_blocks(mock_cognitive):
         def available_tools(self, frame_id):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object"}}]
 
-        async def dispatch(self, name, input_data):
+        async def dispatch(self, name, input_data, session_id=None):
             return "tool result", False
 
     r.set_dispatcher(MockDispatcher())
@@ -896,7 +906,7 @@ async def test_tool_loop_preserves_redacted_thinking(mock_cognitive):
 
     call_count = 0
 
-    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False):
+    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False, model_override=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -919,7 +929,7 @@ async def test_tool_loop_preserves_redacted_thinking(mock_cognitive):
         def available_tools(self, frame_id):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object"}}]
 
-        async def dispatch(self, name, input_data):
+        async def dispatch(self, name, input_data, session_id=None):
             return "ok", False
 
     r.set_dispatcher(MockDispatcher())

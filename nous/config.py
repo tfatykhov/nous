@@ -118,6 +118,9 @@ class Settings(BaseSettings):
         default=0, validation_alias="NOUS_CONTEXT_WINDOW"
     )
 
+    # API backend: "sdk" (official anthropic SDK) or "httpx" (direct httpx calls)
+    api_backend: str = "sdk"
+
     # Direct API settings
     max_turns: int = 10  # Max tool use iterations per turn
     api_base_url: str = "https://api.anthropic.com"
