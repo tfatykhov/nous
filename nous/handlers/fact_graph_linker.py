@@ -1,9 +1,9 @@
 """Fact Graph Linker — cross-type linking on fact creation.
 
 Listens to: fact_learned (in-process EventBus)
-Calls: GraphLinker.link_fact_to_decisions()
+Calls: GraphLinker.link_fact_to_decisions() and GraphLinker.link_fact_to_facts()
 
-F022 Phase 2: Wires the missing fact->decision cross-type edge creation.
+F022 Phase 2: Wires fact->decision and fact->fact auto-linking.
 """
 
 from __future__ import annotations
@@ -55,18 +55,24 @@ class FactGraphLinker:
 
         try:
             async with self._graph_linker.db.session() as link_session:
-                edges = await self._graph_linker.link_fact_to_decisions(
+                decision_edges = await self._graph_linker.link_fact_to_decisions(
                     fact_id=fact_id,
                     fact_content=fact_content,
                     session=link_session,
                 )
-                if edges:
+                fact_edges = await self._graph_linker.link_fact_to_facts(
+                    fact_id=fact_id,
+                    fact_content=fact_content,
+                    session=link_session,
+                )
+                all_edges = decision_edges + fact_edges
+                if all_edges:
                     await link_session.commit()
                     logger.debug(
-                        "F022: Linked fact %s to %d decisions via cross-type embedding",
-                        fact_id, len(edges),
+                        "F022: Linked fact %s to %d decisions + %d facts",
+                        fact_id, len(decision_edges), len(fact_edges),
                     )
         except asyncio.CancelledError:
             raise  # Let the EventBus handle cancellation for clean shutdown
         except Exception:
-            logger.debug("F022 fact->decision graph linking failed for fact %s", fact_id_str)
+            logger.debug("F022 fact graph linking failed for fact %s", fact_id_str)

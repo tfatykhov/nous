@@ -120,6 +120,75 @@ class GraphLinker:
 
         return edges
 
+    async def link_fact_to_facts(
+        self,
+        fact_id: UUID,
+        fact_content: str,
+        session: AsyncSession,
+    ) -> list[GraphEdgeInfo]:
+        """Find and link a new fact to similar existing facts via embedding similarity."""
+        if not self.embedder or not self.settings.cross_type_linking_enabled:
+            return []
+
+        template_text = common_template_text("fact", fact_content)
+        try:
+            fact_embedding = await self.embedder.embed(template_text)
+        except Exception:
+            logger.warning("Failed to embed fact %s for fact-to-fact linking", fact_id)
+            return []
+
+        embedding_str = "[" + ",".join(str(float(v)) for v in fact_embedding) + "]"
+
+        sql = text("""
+            SELECT id, content,
+                   1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+            FROM heart.facts
+            WHERE agent_id = :agent_id
+              AND active = true
+              AND id != :fact_id
+              AND embedding IS NOT NULL
+              AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :threshold
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT 5
+        """)
+        result = await session.execute(sql, {
+            "embedding": embedding_str,
+            "agent_id": self.agent_id,
+            "fact_id": fact_id,
+            "threshold": self.settings.cross_type_same_threshold * 0.9,
+        })
+        candidates = result.all()
+
+        edges = []
+        for row in candidates:
+            if row.similarity >= self.settings.cross_type_same_threshold:
+                stmt = (
+                    pg_insert(GraphEdge)
+                    .values(
+                        source_id=fact_id,
+                        target_id=row.id,
+                        source_type="fact",
+                        target_type="fact",
+                        agent_id=self.agent_id,
+                        relation="related_to",
+                        weight=float(row.similarity),
+                        auto_linked=True,
+                    )
+                    .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
+                )
+                await session.execute(stmt)
+                edges.append(GraphEdgeInfo(
+                    source_id=fact_id,
+                    target_id=row.id,
+                    source_type="fact",
+                    target_type="fact",
+                    relation="related_to",
+                    weight=float(row.similarity),
+                    auto_linked=True,
+                ))
+
+        return edges
+
     async def link_episode_deterministic(
         self,
         episode_id: UUID,
