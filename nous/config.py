@@ -85,7 +85,7 @@ class Settings(BaseSettings):
         validation_alias="GITHUB_TOKEN",
     )
     background_model: str = Field(
-        default="claude-sonnet-4-5-20250514",
+        default="claude-sonnet-4-6",
         validation_alias="NOUS_BACKGROUND_MODEL",
     )
     session_idle_timeout: int = Field(
@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     mcp_enabled: bool = True
 
     # LLM
-    model: str = "claude-sonnet-4-5-20250514"
+    model: str = "claude-sonnet-4-6"
     max_tokens: int = 4096
 
     # Extended thinking

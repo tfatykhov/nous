@@ -219,7 +219,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_IDENTITY_PROMPT` | Built-in default | **Agent identity.** First section of every system prompt. How Nous knows who it is, what tools it has, and how to behave. Override to customize. |
 | `NOUS_AGENT_ID` | `nous-default` | Agent identifier |
 | `NOUS_AGENT_NAME` | `Nous` | Agent display name |
-| `NOUS_MODEL` | `claude-sonnet-4-5-20250514` | LLM model for chat |
+| `NOUS_MODEL` | `claude-sonnet-4-6` | LLM model for chat |
 | `NOUS_MAX_TURNS` | `10` | Max tool loop iterations |
 | `NOUS_MCP_ENABLED` | `true` | Enable MCP server |
 | `NOUS_LOG_LEVEL` | `info` | Log level |
@@ -229,7 +229,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_EPISODE_SUMMARY_ENABLED` | `true` | Enable episode summarization handler |
 | `NOUS_FACT_EXTRACTION_ENABLED` | `true` | Enable fact extraction handler |
 | `NOUS_SLEEP_ENABLED` | `true` | Enable sleep/reflection handler |
-| `NOUS_BACKGROUND_MODEL` | `claude-sonnet-4-5-20250514` | Model for background LLM tasks |
+| `NOUS_BACKGROUND_MODEL` | `claude-sonnet-4-6` | Model for background LLM tasks |
 | `NOUS_SESSION_TIMEOUT` | `1800` | Session idle timeout in seconds |
 | `NOUS_SLEEP_TIMEOUT` | `7200` | Sleep mode timeout in seconds |
 | `NOUS_SLEEP_CHECK_INTERVAL` | `60` | Sleep check interval in seconds |
