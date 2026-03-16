@@ -313,9 +313,14 @@ class AgentRunner:
             "system": [
                 {
                     "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
                     "text": system_prompt,
                     "cache_control": {"type": "ephemeral"},
-                }
+                },
             ],
             "messages": messages,
         }
