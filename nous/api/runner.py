@@ -1,8 +1,8 @@
-"""Agent runner -- executes conversational turns via direct Anthropic API.
+"""Agent runner -- executes conversational turns via Anthropic API.
 
 Wires CognitiveLayer.pre_turn() and post_turn() around
-direct httpx calls to the Anthropic Messages API.  Manages the
-tool use loop internally (no external SDK).
+Anthropic API calls (via pluggable backend: SDK or httpx).
+Manages the tool use loop internally.
 """
 
 from __future__ import annotations
@@ -13,11 +13,14 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
+from nous.api.anthropic_client import (
+    AnthropicClient,
+    StreamEvent,
+    _parse_sse_event,  # noqa: F401 — re-exported for backward compat (tests)
+    create_client,
+)
 from nous.api.compaction import ConversationCompactor
 from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
@@ -32,10 +35,9 @@ logger = logging.getLogger(__name__)
 
 MAX_CONVERSATIONS = 100
 MAX_HISTORY_MESSAGES = 20
-_MAX_RETRIES = 5  # initial + 5 retries = 6 attempts total
-_BACKOFF_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)  # base delays per retry attempt
-_BACKOFF_CAP = 30.0  # max exponential backoff
-_HEADER_DELAY_MAX = 60.0  # max delay from retry-after headers
+
+# Re-export StreamEvent for backward compatibility
+__all__ = ["AgentRunner", "StreamEvent", "FRAME_TOOLS"]
 
 # Frame types where record_decision is expected
 _REQUIRED_DECISION_FRAMES = frozenset({"decision"})
@@ -51,186 +53,6 @@ FRAME_TOOLS: dict[str, list[str]] = {
     "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python"],
     "initiation": ["store_identity", "complete_initiation"],
 }
-
-# Anthropic API version header (P0-1)
-_API_VERSION = "2023-06-01"
-
-
-@dataclass
-class StreamEvent:
-    """A single event from the streaming API response."""
-
-    type: str  # text_delta, tool_start, tool_input_delta, tool_end, block_stop, done, error, message_stop
-    text: str = ""
-    tool_name: str = ""
-    tool_id: str = ""
-    tool_input: dict = field(default_factory=dict)
-    stop_reason: str = ""
-    block_index: int = 0
-    usage: dict[str, int] | None = None
-
-
-def _should_retry(status_code: int, headers: httpx.Headers) -> bool:
-    """Always retry on retryable status codes. Log x-should-retry header if present."""
-    should = headers.get("x-should-retry")
-    is_retryable = status_code in (408, 409, 429) or status_code >= 500
-
-    if should is not None:
-        if should.lower() == "true":
-            logger.info("x-should-retry: true (status %d)", status_code)
-            return True
-        else:
-            # Log but ignore — we always retry on retryable status codes
-            logger.info(
-                "x-should-retry: false (status %d) — retrying anyway per policy",
-                status_code,
-            )
-
-    return is_retryable
-
-
-def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
-    """Compute retry delay from headers or exponential backoff with jitter.
-
-    Priority: retry-after-ms → Retry-After → exponential backoff.
-    Header delays between 0-60s are used as-is; otherwise fall back to backoff.
-    """
-    import random
-    from email.utils import parsedate_to_datetime
-
-    if response is not None:
-        retry_ms = response.headers.get("retry-after-ms")
-        retry_after = response.headers.get("retry-after")
-        should_retry = response.headers.get("x-should-retry")
-
-        logger.info(
-            "Retry headers: x-should-retry=%s, retry-after-ms=%s, retry-after=%s",
-            should_retry,
-            retry_ms,
-            retry_after,
-        )
-
-        # 1. retry-after-ms (milliseconds)
-        if retry_ms is not None:
-            try:
-                delay = float(retry_ms) / 1000.0
-                if 0 <= delay <= _HEADER_DELAY_MAX:
-                    logger.info("Using retry-after-ms: %.3fs", delay)
-                    return delay
-            except (ValueError, OverflowError):
-                pass
-
-        # 2. Retry-After (seconds or HTTP date)
-        if retry_after is not None:
-            try:
-                delay = float(retry_after)
-                if 0 <= delay <= _HEADER_DELAY_MAX:
-                    logger.info("Using Retry-After: %.1fs", delay)
-                    return delay
-            except ValueError:
-                # Try parsing as HTTP date
-                try:
-                    from datetime import datetime, timezone
-                    target = parsedate_to_datetime(retry_after)
-                    delay = (target - datetime.now(timezone.utc)).total_seconds()
-                    if 0 <= delay <= _HEADER_DELAY_MAX:
-                        logger.info("Using Retry-After (date): %.1fs", delay)
-                        return delay
-                except (ValueError, TypeError):
-                    pass
-
-    # 3. Exponential backoff with jitter (0.75-1.0)
-    base = _BACKOFF_DELAYS[min(attempt, len(_BACKOFF_DELAYS) - 1)]
-    jitter = random.uniform(0.75, 1.0)
-    return min(base * jitter, _BACKOFF_CAP)
-
-
-def _parse_sse_event(data: dict[str, Any]) -> StreamEvent | None:
-    """Parse Anthropic SSE event dict into StreamEvent.
-
-    N4: Skip ping keepalives.
-    N3: stop_reason is in message_delta.delta, NOT message_start.
-    N2: Handle in-stream error events (HTTP 200 but error in body).
-    """
-    event_type = data.get("type")
-
-    if event_type == "ping":
-        return None
-
-    if event_type == "error":
-        error = data.get("error", {})
-        return StreamEvent(
-            type="error",
-            text=f"{error.get('type', 'unknown')}: {error.get('message', '')}",
-        )
-
-    if event_type == "content_block_start":
-        block = data.get("content_block", {})
-        block_index = data.get("index", 0)
-        block_type = block.get("type")
-        if block_type == "tool_use":
-            return StreamEvent(
-                type="tool_start",
-                tool_name=block.get("name", ""),
-                tool_id=block.get("id", ""),
-                block_index=block_index,
-            )
-        if block_type == "thinking":
-            return StreamEvent(type="thinking_start", block_index=block_index)
-        if block_type == "redacted_thinking":
-            # redacted_thinking carries data in the start event, no deltas follow
-            return StreamEvent(
-                type="redacted_thinking",
-                text=block.get("data", ""),
-                block_index=block_index,
-            )
-        return StreamEvent(type="text_block_start", block_index=block_index)
-
-    if event_type == "content_block_delta":
-        delta = data.get("delta", {})
-        block_index = data.get("index", 0)
-        delta_type = delta.get("type")
-        if delta_type == "text_delta":
-            return StreamEvent(type="text_delta", text=delta.get("text", ""))
-        if delta_type == "input_json_delta":
-            return StreamEvent(
-                type="tool_input_delta",
-                text=delta.get("partial_json", ""),
-                block_index=block_index,
-            )
-        if delta_type == "thinking_delta":
-            return StreamEvent(
-                type="thinking_delta",
-                text=delta.get("thinking", ""),
-                block_index=block_index,
-            )
-        if delta_type == "signature_delta":
-            return StreamEvent(
-                type="signature_delta",
-                text=delta.get("signature", ""),
-                block_index=block_index,
-            )
-        return None
-
-    if event_type == "content_block_stop":
-        return StreamEvent(type="block_stop", block_index=data.get("index", 0))
-
-    if event_type == "message_delta":
-        usage = data.get("usage")
-        return StreamEvent(
-            type="done",
-            stop_reason=data.get("delta", {}).get("stop_reason", ""),
-            usage=usage,
-        )
-
-    if event_type == "message_start":
-        usage = data.get("message", {}).get("usage")
-        return StreamEvent(type="message_start", usage=usage)
-
-    if event_type == "message_stop":
-        return StreamEvent(type="message_stop")
-
-    return None
 
 
 class AgentRunner:
@@ -260,7 +82,7 @@ class AgentRunner:
         self._heart = heart
         self._settings = settings
         self._conversations: OrderedDict[str, Conversation] = OrderedDict()
-        self._http: httpx.AsyncClient | None = None
+        self._api: AnthropicClient | None = None
         self._dispatcher: Any | None = None  # ToolDispatcher, set via set_dispatcher()
 
         # Compaction (Spec 008.1)
@@ -274,90 +96,15 @@ class AgentRunner:
         self._dispatcher = dispatcher
 
     async def start(self) -> None:
-        """Initialize the httpx client with auth and timeout settings."""
-        settings = self._settings
-
-        # Build default headers
-        headers: dict[str, str] = {
-            "anthropic-version": _API_VERSION,
-            "content-type": "application/json",
-            "accept": "application/json",
-            "user-agent": "claude-cli/2.1.2 (external, cli)",
-            "User-Agent": "Anthropic/JS 0.73.0",
-            "x-app": "cli",
-            "X-Stainless-Lang": "js",
-            "X-Stainless-Package-Version": "0.73.0",
-            "X-Stainless-OS": "Linux",
-            "X-Stainless-Arch": "x64",
-            "X-Stainless-Runtime": "node",
-            "X-Stainless-Runtime-Version": "v22.22.0",
-        }
-
-        # Auth header selection (D1 + OAT detection)
-        # OAT tokens (sk-ant-oat*) from `claude setup-token` require Bearer auth
-        # plus special beta headers. Regular API keys use x-api-key.
-        api_key = settings.anthropic_api_key or ""
-        auth_token = settings.anthropic_auth_token or ""
-        is_oat = False
-
-        if auth_token:
-            # Explicit auth token always uses Bearer
-            headers["authorization"] = f"Bearer {auth_token}"
-            if "sk-ant-oat" in auth_token:
-                is_oat = True
-                headers["anthropic-dangerous-direct-browser-access"] = "true"
-        elif api_key:
-            if "sk-ant-oat" in api_key:
-                # OAT token passed as API key - use Bearer + required beta headers
-                is_oat = True
-                headers["authorization"] = f"Bearer {api_key}"
-                headers["anthropic-dangerous-direct-browser-access"] = "true"
-            else:
-                headers["x-api-key"] = api_key
-        else:
-            logger.warning(
-                "Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set -- "
-                "API calls will fail"
-            )
-
-        # Build beta features list
-        beta_features: list[str] = [
-            "claude-code-20250219",
-            "fine-grained-tool-streaming-2025-05-14",
-            "interleaved-thinking-2025-05-14",
-        ]
-        if is_oat:
-            beta_features.append("oauth-2025-04-20")
-        headers["anthropic-beta"] = ",".join(beta_features)
-
-        # Create httpx client with timeout and connection limits
-        timeout = httpx.Timeout(
-            connect=settings.api_timeout_connect,
-            read=settings.api_timeout_read,
-            write=10.0,
-            pool=10.0,
-        )
-        limits = httpx.Limits(
-            max_connections=5,       # 1 active stream + 2 subtask + 2 buffer
-            max_keepalive_connections=2,  # 1 warm connection ready, no idle hoarding
-        )
-
-        self._http = httpx.AsyncClient(
-            base_url=settings.api_base_url,
-            headers=headers,
-            timeout=timeout,
-            limits=limits,
-            http2=True,
-        )
-
-        auth_type = "OAT/subscription" if is_oat else ("Bearer token" if auth_token else "API key")
-        logger.info("httpx client initialized (auth: %s, http2: true)", auth_type)
+        """Initialize the API client based on configured backend."""
+        self._api = create_client(self._settings)
+        await self._api.start()
 
     async def close(self) -> None:
-        """Clean up httpx client."""
-        if self._http:
-            await self._http.aclose()
-            self._http = None
+        """Clean up API client."""
+        if self._api:
+            await self._api.close()
+            self._api = None
 
     async def run_turn(
         self,
@@ -601,92 +348,19 @@ class AgentRunner:
         skip_thinking: bool = False,
         model_override: str | None = None,
     ) -> ApiResponse:
-        """Call Anthropic Messages API with retry and exponential backoff.
+        """Call Anthropic Messages API via configured backend.
 
-        Retries up to _MAX_RETRIES times on retryable errors (408, 409, 429, 5xx).
-        Respects x-should-retry, retry-after-ms, and Retry-After headers.
+        Delegates to self._api.call() which handles retries and error mapping.
         Returns parsed ApiResponse with content blocks and stop_reason.
-        Raises RuntimeError on persistent errors.
         """
-        if not self._http:
-            raise RuntimeError("httpx client not initialized -- call start() first")
+        if not self._api:
+            raise RuntimeError("API client not initialized -- call start() first")
 
         payload = self._build_api_payload(
             system_prompt, messages, tools,
             skip_thinking=skip_thinking, model_override=model_override,
         )
-
-        # Retry with exponential backoff (x-should-retry / 408 / 409 / 429 / 5xx)
-        last_error: Exception | None = None
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                response = await self._http.post(
-                    "/v1/messages", json=payload,
-                    headers={"X-Stainless-Retry-Count": str(attempt)},
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    return ApiResponse(
-                        content=data["content"],
-                        stop_reason=data["stop_reason"],
-                        usage=data.get("usage"),
-                    )
-
-                # Parse error body
-                try:
-                    error_data = response.json()
-                    error_type = error_data.get("error", {}).get("type", "unknown")
-                    error_msg = error_data.get("error", {}).get("message", "unknown error")
-                except Exception:
-                    error_type = "http_error"
-                    error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
-
-                logger.info(
-                    "Anthropic API %d %s: %s (request_id=%s)",
-                    response.status_code,
-                    error_type,
-                    error_msg,
-                    response.headers.get("request-id", "n/a"),
-                )
-                if response.status_code >= 500:
-                    logger.info(
-                        "Anthropic API response headers: %s",
-                        dict(response.headers),
-                    )
-
-                # Retry based on x-should-retry header or retryable status codes
-                if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
-                    delay = _retry_delay(attempt, response)
-                    logger.warning(
-                        "API error %d (%s), retry %d/%d in %.1fs: %s",
-                        response.status_code,
-                        error_type,
-                        attempt + 1,
-                        _MAX_RETRIES,
-                        delay,
-                        error_msg,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-
-                last_error = RuntimeError(
-                    f"Anthropic API error ({response.status_code}): "
-                    f"{error_type} - {error_msg}"
-                )
-
-            except httpx.TimeoutException as e:
-                last_error = RuntimeError(f"API request timed out: {e}")
-                if attempt < _MAX_RETRIES:
-                    delay = _retry_delay(attempt)
-                    logger.warning("API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
-                    await asyncio.sleep(delay)
-                    continue
-            except httpx.HTTPError as e:
-                last_error = RuntimeError(f"HTTP error: {e}")
-                break  # Don't retry connection errors
-
-        raise last_error or RuntimeError("API call failed with unknown error")
+        return await self._api.call(payload)
 
     async def _call_api_stream(
         self,
@@ -694,79 +368,16 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Call Anthropic API with streaming enabled.
+        """Call Anthropic API with streaming via configured backend.
 
-        Yields StreamEvent objects. Uses self._http which already has
-        auth headers and base_url configured (set in start()).
-
-        N2: Yields error event on HTTP errors or in-stream errors.
-        N8: Only processes data: lines (skips event: lines naturally).
+        Yields StreamEvent objects from the underlying client.
         """
-        if not self._http:
-            raise RuntimeError("httpx client not initialized -- call start() first")
+        if not self._api:
+            raise RuntimeError("API client not initialized -- call start() first")
 
         payload = self._build_api_payload(system_prompt, messages, tools, stream=True)
-
-        # Retry with exponential backoff (matching _call_api)
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                async with self._http.stream(
-                    "POST", "/v1/messages", json=payload,
-                    headers={"X-Stainless-Retry-Count": str(attempt)},
-                ) as response:
-                    if response.status_code != 200:
-                        error_body = await response.aread()
-                        error_text = error_body.decode()[:500]
-                        logger.info(
-                            "Anthropic streaming API %d: %s (request_id=%s)",
-                            response.status_code,
-                            error_text,
-                            response.headers.get("request-id", "n/a"),
-                        )
-                        if response.status_code >= 500:
-                            logger.info(
-                                "Anthropic streaming API response headers: %s",
-                                dict(response.headers),
-                            )
-
-                        if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
-                            delay = _retry_delay(attempt, response)
-                            logger.warning(
-                                "Streaming API error %d, retry %d/%d in %.1fs",
-                                response.status_code,
-                                attempt + 1,
-                                _MAX_RETRIES,
-                                delay,
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-
-                        yield StreamEvent(type="error", text=error_text)
-                        return
-
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = json.loads(line[6:])
-                        event = _parse_sse_event(data)
-                        if event:
-                            if event.type == "error":
-                                yield event
-                                return
-                            yield event
-                    return  # successful stream complete
-
-            except httpx.TimeoutException as e:
-                if attempt < _MAX_RETRIES:
-                    delay = _retry_delay(attempt)
-                    logger.warning("Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
-                    await asyncio.sleep(delay)
-                    continue
-                yield StreamEvent(type="error", text=f"Stream timeout: {e}")
-                return
-            except httpx.HTTPError as e:
-                yield StreamEvent(type="error", text=f"Stream HTTP error: {e}")
-                return
+        async for event in self._api.stream(payload):
+            yield event
 
     # ------------------------------------------------------------------
     # Streaming chat

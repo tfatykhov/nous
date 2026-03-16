@@ -13,6 +13,7 @@ dependencies = [
     "cel-python>=0.4,<1.0",
     "croniter>=6.0.0",
     "h2>=4.3.0",
+    "anthropic>=0.52,<1.0",
 ]
 
 [project.optional-dependencies]
