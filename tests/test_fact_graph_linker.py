@@ -1,4 +1,4 @@
-"""Tests for F022 Phase 2 gap fix: fact-to-decision auto-linking."""
+"""Tests for F022 Phase 2: fact-to-decision and fact-to-fact auto-linking."""
 
 from __future__ import annotations
 
@@ -183,8 +183,8 @@ class TestFactGraphLinker:
         graph_linker.db.session.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_calls_link_fact_to_decisions(self):
-        """Should call graph_linker.link_fact_to_decisions with correct args."""
+    async def test_calls_link_fact_to_decisions_and_facts(self):
+        """Should call both link_fact_to_decisions and link_fact_to_facts."""
         graph_linker = AsyncMock(spec=GraphLinker)
         mock_session = AsyncMock()
         mock_cm = AsyncMock()
@@ -194,7 +194,7 @@ class TestFactGraphLinker:
         graph_linker.db.session.return_value = mock_cm
 
         fact_id = uuid4()
-        edge = GraphEdgeInfo(
+        decision_edge = GraphEdgeInfo(
             source_id=fact_id,
             target_id=uuid4(),
             source_type="fact",
@@ -203,7 +203,17 @@ class TestFactGraphLinker:
             weight=0.85,
             auto_linked=True,
         )
-        graph_linker.link_fact_to_decisions = AsyncMock(return_value=[edge])
+        fact_edge = GraphEdgeInfo(
+            source_id=fact_id,
+            target_id=uuid4(),
+            source_type="fact",
+            target_type="fact",
+            relation="related_to",
+            weight=0.92,
+            auto_linked=True,
+        )
+        graph_linker.link_fact_to_decisions = AsyncMock(return_value=[decision_edge])
+        graph_linker.link_fact_to_facts = AsyncMock(return_value=[fact_edge])
 
         handler, _, _ = self._make_handler(graph_linker=graph_linker)
         event = _make_event(fact_id=fact_id, content="PostgreSQL uses MVCC")
@@ -215,11 +225,44 @@ class TestFactGraphLinker:
             fact_content="PostgreSQL uses MVCC",
             session=mock_session,
         )
+        graph_linker.link_fact_to_facts.assert_called_once_with(
+            fact_id=fact_id,
+            fact_content="PostgreSQL uses MVCC",
+            session=mock_session,
+        )
+        mock_session.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_commits_when_only_fact_edges(self):
+        """Should commit when only link_fact_to_facts returns edges."""
+        graph_linker = AsyncMock(spec=GraphLinker)
+        mock_session = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        graph_linker.db = MagicMock()
+        graph_linker.db.session.return_value = mock_cm
+
+        fact_edge = GraphEdgeInfo(
+            source_id=uuid4(),
+            target_id=uuid4(),
+            source_type="fact",
+            target_type="fact",
+            relation="related_to",
+            weight=0.93,
+            auto_linked=True,
+        )
+        graph_linker.link_fact_to_decisions = AsyncMock(return_value=[])
+        graph_linker.link_fact_to_facts = AsyncMock(return_value=[fact_edge])
+
+        handler, _, _ = self._make_handler(graph_linker=graph_linker)
+        await handler.handle(_make_event())
+
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_no_commit_when_no_edges(self):
-        """Should not commit when link_fact_to_decisions returns empty list."""
+        """Should not commit when both linking methods return empty lists."""
         graph_linker = AsyncMock(spec=GraphLinker)
         mock_session = AsyncMock()
         mock_cm = AsyncMock()
@@ -228,6 +271,7 @@ class TestFactGraphLinker:
         graph_linker.db = MagicMock()
         graph_linker.db.session.return_value = mock_cm
         graph_linker.link_fact_to_decisions = AsyncMock(return_value=[])
+        graph_linker.link_fact_to_facts = AsyncMock(return_value=[])
 
         handler, _, _ = self._make_handler(graph_linker=graph_linker)
         await handler.handle(_make_event())
@@ -245,6 +289,26 @@ class TestFactGraphLinker:
         graph_linker.db = MagicMock()
         graph_linker.db.session.return_value = mock_cm
         graph_linker.link_fact_to_decisions = AsyncMock(
+            side_effect=Exception("embedding service down")
+        )
+
+        handler, _, _ = self._make_handler(graph_linker=graph_linker)
+
+        # Should NOT raise
+        await handler.handle(_make_event())
+
+    @pytest.mark.asyncio
+    async def test_error_in_fact_to_facts_isolated(self):
+        """link_fact_to_facts failure should not propagate."""
+        graph_linker = AsyncMock(spec=GraphLinker)
+        mock_session = AsyncMock()
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        graph_linker.db = MagicMock()
+        graph_linker.db.session.return_value = mock_cm
+        graph_linker.link_fact_to_decisions = AsyncMock(return_value=[])
+        graph_linker.link_fact_to_facts = AsyncMock(
             side_effect=Exception("embedding service down")
         )
 
