@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -91,7 +91,7 @@ class TestHeartBusEmission:
 
 def _mock_settings(**overrides):
     """Create a mock Settings with cross_type_linking_enabled=True."""
-    s = MagicMock()
+    s = MagicMock(spec=Settings)
     s.cross_type_linking_enabled = overrides.get("cross_type_linking_enabled", True)
     return s
 
