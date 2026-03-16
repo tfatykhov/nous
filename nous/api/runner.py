@@ -857,10 +857,15 @@ class AgentRunner:
                 # Execute tools (P1-2: all results in single user message)
                 tool_results_for_message: list[dict[str, Any]] = []
                 for tc in tool_calls:
+                    # F022: Auto-inject source_episode_id into learn_fact.
+                    # Use a local variable (not tc["input"]) to avoid mutating the
+                    # shared block dict that content_blocks already references.
+                    dispatch_input = self._maybe_inject_episode_id(tc["name"], tc["input"], session_id)
+
                     start_time = time.monotonic()
                     result_text, is_error = "", False
                     async for item in self._dispatch_with_keepalive(
-                        tc["name"], tc["input"], session_id=session_id
+                        tc["name"], dispatch_input, session_id=session_id
                     ):
                         if isinstance(item, StreamEvent):
                             yield item
@@ -1041,6 +1046,9 @@ class AgentRunner:
                     tool_name = block["name"]
                     tool_input = block.get("input", {})
                     tool_use_id = block["id"]
+
+                    # F022: Auto-inject source_episode_id into learn_fact.
+                    tool_input = self._maybe_inject_episode_id(tool_name, tool_input, session_id)
 
                     start_time = time.monotonic()
                     result_text, is_error = await self._dispatcher.dispatch(
@@ -1376,6 +1384,36 @@ Rules:
                     await next_task
                 except (asyncio.CancelledError, StopAsyncIteration):
                     pass
+
+    def _maybe_inject_episode_id(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        session_id: str | None,
+    ) -> dict[str, Any]:
+        """Return tool_input with source_episode_id injected for learn_fact calls.
+
+        F022: Facts learned during an active episode should be linked to that
+        episode via source_episode_id so link_episode_deterministic() can create
+        fact→episode graph edges.  The model never needs to know the UUID;
+        injection happens transparently server-side.
+
+        Returns the original dict unchanged for all other tools, or if no active
+        episode exists for the session.
+
+        NOTE (P1-1 limitation): falls back to None after process restart because
+        _active_episodes is in-memory only.  A proper fix requires adding
+        session_id to the Episode DB schema so we can query the active episode
+        from DB when the in-memory dict misses.  Tracked as follow-up migration.
+        """
+        if tool_name != "learn_fact" or "source_episode_id" in tool_input:
+            return tool_input
+        if not session_id:
+            return tool_input
+        active_ep = self._cognitive.get_active_episode_id(session_id)
+        if not active_ep:
+            return tool_input
+        return {**tool_input, "source_episode_id": active_ep}
 
     async def _dispatch_with_keepalive(
         self, name: str, args: dict[str, Any], session_id: str | None = None,

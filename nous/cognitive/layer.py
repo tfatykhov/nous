@@ -155,6 +155,28 @@ class CognitiveLayer:
         """Public delegation to FrameEngine.list_frames()."""
         return await self._frames.list_frames(agent_id, session=session)
 
+    def get_active_episode_id(self, session_id: str) -> str | None:
+        """Return the active episode UUID string for a session, or None.
+
+        Used by the runner to auto-inject source_episode_id into learn_fact
+        calls so fact→episode edges are created without requiring the model
+        to know or pass the UUID explicitly.
+
+        Limitation (P1-1): _active_episodes is in-memory only.  After a
+        process restart the dict is empty and this returns None, causing
+        injection to be silently skipped.  The proper fix is to add
+        session_id to the Episode DB schema and fall back to a DB query here.
+        Tracked as follow-up migration task.
+        """
+        episode_id = self._active_episodes.get(session_id)
+        if episode_id is None:
+            logger.debug(
+                "get_active_episode_id: no active episode for session %s "
+                "(in-memory miss — may be post-restart or low-significance turn)",
+                session_id,
+            )
+        return episode_id
+
     async def pre_turn(
         self,
         agent_id: str,

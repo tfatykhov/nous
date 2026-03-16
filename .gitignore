@@ -11,3 +11,4 @@ pgdata/
 PLAN-tests.md
 /.claude
 .worktrees
+tests/benchmark/results/
