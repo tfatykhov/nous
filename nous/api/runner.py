@@ -857,6 +857,12 @@ class AgentRunner:
                 # Execute tools (P1-2: all results in single user message)
                 tool_results_for_message: list[dict[str, Any]] = []
                 for tc in tool_calls:
+                    # F022: Auto-inject source_episode_id into learn_fact (streaming path)
+                    if tc["name"] == "learn_fact" and "source_episode_id" not in tc["input"]:
+                        active_ep = self._cognitive.get_active_episode_id(session_id) if session_id else None
+                        if active_ep:
+                            tc["input"] = {**tc["input"], "source_episode_id": active_ep}
+
                     start_time = time.monotonic()
                     result_text, is_error = "", False
                     async for item in self._dispatch_with_keepalive(
@@ -1041,6 +1047,14 @@ class AgentRunner:
                     tool_name = block["name"]
                     tool_input = block.get("input", {})
                     tool_use_id = block["id"]
+
+                    # F022: Auto-inject source_episode_id into learn_fact so
+                    # fact→episode edges are created without the model needing
+                    # to know or pass the episode UUID explicitly.
+                    if tool_name == "learn_fact" and "source_episode_id" not in tool_input:
+                        active_ep = self._cognitive.get_active_episode_id(session_id) if session_id else None
+                        if active_ep:
+                            tool_input = {**tool_input, "source_episode_id": active_ep}
 
                     start_time = time.monotonic()
                     result_text, is_error = await self._dispatcher.dispatch(
