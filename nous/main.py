@@ -102,15 +102,23 @@ async def create_components(settings: Settings) -> dict:
             timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
         )
 
+        # F022: Create GraphLinker (shared between episode and fact linking)
+        graph_linker = None
         try:
-            from nous.handlers.episode_summarizer import EpisodeSummarizer
             from nous.brain.graph_linker import GraphLinker
 
-            if settings.episode_summary_enabled:
+            if settings.cross_type_linking_enabled or settings.episode_summary_enabled:
                 graph_linker = GraphLinker(
                     db=database, embedder=embedding_provider,
                     settings=settings, agent_id=settings.agent_id,
                 )
+        except ImportError:
+            logger.debug("GraphLinker not available yet")
+
+        try:
+            from nous.handlers.episode_summarizer import EpisodeSummarizer
+
+            if settings.episode_summary_enabled:
                 EpisodeSummarizer(heart, brain, settings, bus, handler_http, graph_linker=graph_linker)
         except ImportError:
             logger.debug("EpisodeSummarizer not available yet")
@@ -122,6 +130,17 @@ async def create_components(settings: Settings) -> dict:
                 FactExtractor(heart, settings, bus, handler_http)
         except ImportError:
             logger.debug("FactExtractor not available yet")
+
+        # F022 Phase 2: Wire fact->decision graph linking
+        try:
+            from nous.handlers.fact_graph_linker import FactGraphLinker
+
+            if graph_linker is not None and settings.cross_type_linking_enabled:
+                heart._bus = bus  # Inject bus for fact_learned emission
+                FactGraphLinker(graph_linker, settings, bus)
+                logger.debug("F022: FactGraphLinker wired — fact->decision linking enabled")
+        except ImportError:
+            logger.debug("FactGraphLinker not available yet")
 
         try:
             from nous.handlers.knowledge_extractor import KnowledgeExtractor
