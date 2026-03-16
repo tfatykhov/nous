@@ -606,10 +606,21 @@ class SdkAnthropicClient:
     def _log_sdk_error(e: Exception) -> None:
         """Log detailed error info from Anthropic SDK exceptions."""
         # APIStatusError has status_code, request_id, body, response
+        # APIError (base) has request with headers
         status = getattr(e, "status_code", None)
         request_id = getattr(e, "request_id", None)
         body = getattr(e, "body", None)
         response = getattr(e, "response", None)
+        request = getattr(e, "request", None)
+
+        # Log request headers (sanitize auth)
+        if request is not None:
+            req_headers = dict(request.headers)
+            for key in ("authorization", "x-api-key"):
+                if key in req_headers:
+                    val = req_headers[key]
+                    req_headers[key] = val[:12] + "..." if len(val) > 12 else "***"
+            logger.info("Anthropic SDK request headers: %s", req_headers)
 
         if status is not None:
             error_type = "unknown"
