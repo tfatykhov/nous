@@ -530,7 +530,7 @@ class TestShadowMode:
             source_text=None,
             session=None,
         )
-        assert "SHADOW_WOULD_REJECT" in result.explanation or "SHADOW_WOULD_ADMIT" in result.explanation
+        assert "SHADOW_WOULD_REJECT" in result.explanation
 
     @pytest.mark.asyncio
     async def test_shadow_still_scores(self):
