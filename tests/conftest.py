@@ -110,6 +110,51 @@ async def heart(db, mock_embeddings):
     await h.close()
 
 
+@pytest_asyncio.fixture
+async def heart_with_admission(db, mock_embeddings):
+    """Heart with active admission control (LLM disabled, heuristic only)."""
+    from nous.heart import Heart
+    from nous.heart.admission import AdmissionConfig, AdmissionController
+
+    config = AdmissionConfig(shadow_mode=False, utility_llm_enabled=False)
+    controller = AdmissionController(config=config)
+    settings = Settings()
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    h.facts._admission_controller = controller
+    yield h
+    await h.close()
+
+
+@pytest_asyncio.fixture
+async def heart_with_strict_admission(db, mock_embeddings):
+    """Heart with strict admission (threshold=0.99)."""
+    from nous.heart import Heart
+    from nous.heart.admission import AdmissionConfig, AdmissionController
+
+    config = AdmissionConfig(shadow_mode=False, utility_llm_enabled=False, threshold=0.99)
+    controller = AdmissionController(config=config)
+    settings = Settings()
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    h.facts._admission_controller = controller
+    yield h
+    await h.close()
+
+
+@pytest_asyncio.fixture
+async def heart_with_shadow_admission(db, mock_embeddings):
+    """Heart with shadow mode admission."""
+    from nous.heart import Heart
+    from nous.heart.admission import AdmissionConfig, AdmissionController
+
+    config = AdmissionConfig(shadow_mode=True, utility_llm_enabled=False)
+    controller = AdmissionController(config=config)
+    settings = Settings()
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    h.facts._admission_controller = controller
+    yield h
+    await h.close()
+
+
 GUARDRAIL_TEST_AGENT = "test-guardrail-agent"
 
 
