@@ -1,11 +1,11 @@
 # F023 — Memory Admission Control (A-MAC)
 
-> **Status:** Draft v2 (post-review)
+> **Status:** Draft v3 (post-Emerson review)
 > **Priority:** P1
 > **Depends on:** F002 (Heart Module), F022 (Graph-Augmented Recall)
 > **Research:** 016 — Agent Memory Synthesis, Gap G3 (Admission Control)
 > **Papers:** Zhang et al. (2026) "Adaptive Memory Admission Control for LLM Agents" (arXiv:2603.04549), ACC (Admission-Controlled Caching), A-MEM (Zettelkasten), Memory Survey (Hatalis et al., 2025)
-> **Review:** 3-agent review completed Mar 17 2026. Research reviewer scored 6.5/10 on v1 draft. Key findings incorporated below.
+> **Review:** 3-agent review completed Mar 17 2026. Research reviewer scored 6.5/10 on v1 draft. Emerson review on PR #155: Approve with minor revisions (0 P1, 3 P2, 3 P3). All findings incorporated in v3.
 
 ---
 
@@ -61,6 +61,7 @@ Three gates in `FactManager._learn()`:
 5. **Configurable** — Weights and threshold are settings, not hardcoded. Can tune without deploys.
 6. **Grounded** — Confidence measures whether a fact is actually supported by source text, not just how certain the extractor felt. Prevents hallucination propagation.
 7. **Research-aligned** — Dimension implementations follow Zhang et al. (2026) validated approach, adapted for Nous's architecture.
+8. **Observable from day one** — Shadow mode enables data collection before the gate enforces. Every score is logged whether or not the gate is active.
 
 ---
 
@@ -135,6 +136,7 @@ class AdmissionResult:
     scores: dict[str, float]  # Per-dimension scores
     explanation: str
     bypassed: bool = False    # True if user bypass applied
+    shadow_mode: bool = False # True if gate is in shadow mode (admit all, but score)
 
 
 @dataclass
@@ -153,6 +155,8 @@ class AdmissionConfig:
     # LLM utility scoring
     utility_llm_enabled: bool = True
     utility_llm_model: str = "haiku"  # Cheap model for utility prediction
+    # Shadow mode: score everything but admit all — for baseline data collection
+    shadow_mode: bool = False
 
 
 class AdmissionController:
@@ -164,6 +168,11 @@ class AdmissionController:
     - Novelty: How different is this from what we already know?
     - Recency: How fresh is the source context? (exponential decay)
     - Type Prior: Category-based prior probability of usefulness.
+
+    Supports three modes via configuration:
+    - Disabled: NOUS_ADMISSION_CONTROL_ENABLED=false → no scoring, no gating
+    - Shadow:   NOUS_ADMISSION_SHADOW_MODE=true → score everything, admit all, log results
+    - Active:   Both enabled, shadow off → score and gate (reject below threshold)
     """
 
     def __init__(self, config: AdmissionConfig | None = None, llm_client=None):
@@ -187,6 +196,9 @@ class AdmissionController:
                 fact (from the dedup query we already run). None if no embedding.
             source_text: Original conversation/episode text this fact was
                 extracted from. Used for ROUGE-L grounding. None if unavailable.
+                NOTE: This MUST include tool call outputs (web_search results,
+                run_python output, etc.) not just user/assistant messages.
+                See _get_source_text() for implementation details.
             session: DB session (for future expansion, e.g., subject frequency).
 
         Returns:
@@ -230,6 +242,22 @@ class AdmissionController:
             + w["type_prior"] * scores["type_prior"]
         )
 
+        # In shadow mode: always admit, but log what would have been rejected
+        if self.config.shadow_mode:
+            would_reject = composite < self.config.threshold
+            dims = ", ".join(f"{k}={v:.2f}" for k, v in scores.items())
+            action = "SHADOW_WOULD_REJECT" if would_reject else "SHADOW_WOULD_ADMIT"
+            explanation = f"{action} (score={composite:.3f}, threshold={self.config.threshold}): {dims}"
+            logger.info("Admission shadow: %s — %s", fact_input.content[:80], explanation)
+            return AdmissionResult(
+                admitted=True,  # Always admit in shadow mode
+                composite_score=composite,
+                threshold=self.config.threshold,
+                scores=scores,
+                explanation=explanation,
+                shadow_mode=True,
+            )
+
         admitted = composite >= self.config.threshold
 
         # Build explanation
@@ -271,10 +299,20 @@ class AdmissionController:
 
         Prompt asks the model to rate 0.0-1.0 how likely this fact
         is to be useful in future conversations with this user.
+
+        Includes calibration anchors per Emerson review P3 #1 —
+        without anchored examples, scores drift across sessions.
         """
         prompt = f"""Rate how useful this fact will be in future conversations.
 Consider: Will the user or agent need this information again?
 Is it specific and actionable, or vague and ephemeral?
+
+Calibration examples:
+- "Tim's birthday is March 15" → 0.9 (personal, reusable, specific)
+- "Tim mentioned he had a busy week" → 0.3 (vague, ephemeral, no future use)
+- "The meeting went well" → 0.2 (subjective, no actionable content)
+- "Tim prefers Celsius for temperatures" → 0.95 (preference, used every time)
+- "It was raining during our conversation" → 0.1 (irrelevant ephemeral context)
 
 Fact: {fact_input.content}
 Category: {fact_input.category or 'unknown'}
@@ -334,6 +372,14 @@ Respond with ONLY a number between 0.0 and 1.0."""
 
         Uses ROUGE-L overlap between fact content and source text.
         Falls back to source-penalty heuristic if source text unavailable.
+
+        NOTE on source_text scope (Emerson review P2 #1):
+        source_text MUST include tool call outputs (web_search results,
+        run_python output, bash output, web_fetch content) — not just
+        user/assistant message text. Facts derived from web research
+        or code execution need their tool outputs in the grounding window,
+        otherwise ROUGE-L will incorrectly flag them as hallucinations.
+        See _get_source_text() for how episode.content is structured.
         """
         if source_text:
             return self._rouge_l_score(fact_input.content, source_text)
@@ -359,6 +405,8 @@ Respond with ONLY a number between 0.0 and 1.0."""
         Low score = fact may be hallucinated or heavily inferred.
 
         Lightweight implementation — no external dependencies.
+        Uses whitespace tokenization (sufficient for our scale;
+        proper tokenizer not worth the dependency — see Open Questions #4).
         """
         fact_tokens = fact_text.lower().split()
         source_tokens = source_text.lower().split()
@@ -439,14 +487,9 @@ Respond with ONLY a number between 0.0 and 1.0."""
         """
         now = datetime.now(UTC)
 
-        # Determine source timestamp
-        # Priority: explicit source time > fact creation time > now
-        source_time = None
-
-        # If we have a source episode, use its timestamp
-        # (passed via fact_input metadata in future)
-        if hasattr(fact_input, 'source_timestamp') and fact_input.source_timestamp:
-            source_time = fact_input.source_timestamp
+        # Use source_timestamp if provided on FactInput (added in PR 1)
+        # This field is explicitly typed on the schema, not discovered via hasattr.
+        source_time = fact_input.source_timestamp if fact_input.source_timestamp else None
 
         if source_time is None:
             # For facts being created right now from live conversation,
@@ -474,6 +517,30 @@ Respond with ONLY a number between 0.0 and 1.0."""
         return self.config.type_priors.get(fact_input.category, 0.50)
 ```
 
+### Schema Change: `FactInput` — Add `source_timestamp`
+
+Per Emerson review P3 #2: the `hasattr` check for `source_timestamp` is fragile. The field must be explicitly typed on the schema so callers know it exists and can populate it.
+
+```python
+# In nous/heart/schemas.py — FactInput
+
+class FactInput(BaseModel):
+    content: str
+    category: str | None = None
+    subject: str | None = None
+    confidence: float = 1.0
+    source: str | None = None
+    source_episode_id: UUID | None = None
+    source_decision_id: UUID | None = None
+    tags: list[str] | None = None
+    # NEW: Timestamp of the source context this fact was extracted from.
+    # Used by admission controller for accurate recency scoring.
+    # For live conversation facts: None (defaults to now → recency ≈ 1.0)
+    # For sleep-reflected facts: timestamp of the oldest source episode
+    # For knowledge_extractor: timestamp of the compacted episode
+    source_timestamp: datetime | None = None
+```
+
 ### Integration Point: `FactManager._learn()`
 
 The gate inserts **after** dedup check passes but **before** `session.add(fact)`:
@@ -489,6 +556,10 @@ async def _learn(self, input, exclude_ids, check_contradictions, session, ...):
         return await self._confirm(dupe.id, session)
 
     # 3. *** NEW: Admission gate ***
+    # Initialize result to None before the conditional block
+    # to avoid NameError when controller is disabled (Emerson P2 #3)
+    admission_result: AdmissionResult | None = None
+
     if self._admission_controller is not None:
         # Reuse the similarity data from dedup search
         max_sim = await self._find_max_similarity(embedding, exclude_ids, session)
@@ -496,23 +567,23 @@ async def _learn(self, input, exclude_ids, check_contradictions, session, ...):
         # Retrieve source text for ROUGE-L grounding
         source_text = await self._get_source_text(input, session)
 
-        result = await self._admission_controller.score(
+        admission_result = await self._admission_controller.score(
             input, embedding, max_sim, source_text, session
         )
-        if not result.admitted:
+        if not admission_result.admitted:
             logger.info("Fact rejected by admission: %s — %s",
-                        input.content[:80], result.explanation)
+                        input.content[:80], admission_result.explanation)
             await self._emit_event(session, "fact_rejected", {
                 "content": input.content[:200],
                 "source": input.source,
-                "scores": result.scores,
-                "composite_score": result.composite_score,
+                "scores": admission_result.scores,
+                "composite_score": admission_result.composite_score,
             })
-            return self._rejected_detail(input, result)
+            return self._rejected_detail(input, admission_result)
 
     # 4. Create and store fact (existing)
     fact = Fact(...)
-    fact.admission_score = result.composite_score if result else None
+    fact.admission_score = admission_result.composite_score if admission_result else None
     session.add(fact)
     ...
 ```
@@ -529,6 +600,19 @@ async def _get_source_text(
 
     If the fact has a source_episode_id, fetch the episode's content.
     This is the conversation/summary text the fact was extracted from.
+
+    IMPORTANT (Emerson review P2 #1): episode.content includes the FULL
+    conversation log — user messages, assistant messages, AND tool call
+    outputs (web_search results, run_python output, bash output, web_fetch
+    content). This means facts derived from tool outputs (e.g., "Tim's
+    server runs Ubuntu 24.04" learned from a bash command output) will
+    have their source text available for ROUGE-L grounding.
+
+    If the episode's content field does NOT include tool outputs (e.g.,
+    due to content truncation or a format change), the ROUGE-L score
+    will undercount grounding for tool-derived facts, and the fallback
+    source-penalty heuristic will apply instead. This is a known
+    limitation — see Open Questions #5.
 
     Returns None if no source episode available (user-stated facts, etc.).
     Cost: ~1ms (single row lookup by PK).
@@ -618,7 +702,24 @@ COMMENT ON COLUMN heart.facts.admission_score IS
     'A-MAC composite score at time of admission. NULL for pre-F023 facts.';
 ```
 
-No index needed — this column is for observability and sleep re-scoring, not query filtering.
+### Migration: Add feedback loop columns to `heart.facts`
+
+Per Emerson review P3 #3: the feedback loop columns were specified in the design
+but the migration SQL was missing. Both columns are needed from PR 1 so the schema
+is ready when PR 4 wires up the tracking logic.
+
+```sql
+ALTER TABLE heart.facts
+    ADD COLUMN recall_count INTEGER DEFAULT 0,
+    ADD COLUMN last_recalled_at TIMESTAMPTZ DEFAULT NULL;
+
+COMMENT ON COLUMN heart.facts.recall_count IS
+    'Number of times this fact was recalled and used in a response. For admission feedback loop.';
+COMMENT ON COLUMN heart.facts.last_recalled_at IS
+    'Last time this fact was recalled and used. For admission feedback loop and sleep pruning.';
+```
+
+No indexes needed on these columns — they're updated on write and read during sleep batch jobs, not queried directly.
 
 ---
 
@@ -641,6 +742,7 @@ if settings.admission_control_enabled:
         threshold=settings.admission_threshold or DEFAULT_THRESHOLD,
         recency_lambda=settings.admission_recency_lambda or RECENCY_DECAY_LAMBDA,
         utility_llm_enabled=settings.admission_utility_llm_enabled,
+        shadow_mode=settings.admission_shadow_mode,
     )
     self._admission = AdmissionController(admission_config, llm_client=self.llm)
 ```
@@ -649,6 +751,8 @@ if settings.admission_control_enabled:
 
 The extractor calls `heart.learn()` which calls `FactManager._learn()`.
 The gate fires automatically. The extractor should pass `source_episode_id` on FactInput so the admission controller can retrieve source text for ROUGE-L grounding. If extractor already has the source conversation text in memory, it can pass it directly via a new `source_text` field on FactInput to avoid the extra DB lookup.
+
+**Must also populate `source_timestamp`** from the compacted episode's timestamp so recency scoring is accurate (not defaulting to "now").
 
 ### 3. `FactExtractor` (episode candidate facts) — No Changes Needed
 
@@ -684,14 +788,16 @@ for fact in old_facts:
 
 This enables "forgetting" — facts that were marginal at admission time and haven't been confirmed or recalled can be retired.
 
-### 8. Sleep Phase 2 — Feedback Loop (NEW)
+### 8. Sleep Phase 2 — Feedback Loop
 
 Track which admitted facts are actually recalled and used vs. never touched:
 ```python
 # On every recall_deep that returns facts used in a response:
 for fact_id in facts_used_in_response:
     await session.execute(
-        text("UPDATE heart.facts SET recall_count = recall_count + 1, last_recalled_at = NOW() WHERE id = :id"),
+        text("""UPDATE heart.facts
+                SET recall_count = recall_count + 1, last_recalled_at = NOW()
+                WHERE id = :id"""),
         {"id": fact_id}
     )
 ```
@@ -710,6 +816,11 @@ Sleep Phase 2 can then use `recall_count` and `last_recalled_at` as signals:
 ```python
 # Feature flag
 NOUS_ADMISSION_CONTROL_ENABLED: bool = True
+
+# Shadow mode: score everything but admit all — for baseline data collection
+# Use this BEFORE enabling the gate to collect real scoring data and
+# validate threshold/weights without risking fact loss (Emerson P2 #2)
+NOUS_ADMISSION_SHADOW_MODE: bool = False
 
 # Composite threshold — facts below this are rejected
 # Zhang et al. grid search optimal: 0.55
@@ -740,6 +851,13 @@ NOUS_ADMISSION_PRIOR_TOOL: float = 0.65
 NOUS_ADMISSION_PRIOR_CONCEPT: float = 0.60
 ```
 
+### Recommended Rollout Sequence
+
+1. **Week 1:** Enable with `SHADOW_MODE=true`. Collect baseline data. Review score distributions.
+2. **Week 2:** Run pre-launch benchmark (100-fact labeling). Validate threshold.
+3. **Week 3:** Disable shadow mode (`SHADOW_MODE=false`). Gate is now active.
+4. **Week 4+:** Monitor rejection rate. Tune weights if needed based on feedback loop data.
+
 ---
 
 ## Implementation Plan (4 PRs)
@@ -748,24 +866,28 @@ NOUS_ADMISSION_PRIOR_CONCEPT: float = 0.60
 - New file: `nous/nous/heart/admission.py`
 - `AdmissionController` class with all 5 scoring dimensions
   - LLM-based utility scoring with heuristic fallback
+  - Calibration anchors in utility prompt (Emerson P3 #1)
   - ROUGE-L grounding for confidence with source-penalty fallback
   - Exponential time-decay for recency (λ=0.01/hr)
   - Type prior as highest-weighted dimension (0.30)
+  - Shadow mode support (score all, admit all, log results)
 - `AdmissionResult` and `AdmissionConfig` dataclasses
 - ROUGE-L implementation (lightweight, no external deps)
-- Alembic migration: add `admission_score` column to `heart.facts`
-- Unit tests: scoring logic, ROUGE-L accuracy, bypass behavior, decay math, edge cases
+- Add `source_timestamp: datetime | None = None` to `FactInput` schema (Emerson P3 #2)
+- Alembic migration: add `admission_score`, `recall_count`, `last_recalled_at` columns to `heart.facts` (Emerson P3 #3)
+- Unit tests: scoring logic, ROUGE-L accuracy, bypass behavior, decay math, edge cases, shadow mode
 - **No behavior change** — controller exists but isn't wired in
 
 ### PR 2 — Wire into FactManager._learn() (~3 hours)
 - Add `_find_max_similarity()` method to FactManager
-- Add `_get_source_text()` method for ROUGE-L grounding
+- Add `_get_source_text()` method for ROUGE-L grounding (with tool output documentation — Emerson P2 #1)
 - Inject `AdmissionController` + LLM client into FactManager constructor
 - Gate logic in `_learn()`: score → admit/reject → emit event
+  - `admission_result` initialized to `None` before conditional block (Emerson P2 #3)
 - `FactRejected` return type for rejected facts
 - Feature flag: `NOUS_ADMISSION_CONTROL_ENABLED`
-- Integration tests: verified admit, verified reject, bypass for user facts, ROUGE-L grounding
-- **Behavior change** — automated fact extraction now gates
+- Shadow mode flag: `NOUS_ADMISSION_SHADOW_MODE` (Emerson P2 #2)
+- Integration tests: verified admit, verified reject, bypass for user facts, ROUGE-L grounding, shadow mode logging
 
 ### PR 3 — Tool handler + observability (~2 hours)
 - Update `learn_fact` tool handler to set `source="user_direct"`
@@ -775,8 +897,7 @@ NOUS_ADMISSION_PRIOR_CONCEPT: float = 0.60
 - Dashboard query: rejection rate, score distributions, per-source breakdown
 
 ### PR 4 — Feedback loop + sleep integration + benchmark (~3 hours)
-- Add `recall_count` and `last_recalled_at` columns to `heart.facts`
-- Track fact usage on every recall_deep response
+- Wire up `recall_count` / `last_recalled_at` tracking on every recall_deep
 - Config loading for weights, threshold, type priors from settings
 - Sleep Phase 2 integration: re-score existing facts, deactivate decayed ones
 - **Pre-launch benchmark**: label 100 existing facts as valuable/noise, run scorer, measure precision/recall. Target: F1 ≥ 0.55 (matching Zhang et al. LoCoMo baseline)
@@ -824,18 +945,21 @@ Per research review recommendation, we define a concrete benchmark before launch
 5. **Recall quality improvement** — `recall_deep` results should have higher signal-to-noise
    - Measured by: track % of recalled facts that are actually referenced in responses
 
-6. **Latency impact: <10ms** additional per fact admission
-   - ROUGE-L: ~1ms (text comparison)
-   - `_find_max_similarity()`: ~2ms (HNSW lookup)
-   - `_get_source_text()`: ~1ms (PK lookup)
-   - LLM utility call: ~100ms (async, Haiku)
-   - Total: ~105ms with LLM, ~5ms without
+6. **Latency impact:**
+   - Without LLM utility scoring: <10ms per fact admission
+     - ROUGE-L: ~1ms (text comparison)
+     - `_find_max_similarity()`: ~2ms (HNSW lookup)
+     - `_get_source_text()`: ~1ms (PK lookup)
+   - With LLM utility scoring: ~105ms per fact admission
+     - Above + LLM call: ~100ms (async, Haiku)
+   - At 2-5 facts/conversation, total added latency: 10-525ms spread across session
 
 ### Observability
 
 - `fact_rejected` events with full score breakdowns
 - `admission_score` persisted on every admitted fact
 - `recall_count` and `last_recalled_at` for feedback loop
+- Shadow mode logging: "SHADOW_WOULD_REJECT" / "SHADOW_WOULD_ADMIT" log lines
 - Log line for every rejection: content preview + per-dimension scores
 - Periodic report: admission rate by source, by category, score distributions
 
@@ -845,7 +969,7 @@ Per research review recommendation, we define a concrete benchmark before launch
 
 **Threshold too aggressive — rejects valuable facts**
 Impact: Lost knowledge
-Mitigation: Start with 0.55 (validated by Zhang et al.), tune based on pre-launch benchmark and rejection review
+Mitigation: Start with shadow mode to collect baseline data. Run pre-launch benchmark at 0.55 (validated by Zhang et al.), tune based on results.
 
 **Threshold too permissive — doesn't filter enough**
 Impact: No improvement
@@ -854,6 +978,10 @@ Mitigation: Monitor rejection rate, tune down if <20%
 **ROUGE-L grounding too strict on valid inferences**
 Impact: Rejects legitimate inferred facts that aren't verbatim in source
 Mitigation: ROUGE-L is one of 5 dimensions (weight 0.15). A fact can score low on grounding but still pass on utility + type_prior + novelty. Also, fallback to source-penalty heuristic when source text unavailable.
+
+**Tool output missing from episode content (Emerson P2 #1)**
+Impact: Facts derived from web research / code execution flagged as ungrounded
+Mitigation: Document requirement that episode.content includes tool outputs. Add validation check in _get_source_text(). If tool outputs are truncated, fall back to source-penalty heuristic.
 
 **LLM utility scoring adds latency**
 Impact: ~100ms per fact admission
@@ -869,7 +997,7 @@ Mitigation: Graceful fallback to source-penalty heuristic. Most facts from knowl
 
 **Breaking change for existing integrations**
 Impact: Service disruption
-Mitigation: Feature flag, gradual rollout, bypass for explicit user actions
+Mitigation: Feature flag, shadow mode for data collection, gradual rollout, bypass for explicit user actions
 
 ---
 
@@ -882,6 +1010,8 @@ Mitigation: Feature flag, gradual rollout, bypass for explicit user actions
 3. **Recency for sleep-reflected facts:** When sleep Phase 4 reflects on episodes from last week, should the recency score use the episode timestamp (old → low recency) or the reflection timestamp (now → high recency)? Current design: episode timestamp, which seems more honest — a reflection about old data shouldn't get a freshness bonus.
 
 4. **ROUGE-L token normalization:** Current implementation uses whitespace splitting. Should we use a proper tokenizer (e.g., word_tokenize) for more accurate overlap measurement? Probably not worth the dependency at current scale.
+
+5. **Tool output completeness in episode content (Emerson P2 #1):** Need to audit whether all episode types consistently include tool call outputs in their content field. If some episode types truncate or exclude tool outputs, facts derived from those tools will have artificially low ROUGE-L scores. May need a separate tool_output store or expanded episode content format.
 
 ---
 
@@ -908,3 +1038,13 @@ Mitigation: Feature flag, gradual rollout, bypass for explicit user actions
   - Added ROUGE-L implementation details
   - Estimated effort: 9h → 12h (LLM integration + grounding + benchmark)
   - Cited Zhang et al. (2026) throughout
+- **v3 (Mar 17 2026):** Post-Emerson review (PR #155) — all P2/P3 findings addressed:
+  - P2 #1: Documented tool output requirement in _get_source_text() and ROUGE-L grounding. Added Open Question #5 for audit.
+  - P2 #2: Added shadow mode (NOUS_ADMISSION_SHADOW_MODE). Three-state config: disabled → shadow → active. Added rollout sequence.
+  - P2 #3: Fixed NameError — `admission_result` initialized to `None` before conditional block.
+  - P3 #1: Added calibration anchors to LLM utility prompt (5 examples with scores).
+  - P3 #2: Added `source_timestamp: datetime | None = None` as explicit field on FactInput schema. Removed fragile `hasattr` check.
+  - P3 #3: Added migration SQL for `recall_count` and `last_recalled_at` columns.
+  - Fixed latency contradiction: split into "<10ms without LLM / ~105ms with LLM" in success criteria.
+  - Added Design Principle #8 (observable from day one).
+  - Added recommended rollout sequence (shadow → benchmark → active → tune).
