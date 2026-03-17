@@ -22,6 +22,7 @@ from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
 from nous.heart.facts import FactManager
 from nous.heart.procedures import ProcedureManager
+from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.schemas import (
     CensorDetail,
     CensorInput,
@@ -31,6 +32,7 @@ from nous.heart.schemas import (
     EpisodeSummary,
     FactDetail,
     FactInput,
+    FactRejected,
     FactSummary,
     OpenThread,
     ProcedureDetail,
@@ -72,9 +74,29 @@ class Heart:
         self._embeddings = embedding_provider
         self._owns_embeddings = owns_embeddings
 
+        # F023: Construct admission controller if enabled
+        admission_controller = None
+        if settings.admission_control_enabled:
+            admission_config = AdmissionConfig(
+                weights={
+                    "utility": settings.admission_w_utility,
+                    "confidence": settings.admission_w_confidence,
+                    "novelty": settings.admission_w_novelty,
+                    "recency": settings.admission_w_recency,
+                    "type_prior": settings.admission_w_type_prior,
+                },
+                threshold=settings.admission_threshold,
+                recency_lambda=settings.admission_recency_lambda,
+                utility_llm_enabled=settings.admission_utility_llm_enabled,
+                utility_llm_model=settings.admission_utility_model or settings.background_model,
+                shadow_mode=settings.admission_shadow_mode,
+            )
+            # LLM client injected post-init (same pattern as EventBus)
+            admission_controller = AdmissionController(config=admission_config)
+
         # Initialize managers
         self.episodes = EpisodeManager(database, embedding_provider, settings.agent_id)
-        self.facts = FactManager(database, embedding_provider, settings.agent_id)
+        self.facts = FactManager(database, embedding_provider, settings.agent_id, admission_controller)
         self.procedures = ProcedureManager(database, embedding_provider, settings.agent_id)
         self.censors = CensorManager(database, embedding_provider, settings.agent_id)
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
@@ -206,7 +228,7 @@ class Heart:
         session: AsyncSession | None = None,
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
-    ) -> FactDetail:
+    ) -> FactDetail | FactRejected:
         """Store a new fact with deduplication.
 
         Args:
@@ -221,6 +243,10 @@ class Heart:
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
         )
+
+        # F023: Skip event emission for rejected facts (FactRejected has no .id)
+        if isinstance(result, FactRejected):
+            return result
 
         # F022 Phase 2: Emit on in-process EventBus for cross-type graph linking.
         # The DB audit event (via FactManager._emit_event) does NOT reach the bus.
