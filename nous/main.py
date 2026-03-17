@@ -61,6 +61,20 @@ async def create_components(settings: Settings) -> dict:
     brain = Brain(database, settings, embedding_provider)
     heart = Heart(database, settings, embedding_provider, owns_embeddings=False)  # F4
 
+    # F023: Inject LLM client into admission controller
+    admission_llm_http = None
+    if heart.facts._admission_controller is not None:
+        from nous.heart.admission import AdmissionLLMClient
+        admission_llm_http = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
+        )
+        heart.facts._admission_controller.llm_client = AdmissionLLMClient(
+            http_client=admission_llm_http,
+            api_key=settings.anthropic_api_key,
+            auth_token=settings.anthropic_auth_token,
+            api_base_url=settings.api_base_url,
+        )
+
     # 006: Create EventBus (only if enabled)
     bus = None
     handler_http = None
@@ -300,6 +314,7 @@ async def create_components(settings: Settings) -> dict:
         "subtask_pool": subtask_pool,
         "task_scheduler": task_scheduler,
         "decision_reviewer": decision_reviewer,
+        "admission_llm_http": admission_llm_http,
     }
 
 
@@ -336,6 +351,11 @@ async def shutdown_components(components: dict) -> None:
     web_http = components.get("web_http")
     if web_http:
         await web_http.aclose()
+
+    # F023: Close admission LLM client
+    admission_llm_http = components.get("admission_llm_http")
+    if admission_llm_http:
+        await admission_llm_http.aclose()
 
     runner = components.get("runner")
     if runner:
