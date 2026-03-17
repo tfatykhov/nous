@@ -19,7 +19,7 @@ from nous.heart.admission import AdmissionController, AdmissionResult
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
-from nous.storage.models import Event, Fact, GraphEdge
+from nous.storage.models import Episode, Event, Fact, GraphEdge
 
 logger = logging.getLogger(__name__)
 
@@ -489,7 +489,6 @@ class FactManager:
         if not fact_input.source_episode_id:
             return None
 
-        from nous.storage.models import Episode
         episode = await session.get(Episode, fact_input.source_episode_id)
         if episode and episode.content:
             return episode.content

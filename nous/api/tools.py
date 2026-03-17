@@ -1577,11 +1577,16 @@ def create_programmatic_tools(
             write_count["n"] += 1
             from uuid import UUID as _UUID
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
-            _schedule(heart.learn(FactInput(
+            result = _schedule(heart.learn(FactInput(
                 content=content, category=category,
                 subject=subject, confidence=confidence,
+                source="user_direct",  # F023: bypass admission gate
                 source_episode_id=ep_uuid,
             )))
+            # F023: Handle FactRejected (shouldn't happen with user_direct bypass,
+            # but defensive in case bypass_sources config changes)
+            if hasattr(result, "admitted") and not result.admitted:
+                return f"rejected: {content[:60]} (score={result.composite_score:.2f})"
             return f"stored: {content[:60]}"
 
         def _print(*args: object) -> None:
