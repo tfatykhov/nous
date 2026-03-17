@@ -160,11 +160,10 @@ class AdmissionController:
         """
         now = datetime.now(UTC)
 
-        source_timestamp = getattr(fact_input, "source_timestamp", None)
-        if source_timestamp is None:
+        if fact_input.source_timestamp is None:
             hours_elapsed = 0.0
         else:
-            delta = now - source_timestamp
+            delta = now - fact_input.source_timestamp
             hours_elapsed = delta.total_seconds() / 3600.0
 
         return max(0.0, min(1.0, math.exp(-self.config.recency_lambda * hours_elapsed)))

@@ -129,14 +129,14 @@ class FactDetail(BaseModel):
 
 
 class FactRejected(BaseModel):
-    """Returned when a candidate fact is rejected by admission control (F023)."""
+    """Returned when a fact is rejected by admission control."""
 
-    rejected: bool = True
-    reason: str
-    score: float
+    admitted: bool = False
+    content: str
+    composite_score: float
     threshold: float
-    dimension_scores: dict[str, float] = {}
-    shadow: bool = False  # True if admitted anyway (shadow mode)
+    scores: dict[str, float]
+    explanation: str
 
 
 class FactSummary(BaseModel):
