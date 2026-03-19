@@ -761,6 +761,27 @@ def create_app(
             logger.error("Deactivate schedule error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # ------------------------------------------------------------------
+    # F021: Dashboard endpoints (route registration in Task 10)
+    # ------------------------------------------------------------------
+
+    async def dashboard_graph(request: Request) -> JSONResponse:
+        """GET /dashboard/graph - Graph visualization data."""
+        try:
+            limit = int(request.query_params.get("limit", "200"))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_graph_data
+
+            async with database.session() as session:
+                data = await get_graph_data(session, settings.agent_id, limit=limit)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard graph error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
