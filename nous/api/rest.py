@@ -217,8 +217,7 @@ def create_app(
                             ],
                         })
 
-            return JSONResponse(
-                {
+            result_data: dict[str, Any] = {
                     "agent_id": settings.agent_id,
                     "agent_name": settings.agent_name,
                     "model": settings.model,
@@ -238,7 +237,17 @@ def create_app(
                     },
                     "working_memory": working_memory_sessions,
                 }
-            )
+
+            # F021: Dashboard extension
+            if request.query_params.get("dashboard") == "true":
+                from nous.api.dashboard_queries import get_dashboard_stats
+
+                async with database.session() as dash_session:
+                    result_data["dashboard"] = await get_dashboard_stats(
+                        dash_session, settings.agent_id
+                    )
+
+            return JSONResponse(result_data)
         except Exception as e:
             logger.error("Status error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
