@@ -782,6 +782,18 @@ def create_app(
             logger.error("Dashboard graph error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_calibration(request: Request) -> JSONResponse:
+        """GET /dashboard/calibration - Calibration dashboard data."""
+        try:
+            from nous.api.dashboard_queries import get_calibration_data
+
+            async with database.session() as session:
+                data = await get_calibration_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard calibration error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),

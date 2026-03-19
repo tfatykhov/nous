@@ -254,3 +254,160 @@ async def get_graph_data(
             "orphan_counts": orphan_counts,
         },
     }
+
+
+# ── Task 7: Calibration data (GET /dashboard/calibration) ───────────────
+
+
+async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
+    """Return calibration curve, histograms, and history for dashboard."""
+
+    # Calibration curve: bucket confidence into 10 bins, compute accuracy per bin
+    result = await session.execute(
+        text("""
+            SELECT
+                FLOOR(confidence * 10) / 10 AS bin,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE outcome = 'success') AS successes,
+                AVG(confidence) AS avg_confidence
+            FROM brain.decisions
+            WHERE agent_id = :agent_id AND outcome IS NOT NULL AND outcome != 'pending'
+            GROUP BY bin ORDER BY bin
+        """),
+        {"agent_id": agent_id},
+    )
+    calibration_curve = [
+        {
+            "bin": float(row.bin),
+            "total": row.total,
+            "successes": row.successes,
+            "accuracy": row.successes / row.total if row.total > 0 else 0.0,
+            "avg_confidence": float(row.avg_confidence) if row.avg_confidence else 0.0,
+        }
+        for row in result
+    ]
+
+    # Confidence histogram (all decisions)
+    result = await session.execute(
+        text("""
+            SELECT
+                FLOOR(confidence * 10) / 10 AS bin,
+                COUNT(*) AS cnt
+            FROM brain.decisions
+            WHERE agent_id = :agent_id
+            GROUP BY bin ORDER BY bin
+        """),
+        {"agent_id": agent_id},
+    )
+    confidence_histogram = [
+        {"bin": float(row.bin), "count": row.cnt} for row in result
+    ]
+
+    # Outcome by category
+    result = await session.execute(
+        text("""
+            SELECT category, outcome, COUNT(*) AS cnt
+            FROM brain.decisions
+            WHERE agent_id = :agent_id AND outcome IS NOT NULL AND outcome != 'pending'
+            GROUP BY category, outcome
+            ORDER BY category, outcome
+        """),
+        {"agent_id": agent_id},
+    )
+    outcome_by_category: dict[str, dict[str, int]] = {}
+    for row in result:
+        outcome_by_category.setdefault(row.category, {})[row.outcome] = row.cnt
+
+    # Outcome by stakes
+    result = await session.execute(
+        text("""
+            SELECT stakes, outcome, COUNT(*) AS cnt
+            FROM brain.decisions
+            WHERE agent_id = :agent_id AND outcome IS NOT NULL AND outcome != 'pending'
+            GROUP BY stakes, outcome
+            ORDER BY stakes, outcome
+        """),
+        {"agent_id": agent_id},
+    )
+    outcome_by_stakes: dict[str, dict[str, int]] = {}
+    for row in result:
+        outcome_by_stakes.setdefault(row.stakes, {})[row.outcome] = row.cnt
+
+    # Reason type stats
+    result = await session.execute(
+        text("""
+            SELECT r.type, COUNT(*) AS cnt,
+                   COUNT(*) FILTER (WHERE d.outcome = 'success') AS successes,
+                   COUNT(*) FILTER (WHERE d.outcome IS NOT NULL AND d.outcome != 'pending') AS reviewed
+            FROM brain.decision_reasons r
+            JOIN brain.decisions d ON d.id = r.decision_id AND d.agent_id = :agent_id
+            GROUP BY r.type ORDER BY cnt DESC
+        """),
+        {"agent_id": agent_id},
+    )
+    reason_stats = [
+        {
+            "type": row.type,
+            "count": row.cnt,
+            "successes": row.successes,
+            "reviewed": row.reviewed,
+            "success_rate": row.successes / row.reviewed if row.reviewed > 0 else None,
+        }
+        for row in result
+    ]
+
+    # Brier history from calibration_snapshots
+    result = await session.execute(
+        text("""
+            SELECT brier_score, accuracy, snapshot_at,
+                   category_stats, reason_stats
+            FROM brain.calibration_snapshots
+            WHERE agent_id = :agent_id
+            ORDER BY snapshot_at ASC
+        """),
+        {"agent_id": agent_id},
+    )
+    brier_history = [
+        {
+            "brier_score": row.brier_score,
+            "accuracy": row.accuracy,
+            "snapshot_at": row.snapshot_at.isoformat() if row.snapshot_at else None,
+        }
+        for row in result
+    ]
+
+    # Daily decisions (last 30 days)
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
+    result = await session.execute(
+        text("""
+            SELECT d::date AS day,
+                   COUNT(t.created_at) AS total,
+                   COUNT(t.created_at) FILTER (WHERE t.outcome = 'success') AS successes,
+                   COUNT(t.created_at) FILTER (WHERE t.outcome IS NOT NULL AND t.outcome != 'pending') AS reviewed
+            FROM generate_series(:since::date, :now::date, '1 day') AS d
+            LEFT JOIN brain.decisions t
+                ON t.created_at::date = d::date AND t.agent_id = :agent_id
+            GROUP BY day ORDER BY day
+        """),
+        {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
+    )
+    daily_decisions = [
+        {
+            "date": row.day.isoformat(),
+            "total": row.total,
+            "successes": row.successes,
+            "reviewed": row.reviewed,
+        }
+        for row in result
+    ]
+
+    return {
+        "calibration_curve": calibration_curve,
+        "confidence_histogram": confidence_histogram,
+        "outcome_by_category": outcome_by_category,
+        "outcome_by_stakes": outcome_by_stakes,
+        "reason_stats": reason_stats,
+        "brier_history": brier_history,
+        "daily_decisions": daily_decisions,
+    }
