@@ -98,37 +98,83 @@ class Brain:
         limit: int = 20,
         offset: int = 0,
         agent_id: str | None = None,
+        category: str | None = None,
+        stakes: str | None = None,
+        outcome: str | None = None,
+        confidence_min: float | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        reviewed: bool | None = None,
+        sort: str = "created_at",
+        order: str = "desc",
         session: AsyncSession | None = None,
     ) -> tuple[list[DecisionSummary], int]:
-        """List decisions ordered by created_at DESC. Returns (decisions, total_count)."""
+        """List decisions with optional filters. Returns (decisions, total_count)."""
         if session is None:
             async with self.db.session() as session:
-                return await self._list_decisions(limit, offset, agent_id, session)
-        return await self._list_decisions(limit, offset, agent_id, session)
+                return await self._list_decisions(
+                    limit, offset, agent_id, category, stakes, outcome,
+                    confidence_min, date_from, date_to, reviewed, sort, order, session,
+                )
+        return await self._list_decisions(
+            limit, offset, agent_id, category, stakes, outcome,
+            confidence_min, date_from, date_to, reviewed, sort, order, session,
+        )
 
     async def _list_decisions(
         self,
         limit: int,
         offset: int,
         agent_id: str | None,
+        category: str | None,
+        stakes: str | None,
+        outcome: str | None,
+        confidence_min: float | None,
+        date_from: str | None,
+        date_to: str | None,
+        reviewed: bool | None,
+        sort: str,
+        order: str,
         session: AsyncSession,
     ) -> tuple[list[DecisionSummary], int]:
+        from sqlalchemy import func as sa_func
+
         _agent_id = agent_id or self.agent_id
 
-        # Count total
-        count_result = await session.execute(
-            text("SELECT COUNT(*) FROM brain.decisions WHERE agent_id = :agent_id"),
-            {"agent_id": _agent_id},
-        )
-        total = count_result.scalar() or 0
+        conditions = [Decision.agent_id == _agent_id]
+        if category:
+            conditions.append(Decision.category == category)
+        if stakes:
+            conditions.append(Decision.stakes == stakes)
+        if outcome:
+            conditions.append(Decision.outcome == outcome)
+        if confidence_min is not None:
+            conditions.append(Decision.confidence >= confidence_min)
+        if date_from:
+            conditions.append(Decision.created_at >= date_from)
+        if date_to:
+            conditions.append(Decision.created_at <= date_to)
+        if reviewed is True:
+            conditions.append(Decision.reviewed_at.isnot(None))
+        elif reviewed is False:
+            conditions.append(Decision.reviewed_at.is_(None))
 
-        # Fetch page
+        # Count
+        count_q = select(sa_func.count()).select_from(Decision).where(*conditions)
+        total = (await session.execute(count_q)).scalar() or 0
+
+        # Sort — VALIDATE against allowlist to prevent attribute injection
+        ALLOWED_SORTS = {"created_at", "confidence", "category", "stakes"}
+        if sort not in ALLOWED_SORTS:
+            sort = "created_at"
+        if order not in ("asc", "desc"):
+            order = "desc"
+        sort_col = getattr(Decision, sort)
+        order_clause = sort_col.desc() if order == "desc" else sort_col.asc()
+
+        # Fetch
         result = await session.execute(
-            select(Decision)
-            .where(Decision.agent_id == _agent_id)
-            .order_by(Decision.created_at.desc())
-            .limit(limit)
-            .offset(offset)
+            select(Decision).where(*conditions).order_by(order_clause).limit(limit).offset(offset)
         )
         decisions = list(result.scalars().all())
 
