@@ -244,21 +244,38 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_decisions(request: Request) -> JSONResponse:
-        """GET /decisions?limit=20&offset=0 - Recent decisions."""
+        """GET /decisions?limit=20&offset=0 - List decisions with filters."""
         try:
             limit = int(request.query_params.get("limit", "20"))
             offset = int(request.query_params.get("offset", "0"))
         except ValueError:
             return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
 
+        category = request.query_params.get("category")
+        stakes = request.query_params.get("stakes")
+        outcome = request.query_params.get("outcome")
+        confidence_min_str = request.query_params.get("confidence_min")
+        confidence_min = float(confidence_min_str) if confidence_min_str else None
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        reviewed_param = request.query_params.get("reviewed")
+        reviewed = {"true": True, "false": False}.get(reviewed_param) if reviewed_param else None
+        sort = request.query_params.get("sort", "created_at")
+        order = request.query_params.get("order", "desc")
+
         try:
-            decisions, total = await brain.list_decisions(limit=limit, offset=offset)
-            return JSONResponse(
-                {
-                    "decisions": [d.model_dump(mode="json") for d in decisions],
-                    "total": total,
-                }
+            decisions, total = await brain.list_decisions(
+                limit=limit, offset=offset, category=category, stakes=stakes,
+                outcome=outcome, confidence_min=confidence_min,
+                date_from=date_from, date_to=date_to, reviewed=reviewed,
+                sort=sort, order=order,
             )
+            return JSONResponse({
+                "decisions": [d.model_dump(mode="json") for d in decisions],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
         except Exception as e:
             logger.error("List decisions error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -281,56 +298,124 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_episodes(request: Request) -> JSONResponse:
-        """GET /episodes?limit=20 - Recent episodes."""
+        """GET /episodes?limit=20&offset=0 - List episodes with filters."""
         try:
             limit = int(request.query_params.get("limit", "20"))
+            offset = int(request.query_params.get("offset", "0"))
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+
+        outcome = request.query_params.get("outcome")
+        frame = request.query_params.get("frame")
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        sort = request.query_params.get("sort", "started_at")
+        order = request.query_params.get("order", "desc")
 
         try:
-            episodes = await heart.list_episodes(limit=limit)
-            return JSONResponse(
-                {
-                    "episodes": [e.model_dump(mode="json") for e in episodes],
-                }
+            episodes, total = await heart.list_episodes_paginated(
+                limit=limit, offset=offset, outcome=outcome, frame=frame,
+                date_from=date_from, date_to=date_to, sort=sort, order=order,
             )
+            return JSONResponse({
+                "episodes": [e.model_dump(mode="json") for e in episodes],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
         except Exception as e:
             logger.error("List episodes error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def search_facts(request: Request) -> JSONResponse:
-        """GET /facts?q=query&limit=20 - Search facts."""
+        """GET /facts?q=query&limit=20 - Search or browse facts."""
         q = request.query_params.get("q")
-        if not q:
-            return JSONResponse({"error": "Missing required query parameter: q"}, status_code=400)
 
         try:
             limit = int(request.query_params.get("limit", "20"))
+            offset = int(request.query_params.get("offset", "0"))
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
 
         try:
-            facts = await heart.search_facts(q, limit=limit)
-            return JSONResponse(
-                {
+            if q:
+                # Existing search behavior
+                category = request.query_params.get("category")
+                facts = await heart.search_facts(q, limit=limit, category=category)
+                return JSONResponse({
                     "facts": [f.model_dump(mode="json") for f in facts],
-                }
-            )
+                    "total": len(facts),
+                })
+            else:
+                # Browse mode (F021)
+                category = request.query_params.get("category")
+                active_param = request.query_params.get("active")
+                active_only = active_param != "false" if active_param else True
+                confidence_min_str = request.query_params.get("confidence_min")
+                confidence_min = float(confidence_min_str) if confidence_min_str else None
+                date_from = request.query_params.get("date_from")
+                date_to = request.query_params.get("date_to")
+                sort = request.query_params.get("sort", "created_at")
+                order = request.query_params.get("order", "desc")
+
+                facts, total = await heart.list_facts(
+                    limit=limit, offset=offset, category=category,
+                    active_only=active_only, confidence_min=confidence_min,
+                    date_from=date_from, date_to=date_to, sort=sort, order=order,
+                )
+                return JSONResponse({
+                    "facts": [f.model_dump(mode="json") for f in facts],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                })
         except Exception as e:
-            logger.error("Search facts error: %s", e)
+            logger.error("Search/browse facts error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_censors(request: Request) -> JSONResponse:
-        """GET /censors - Active censors."""
+        """GET /censors - List censors with filters."""
         try:
-            censors = await heart.list_censors()
-            return JSONResponse(
-                {
-                    "censors": [c.model_dump(mode="json") for c in censors],
-                }
+            limit = int(request.query_params.get("limit", "50"))
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+
+        action = request.query_params.get("action")
+        active_param = request.query_params.get("active")
+        active_only = active_param != "false" if active_param else True
+        domain = request.query_params.get("domain")
+
+        try:
+            censors, total = await heart.list_censors_paginated(
+                limit=limit, offset=offset, action=action,
+                active_only=active_only, domain=domain,
             )
+            return JSONResponse({
+                "censors": [c.model_dump(mode="json") for c in censors],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
         except Exception as e:
             logger.error("List censors error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def list_procedures(request: Request) -> JSONResponse:
+        """GET /procedures - List procedures with filters."""
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+        domain = request.query_params.get("domain")
+        active_param = request.query_params.get("active")
+        active_only = active_param != "false" if active_param else True
+        try:
+            procs, total = await heart.list_procedures(limit=limit, offset=offset, domain=domain, active_only=active_only)
+            return JSONResponse({"procedures": [p.model_dump(mode="json") for p in procs], "total": total, "limit": limit, "offset": offset})
+        except Exception as e:
+            logger.error("List procedures error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_frames(request: Request) -> JSONResponse:
@@ -679,6 +764,7 @@ def create_app(
         Route("/episodes", list_episodes),
         Route("/facts", search_facts),
         Route("/censors", list_censors),
+        Route("/procedures", list_procedures),
         Route("/frames", list_frames),
         Route("/calibration", calibration),
         Route("/identity", get_identity),

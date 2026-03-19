@@ -872,6 +872,95 @@ class FactManager:
         ]
 
     # ------------------------------------------------------------------
+    # list_all() — F021 dashboard browse mode
+    # ------------------------------------------------------------------
+
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        category: str | None = None,
+        active_only: bool = True,
+        confidence_min: float | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        sort: str = "created_at",
+        order: str = "desc",
+        session: AsyncSession | None = None,
+    ) -> tuple[list[FactSummary], int]:
+        """Return paginated facts without search. Used by dashboard browse mode."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_all(
+                    limit, offset, category, active_only,
+                    confidence_min, date_from, date_to, sort, order, session,
+                )
+        return await self._list_all(
+            limit, offset, category, active_only,
+            confidence_min, date_from, date_to, sort, order, session,
+        )
+
+    async def _list_all(
+        self,
+        limit: int,
+        offset: int,
+        category: str | None,
+        active_only: bool,
+        confidence_min: float | None,
+        date_from: str | None,
+        date_to: str | None,
+        sort: str,
+        order: str,
+        session: AsyncSession,
+    ) -> tuple[list[FactSummary], int]:
+        from sqlalchemy import func as sa_func
+
+        conditions = [Fact.agent_id == self.agent_id]
+        if active_only:
+            conditions.append(Fact.active == True)  # noqa: E712
+        if category:
+            conditions.append(Fact.category == category)
+        if confidence_min is not None:
+            conditions.append(Fact.confidence >= confidence_min)
+        if date_from:
+            conditions.append(Fact.created_at >= date_from)
+        if date_to:
+            conditions.append(Fact.created_at <= date_to)
+
+        # Count
+        count_q = select(sa_func.count()).select_from(Fact).where(*conditions)
+        total = (await session.execute(count_q)).scalar() or 0
+
+        # Sort — VALIDATE against allowlist to prevent attribute injection
+        ALLOWED_SORTS = {"created_at", "confidence", "category", "subject"}
+        if sort not in ALLOWED_SORTS:
+            sort = "created_at"
+        if order not in ("asc", "desc"):
+            order = "desc"
+        sort_col = getattr(Fact, sort)
+        order_clause = sort_col.desc() if order == "desc" else sort_col.asc()
+
+        # Fetch
+        q = select(Fact).where(*conditions).order_by(order_clause).limit(limit).offset(offset)
+        result = await session.execute(q)
+        facts = list(result.scalars().all())
+
+        # NOTE: FactSummary has fields: id, content, category, subject, confidence, active, score.
+        # It does NOT have source, tags, or learned_at. Use only existing fields.
+        summaries = [
+            FactSummary(
+                id=f.id,
+                content=f.content,
+                category=f.category,
+                subject=f.subject,
+                confidence=f.confidence or 1.0,
+                active=f.active if f.active is not None else True,
+            )
+            for f in facts
+        ]
+        return summaries, total
+
+    # ------------------------------------------------------------------
     # get_current() — P3-5: recursive CTE
     # ------------------------------------------------------------------
 
