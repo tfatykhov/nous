@@ -19,7 +19,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.heart.heart import Heart
-from nous.heart.schemas import FactInput
+from nous.heart.schemas import FactInput, FactRejected
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,11 @@ class KnowledgeExtractor:
                     confidence=confidence,
                     category=fact.get("category"),
                 )
-                await self._heart.learn(fact_input)
+                result = await self._heart.learn(fact_input)
+                # F023: Don't count rejected facts as stored
+                if isinstance(result, FactRejected):
+                    logger.debug("Admission rejected knowledge fact: %s", content[:50])
+                    continue
                 stored += 1
 
             if stored:

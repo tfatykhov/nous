@@ -89,6 +89,7 @@ class FactInput(BaseModel):
     source_decision_id: UUID | None = None
     contradiction_of: UUID | None = None  # P1-4: for direct insertion cases
     tags: list[str] = []
+    source_timestamp: datetime | None = None  # F023: when the source info was produced
 
 
 class ContradictionWarning(BaseModel):
@@ -125,6 +126,17 @@ class FactDetail(BaseModel):
     tags: list[str]
     created_at: datetime
     contradiction_warning: ContradictionWarning | None = None
+
+
+class FactRejected(BaseModel):
+    """Returned when a fact is rejected by admission control."""
+
+    admitted: bool = False
+    content: str
+    composite_score: float
+    threshold: float
+    scores: dict[str, float]
+    explanation: str
 
 
 class FactSummary(BaseModel):

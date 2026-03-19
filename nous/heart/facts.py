@@ -15,10 +15,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
-from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactSummary
+from nous.heart.admission import AdmissionController, AdmissionResult
+from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
-from nous.storage.models import Event, Fact, GraphEdge
+from nous.storage.models import Episode, Event, Fact, GraphEdge
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,12 @@ class FactManager:
         db: Database,
         embeddings: EmbeddingProvider | None,
         agent_id: str,
+        admission_controller: AdmissionController | None = None,
     ) -> None:
         self.db = db
         self.embeddings = embeddings
         self.agent_id = agent_id
+        self._admission_controller = admission_controller
 
     # ------------------------------------------------------------------
     # Event helper
@@ -107,7 +110,7 @@ class FactManager:
         session: AsyncSession | None = None,
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
-    ) -> FactDetail:
+    ) -> FactDetail | FactRejected:
         """Store a new fact with deduplication.
 
         Args:
@@ -150,7 +153,7 @@ class FactManager:
         *,
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
-    ) -> FactDetail:
+    ) -> FactDetail | FactRejected:
         # Generate embedding
         embedding = None
         if self.embeddings:
@@ -166,6 +169,34 @@ class FactManager:
                 # Confirm existing fact instead of creating new
                 return await self._confirm(dupe.id, session)
 
+        # F023: Admission gate — score candidate before storage
+        admission_result: AdmissionResult | None = None
+        if self._admission_controller is not None:
+            max_sim = await self._find_max_similarity(embedding, exclude_ids, session) if embedding else None
+            source_text = await self._get_source_text(input, session)
+
+            admission_result = await self._admission_controller.score(
+                input, embedding, max_sim, source_text, session
+            )
+            if not admission_result.admitted:
+                logger.info(
+                    "Fact rejected by admission: %s — %s",
+                    input.content[:80], admission_result.explanation,
+                )
+                await self._emit_event(session, "fact_rejected", {
+                    "content": input.content[:200],
+                    "source": input.source,
+                    "scores": admission_result.scores,
+                    "composite_score": admission_result.composite_score,
+                })
+                return FactRejected(
+                    content=input.content,
+                    composite_score=admission_result.composite_score,
+                    threshold=admission_result.threshold,
+                    scores=admission_result.scores,
+                    explanation=admission_result.explanation,
+                )
+
         fact = Fact(
             agent_id=self.agent_id,
             content=input.content,
@@ -180,6 +211,7 @@ class FactManager:
             embedding=embedding,
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
+            admission_score=admission_result.composite_score if admission_result else None,
         )
         session.add(fact)
         await session.flush()
@@ -405,6 +437,64 @@ class FactManager:
         fact_result = await session.execute(select(Fact).where(Fact.id == row.id))
         return fact_result.scalars().first()
 
+    async def _find_max_similarity(
+        self,
+        embedding: list[float],
+        exclude_ids: list[UUID],
+        session: AsyncSession,
+    ) -> float | None:
+        """Find highest cosine similarity to any existing active fact.
+
+        Used by admission controller for novelty scoring.
+        Returns None if no facts exist or no embedding available.
+        """
+        if not embedding:
+            return None
+
+        embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        params: dict = {"embedding": embedding_str, "agent_id": self.agent_id}
+
+        exclude_clause = ""
+        if exclude_ids:
+            placeholders = ", ".join(f":excl_{i}" for i in range(len(exclude_ids)))
+            exclude_clause = f"AND id NOT IN ({placeholders})"
+            for i, eid in enumerate(exclude_ids):
+                params[f"excl_{i}"] = eid
+
+        sql = text(f"""
+            SELECT 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+            FROM heart.facts
+            WHERE agent_id = :agent_id
+              AND active = true
+              AND embedding IS NOT NULL
+              {exclude_clause}
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT 1
+        """)
+
+        result = await session.execute(sql, params)
+        row = result.first()
+        return float(row.similarity) if row else None
+
+    async def _get_source_text(
+        self,
+        fact_input: FactInput,
+        session: AsyncSession,
+    ) -> str | None:
+        """Retrieve original source text for ROUGE-L grounding check.
+
+        Fetches episode.content by PK if source_episode_id present.
+        Episode content includes tool call outputs (web_search, bash, etc.).
+        """
+        if not fact_input.source_episode_id:
+            return None
+
+        episode = await session.get(Episode, fact_input.source_episode_id)
+        if episode and episode.content:
+            return episode.content
+
+        return None
+
     # ------------------------------------------------------------------
     # confirm()
     # ------------------------------------------------------------------
@@ -468,8 +558,11 @@ class FactManager:
         if old_fact is None:
             raise ValueError(f"Fact {old_fact_id} not found")
 
-        # P1-2: exclude old fact from dedup check
-        new_detail = await self._learn(new_fact, [old_fact_id], False, session)
+        # F023: Bypass admission gate for intentional replacements
+        bypass_input = new_fact.model_copy(update={"source": "supersede"})
+        new_detail = await self._learn(bypass_input, [old_fact_id], False, session)
+        if isinstance(new_detail, FactRejected):
+            raise RuntimeError("Supersede bypass failed — admission should not reject bypassed sources")
 
         # Update old fact
         old_fact.superseded_by = new_detail.id
@@ -521,8 +614,11 @@ class FactManager:
         if old_fact is None:
             raise ValueError(f"Fact {fact_id} not found")
 
-        # P1-2: exclude target from dedup check
-        new_detail = await self._learn(contradicting_fact, [fact_id], False, session)
+        # F023: Bypass admission gate for intentional contradictions
+        bypass_input = contradicting_fact.model_copy(update={"source": "contradict"})
+        new_detail = await self._learn(bypass_input, [fact_id], False, session)
+        if isinstance(new_detail, FactRejected):
+            raise RuntimeError("Contradict bypass failed — admission should not reject bypassed sources")
 
         # Set contradiction_of on the new fact
         new_fact_orm = await self._get_fact_orm(new_detail.id, session)

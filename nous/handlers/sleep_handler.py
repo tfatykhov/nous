@@ -32,7 +32,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.heart.heart import Heart
-from nous.heart.schemas import FactInput
+from nous.heart.schemas import FactInput, FactRejected
 
 logger = logging.getLogger(__name__)
 
@@ -252,25 +252,30 @@ class SleepHandler:
 
             # Store reflection summary as a fact
             if reflection.get("summary"):
-                await self._heart.learn(FactInput(
+                result = await self._heart.learn(FactInput(
                     subject="daily_reflection",
                     content=reflection["summary"],
                     source="sleep_reflection",
                     confidence=0.8,
                     category="concept",
                 ))
+                if isinstance(result, FactRejected):
+                    logger.debug("Admission rejected sleep-reflected fact: %s", reflection["summary"][:50])
 
             # Store lessons as individual facts
             for lesson in reflection.get("lessons", [])[:3]:
                 if self._interrupted:
                     break
-                await self._heart.learn(FactInput(
+                result = await self._heart.learn(FactInput(
                     subject="lesson_learned",
                     content=lesson,
                     source="sleep_reflection",
                     confidence=0.7,
                     category="rule",
                 ))
+                if isinstance(result, FactRejected):
+                    logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])
+                    continue
 
             logger.info(
                 "Reflection complete: %d patterns, %d lessons",

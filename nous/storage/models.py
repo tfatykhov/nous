@@ -394,6 +394,11 @@ class Fact(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # F023: Memory Admission Control
+    admission_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    recall_count: Mapped[int | None] = mapped_column(Integer, server_default="0")
+    last_recalled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])
     source_decision: Mapped["Decision | None"] = relationship(foreign_keys=[source_decision_id])

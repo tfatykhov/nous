@@ -25,7 +25,7 @@ from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.schemas import CensorInput, FactInput, ProcedureInput
+from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -243,7 +243,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 category=category,
                 subject=subject,
                 confidence=confidence,
-                source=source,
+                source="user_direct",  # F023: Always bypass admission gate for user tool calls
                 source_episode_id=episode_uuid,
                 source_decision_id=decision_uuid,
                 tags=tags or [],
@@ -251,6 +251,23 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             # Store to Heart
             result = await heart.learn(input_data)
+
+            # F023: Handle rejected facts (should not happen with user_direct bypass,
+            # but handle gracefully in case bypass list changes)
+            if isinstance(result, FactRejected):
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Fact not stored (admission score {result.composite_score:.2f} "
+                                f"< {result.threshold} threshold).\n"
+                                f"Scores: {', '.join(f'{k}={v:.2f}' for k, v in result.scores.items())}\n"
+                                f"Override with explicit instruction if this should be stored."
+                            ),
+                        }
+                    ]
+                }
 
             warning_msg = ""
             if result.contradiction_warning:
@@ -1560,11 +1577,16 @@ def create_programmatic_tools(
             write_count["n"] += 1
             from uuid import UUID as _UUID
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
-            _schedule(heart.learn(FactInput(
+            result = _schedule(heart.learn(FactInput(
                 content=content, category=category,
                 subject=subject, confidence=confidence,
+                source="user_direct",  # F023: bypass admission gate
                 source_episode_id=ep_uuid,
             )))
+            # F023: Handle FactRejected (shouldn't happen with user_direct bypass,
+            # but defensive in case bypass_sources config changes)
+            if hasattr(result, "admitted") and not result.admitted:
+                return f"rejected: {content[:60]} (score={result.composite_score:.2f})"
             return f"stored: {content[:60]}"
 
         def _print(*args: object) -> None:

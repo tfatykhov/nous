@@ -249,6 +249,19 @@ class Settings(BaseSettings):
     procedure_staleness_days: int = 30
     procedure_weakness_threshold: float = 0.30
 
+    # F023: Memory Admission Control (A-MAC)
+    admission_control_enabled: bool = True
+    admission_shadow_mode: bool = True
+    admission_threshold: float = 0.55
+    admission_w_utility: float = 0.25
+    admission_w_confidence: float = 0.15
+    admission_w_novelty: float = 0.20
+    admission_w_recency: float = 0.10
+    admission_w_type_prior: float = 0.30
+    admission_recency_lambda: float = 0.01
+    admission_utility_model: str = ""
+    admission_utility_llm_enabled: bool = True
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

@@ -17,7 +17,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import build_anthropic_headers, parse_llm_json
 from nous.heart.heart import Heart
-from nous.heart.schemas import FactInput
+from nous.heart.schemas import FactInput, FactRejected
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,10 @@ class FactExtractor:
                     confidence=confidence,
                     category=fact.get("category"),
                 )
-                await self._heart.learn(fact_input)
+                result = await self._heart.learn(fact_input)
+                if isinstance(result, FactRejected):
+                    logger.debug("Admission rejected extracted fact: %s", content[:50])
+                    continue
                 stored += 1
 
             if stored:
@@ -161,7 +164,10 @@ class FactExtractor:
                 source="episode_summarizer",
                 confidence=0.8,  # Default confidence for LLM-extracted candidates
             )
-            await self._heart.learn(fact_input)
+            result = await self._heart.learn(fact_input)
+            if isinstance(result, FactRejected):
+                logger.debug("Admission rejected candidate fact: %s", fact_text[:50])
+                continue
             stored += 1
 
         if stored:
