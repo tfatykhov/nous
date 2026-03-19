@@ -28,7 +28,7 @@ Dashboard.registerView('graph', async function(container) {
     // Build the view
     container.innerHTML =
         '<div class="view-header"><h1>Knowledge Graph</h1>' +
-        '<p>' + (data.stats ? data.stats.total_nodes + ' nodes, ' + data.stats.total_edges + ' edges' : '') + '</p></div>' +
+        '<p>' + (data.stats ? data.stats.node_count + ' nodes, ' + data.stats.total_edges + ' edges' : '') + '</p></div>' +
         '<div class="graph-container" id="graph-container">' +
             '<div class="graph-controls" id="graph-controls"></div>' +
             '<div class="graph-stats-overlay" id="graph-stats"></div>' +
@@ -39,6 +39,16 @@ Dashboard.registerView('graph', async function(container) {
     var statsEl = document.getElementById('graph-stats');
     var detailEl = document.getElementById('graph-detail');
     var controlsEl = document.getElementById('graph-controls');
+
+    // Compute edge_count for each node from edge data
+    var edgeCounts = {};
+    data.edges.forEach(function(e) {
+        edgeCounts[e.source] = (edgeCounts[e.source] || 0) + 1;
+        edgeCounts[e.target] = (edgeCounts[e.target] || 0) + 1;
+    });
+    data.nodes.forEach(function(n) {
+        n.edge_count = edgeCounts[n.id] || 0;
+    });
 
     // State
     var allNodes = data.nodes;
@@ -118,11 +128,15 @@ Dashboard.registerView('graph', async function(container) {
     }
 
     function renderStats(el, stats) {
+        var orphanTotal = 0;
+        if (stats.orphan_counts) {
+            Object.keys(stats.orphan_counts).forEach(function(k) { orphanTotal += stats.orphan_counts[k]; });
+        }
         el.innerHTML =
-            '<div class="stat-item"><div class="stat-num">' + (stats.displayed_nodes || stats.total_nodes || 0) + '</div><div>Nodes</div></div>' +
+            '<div class="stat-item"><div class="stat-num">' + (stats.node_count || 0) + '</div><div>Nodes</div></div>' +
             '<div class="stat-item"><div class="stat-num">' + (stats.total_edges || 0) + '</div><div>Edges</div></div>' +
-            '<div class="stat-item"><div class="stat-num">' + (stats.density != null ? stats.density.toFixed(1) : '-') + '</div><div>Density</div></div>' +
-            '<div class="stat-item"><div class="stat-num">' + (stats.orphan_count || 0) + '</div><div>Orphans</div></div>';
+            '<div class="stat-item"><div class="stat-num">' + (stats.displayed_edges || 0) + '</div><div>Shown</div></div>' +
+            '<div class="stat-item"><div class="stat-num">' + orphanTotal + '</div><div>Orphans</div></div>';
     }
 
     var simulation = null;

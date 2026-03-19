@@ -291,7 +291,7 @@ Dashboard.registerView('browser', async function(container) {
                 html += detailRow('Category', item.category);
                 html += detailRow('Subject', item.subject);
                 html += detailRow('Confidence', item.confidence != null ? (item.confidence * 100).toFixed(0) + '%' : '-');
-                html += detailRow('ID', '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
+                html += detailRow('ID', null, '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
                 if (item.tags && item.tags.length) html += detailRow('Tags', item.tags.join(', '));
                 break;
             case 'episodes':
@@ -319,7 +319,7 @@ Dashboard.registerView('browser', async function(container) {
                     var reasonStr = item.reasons.map(function(r) { return (r.type || 'reason') + ': ' + (r.text || r.content || ''); }).join('; ');
                     html += detailRow('Reasons', reasonStr);
                 }
-                html += detailRow('ID', '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
+                html += detailRow('ID', null, '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
                 break;
             case 'procedures':
                 html += detailRow('Name', item.name);
@@ -336,7 +336,7 @@ Dashboard.registerView('browser', async function(container) {
                 html += detailRow('Domain', item.domain);
                 html += detailRow('Activations', item.activation_count);
                 html += detailRow('False Positives', item.false_positive_count);
-                html += detailRow('ID', '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
+                html += detailRow('ID', null, '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
                 break;
         }
 
@@ -344,10 +344,11 @@ Dashboard.registerView('browser', async function(container) {
         return html;
     }
 
-    function detailRow(label, value) {
-        if (value == null || value === '') return '';
+    function detailRow(label, value, rawHtml) {
+        if (value == null && !rawHtml) return '';
+        var rendered = rawHtml ? rawHtml : escapeHtml(String(value));
         return '<div class="detail-label">' + escapeHtml(label) + '</div>' +
-               '<div class="detail-value">' + (typeof value === 'string' && value.startsWith('<') ? value : escapeHtml(String(value))) + '</div>';
+               '<div class="detail-value">' + rendered + '</div>';
     }
 
     // Load initial tab

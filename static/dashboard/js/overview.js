@@ -21,32 +21,41 @@ Dashboard.registerView('overview', async function(container) {
     }
 
     var db = data.dashboard || {};
-    var stats = data.memory || {};
-    var deltas = db.deltas_7d || {};
+    var mem = data.memory || {};
+    var deltas = db.deltas || {};
     var distributions = db.distributions || {};
-    var timeseries = db.timeseries || {};
+    var rawTimeseries = db.timeseries || {};
     var density = db.graph_density;
 
+    // Normalize timeseries: API returns {facts: [{date, count}, ...], ...}
+    // Charts expect {labels: [...], facts: [...], ...}
+    var timeseries = normalizeTimeseries(rawTimeseries);
+
     // Check for empty state
-    var totalItems = (stats.facts || 0) + (stats.episodes || 0) + (stats.decisions || 0);
+    var totalItems = (mem.total_facts || 0) + (mem.total_episodes || 0) + (mem.total_decisions || 0);
     if (totalItems === 0) {
         Dashboard.showEmpty(container, 'Start a conversation with Nous to generate memories.');
         return;
     }
+
+    // Extract 7-day deltas as scalars
+    var factsDelta = deltas.facts ? deltas.facts.last_7_days : null;
+    var episodesDelta = deltas.episodes ? deltas.episodes.last_7_days : null;
+    var decisionsDelta = deltas.decisions ? deltas.decisions.last_7_days : null;
 
     // Build view
     var html = '<div class="view-header"><h1>Overview</h1><p>At-a-glance memory health and trends</p></div>';
 
     // Stat cards
     html += '<div class="stat-grid">';
-    html += buildStatCard('Total Facts', stats.facts || 0, deltas.facts, 'var(--fact-color)');
-    html += buildStatCard('Total Episodes', stats.episodes || 0, deltas.episodes, 'var(--episode-color)');
-    html += buildStatCard('Total Decisions', stats.decisions || 0, deltas.decisions, 'var(--decision-color)');
-    html += buildStatCard('Active Censors', stats.censors || 0, null, 'var(--censor-color)');
+    html += buildStatCard('Total Facts', mem.total_facts || 0, factsDelta, 'var(--fact-color)');
+    html += buildStatCard('Total Episodes', mem.total_episodes || 0, episodesDelta, 'var(--episode-color)');
+    html += buildStatCard('Total Decisions', mem.total_decisions || 0, decisionsDelta, 'var(--decision-color)');
+    html += buildStatCard('Active Censors', mem.active_censors || 0, null, 'var(--censor-color)');
     html += buildDensityCard(density);
     html += buildBrierCard(data.calibration);
-    html += buildStatCard('Procedures', stats.procedures || 0, null, 'var(--procedure-color)');
-    html += buildStatCard('Active Schedules', stats.schedules || 0, null, 'var(--muted)');
+    html += buildStatCard('Procedures', mem.total_procedures || 0, null, 'var(--procedure-color)');
+    html += buildStatCard('Active Schedules', mem.active_conversations || 0, null, 'var(--muted)');
     html += '</div>';
 
     // Charts
@@ -105,6 +114,22 @@ function buildBrierCard(calibration) {
         '<div class="stat-value"><span class="stat-indicator ' + indicatorCls + '"></span>' + val + '</div>' +
         '<div class="stat-label">Brier Score</div>' +
         '</div>';
+}
+
+function normalizeTimeseries(raw) {
+    // Convert {facts: [{date, count}, ...], episodes: [...], ...}
+    // to {labels: [...], facts: [...], episodes: [...], ...}
+    if (!raw) return {};
+    var firstKey = Object.keys(raw)[0];
+    if (!firstKey || !Array.isArray(raw[firstKey])) return raw;
+    // Already normalized?
+    if (raw.labels) return raw;
+    var labels = raw[firstKey].map(function(e) { return e.date; });
+    var result = { labels: labels };
+    Object.keys(raw).forEach(function(key) {
+        result[key] = raw[key].map(function(e) { return e.count; });
+    });
+    return result;
 }
 
 function createGrowthChart(timeseries) {
