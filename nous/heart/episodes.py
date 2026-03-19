@@ -359,6 +359,77 @@ class EpisodeManager:
         ]
 
     # ------------------------------------------------------------------
+    # list_all() — F021 dashboard browse mode
+    # ------------------------------------------------------------------
+
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        outcome: str | None = None,
+        frame: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        sort: str = "started_at",
+        order: str = "desc",
+        session: AsyncSession | None = None,
+    ) -> tuple[list[EpisodeSummary], int]:
+        """Paginated episode list with filters (F021)."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_all(limit, offset, outcome, frame, date_from, date_to, sort, order, session)
+        return await self._list_all(limit, offset, outcome, frame, date_from, date_to, sort, order, session)
+
+    async def _list_all(
+        self, limit, offset, outcome, frame, date_from, date_to, sort, order, session,
+    ) -> tuple[list[EpisodeSummary], int]:
+        from sqlalchemy import func as sa_func
+
+        conditions = [Episode.agent_id == self.agent_id]
+        if outcome:
+            conditions.append(Episode.outcome == outcome)
+        if frame:
+            conditions.append(Episode.frame_used == frame)
+        if date_from:
+            conditions.append(Episode.started_at >= date_from)
+        if date_to:
+            conditions.append(Episode.started_at <= date_to)
+
+        count_q = select(sa_func.count()).select_from(Episode).where(*conditions)
+        total = (await session.execute(count_q)).scalar() or 0
+
+        # Sort — VALIDATE against allowlist to prevent attribute injection
+        ALLOWED_SORTS = {"started_at", "ended_at", "outcome", "title"}
+        if sort not in ALLOWED_SORTS:
+            sort = "started_at"
+        if order not in ("asc", "desc"):
+            order = "desc"
+        sort_col = getattr(Episode, sort)
+        order_clause = sort_col.desc() if order == "desc" else sort_col.asc()
+
+        q = select(Episode).where(*conditions).order_by(order_clause).limit(limit).offset(offset)
+        result = await session.execute(q)
+        episodes = list(result.scalars().all())
+
+        # NOTE: There is NO `_to_summary` method in EpisodeManager.
+        # list_recent() constructs EpisodeSummary inline (episodes.py:349-358).
+        # Replicate the same inline construction here, adding structured_summary
+        # for browser expand view:
+        summaries = [
+            EpisodeSummary(
+                id=e.id,
+                title=e.title,
+                summary=e.summary,
+                outcome=e.outcome,
+                started_at=e.started_at,
+                tags=e.tags or [],
+                structured_summary=e.structured_summary,
+            )
+            for e in episodes
+        ]
+        return summaries, total
+
+    # ------------------------------------------------------------------
     # search()
     # ------------------------------------------------------------------
 
