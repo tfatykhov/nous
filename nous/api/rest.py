@@ -806,6 +806,18 @@ def create_app(
             logger.error("Dashboard activity error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_health(request: Request) -> JSONResponse:
+        """GET /dashboard/health - Graph health metrics."""
+        try:
+            from nous.api.dashboard_queries import get_health_data
+
+            async with database.session() as session:
+                data = await get_health_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard health error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),

@@ -522,3 +522,103 @@ async def get_activity_data(session: AsyncSession, agent_id: str) -> dict:
         "schedule_stats": schedule_stats,
         "sleep_stats": sleep_stats,
     }
+
+
+# ── Task 9: Health data (GET /dashboard/health) ─────────────────────────
+
+
+async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
+    """Return graph health metrics: edge creation, degree distribution, density, orphans."""
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
+
+    # Daily edge creation (last 30 days)
+    result = await session.execute(
+        text("""
+            SELECT d::date AS day, COUNT(e.created_at) AS cnt
+            FROM generate_series(:since::date, :now::date, '1 day') AS d
+            LEFT JOIN brain.graph_edges e
+                ON e.created_at::date = d::date AND e.agent_id = :agent_id
+            GROUP BY day ORDER BY day
+        """),
+        {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
+    )
+    daily_edges = [
+        {"date": row.day.isoformat(), "count": row.cnt} for row in result
+    ]
+
+    # Degree distribution (how many nodes have degree 1, 2, 3, ...)
+    result = await session.execute(
+        text("""
+            WITH node_degrees AS (
+                SELECT node_id, COUNT(*) AS degree
+                FROM (
+                    SELECT source_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                    UNION ALL
+                    SELECT target_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                ) all_nodes
+                GROUP BY node_id
+            )
+            SELECT degree, COUNT(*) AS node_count
+            FROM node_degrees
+            GROUP BY degree ORDER BY degree
+        """),
+        {"agent_id": agent_id},
+    )
+    degree_distribution = [
+        {"degree": row.degree, "count": row.node_count} for row in result
+    ]
+
+    # Graph density
+    density = await compute_graph_density(session, agent_id)
+
+    # Orphan counts per type
+    orphan_counts: dict[str, int] = {}
+    orphan_queries = [
+        ("decisions", "brain.decisions"),
+        ("facts", "heart.facts"),
+        ("episodes", "heart.episodes"),
+        ("procedures", "heart.procedures"),
+    ]
+    for key, table in orphan_queries:
+        result = await session.execute(
+            text(f"""
+                SELECT COUNT(*) AS cnt
+                FROM {table} t
+                WHERE t.agent_id = :agent_id
+                  AND NOT EXISTS (
+                      SELECT 1 FROM brain.graph_edges e
+                      WHERE e.agent_id = :agent_id
+                        AND (e.source_id = t.id OR e.target_id = t.id)
+                  )
+            """),
+            {"agent_id": agent_id},
+        )
+        orphan_counts[key] = result.scalar() or 0
+
+    total_orphans = sum(orphan_counts.values())
+
+    # Total counts for context
+    result = await session.execute(
+        text("""
+            SELECT
+                (SELECT COUNT(*) FROM brain.graph_edges WHERE agent_id = :agent_id) AS total_edges,
+                (SELECT COUNT(DISTINCT node_id) FROM (
+                    SELECT source_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                    UNION
+                    SELECT target_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                ) n) AS connected_nodes
+        """),
+        {"agent_id": agent_id},
+    )
+    totals = result.one()
+
+    return {
+        "daily_edges": daily_edges,
+        "degree_distribution": degree_distribution,
+        "density": density,
+        "orphan_counts": orphan_counts,
+        "total_orphans": total_orphans,
+        "total_edges": totals.total_edges,
+        "connected_nodes": totals.connected_nodes,
+    }

@@ -522,6 +522,7 @@ CREATE INDEX idx_edges_target ON brain.graph_edges(target_id);
 CREATE INDEX idx_graph_edges_source_type ON brain.graph_edges(source_id, source_type);
 CREATE INDEX idx_graph_edges_target_type ON brain.graph_edges(target_id, target_type);
 CREATE INDEX idx_graph_edges_agent ON brain.graph_edges(agent_id);
+CREATE INDEX idx_graph_edges_created ON brain.graph_edges(created_at);
 
 -- --- brain.calibration_snapshots indexes ---
 CREATE INDEX idx_calibration_agent ON brain.calibration_snapshots(agent_id, snapshot_at DESC);
