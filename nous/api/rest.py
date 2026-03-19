@@ -23,19 +23,27 @@ Endpoints:
   POST /schedules         - Create a schedule externally
   DELETE /schedules/{id}  - Deactivate a schedule
   GET  /health            - Health check (DB connectivity)
+  GET  /procedures        - List procedures (Heart)
+  GET  /dashboard/graph   - Graph data for D3 visualization (F021)
+  GET  /dashboard/calibration - Decision intelligence analytics (F021)
+  GET  /dashboard/activity - System activity timeline (F021)
+  GET  /dashboard/health  - Graph health trends (F021)
+  GET  /dashboard         - Static dashboard SPA (F021)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 from uuid import UUID, uuid4
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
@@ -843,7 +851,23 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        # Dashboard API endpoints (F021) — MUST be before static Mount
+        Route("/dashboard/graph", dashboard_graph),
+        Route("/dashboard/calibration", dashboard_calibration),
+        Route("/dashboard/activity", dashboard_activity),
+        Route("/dashboard/health", dashboard_health),
     ]
+
+    # Static dashboard mount — only add if directory exists (avoids crash during tests)
+    # MUST be LAST in routes list (catch-all for /dashboard/*)
+    dashboard_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "static", "dashboard",
+    )
+    if os.path.isdir(dashboard_dir):
+        routes.append(
+            Mount("/dashboard", app=StaticFiles(directory=dashboard_dir, html=True)),
+        )
 
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:
