@@ -418,11 +418,40 @@ class CognitiveLayer:
         except Exception:
             pass
 
+        # Programmatic censor check on user input (#160 follow-up).
+        # This complements the prompt-based censors (soft) with actual
+        # pattern matching (hard). check_censors() increments
+        # activation_count as a side effect.
+        censor_blocked = False
+        censor_block_reason: str | None = None
+        try:
+            matches = await self._heart.check_censors(user_input, session=session)
+            for match in matches:
+                if match.action == "block":
+                    censor_blocked = True
+                    censor_block_reason = (
+                        f"Blocked by censor: {match.reason or match.trigger_pattern}"
+                    )
+                    logger.warning(
+                        "Censor BLOCK on user input (session=%s, censor=%s): %s",
+                        session_id, match.id, match.trigger_pattern,
+                    )
+                    break  # One block is enough
+                elif match.action == "warn":
+                    logger.info(
+                        "Censor WARN on user input (session=%s, censor=%s): %s",
+                        session_id, match.id, match.trigger_pattern,
+                    )
+        except Exception:
+            logger.debug("Censor check failed during pre_turn")
+
         return TurnContext(
             system_prompt=system_prompt,
             frame=frame,
             decision_id=decision_id,
             active_censors=active_censors,
+            censor_blocked=censor_blocked,
+            censor_block_reason=censor_block_reason,
             context_token_estimate=context_token_estimate,
             recalled_decision_ids=recalled_decision_ids,
             recalled_fact_ids=recalled_fact_ids,
@@ -579,6 +608,28 @@ class CognitiveLayer:
                     await self._heart.record_procedure_outcome(pid, proc_outcome, session=session)
                 except Exception:
                     logger.debug("Failed to reinforce procedure %s", proc_id_str)
+
+        # Post-turn censor check on model output (#160 follow-up).
+        # Catches credential leaks, blocked content in model responses.
+        # Only logs — doesn't block (response already sent in streaming).
+        # Increments activation_count for monitoring/escalation.
+        try:
+            output_matches = await self._heart.check_censors(
+                turn_result.response_text, session=session,
+            )
+            for match in output_matches:
+                if match.action == "block":
+                    logger.warning(
+                        "Censor BLOCK on model output (session=%s, censor=%s): %s",
+                        session_id, match.id, match.trigger_pattern,
+                    )
+                elif match.action == "warn":
+                    logger.info(
+                        "Censor WARN on model output (session=%s, censor=%s): %s",
+                        session_id, match.id, match.trigger_pattern,
+                    )
+        except Exception:
+            logger.debug("Censor check failed during post_turn")
 
         # 5. Update session metadata for significance tracking (005.5)
         meta = self._session_metadata.setdefault(session_id, SessionMetadata())
