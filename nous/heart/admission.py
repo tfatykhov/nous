@@ -82,50 +82,55 @@ class AdmissionConfig:
 
 
 class AdmissionLLMClient:
-    """Minimal LLM client for admission utility scoring.
+    """LLM client adapter for admission utility scoring.
 
-    Supports both API key (x-api-key) and OAT token (Bearer auth) patterns,
-    matching the dual-auth approach used in runner.py.
+    Wraps a shared AnthropicClient (same one used by runner and handlers)
+    to provide the simple complete(model, prompt, max_tokens) interface
+    that AdmissionController expects.
     """
 
-    def __init__(
-        self,
-        http_client,
-        api_key: str = "",
-        auth_token: str = "",
-        api_base_url: str = "https://api.anthropic.com",
-    ):
-        self._http = http_client
-        self._api_key = api_key
-        self._auth_token = auth_token
-        self._api_base_url = api_base_url
-
-    def _headers(self) -> dict[str, str]:
-        headers = {
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        if self._auth_token:
-            # OAT/Max subscription: Bearer auth
-            headers["authorization"] = f"Bearer {self._auth_token}"
-        elif self._api_key:
-            headers["x-api-key"] = self._api_key
-        return headers
+    def __init__(self, api_client=None):
+        self._client = api_client
 
     async def complete(self, model: str, prompt: str, max_tokens: int = 10) -> str:
         """Single-turn completion. Returns raw text response."""
-        response = await self._http.post(
-            f"{self._api_base_url}/v1/messages",
-            json={
-                "model": model,
-                "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            headers=self._headers(),
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data["content"][0]["text"]
+        if not self._client:
+            raise RuntimeError("No API client configured for admission LLM")
+
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": [
+                {
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": "You are scoring the utility of a candidate fact for an AI agent's long-term memory.",
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+        response = await self._client.call(payload)
+        for block in response.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "")
+        return ""
 
 
 class AdmissionController:

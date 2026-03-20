@@ -17,12 +17,10 @@ import math
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-import httpx
-
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import ProcedureInput
 
@@ -170,13 +168,13 @@ class ProcedureLearner:
         heart: Heart,
         embeddings: EmbeddingProvider | None,
         settings: Settings,
-        http_client: httpx.AsyncClient | None = None,
+        llm_client: LLMClient | None = None,
     ) -> None:
         self._brain = brain
         self._heart = heart
         self._embeddings = embeddings
         self._settings = settings
-        self._http = http_client
+        self._llm = llm_client
 
     # ==================================================================
     # Public entry point
@@ -518,39 +516,25 @@ class ProcedureLearner:
 
     async def _call_llm(self, prompt: str) -> dict[str, Any] | None:
         """Call Anthropic API and parse JSON response."""
-        if not self._http:
+        if not self._llm:
             return None
 
-        headers = build_anthropic_headers(self._settings)
+        text = await call_background_llm(
+            self._llm,
+            model=self._settings.background_model,
+            system_prompt="You are analyzing patterns to extract reusable procedures for an AI agent.",
+            user_message=prompt,
+            max_tokens=500,
+        )
+
+        if not text:
+            return None
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning("LLM call failed with status %d", response.status_code)
-                return None
-
-            data = response.json()
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
-
             result = parse_llm_json(text)
             if isinstance(result, dict):
                 return result
             return None
-
-        except (json.JSONDecodeError, httpx.TimeoutException):
-            logger.warning("LLM call failed or returned invalid JSON")
+        except json.JSONDecodeError:
+            logger.warning("LLM call returned invalid JSON")
             return None

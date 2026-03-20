@@ -13,11 +13,9 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -77,12 +75,12 @@ class KnowledgeExtractor:
         heart: Heart,
         settings: Settings,
         bus: EventBus,
-        http_client: httpx.AsyncClient | None = None,
+        llm_client: LLMClient | None = None,
     ):
         self._heart = heart
         self._settings = settings
         self._bus = bus
-        self._http = http_client
+        self._llm = llm_client
         bus.on("conversation_compacting", self.handle)
 
     async def handle(self, event: Event) -> None:
@@ -179,7 +177,7 @@ class KnowledgeExtractor:
         self, conversation_text: str
     ) -> list[dict[str, Any]]:
         """Call LLM to extract facts from conversation text."""
-        if not self._http:
+        if not self._llm:
             return []
 
         # Truncate conversation to avoid exceeding context
@@ -187,35 +185,19 @@ class KnowledgeExtractor:
             conversation_text = conversation_text[:12000] + "\n\n[...truncated...]"
 
         prompt = _EXTRACT_PROMPT.format(conversation_text=conversation_text)
-        headers = build_anthropic_headers(self._settings)
+
+        text = await call_background_llm(
+            self._llm,
+            model=self._settings.background_model,
+            system_prompt="You are extracting knowledge from a conversation before it is compacted.",
+            user_message=prompt,
+            max_tokens=500,
+        )
+
+        if not text:
+            return []
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning(
-                    "Knowledge extraction LLM call failed: %d",
-                    response.status_code,
-                )
-                return []
-
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
             return parse_llm_json(text)
-
-        except (json.JSONDecodeError, httpx.TimeoutException):
+        except json.JSONDecodeError:
             return []

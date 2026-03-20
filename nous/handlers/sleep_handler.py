@@ -25,12 +25,10 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -86,13 +84,13 @@ class SleepHandler:
         heart: Heart,
         settings: Settings,
         bus: EventBus,
-        http_client: httpx.AsyncClient | None = None,
+        llm_client: LLMClient | None = None,
     ):
         self._brain = brain
         self._heart = heart
         self._settings = settings
         self._bus = bus
-        self._http = http_client
+        self._llm = llm_client
         self._interrupted = False
         self._sleeping = False
         self._sleep_task: asyncio.Task | None = None
@@ -198,7 +196,7 @@ class SleepHandler:
 
     async def _phase_compress(self) -> None:
         """Phase 3: Compress old episodes (>7 days) without summaries."""
-        if not self._http:
+        if not self._llm:
             return
         try:
             # Find episodes older than 7 days without structured_summary
@@ -209,7 +207,7 @@ class SleepHandler:
 
     async def _phase_reflect(self) -> None:
         """Phase 4: Cross-session reflection on recent activity."""
-        if not self._http:
+        if not self._llm:
             return
         try:
             # Use list_recent instead of search_episodes("") — proper method
@@ -225,29 +223,18 @@ class SleepHandler:
                 return
 
             prompt = _REFLECTION_PROMPT.format(episodes=episodes_text)
-            headers = build_anthropic_headers(self._settings)
 
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
+            text = await call_background_llm(
+                self._llm,
+                model=self._settings.background_model,
+                system_prompt="You are an AI agent reflecting on your recent activity.",
+                user_message=prompt,
+                max_tokens=500,
             )
 
-            if response.status_code != 200:
+            if not text:
                 return
 
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
             reflection = parse_llm_json(text)
 
             # Store reflection summary as a fact

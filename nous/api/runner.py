@@ -83,6 +83,7 @@ class AgentRunner:
         self._settings = settings
         self._conversations: OrderedDict[str, Conversation] = OrderedDict()
         self._api: AnthropicClient | None = None
+        self._api_shared: bool = False  # True if client was externally provided
         self._dispatcher: Any | None = None  # ToolDispatcher, set via set_dispatcher()
 
         # Compaction (Spec 008.1)
@@ -95,16 +96,22 @@ class AgentRunner:
         """Set the tool dispatcher for tool loop execution."""
         self._dispatcher = dispatcher
 
+    def set_api_client(self, client: AnthropicClient) -> None:
+        """Set a pre-initialized API client (shared with handlers)."""
+        self._api = client
+        self._api_shared = True
+
     async def start(self) -> None:
         """Initialize the API client based on configured backend."""
-        self._api = create_client(self._settings)
-        await self._api.start()
+        if self._api is None:
+            self._api = create_client(self._settings)
+            await self._api.start()
 
     async def close(self) -> None:
-        """Clean up API client."""
-        if self._api:
+        """Clean up API client (skip if shared — caller manages lifecycle)."""
+        if self._api and not self._api_shared:
             await self._api.close()
-            self._api = None
+        self._api = None
 
     async def run_turn(
         self,

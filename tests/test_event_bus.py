@@ -79,6 +79,22 @@ def _llm_response(text: str) -> dict:
     return {"content": [{"type": "text", "text": text}]}
 
 
+def _mock_llm_client(text: str = "", status_code: int = 200) -> AsyncMock:
+    """Build a mock LLMClient that returns an ApiResponse-like object.
+
+    Replaces the old httpx.AsyncClient mocks now that handlers use
+    the shared AnthropicClient via call_background_llm().
+    """
+    client = AsyncMock()
+    if status_code == 200:
+        response = MagicMock()
+        response.content = [{"type": "text", "text": text}]
+        client.call = AsyncMock(return_value=response)
+    else:
+        client.call = AsyncMock(side_effect=RuntimeError(f"API error ({status_code})"))
+    return client
+
+
 # ===========================================================================
 # TestEventBus — 8 tests
 # ===========================================================================
@@ -257,7 +273,7 @@ class TestEventBus:
 class TestEpisodeSummarizer:
     """Episode summary handler tests."""
 
-    def _make_summarizer(self, heart=None, settings=None, bus=None, http_client=None, brain=None):
+    def _make_summarizer(self, heart=None, settings=None, bus=None, llm_client=None, brain=None):
         from nous.handlers.episode_summarizer import EpisodeSummarizer
 
         heart = heart or AsyncMock()
@@ -266,9 +282,9 @@ class TestEpisodeSummarizer:
         bus = bus or MagicMock(spec=EventBus)
         bus.on = MagicMock()
         bus.emit = AsyncMock()
-        http_client = http_client or AsyncMock(spec=httpx.AsyncClient)
-        summarizer = EpisodeSummarizer(heart, brain, settings, bus, http_client)
-        return summarizer, heart, bus, http_client
+        llm_client = llm_client or _mock_llm_client()
+        summarizer = EpisodeSummarizer(heart, brain, settings, bus, llm_client)
+        return summarizer, heart, bus, llm_client
 
     @pytest.mark.asyncio
     async def test_generates_summary_on_session_ended(self):
@@ -280,14 +296,14 @@ class TestEpisodeSummarizer:
             "outcome": "resolved",
             "topics": ["testing"],
         }
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening msg", structured_summary=None)
         )
         heart.update_episode_summary = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(summary_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(summary_json)}]
+        ))
 
         episode_id = str(uuid4())
         event = _make_event(
@@ -307,7 +323,7 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_skips_short_transcripts(self):
         """10. Skips short transcripts (<50 chars)."""
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="hi", structured_summary=None)
         )
@@ -323,7 +339,7 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_skips_when_no_episode_id(self):
         """11. Skips when no episode_id in event."""
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
 
         event = _make_event("session_ended", data={"transcript": "some text" * 20})
         await summarizer.handle(event)
@@ -340,14 +356,14 @@ class TestEpisodeSummarizer:
             "outcome": "resolved",
             "topics": [],
         }
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening", structured_summary=None)
         )
         heart.update_episode_summary = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(summary_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(summary_json)}]
+        ))
 
         episode_id = str(uuid4())
         event = _make_event(
@@ -368,13 +384,11 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_handles_llm_failure_gracefully(self):
         """13. Handles LLM failure gracefully (mock 500 response)."""
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening", structured_summary=None)
         )
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(500, {"error": "internal"})
-        )
+        llm_client.call = AsyncMock(side_effect=RuntimeError("API error (500)"))
 
         event = _make_event(
             "session_ended",
@@ -392,22 +406,20 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_truncates_long_transcripts(self):
         """14. Truncates long transcripts (>8000 chars)."""
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening", structured_summary=None)
         )
         heart.update_episode_summary = AsyncMock()
 
         summary_json = {"title": "T", "summary": "S", "key_points": [], "outcome": "resolved", "topics": []}
-        captured_prompts: list[str] = []
+        captured_payloads: list[dict] = []
 
-        async def capture_post(url, **kwargs):
-            body = kwargs.get("json", {})
-            msg_content = body.get("messages", [{}])[0].get("content", "")
-            captured_prompts.append(msg_content)
-            return _mock_httpx_response(200, _llm_response(json.dumps(summary_json)))
+        async def capture_call(payload):
+            captured_payloads.append(payload)
+            return MagicMock(content=[{"type": "text", "text": json.dumps(summary_json)}])
 
-        http_client.post = capture_post
+        llm_client.call = capture_call
 
         # Use turns separated by \n\n so truncation can split them
         long_transcript = "\n\n".join([f"User: Turn {i} " + "x" * 400 for i in range(30)])
@@ -418,8 +430,12 @@ class TestEpisodeSummarizer:
         await summarizer.handle(event)
 
         # The prompt sent to LLM should be truncated (shorter than original)
-        assert len(captured_prompts) == 1
-        assert len(captured_prompts[0]) < len(long_transcript)
+        assert len(captured_payloads) == 1
+        user_msg = captured_payloads[0]["messages"][0]["content"]
+        # Content is a list of blocks with cache_control
+        if isinstance(user_msg, list):
+            user_msg = user_msg[0]["text"]
+        assert len(user_msg) < len(long_transcript)
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
@@ -433,14 +449,14 @@ class TestEpisodeSummarizer:
             "topics": ["architecture", "database"],
             "candidate_facts": ["Project uses PostgreSQL 17 with pgvector for embeddings"],
         }
-        summarizer, heart, bus, http_client = self._make_summarizer()
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening", structured_summary=None)
         )
         heart.update_episode_summary = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(summary_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(summary_json)}]
+        ))
 
         episode_id = str(uuid4())
         event = _make_event(
@@ -478,7 +494,7 @@ class TestEpisodeSummarizer:
             decision_ids=[uuid4()],
             structured_summary=None,
         ))
-        summarizer, _, _, _ = self._make_summarizer(heart=heart, brain=brain)
+        summarizer, _, _, _llm = self._make_summarizer(heart=heart, brain=brain)
 
         result = await summarizer._build_decision_context(str(uuid4()))
         assert "Decisions made during this episode:" in result
@@ -491,7 +507,7 @@ class TestEpisodeSummarizer:
         brain = AsyncMock()
         heart = AsyncMock()
         heart.get_episode = AsyncMock(return_value=MagicMock(decision_ids=[]))
-        summarizer, _, _, _ = self._make_summarizer(heart=heart, brain=brain)
+        summarizer, _, _, _llm = self._make_summarizer(heart=heart, brain=brain)
 
         result = await summarizer._build_decision_context(str(uuid4()))
         assert result == ""
@@ -503,7 +519,7 @@ class TestEpisodeSummarizer:
         brain.get = AsyncMock(side_effect=Exception("Brain unavailable"))
         heart = AsyncMock()
         heart.get_episode = AsyncMock(return_value=MagicMock(decision_ids=[uuid4()]))
-        summarizer, _, _, _ = self._make_summarizer(heart=heart, brain=brain)
+        summarizer, _, _, _llm = self._make_summarizer(heart=heart, brain=brain)
 
         result = await summarizer._build_decision_context(str(uuid4()))
         assert result == ""
@@ -511,7 +527,7 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_truncate_noop_under_limit(self):
         """008.4: Short transcript returned unchanged."""
-        summarizer, _, _, _ = self._make_summarizer()
+        summarizer, _, _, _llm = self._make_summarizer()
         short = "User: Hello\n\nAssistant: Hi there"
         result = summarizer._truncate_transcript(short)
         assert result == short
@@ -519,7 +535,7 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_truncate_preserves_first_last(self):
         """008.4: First and last turns always kept."""
-        summarizer, _, _, _ = self._make_summarizer()
+        summarizer, _, _, _llm = self._make_summarizer()
         turns = ["User: First turn"] + [f"Assistant: Middle turn {i} " + "x" * 500 for i in range(20)] + ["User: Last turn"]
         transcript = "\n\n".join(turns)
         result = summarizer._truncate_transcript(transcript, max_chars=2000)
@@ -529,7 +545,7 @@ class TestEpisodeSummarizer:
     @pytest.mark.asyncio
     async def test_truncate_prioritizes_decisions(self):
         """008.4: Decision turns kept over tool output."""
-        summarizer, _, _, _ = self._make_summarizer()
+        summarizer, _, _, _llm = self._make_summarizer()
         decision_turn = "Assistant: We decided to use PostgreSQL because it supports pgvector natively."
         tool_turn = "Tool output:\n```\n" + "x" * 600 + "\n```"
         filler = "Assistant: " + "y" * 400
@@ -550,7 +566,7 @@ class TestEpisodeSummarizer:
 class TestFactExtractor:
     """Fact extraction handler tests."""
 
-    def _make_extractor(self, heart=None, settings=None, bus=None, http_client=None):
+    def _make_extractor(self, heart=None, settings=None, bus=None, llm_client=None):
         from nous.handlers.fact_extractor import FactExtractor
 
         heart = heart or AsyncMock()
@@ -558,9 +574,9 @@ class TestFactExtractor:
         bus = bus or MagicMock(spec=EventBus)
         bus.on = MagicMock()
         bus.emit = AsyncMock()
-        http_client = http_client or AsyncMock(spec=httpx.AsyncClient)
-        extractor = FactExtractor(heart, settings, bus, http_client)
-        return extractor, heart, bus, http_client
+        llm_client = llm_client or _mock_llm_client()
+        extractor = FactExtractor(heart, settings, bus, llm_client)
+        return extractor, heart, bus, llm_client
 
     @pytest.mark.asyncio
     async def test_extracts_facts_from_episode_summarized(self):
@@ -573,12 +589,12 @@ class TestFactExtractor:
                 "confidence": 0.9,
             },
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])  # No existing
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -603,16 +619,16 @@ class TestFactExtractor:
         facts_json = [
             {"subject": "user", "content": "User likes Python", "category": "preference", "confidence": 0.9},
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
 
         # Return existing fact with .score above 0.85 threshold -> should be deduped
         existing_fact = MagicMock(spec=FactSummary)
         existing_fact.score = 0.90  # Above 0.85 threshold -> deduped
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -631,16 +647,16 @@ class TestFactExtractor:
         facts_json = [
             {"subject": "user", "content": "User likes Python 3.12", "category": "preference", "confidence": 0.9},
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
 
         # Return existing fact with .score in the 0.65-0.85 range -> should NOT be deduped
         existing_fact = MagicMock(spec=FactSummary)
         existing_fact.score = 0.70  # Between 0.65 and 0.85 -> allowed through
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -659,13 +675,13 @@ class TestFactExtractor:
         facts_json = [
             {"subject": "project", "content": "Project uses PostgreSQL", "category": "technical", "confidence": 0.85},
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
 
         heart.search_facts = AsyncMock(return_value=[])  # No existing match
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -687,12 +703,12 @@ class TestFactExtractor:
         facts_json = [
             {"subject": "user", "content": "Maybe likes Java", "category": "preference", "confidence": 0.4},
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -712,12 +728,12 @@ class TestFactExtractor:
             {"subject": f"s{i}", "content": f"Fact {i}", "category": "technical", "confidence": 0.9}
             for i in range(8)  # 8 facts, only 5 should be stored
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -733,7 +749,7 @@ class TestFactExtractor:
     @pytest.mark.asyncio
     async def test_handles_empty_summary(self):
         """19. Handles empty summary gracefully."""
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.learn = AsyncMock()
 
         event = _make_event(
@@ -747,11 +763,9 @@ class TestFactExtractor:
     @pytest.mark.asyncio
     async def test_handles_llm_failure(self):
         """20. Handles LLM failure gracefully."""
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(500, {"error": "server error"})
-        )
+        llm_client.call = AsyncMock(side_effect=RuntimeError("API error (500)"))
 
         event = _make_event(
             "episode_summarized",
@@ -768,7 +782,7 @@ class TestFactExtractor:
     @pytest.mark.asyncio
     async def test_uses_candidate_facts_skips_llm(self):
         """008.4: When candidate_facts present, store directly without LLM call."""
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])  # No duplicates
         heart.learn = AsyncMock()
 
@@ -789,7 +803,7 @@ class TestFactExtractor:
         await extractor.handle(event)
 
         # LLM should NOT be called
-        http_client.post.assert_not_called()
+        llm_client.call.assert_not_called()
         # Both facts should be stored
         assert heart.learn.call_count == 2
         stored_contents = [call[0][0].content for call in heart.learn.call_args_list]
@@ -799,7 +813,7 @@ class TestFactExtractor:
     @pytest.mark.asyncio
     async def test_candidate_facts_deduped(self):
         """008.4: candidate_facts are deduped against existing facts."""
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
 
         existing_fact = MagicMock(spec=FactSummary)
         existing_fact.score = 0.90  # Above 0.85 -> deduped
@@ -816,7 +830,7 @@ class TestFactExtractor:
         )
         await extractor.handle(event)
 
-        http_client.post.assert_not_called()
+        llm_client.call.assert_not_called()
         heart.learn.assert_not_called()  # Deduped
 
     @pytest.mark.asyncio
@@ -825,12 +839,12 @@ class TestFactExtractor:
         facts_json = [
             {"subject": "user", "content": "User likes tests", "category": "preference", "confidence": 0.9},
         ]
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
@@ -843,13 +857,13 @@ class TestFactExtractor:
         await extractor.handle(event)
 
         # LLM SHOULD be called (fallback)
-        http_client.post.assert_called_once()
+        llm_client.call.assert_called_once()
         heart.learn.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_candidate_facts_max_5(self):
         """008.4: candidate_facts respects max 5 limit."""
-        extractor, heart, bus, http_client = self._make_extractor()
+        extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
 
@@ -863,7 +877,7 @@ class TestFactExtractor:
         )
         await extractor.handle(event)
 
-        http_client.post.assert_not_called()
+        llm_client.call.assert_not_called()
         assert heart.learn.call_count == 5  # Max 5
 
 
@@ -1096,7 +1110,7 @@ class TestSessionTimeoutMonitor:
 class TestSleepHandler:
     """Sleep mode — reflection, compaction, pruning."""
 
-    def _make_sleep_handler(self, brain=None, heart=None, settings=None, bus=None, http_client=None):
+    def _make_sleep_handler(self, brain=None, heart=None, settings=None, bus=None, llm_client=None):
         from nous.handlers.sleep_handler import SleepHandler
 
         brain = brain or AsyncMock()
@@ -1105,14 +1119,14 @@ class TestSleepHandler:
         bus = bus or MagicMock(spec=EventBus)
         bus.on = MagicMock()
         bus.emit = AsyncMock()
-        http_client = http_client or AsyncMock(spec=httpx.AsyncClient)
-        handler = SleepHandler(brain, heart, settings, bus, http_client)
-        return handler, brain, heart, bus, http_client
+        llm_client = llm_client or _mock_llm_client()
+        handler = SleepHandler(brain, heart, settings, bus, llm_client)
+        return handler, brain, heart, bus, llm_client
 
     @pytest.mark.asyncio
     async def test_all_5_phases_run_when_not_interrupted(self):
         """34. All 5 phases run when not interrupted."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Mock all phases to be no-ops (stubs in real implementation)
         handler._phase_review_decisions = AsyncMock()
@@ -1140,7 +1154,7 @@ class TestSleepHandler:
     @pytest.mark.asyncio
     async def test_message_received_interrupts_sleep(self):
         """35. message_received interrupts sleep (sets _interrupted)."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
         handler._sleeping = True
 
         wake_event = _make_event("message_received")
@@ -1151,7 +1165,7 @@ class TestSleepHandler:
     @pytest.mark.asyncio
     async def test_free_phases_before_llm_phases(self):
         """36. Free phases (review, prune) run before LLM phases."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
         order: list[str] = []
 
         async def track_review():
@@ -1184,7 +1198,7 @@ class TestSleepHandler:
     @pytest.mark.asyncio
     async def test_sleep_completed_reports_phases_ran(self):
         """37. sleep_completed reports which phases ran."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
         handler._phase_review_decisions = AsyncMock()
         handler._phase_prune = AsyncMock()
         handler._phase_compress = AsyncMock()
@@ -1203,7 +1217,7 @@ class TestSleepHandler:
     @pytest.mark.asyncio
     async def test_sleep_completed_reports_interrupted(self):
         """38. sleep_completed reports interrupted=True when interrupted."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         async def interrupt_during_compress():
             handler._interrupted = True
@@ -1228,7 +1242,7 @@ class TestSleepHandler:
     @pytest.mark.asyncio
     async def test_reflection_generates_facts(self):
         """39. Reflection generates facts from cross-session patterns (mock LLM)."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Mock list_episodes returning >= 2 episodes
         ep1 = MagicMock()
@@ -1245,9 +1259,9 @@ class TestSleepHandler:
             "gaps": [],
             "summary": "The agent primarily assists with Python development.",
         }
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(reflection_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(reflection_json)}]
+        ))
 
         await handler._phase_reflect()
 
@@ -1262,7 +1276,7 @@ class TestSleepHandler:
     @pytest.mark.asyncio
     async def test_reflection_skipped_when_few_episodes(self):
         """40. Reflection skipped when <2 recent episodes."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Only 1 episode
         ep1 = MagicMock()
@@ -1273,12 +1287,12 @@ class TestSleepHandler:
         await handler._phase_reflect()
 
         heart.learn.assert_not_called()
-        http_client.post.assert_not_called()
+        llm_client.call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_llm_failure_doesnt_crash_sleep(self):
         """41. LLM failure doesn't crash sleep handler."""
-        handler, brain, heart, bus, http_client = self._make_sleep_handler()
+        handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Make all phases pass except reflect which has LLM failure
         handler._phase_review_decisions = AsyncMock()
@@ -1292,7 +1306,7 @@ class TestSleepHandler:
         ep2 = MagicMock()
         ep2.summary = "Episode 2"
         heart.search_episodes = AsyncMock(return_value=[ep1, ep2])
-        http_client.post = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
+        llm_client.call = AsyncMock(side_effect=RuntimeError("timeout"))
 
         # _run_sleep should not raise
         await handler._run_sleep(_make_event("sleep_started"))
@@ -1440,9 +1454,9 @@ class TestReviewFixes:
         bus = MagicMock(spec=EventBus)
         bus.on = MagicMock()
         bus.emit = AsyncMock()
-        http_client = AsyncMock(spec=httpx.AsyncClient)
+        llm_client = _mock_llm_client()
 
-        extractor = FactExtractor(heart, settings, bus, http_client)
+        extractor = FactExtractor(heart, settings, bus, llm_client)
 
         facts_json = [
             {
@@ -1454,9 +1468,9 @@ class TestReviewFixes:
         ]
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        http_client.post = AsyncMock(
-            return_value=_mock_httpx_response(200, _llm_response(json.dumps(facts_json)))
-        )
+        llm_client.call = AsyncMock(return_value=MagicMock(
+            content=[{"type": "text", "text": json.dumps(facts_json)}]
+        ))
 
         event = _make_event(
             "episode_summarized",
