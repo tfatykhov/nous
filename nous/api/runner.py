@@ -155,6 +155,14 @@ class AgentRunner:
         # 3. Append user message
         conversation.messages.append(Message(role="user", content=user_message))
 
+        # 3b. Censor block check — skip LLM if input was blocked
+        if turn_context.censor_blocked:
+            response_text = turn_context.censor_block_reason or "I can't process that request."
+            conversation.messages.append(Message(role="assistant", content=response_text))
+            turn_result = TurnResult(response_text=response_text)
+            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+            return response_text, usage
+
         # 4-6. Build system prompt and run tool loop
         response_text = ""
         tool_results: list[ToolResult] = []
@@ -450,6 +458,16 @@ class AgentRunner:
         )
 
         conversation.messages.append(Message(role="user", content=user_message))
+
+        # Censor block check — yield block message and return
+        if turn_context.censor_blocked:
+            block_msg = turn_context.censor_block_reason or "I can't process that request."
+            conversation.messages.append(Message(role="assistant", content=block_msg))
+            turn_result = TurnResult(response_text=block_msg)
+            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+            yield StreamEvent(type="text", text=block_msg)
+            yield StreamEvent(type="done")
+            return
 
         system_prompt = self._build_system_prompt(turn_context, platform=platform)
         if system_prompt_prefix:
