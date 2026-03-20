@@ -314,3 +314,220 @@ function renderThresholdSimulator(el, data) {
     });
     updateSimulation(data.config.threshold);
 }
+
+// ── Phase 2 Analytics ────────────────────────────────────────────────
+
+function renderDimensionBreakdown(el, data) {
+    if (!data.dimension_stats || Object.keys(data.dimension_stats).length <= 1) return;
+
+    var section = document.createElement('div');
+    section.className = 'chart-section';
+    section.innerHTML =
+        '<h3>Per-Dimension Breakdown</h3>' +
+        '<p class="section-note">Excludes bypassed facts. Shows score spread for admitted vs rejected.</p>';
+
+    var dims = ['utility', 'confidence', 'novelty', 'recency', 'type_prior'];
+    var grid = document.createElement('div');
+    grid.className = 'dimension-grid';
+
+    dims.forEach(function (dim) {
+        var d = data.dimension_stats[dim];
+        if (!d) return;
+        var card = document.createElement('div');
+        card.className = 'dimension-card';
+        card.innerHTML = '<h4>' + dim.replace('_', ' ') + '</h4>' +
+            renderBoxPlotHtml('Admitted', d.admitted, '#34d399') +
+            renderBoxPlotHtml('Rejected', d.rejected, '#f87171');
+        grid.appendChild(card);
+    });
+
+    section.appendChild(grid);
+    el.appendChild(section);
+}
+
+function renderBoxPlotHtml(label, stats, color) {
+    if (!stats || (!stats.min && stats.min !== 0)) {
+        return '<div class="box-plot-row"><span class="bp-label">' + label + '</span><span class="bp-empty">No data</span></div>';
+    }
+    var maxVal = Math.max(1.0, stats.max);
+    var pct = function (v) { return (Math.min(v / maxVal, 1.0) * 100).toFixed(1) + '%'; };
+    return '<div class="box-plot-row">' +
+        '<span class="bp-label">' + label + '</span>' +
+        '<div class="bp-track">' +
+        '<div class="bp-whisker" style="left:' + pct(stats.min) + ';width:' + pct(stats.max - stats.min) + ';background:' + color + '30"></div>' +
+        '<div class="bp-box" style="left:' + pct(stats.q1) + ';width:' + pct(stats.q3 - stats.q1) + ';background:' + color + '80"></div>' +
+        '<div class="bp-median" style="left:' + pct(stats.median) + ';background:' + color + '"></div>' +
+        '</div>' +
+        '<span class="bp-values">' + stats.min.toFixed(2) + ' / ' + stats.median.toFixed(2) + ' / ' + stats.max.toFixed(2) + '</span>' +
+        '</div>';
+}
+
+function renderBySource(el, data) {
+    if (!data.by_source || Object.keys(data.by_source).length === 0) return;
+
+    var section = document.createElement('div');
+    section.className = 'chart-section';
+    section.innerHTML =
+        '<h3>Admission by Source</h3>' +
+        '<div class="chart-container" style="height:300px"><canvas id="admission-by-source-chart"></canvas></div>';
+    el.appendChild(section);
+
+    var sources = Object.keys(data.by_source);
+    var admitted = sources.map(function (s) { return data.by_source[s].admitted; });
+    var rejected = sources.map(function (s) { return data.by_source[s].rejected; });
+    var bypassed = sources.map(function (s) { return data.by_source[s].bypassed || 0; });
+
+    var ctx = document.getElementById('admission-by-source-chart').getContext('2d');
+    Dashboard.trackChart(new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: sources,
+            datasets: [
+                { label: 'Admitted', data: admitted, backgroundColor: '#34d399' },
+                { label: 'Rejected', data: rejected, backgroundColor: '#f87171' },
+                { label: 'Bypassed', data: bypassed, backgroundColor: '#6b6b8a' },
+            ]
+        },
+        options: {
+            plugins: { legend: { display: true } },
+            scales: {
+                x: { stacked: true },
+                y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Count' } }
+            }
+        }
+    }));
+}
+
+function renderByCategory(el, data) {
+    if (!data.by_category || Object.keys(data.by_category).length === 0) return;
+
+    var section = document.createElement('div');
+    section.className = 'chart-section';
+    section.innerHTML =
+        '<h3>Admission by Category</h3>' +
+        '<div class="chart-container" style="height:300px"><canvas id="admission-by-category-chart"></canvas></div>';
+    el.appendChild(section);
+
+    var categories = Object.keys(data.by_category);
+    var admitted = categories.map(function (c) { return data.by_category[c].admitted; });
+    var rejected = categories.map(function (c) { return data.by_category[c].rejected; });
+
+    var ctx = document.getElementById('admission-by-category-chart').getContext('2d');
+    Dashboard.trackChart(new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: categories,
+            datasets: [
+                { label: 'Admitted', data: admitted, backgroundColor: '#34d399' },
+                { label: 'Rejected', data: rejected, backgroundColor: '#f87171' },
+            ]
+        },
+        options: {
+            plugins: { legend: { display: true } },
+            scales: {
+                x: { stacked: true },
+                y: { stacked: true, beginAtZero: true, title: { display: true, text: 'Count' } }
+            }
+        }
+    }));
+}
+
+function renderTrends(el, data) {
+    if (!data.daily_trend || data.daily_trend.length === 0) return;
+
+    var section = document.createElement('div');
+    section.className = 'chart-section';
+    section.innerHTML =
+        '<h3>Trends Over Time</h3>' +
+        '<div class="chart-grid">' +
+        '<div class="chart-container" style="height:250px"><canvas id="admission-trend-rate-chart"></canvas></div>' +
+        '<div class="chart-container" style="height:250px"><canvas id="admission-trend-score-chart"></canvas></div>' +
+        '</div>';
+    el.appendChild(section);
+
+    var labels = data.daily_trend.map(function (d) { return d.date; });
+    var admitRate = data.daily_trend.map(function (d) {
+        return d.scored > 0 ? ((d.admitted / d.scored) * 100) : null;
+    });
+    var avgScore = data.daily_trend.map(function (d) { return d.avg_score; });
+
+    var ctx1 = document.getElementById('admission-trend-rate-chart').getContext('2d');
+    Dashboard.trackChart(new Chart(ctx1, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Admission Rate (%)',
+                data: admitRate,
+                borderColor: '#34d399',
+                backgroundColor: 'rgba(52,211,153,0.1)',
+                fill: true,
+                spanGaps: true,
+            }]
+        },
+        options: {
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { title: { display: true, text: 'Date' } },
+                y: { title: { display: true, text: 'Admission Rate (%)' }, min: 0, max: 100 }
+            }
+        }
+    }));
+
+    var ctx2 = document.getElementById('admission-trend-score-chart').getContext('2d');
+    Dashboard.trackChart(new Chart(ctx2, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [{
+                label: 'Avg Composite Score',
+                data: avgScore,
+                borderColor: '#7c6af7',
+                backgroundColor: 'rgba(124,106,247,0.1)',
+                fill: true,
+                spanGaps: true,
+            }]
+        },
+        options: {
+            plugins: { legend: { display: false } },
+            scales: {
+                x: { title: { display: true, text: 'Date' } },
+                y: { title: { display: true, text: 'Average Score' }, min: 0, max: 1 }
+            }
+        }
+    }));
+}
+
+function renderBypassBreakdown(el, data) {
+    if (!data.bypass_breakdown || Object.keys(data.bypass_breakdown).length === 0) return;
+
+    var section = document.createElement('div');
+    section.className = 'chart-section';
+    section.innerHTML =
+        '<h3>Bypass Breakdown</h3>' +
+        '<div class="chart-container" style="height:250px;max-width:400px"><canvas id="admission-bypass-chart"></canvas></div>';
+    el.appendChild(section);
+
+    var reasons = Object.keys(data.bypass_breakdown);
+    var counts = reasons.map(function (r) { return data.bypass_breakdown[r]; });
+    var colors = ['#7c6af7', '#60a5fa', '#34d399', '#fb923c', '#f87171', '#6b6b8a'];
+
+    var ctx = document.getElementById('admission-bypass-chart').getContext('2d');
+    Dashboard.trackChart(new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+            labels: reasons,
+            datasets: [{
+                data: counts,
+                backgroundColor: colors.slice(0, reasons.length),
+                borderColor: '#111118',
+                borderWidth: 2,
+            }]
+        },
+        options: {
+            plugins: {
+                legend: { position: 'right' }
+            }
+        }
+    }));
+}
