@@ -14,11 +14,9 @@ import logging
 from typing import Any
 from uuid import UUID
 
-import httpx
-
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.brain.brain import Brain
 from nous.brain.graph_linker import GraphLinker
 from nous.heart.heart import Heart
@@ -78,14 +76,14 @@ class EpisodeSummarizer:
         brain: Brain | None,
         settings: Settings,
         bus: EventBus,
-        http_client: httpx.AsyncClient | None = None,
+        llm_client: LLMClient | None = None,
         graph_linker: GraphLinker | None = None,
     ):
         self._heart = heart
         self._brain = brain
         self._settings = settings
         self._bus = bus
-        self._http = http_client
+        self._llm = llm_client
         self._graph_linker = graph_linker
         bus.on("session_ended", self.handle)
 
@@ -166,47 +164,29 @@ class EpisodeSummarizer:
 
     async def _generate_summary(self, transcript: str, decision_context: str = "") -> dict[str, Any] | None:
         """Call LLM to generate structured summary."""
-        if not self._http:
-            logger.warning("No HTTP client for episode summarizer")
+        if not self._llm:
+            logger.warning("No LLM client for episode summarizer")
             return None
 
         transcript = self._truncate_transcript(transcript)
 
         prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
-        headers = build_anthropic_headers(self._settings)
+
+        text = await call_background_llm(
+            self._llm,
+            model=self._settings.background_model,
+            system_prompt="You are summarizing a conversation episode for an AI agent's long-term memory.",
+            user_message=prompt,
+            max_tokens=800,
+        )
+
+        if not text:
+            logger.warning("Summary LLM returned empty text")
+            return None
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 800,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning("Summary LLM call failed: %d", response.status_code)
-                return None
-
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
-
-            if not text:
-                logger.warning("Summary LLM returned empty text (content blocks: %s)",
-                               [b.get("type") for b in data.get("content", [])])
-                return None
-
             return parse_llm_json(text)
-
-        except (json.JSONDecodeError, httpx.TimeoutException) as e:
+        except json.JSONDecodeError as e:
             logger.warning("Summary generation failed: %s", e)
             return None
 

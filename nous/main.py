@@ -61,19 +61,7 @@ async def create_components(settings: Settings) -> dict:
     brain = Brain(database, settings, embedding_provider)
     heart = Heart(database, settings, embedding_provider, owns_embeddings=False)  # F4
 
-    # F023: Inject LLM client into admission controller
-    admission_llm_http = None
-    if heart.facts._admission_controller is not None:
-        from nous.heart.admission import AdmissionLLMClient
-        admission_llm_http = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
-        )
-        heart.facts._admission_controller.llm_client = AdmissionLLMClient(
-            http_client=admission_llm_http,
-            api_key=settings.anthropic_api_key,
-            auth_token=settings.anthropic_auth_token,
-            api_base_url=settings.api_base_url,
-        )
+    # F023: Admission LLM client — wired after api_client is created (below)
 
     # 006: Create EventBus (only if enabled)
     bus = None
@@ -110,8 +98,21 @@ async def create_components(settings: Settings) -> dict:
         bus=bus, identity_manager=identity_manager,
     )
 
+    # Create shared API client for all LLM calls (handlers + runner + admission)
+    from nous.api.anthropic_client import create_client
+    api_client = create_client(settings)
+    await api_client.start()
+
+    # F023: Wire admission LLM client using shared api_client
+    if heart.facts._admission_controller is not None:
+        from nous.heart.admission import AdmissionLLMClient
+        heart.facts._admission_controller.llm_client = AdmissionLLMClient(
+            api_client=api_client,
+        )
+
     # 006: Register handlers on bus (after cognitive exists for monitor)
     if bus is not None:
+        # httpx client for non-LLM HTTP calls (GitHub API, Telegram notifications)
         handler_http = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
         )
@@ -133,7 +134,7 @@ async def create_components(settings: Settings) -> dict:
             from nous.handlers.episode_summarizer import EpisodeSummarizer
 
             if settings.episode_summary_enabled:
-                EpisodeSummarizer(heart, brain, settings, bus, handler_http, graph_linker=graph_linker)
+                EpisodeSummarizer(heart, brain, settings, bus, api_client, graph_linker=graph_linker)
         except ImportError:
             logger.debug("EpisodeSummarizer not available yet")
 
@@ -141,7 +142,7 @@ async def create_components(settings: Settings) -> dict:
             from nous.handlers.fact_extractor import FactExtractor
 
             if settings.fact_extraction_enabled:
-                FactExtractor(heart, settings, bus, handler_http)
+                FactExtractor(heart, settings, bus, api_client)
         except ImportError:
             logger.debug("FactExtractor not available yet")
 
@@ -160,7 +161,7 @@ async def create_components(settings: Settings) -> dict:
             from nous.handlers.knowledge_extractor import KnowledgeExtractor
 
             if settings.compaction_enabled:
-                KnowledgeExtractor(heart, settings, bus, handler_http)
+                KnowledgeExtractor(heart, settings, bus, api_client)
         except ImportError:
             logger.debug("KnowledgeExtractor not available yet")
 
@@ -176,7 +177,7 @@ async def create_components(settings: Settings) -> dict:
             from nous.handlers.sleep_handler import SleepHandler
 
             if settings.sleep_enabled:
-                sleep_handler = SleepHandler(brain, heart, settings, bus, handler_http)
+                sleep_handler = SleepHandler(brain, heart, settings, bus, api_client)
         except ImportError:
             logger.debug("SleepHandler not available yet")
 
@@ -188,7 +189,7 @@ async def create_components(settings: Settings) -> dict:
 
                 procedure_learner = ProcedureLearner(
                     brain=brain, heart=heart, embeddings=embedding_provider,
-                    settings=settings, http_client=handler_http,
+                    settings=settings, llm_client=api_client,
                 )
                 if sleep_handler is not None:
                     sleep_handler._procedure_learner = procedure_learner
@@ -263,6 +264,7 @@ async def create_components(settings: Settings) -> dict:
 
     runner = AgentRunner(cognitive, brain, heart, settings)
     runner.set_dispatcher(dispatcher)
+    runner.set_api_client(api_client)
     await runner.start()
 
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
@@ -314,7 +316,7 @@ async def create_components(settings: Settings) -> dict:
         "subtask_pool": subtask_pool,
         "task_scheduler": task_scheduler,
         "decision_reviewer": decision_reviewer,
-        "admission_llm_http": admission_llm_http,
+        "api_client": api_client,
     }
 
 
@@ -352,14 +354,13 @@ async def shutdown_components(components: dict) -> None:
     if web_http:
         await web_http.aclose()
 
-    # F023: Close admission LLM client
-    admission_llm_http = components.get("admission_llm_http")
-    if admission_llm_http:
-        await admission_llm_http.aclose()
-
     runner = components.get("runner")
     if runner:
         await runner.close()
+
+    api_client = components.get("api_client")
+    if api_client:
+        await api_client.close()
 
     heart = components.get("heart")
     if heart:

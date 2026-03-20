@@ -4,14 +4,83 @@ Handlers listen to bus events and react asynchronously.
 Each handler registers itself on specific event types during __init__.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Background LLM helper — shared by all handlers that need LLM calls
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class LLMClient(Protocol):
+    """Minimal protocol matching AnthropicClient.call()."""
+
+    async def call(self, payload: dict[str, Any]) -> Any: ...
+
+
+async def call_background_llm(
+    client: LLMClient,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    max_tokens: int = 800,
+) -> str | None:
+    """Call LLM for background tasks using the same API contract as the runner.
+
+    Builds a proper payload with system blocks + cache_control (matching
+    runner._build_api_payload format), then delegates to client.call()
+    which handles auth, retries, HTTP/2, and beta headers.
+
+    Returns the text content from the response, or None on failure.
+    """
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": [
+            {
+                "type": "text",
+                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_message,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    try:
+        response = await client.call(payload)
+        # Extract text from response content blocks
+        for block in response.content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return block.get("text", "")
+        return None
+    except Exception as e:
+        logger.warning("Background LLM call failed: %s", e)
+        return None
 
 
 def _extract_braces(text: str, opener: str, closer: str) -> str | None:
@@ -120,20 +189,3 @@ def parse_llm_json(text: str) -> Any:
     raise json.JSONDecodeError("No JSON object found in response", text, 0)
 
 
-def build_anthropic_headers(settings: Settings) -> dict[str, str]:
-    """Build auth headers for Anthropic API calls.
-
-    Shared by all handlers that make LLM calls (episode_summarizer,
-    fact_extractor, sleep_handler).
-    """
-    headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
-    api_key = getattr(settings, "anthropic_auth_token", None) or getattr(
-        settings, "anthropic_api_key", None
-    )
-    if api_key and "sk-ant-oat" in api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers["anthropic-beta"] = "oauth-2025-04-20"
-        headers["anthropic-dangerous-direct-browser-access"] = "true"
-    else:
-        headers["x-api-key"] = api_key or ""
-    return headers

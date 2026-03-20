@@ -11,11 +11,9 @@ import json
 import logging
 from typing import Any
 
-import httpx
-
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -72,12 +70,12 @@ class FactExtractor:
         heart: Heart,
         settings: Settings,
         bus: EventBus,
-        http_client: httpx.AsyncClient | None = None,
+        llm_client: LLMClient | None = None,
     ):
         self._heart = heart
         self._settings = settings
         self._bus = bus
-        self._http = http_client
+        self._llm = llm_client
         bus.on("episode_summarized", self.handle)
 
     async def handle(self, event: Event) -> None:
@@ -179,7 +177,7 @@ class FactExtractor:
 
     async def _extract_facts(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
         """Call LLM to extract facts from episode summary."""
-        if not self._http:
+        if not self._llm:
             return []
 
         summary_text = summary.get("summary", "")
@@ -189,31 +187,19 @@ class FactExtractor:
             return []
 
         prompt = _EXTRACT_PROMPT.format(summary=summary_text, key_points=key_points)
-        headers = build_anthropic_headers(self._settings)
+
+        text = await call_background_llm(
+            self._llm,
+            model=self._settings.background_model,
+            system_prompt="You are extracting facts from an AI agent's conversation summary.",
+            user_message=prompt,
+            max_tokens=500,
+        )
+
+        if not text:
+            return []
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                return []
-
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
             return parse_llm_json(text)
-
-        except (json.JSONDecodeError, httpx.TimeoutException):
+        except json.JSONDecodeError:
             return []
