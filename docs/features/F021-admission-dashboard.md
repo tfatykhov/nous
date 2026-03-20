@@ -1,10 +1,12 @@
 # F021.1 — Admission Control Dashboard View
 
-> **Status:** Draft v1
+> **Status:** Draft v2
 > **Priority:** P2
 > **Depends on:** F021 (Memory Dashboard), F023 (Memory Admission Control — live in shadow mode)
-> **Estimated effort:** ~4–5 hours (1 API endpoint + 1 dashboard view)
+> **Estimated effort:** ~6–8 hours (schema migration + 2 API endpoints + 1 dashboard view with 9 sections)
 > **Domain:** New `#/admission` view in existing dashboard
+> **Changelog:**
+> - v2: Address Emerson + Codex review — mandatory JSONB migration, bypass NULL handling, content truncation, empty state UX, scaling notes, phased implementation plan, time estimate revised
 
 ---
 
@@ -22,9 +24,79 @@ Without this view, the decision to enable enforcement is a blind leap. With it, 
 
 ---
 
+## Prerequisites
+
+### Mandatory: Per-Dimension Score Persistence
+
+Per-dimension scores are NOT currently persisted — only the composite `admission_score`. Without per-dimension data, Sections 3, 4 (dimension columns), and 9 (weight tuning) are non-functional.
+
+**This migration MUST land first (or in the same PR).** The dashboard only shows dimension data for facts scored *after* the migration. Pre-migration facts will have `admission_scores = NULL`.
+
+#### Schema Migration
+
+```sql
+ALTER TABLE heart.facts
+    ADD COLUMN admission_scores JSONB DEFAULT NULL;
+
+COMMENT ON COLUMN heart.facts.admission_scores IS
+    'Per-dimension A-MAC scores at admission time. {utility, confidence, novelty, recency, type_prior}. NULL for pre-migration facts and bypassed facts.';
+```
+
+#### Code Modification — Fact Manager (not AdmissionController)
+
+The `AdmissionController.score()` method computes and returns `AdmissionResult` but does NOT create the `Fact` row. The `Fact` row is created later in the **fact manager**. Therefore, per-dimension scores must be persisted at the fact manager's write point:
+
+```python
+# In fact_manager.py (or wherever Fact rows are created), NOT in admission.py:
+fact.admission_score = admission_result.composite_score
+if not admission_result.bypassed:
+    fact.admission_scores = admission_result.scores  # JSONB dict
+else:
+    fact.admission_scores = None  # NULL for bypassed facts — see below
+```
+
+#### Bypassed Facts — NULL Scores
+
+Bypassed facts return `AdmissionResult(composite_score=1.0, scores={}, bypassed=True)` — the `scores` dict is **empty**. Persisting `{}` would pollute dimension statistics (artificial 1.0 composite with no dimension data).
+
+**Rule:** Bypassed facts get `admission_scores = NULL`. All dimension queries MUST filter:
+```sql
+WHERE admission_scores IS NOT NULL
+```
+
+This cleanly separates "scored and admitted" from "bypassed without scoring" in all analytics.
+
+#### SQLAlchemy Model Update
+
+Add the mapped column to `models.py`:
+```python
+admission_scores = Column(JSONB, nullable=True, default=None)
+```
+
+---
+
 ## Design
 
 ### New Dashboard View: Admission Control — `#/admission`
+
+### Phased Implementation (Recommended)
+
+**Phase 1 (MVP — enables shadow→enforcement decision):**
+- Section 1: Shadow Mode Banner
+- Section 2: Score Distribution Histogram
+- Section 4: Would-Have-Been-Rejected List
+- Section 9: Threshold Simulator
+
+**Phase 2 (Analytics — deeper insight):**
+- Section 3: Per-Dimension Box Plots
+- Section 5: Admission by Source
+- Section 6: Admission by Category
+- Section 7: Trends Over Time
+- Section 8: Bypass Breakdown
+
+Phase 1 covers the critical path: "look at the histogram, review the reject list, slide the threshold, decide." Phase 2 adds diagnostic depth.
+
+---
 
 #### Section 1: Shadow Mode Banner
 
@@ -44,6 +116,12 @@ When enforcement is active, banner changes to:
    Admitted: 644 (76%) | Rejected: 203 (24%) | Bypassed: 89
 ```
 
+**Empty state:** If no facts have been scored yet:
+```
+ℹ️ No admission data yet — facts will appear here as they're scored by F023.
+   Ensure NOUS_ADMISSION_ENABLED=true in your configuration.
+```
+
 #### Section 2: Score Distribution (Histogram)
 
 - **X-axis:** Composite score (0.0 to 1.0, bucketed in 0.05 increments)
@@ -51,27 +129,24 @@ When enforcement is active, banner changes to:
 - **Threshold line:** Vertical red dashed line at 0.55 (or current threshold)
 - **Color:** Green bars above threshold, red bars below
 - **Insight:** Shows if scores cluster around the threshold (risky — small weight changes flip many facts) or are bimodal (clean separation)
+- **Empty state:** "No scored facts in this time window"
 
-#### Section 3: Per-Dimension Breakdown (Radar/Box Plot)
+**Note on threshold reclassification:** The "would_reject" count is computed at query time as `admission_score < threshold`. If the threshold config changes between scoring and viewing, counts shift retroactively. This is intended — the whole point is exploring different thresholds. The UI should display: _"Counts based on current threshold. Scores were computed at admission time."_
 
-**Option A — Radar chart (average scores):**
-- 5 axes: utility, confidence, novelty, recency, type_prior
-- Two overlays: "admitted" average vs "would-reject" average
-- Shows which dimensions separate good facts from noise
+#### Section 3: Per-Dimension Breakdown (Box Plots)
 
-**Option B — Box plots per dimension:**
 - 5 side-by-side box plots showing min/Q1/median/Q3/max for each dimension
 - Split by admitted vs would-reject
-- Better for seeing spread and outliers
-
-Recommend **Option B** — more informative for threshold tuning.
+- Better for seeing spread and outliers than radar charts
+- **Excludes bypassed facts** (WHERE admission_scores IS NOT NULL)
+- Shows which dimensions best separate good facts from noise
 
 #### Section 4: Would-Have-Been-Rejected List
 
 - Table of facts that scored below threshold
-- Columns: Content (truncated), Source, Category, Composite Score, Utility, Confidence, Novelty, Recency, Type Prior, Created At
+- Columns: Content (truncated to 200 chars), Source, Category, Composite Score, Utility, Confidence, Novelty, Recency, Type Prior, Created At
 - Sortable by any column
-- Click row → expands to show full content
+- Click row → expands to show full content (client-side expand, no extra API call)
 - **This is THE critical view** — Tim reviews this list to gut-check: "would I miss any of these?" If yes → threshold too high. If no → safe to enforce.
 - Pagination: limit=50, offset-based
 
@@ -81,12 +156,14 @@ Recommend **Option B** — more informative for threshold tuning.
 - X-axis: source (knowledge_extractor, episode_summarizer, sleep_reflection, compaction_extraction, etc.)
 - Y-axis: count
 - Stacked or grouped: admitted vs would-reject vs bypassed
+- Includes `avg_score` per source
 - Shows which extraction pipelines produce the most noise
 
 #### Section 6: Admission by Category (Bar Chart)
 
 - Same layout as Section 5 but grouped by fact category
 - X-axis: rule, preference, person, technical, tool, concept
+- Includes `avg_score` per category
 - Validates type_prior settings — if "concept" facts are mostly rejected, the 0.60 prior may be correct. If "technical" facts are getting rejected, 0.70 may be too low.
 
 #### Section 7: Trends Over Time (Line Charts)
@@ -94,7 +171,7 @@ Recommend **Option B** — more informative for threshold tuning.
 Two charts:
 
 **7a — Daily admission rate:**
-- X-axis: date (last 30 days)
+- X-axis: date (last N days, based on `days` param)
 - Y-axis: percentage admitted
 - Shows if fact quality is improving or degrading over time
 
@@ -128,6 +205,13 @@ Two charts:
 GET /dashboard/admission?days=30
 ```
 
+**Parameters:**
+- `days` (integer, default: 30) — look-back window in days
+- `source` (string, optional) — filter by source pipeline
+- `category` (string, optional) — filter by fact category
+
+**Empty state:** Returns zero counts, empty arrays. Frontend handles display.
+
 Response:
 
 ```json
@@ -150,7 +234,8 @@ Response:
     "would_reject": 203,
     "bypassed": 89,
     "rejection_rate": 0.240,
-    "avg_composite_score": 0.62
+    "avg_composite_score": 0.62,
+    "threshold_note": "Counts based on current threshold (0.55). Actual scores were computed at admission time."
   },
   "score_distribution": [
     { "bucket": "0.00-0.05", "count": 3 },
@@ -159,6 +244,7 @@ Response:
     { "bucket": "0.55-0.60", "count": 35 }
   ],
   "dimension_stats": {
+    "_note": "Excludes bypassed facts (admission_scores IS NULL). Only available for facts scored after JSONB migration.",
     "utility": {
       "admitted": { "min": 0.30, "q1": 0.55, "median": 0.65, "q3": 0.80, "max": 0.95 },
       "rejected": { "min": 0.10, "q1": 0.25, "median": 0.35, "q3": 0.45, "max": 0.60 }
@@ -169,11 +255,11 @@ Response:
     "type_prior": { "admitted": {}, "rejected": {} }
   },
   "by_source": {
-    "knowledge_extractor": { "admitted": 180, "rejected": 95, "bypassed": 0 },
-    "episode_summarizer": { "admitted": 120, "rejected": 45, "bypassed": 0 },
-    "sleep_reflection": { "admitted": 40, "rejected": 38, "bypassed": 0 },
-    "user_stated": { "admitted": 0, "rejected": 0, "bypassed": 65 },
-    "identity": { "admitted": 0, "rejected": 0, "bypassed": 12 }
+    "knowledge_extractor": { "admitted": 180, "rejected": 95, "bypassed": 0, "avg_score": 0.58 },
+    "episode_summarizer": { "admitted": 120, "rejected": 45, "bypassed": 0, "avg_score": 0.64 },
+    "sleep_reflection": { "admitted": 40, "rejected": 38, "bypassed": 0, "avg_score": 0.52 },
+    "user_stated": { "admitted": 0, "rejected": 0, "bypassed": 65, "avg_score": null },
+    "identity": { "admitted": 0, "rejected": 0, "bypassed": 12, "avg_score": null }
   },
   "by_category": {
     "rule": { "admitted": 45, "rejected": 2, "avg_score": 0.82 },
@@ -208,8 +294,15 @@ Response:
 Paginated list of would-reject / actually-rejected facts for the review table.
 
 ```
-GET /dashboard/admission/rejected?limit=50&offset=0&sort=composite_score&order=asc
+GET /dashboard/admission/rejected?limit=50&offset=0&sort=composite_score&order=asc&days=30
 ```
+
+**Parameters:**
+- `limit` (integer, default: 50)
+- `offset` (integer, default: 0)
+- `sort` (string, default: "composite_score") — sortable column
+- `order` (string, default: "asc") — asc or desc
+- `days` (integer, default: 30) — look-back window
 
 Response:
 
@@ -218,7 +311,8 @@ Response:
   "facts": [
     {
       "id": "uuid",
-      "content": "The meeting went well and was productive",
+      "content_preview": "The meeting went well and was productive...",
+      "content_full": "The meeting went well and was productive and everyone agreed on next steps",
       "category": "concept",
       "source": "episode_summarizer",
       "composite_score": 0.32,
@@ -239,43 +333,16 @@ Response:
 }
 ```
 
+**Security note:** `content_preview` is truncated to 200 characters server-side. `content_full` is included for the expand-on-click UX. The dashboard inherits the API's auth model — if the dashboard is exposed without authentication, consider removing `content_full` and requiring a separate authenticated call.
+
 ---
 
-## Data Source
+## Scaling Considerations
 
-All data comes from `heart.facts` table using the columns F023 already added:
-
-- `admission_score` — composite score (NULL for pre-F023 facts)
-- `source` — extraction pipeline that created the fact
-- `category` — fact category
-- `created_at` — for time-series
-
-Per-dimension scores are NOT currently persisted — only the composite. To support the per-dimension breakdown views, we have two options:
-
-### Option A: Parse from logs (cheap, fragile)
-Shadow mode logs contain per-dimension scores in the explanation string.
-Not recommended — log parsing for production dashboards is brittle.
-
-### Option B: Persist per-dimension scores (recommended)
-
-Add a JSONB column to `heart.facts`:
-
-```sql
-ALTER TABLE heart.facts
-    ADD COLUMN admission_scores JSONB DEFAULT NULL;
-
-COMMENT ON COLUMN heart.facts.admission_scores IS
-    'Per-dimension A-MAC scores at admission time. {utility, confidence, novelty, recency, type_prior}';
-```
-
-This is a small schema addition (~100 bytes per fact) that unlocks all the per-dimension analytics. Without it, Sections 3, 4 (dimension columns), and 9 (simulator) can't work properly.
-
-**Modification to F023:** In `AdmissionController.score()`, persist `scores` dict to the fact alongside `admission_score`:
-
-```python
-fact.admission_score = admission_result.composite_score
-fact.admission_scores = admission_result.scores  # NEW — JSONB
-```
+Current fact count (~1,041) makes all queries trivially fast. At 10K+ facts:
+- **JSONB percentile queries** (Section 3) will be the bottleneck — extracting per-dimension values and computing `percentile_cont` across all rows
+- **Mitigation options:** (a) index `admission_score` for the histogram, (b) add a partial index on `admission_scores IS NOT NULL`, (c) cache aggregations with a 5-minute TTL, (d) materialized view for dimension stats refreshed on schedule
+- Not blocking for v1 but document for future reference
 
 ---
 
@@ -305,7 +372,9 @@ nous/
 │   └── dashboard_queries.py     (add: admission aggregation queries)
 │   └── rest.py                  (add: 2 new endpoints)
 ├── heart/
-│   └── admission.py             (modify: persist per-dimension scores)
+│   └── admission.py             (no changes — scoring logic unchanged)
+│   └── fact_manager.py          (modify: persist admission_scores at write point)
+│   └── models.py                (modify: add admission_scores JSONB column to Fact model)
 ├── sql/
 │   └── init.sql                 (add: admission_scores JSONB column)
 
@@ -321,41 +390,50 @@ static/
 
 ## Implementation Plan
 
-### Single PR (~4-5 hours)
+### Phase 1 — MVP (enables shadow→enforcement decision) (~4 hours)
 
-1. **Schema** (~30 min)
+1. **Schema + Model** (~30 min)
    - Migration: add `admission_scores JSONB` to `heart.facts`
-   - Modify F023 `AdmissionController.score()` to persist per-dimension scores
+   - Add `admission_scores` to `Fact` model in `models.py`
+   - Modify fact manager to persist per-dimension scores (NULL for bypasses)
 
-2. **API** (~1.5 hours)
-   - `GET /dashboard/admission` — aggregation queries (score histogram, by-source, by-category, daily trends, bypass breakdown, dimension stats)
-   - `GET /dashboard/admission/rejected` — paginated rejected facts list
+2. **API — core endpoints** (~1.5 hours)
+   - `GET /dashboard/admission` — summary, score histogram, bypass breakdown
+   - `GET /dashboard/admission/rejected` — paginated rejected facts list with content truncation
    - Add to dashboard_queries.py
 
-3. **Frontend** (~2.5 hours)
-   - `admission.js` — all 9 sections
-   - Score distribution histogram (Chart.js)
-   - Per-dimension box plots (Chart.js)
-   - Rejected facts table with expand/sort
-   - By-source and by-category bar charts
-   - Daily trend line charts
-   - Bypass doughnut
-   - Threshold simulator slider (client-side only)
-   - Shadow mode banner
+3. **Frontend — MVP sections** (~2 hours)
+   - Section 1: Shadow Mode Banner (with empty state)
+   - Section 2: Score Distribution Histogram (Chart.js)
+   - Section 4: Rejected facts table with expand/sort
+   - Section 9: Threshold Simulator slider (client-side only)
+   - Navigation: add `#/admission` route
 
-4. **Navigation** (~15 min)
-   - Add `#/admission` route to app.js
-   - Add sidebar nav item
+### Phase 2 — Analytics (~3-4 hours)
+
+4. **API — dimension + trend queries** (~1 hour)
+   - Dimension stats with JSONB extraction + percentile_cont
+   - By-source and by-category aggregations
+   - Daily trend aggregation
+
+5. **Frontend — analytics sections** (~2-3 hours)
+   - Section 3: Per-Dimension Box Plots
+   - Section 5: Admission by Source (bar chart)
+   - Section 6: Admission by Category (bar chart)
+   - Section 7: Daily Trends (line charts)
+   - Section 8: Bypass Breakdown (doughnut)
 
 ---
 
 ## Success Criteria
 
-1. All 9 sections render with real data from shadow mode
+1. All 9 sections render with real data from shadow mode (Phase 2 complete)
 2. Would-reject list is reviewable and sortable
 3. Threshold simulator works client-side without API calls
 4. View loads in < 2 seconds
 5. Tim can answer "should I flip to enforcement?" by looking at the dashboard
+6. Bypassed facts don't pollute dimension statistics
+7. Empty state handled gracefully for fresh installs
 
 ---
 
