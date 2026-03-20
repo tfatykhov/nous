@@ -17,7 +17,7 @@ import httpx
 
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import handler_llm_call, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -187,35 +187,15 @@ class KnowledgeExtractor:
             conversation_text = conversation_text[:12000] + "\n\n[...truncated...]"
 
         prompt = _EXTRACT_PROMPT.format(conversation_text=conversation_text)
-        headers = build_anthropic_headers(self._settings)
+
+        text = await handler_llm_call(
+            self._http, prompt, self._settings,
+            max_tokens=500, caller="knowledge_extractor",
+        )
+        if not text:
+            return []
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning(
-                    "Knowledge extraction LLM call failed: %d",
-                    response.status_code,
-                )
-                return []
-
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
             return parse_llm_json(text)
-
-        except (json.JSONDecodeError, httpx.TimeoutException):
+        except json.JSONDecodeError:
             return []

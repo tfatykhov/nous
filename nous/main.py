@@ -112,9 +112,11 @@ async def create_components(settings: Settings) -> dict:
 
     # 006: Register handlers on bus (after cognitive exists for monitor)
     if bus is not None:
-        handler_http = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
-        )
+        # Create a shared AnthropicClient for all handlers (same auth, retries,
+        # headers as the main chat path). Replaces bare httpx.AsyncClient.
+        from nous.api.anthropic_client import create_client as create_api_client
+        handler_http = create_api_client(settings)
+        await handler_http.start()
 
         # F022: Create GraphLinker (shared between episode and fact linking)
         graph_linker = None
@@ -203,7 +205,11 @@ async def create_components(settings: Settings) -> dict:
             from nous.handlers.decision_reviewer import DecisionReviewer
 
             if settings.decision_review_enabled:
-                decision_reviewer = DecisionReviewer(brain, settings, bus, handler_http)
+                # DecisionReviewer uses httpx for GitHub API, not Anthropic
+                _reviewer_http = httpx.AsyncClient(
+                    timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
+                )
+                decision_reviewer = DecisionReviewer(brain, settings, bus, _reviewer_http)
             else:
                 decision_reviewer = None
         except ImportError:
@@ -280,9 +286,13 @@ async def create_components(settings: Settings) -> dict:
     if settings.subtask_enabled and bus is not None:
         try:
             from nous.handlers.subtask_worker import SubtaskWorkerPool
+            # SubtaskWorkerPool needs raw httpx for Telegram notifications
+            _subtask_http = httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
+            )
             subtask_pool = SubtaskWorkerPool(
                 runner=runner, heart=heart, settings=settings,
-                bus=bus, http_client=handler_http,
+                bus=bus, http_client=_subtask_http,
             )
             await subtask_pool.start()
         except ImportError:
@@ -346,7 +356,7 @@ async def shutdown_components(components: dict) -> None:
 
     handler_http = components.get("handler_http")
     if handler_http:
-        await handler_http.aclose()
+        await handler_http.close()
 
     web_http = components.get("web_http")
     if web_http:

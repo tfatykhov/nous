@@ -123,8 +123,8 @@ def parse_llm_json(text: str) -> Any:
 def build_anthropic_headers(settings: Settings) -> dict[str, str]:
     """Build auth headers for Anthropic API calls.
 
-    Shared by all handlers that make LLM calls (episode_summarizer,
-    fact_extractor, sleep_handler).
+    DEPRECATED: Prefer injecting AnthropicClient directly into handlers.
+    Kept for backward compatibility with AdmissionLLMClient.
 
     Mirrors the header logic in anthropic_client.py HttpxAnthropicClient
     to ensure handlers use the same auth + beta flags as the main chat path.
@@ -159,3 +159,42 @@ def build_anthropic_headers(settings: Settings) -> dict[str, str]:
         headers["anthropic-beta"] = ",".join(beta_features)
 
     return headers
+
+
+async def handler_llm_call(
+    client: "AnthropicClient",
+    prompt: str,
+    settings: Settings,
+    *,
+    max_tokens: int = 500,
+    caller: str = "handler",
+) -> str | None:
+    """Shared LLM call for all handlers using the centralized AnthropicClient.
+
+    Returns the text response or None on failure. Handles thinking blocks,
+    retries (via client), and error logging.
+
+    This replaces the pattern of raw httpx.post + build_anthropic_headers
+    that was duplicated across 6 handlers.
+    """
+    from nous.api.anthropic_client import AnthropicClient  # noqa: F811
+
+    payload = {
+        "model": settings.background_model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+
+    try:
+        response = await client.call(payload)
+        # Extract text from content blocks (skip thinking blocks)
+        for block in response.content:
+            block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
+            if block_type == "text":
+                return block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+        logger.warning("[%s] LLM returned no text block (blocks: %s)",
+                       caller, [b.get("type", "?") if isinstance(b, dict) else getattr(b, "type", "?") for b in response.content])
+        return None
+    except Exception as e:
+        logger.warning("[%s] LLM call failed: %s", caller, e)
+        return None

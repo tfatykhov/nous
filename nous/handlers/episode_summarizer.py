@@ -18,7 +18,7 @@ import httpx
 
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import handler_llm_call, parse_llm_json
 from nous.brain.brain import Brain
 from nous.brain.graph_linker import GraphLinker
 from nous.heart.heart import Heart
@@ -78,14 +78,14 @@ class EpisodeSummarizer:
         brain: Brain | None,
         settings: Settings,
         bus: EventBus,
-        http_client: httpx.AsyncClient | None = None,
+        http_client: "httpx.AsyncClient | AnthropicClient | None" = None,
         graph_linker: GraphLinker | None = None,
     ):
         self._heart = heart
         self._brain = brain
         self._settings = settings
         self._bus = bus
-        self._http = http_client
+        self._http = http_client  # Accepts AnthropicClient or legacy httpx.AsyncClient
         self._graph_linker = graph_linker
         bus.on("session_ended", self.handle)
 
@@ -171,43 +171,19 @@ class EpisodeSummarizer:
             return None
 
         transcript = self._truncate_transcript(transcript)
-
         prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
-        headers = build_anthropic_headers(self._settings)
+
+        text = await handler_llm_call(
+            self._http, prompt, self._settings,
+            max_tokens=800, caller="episode_summarizer",
+        )
+        if not text:
+            return None
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 800,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning("Summary LLM call failed: %d — %s", response.status_code, response.text[:500])
-                return None
-
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
-
-            if not text:
-                logger.warning("Summary LLM returned empty text (content blocks: %s)",
-                               [b.get("type") for b in data.get("content", [])])
-                return None
-
             return parse_llm_json(text)
-
-        except (json.JSONDecodeError, httpx.TimeoutException) as e:
-            logger.warning("Summary generation failed: %s", e)
+        except json.JSONDecodeError as e:
+            logger.warning("Summary JSON parse failed: %s", e)
             return None
 
     def _truncate_transcript(self, transcript: str, max_chars: int = 8000) -> str:

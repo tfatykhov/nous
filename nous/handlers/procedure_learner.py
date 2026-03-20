@@ -22,7 +22,7 @@ import httpx
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import handler_llm_call, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import ProcedureInput
 
@@ -521,36 +521,18 @@ class ProcedureLearner:
         if not self._http:
             return None
 
-        headers = build_anthropic_headers(self._settings)
+        text = await handler_llm_call(
+            self._http, prompt, self._settings,
+            max_tokens=500, caller="procedure_learner",
+        )
+        if not text:
+            return None
 
         try:
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning("LLM call failed with status %d", response.status_code)
-                return None
-
-            data = response.json()
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
-
             result = parse_llm_json(text)
             if isinstance(result, dict):
                 return result
             return None
-
-        except (json.JSONDecodeError, httpx.TimeoutException):
-            logger.warning("LLM call failed or returned invalid JSON")
+        except json.JSONDecodeError:
+            logger.warning("Procedure learner LLM returned invalid JSON")
             return None

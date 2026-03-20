@@ -30,7 +30,7 @@ import httpx
 from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import build_anthropic_headers, parse_llm_json
+from nous.handlers import handler_llm_call, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -225,30 +225,14 @@ class SleepHandler:
                 return
 
             prompt = _REFLECTION_PROMPT.format(episodes=episodes_text)
-            headers = build_anthropic_headers(self._settings)
 
-            response = await self._http.post(
-                f"{self._settings.api_base_url}/v1/messages",
-                json={
-                    "model": self._settings.background_model,
-                    "max_tokens": 500,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                headers=headers,
-                timeout=30,
+            text = await handler_llm_call(
+                self._http, prompt, self._settings,
+                max_tokens=500, caller="sleep_reflect",
             )
-
-            if response.status_code != 200:
-                logger.warning("Sleep reflect LLM call failed: %d — %s", response.status_code, response.text[:500])
+            if not text:
                 return
 
-            data = response.json()
-            # Find the text block — skip thinking blocks if present
-            text = ""
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    text = block.get("text", "")
-                    break
             reflection = parse_llm_json(text)
 
             # Store reflection summary as a fact
