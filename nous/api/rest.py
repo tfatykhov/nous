@@ -23,19 +23,27 @@ Endpoints:
   POST /schedules         - Create a schedule externally
   DELETE /schedules/{id}  - Deactivate a schedule
   GET  /health            - Health check (DB connectivity)
+  GET  /procedures        - List procedures (Heart)
+  GET  /dashboard/graph   - Graph data for D3 visualization (F021)
+  GET  /dashboard/calibration - Decision intelligence analytics (F021)
+  GET  /dashboard/activity - System activity timeline (F021)
+  GET  /dashboard/health  - Graph health trends (F021)
+  GET  /dashboard         - Static dashboard SPA (F021)
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 from uuid import UUID, uuid4
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
@@ -217,8 +225,7 @@ def create_app(
                             ],
                         })
 
-            return JSONResponse(
-                {
+            result_data: dict[str, Any] = {
                     "agent_id": settings.agent_id,
                     "agent_name": settings.agent_name,
                     "model": settings.model,
@@ -238,27 +245,54 @@ def create_app(
                     },
                     "working_memory": working_memory_sessions,
                 }
-            )
+
+            # F021: Dashboard extension
+            if request.query_params.get("dashboard") == "true":
+                from nous.api.dashboard_queries import get_dashboard_stats
+
+                async with database.session() as dash_session:
+                    result_data["dashboard"] = await get_dashboard_stats(
+                        dash_session, settings.agent_id
+                    )
+
+            return JSONResponse(result_data)
         except Exception as e:
             logger.error("Status error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_decisions(request: Request) -> JSONResponse:
-        """GET /decisions?limit=20&offset=0 - Recent decisions."""
+        """GET /decisions?limit=20&offset=0 - List decisions with filters."""
         try:
             limit = int(request.query_params.get("limit", "20"))
             offset = int(request.query_params.get("offset", "0"))
         except ValueError:
             return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
 
+        category = request.query_params.get("category")
+        stakes = request.query_params.get("stakes")
+        outcome = request.query_params.get("outcome")
+        confidence_min_str = request.query_params.get("confidence_min")
+        confidence_min = float(confidence_min_str) if confidence_min_str else None
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        reviewed_param = request.query_params.get("reviewed")
+        reviewed = {"true": True, "false": False}.get(reviewed_param) if reviewed_param else None
+        sort = request.query_params.get("sort", "created_at")
+        order = request.query_params.get("order", "desc")
+
         try:
-            decisions, total = await brain.list_decisions(limit=limit, offset=offset)
-            return JSONResponse(
-                {
-                    "decisions": [d.model_dump(mode="json") for d in decisions],
-                    "total": total,
-                }
+            decisions, total = await brain.list_decisions(
+                limit=limit, offset=offset, category=category, stakes=stakes,
+                outcome=outcome, confidence_min=confidence_min,
+                date_from=date_from, date_to=date_to, reviewed=reviewed,
+                sort=sort, order=order,
             )
+            return JSONResponse({
+                "decisions": [d.model_dump(mode="json") for d in decisions],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
         except Exception as e:
             logger.error("List decisions error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -281,56 +315,124 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_episodes(request: Request) -> JSONResponse:
-        """GET /episodes?limit=20 - Recent episodes."""
+        """GET /episodes?limit=20&offset=0 - List episodes with filters."""
         try:
             limit = int(request.query_params.get("limit", "20"))
+            offset = int(request.query_params.get("offset", "0"))
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+
+        outcome = request.query_params.get("outcome")
+        frame = request.query_params.get("frame")
+        date_from = request.query_params.get("date_from")
+        date_to = request.query_params.get("date_to")
+        sort = request.query_params.get("sort", "started_at")
+        order = request.query_params.get("order", "desc")
 
         try:
-            episodes = await heart.list_episodes(limit=limit)
-            return JSONResponse(
-                {
-                    "episodes": [e.model_dump(mode="json") for e in episodes],
-                }
+            episodes, total = await heart.list_episodes_paginated(
+                limit=limit, offset=offset, outcome=outcome, frame=frame,
+                date_from=date_from, date_to=date_to, sort=sort, order=order,
             )
+            return JSONResponse({
+                "episodes": [e.model_dump(mode="json") for e in episodes],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
         except Exception as e:
             logger.error("List episodes error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def search_facts(request: Request) -> JSONResponse:
-        """GET /facts?q=query&limit=20 - Search facts."""
+        """GET /facts?q=query&limit=20 - Search or browse facts."""
         q = request.query_params.get("q")
-        if not q:
-            return JSONResponse({"error": "Missing required query parameter: q"}, status_code=400)
 
         try:
             limit = int(request.query_params.get("limit", "20"))
+            offset = int(request.query_params.get("offset", "0"))
         except ValueError:
-            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
 
         try:
-            facts = await heart.search_facts(q, limit=limit)
-            return JSONResponse(
-                {
+            if q:
+                # Existing search behavior
+                category = request.query_params.get("category")
+                facts = await heart.search_facts(q, limit=limit, category=category)
+                return JSONResponse({
                     "facts": [f.model_dump(mode="json") for f in facts],
-                }
-            )
+                    "total": len(facts),
+                })
+            else:
+                # Browse mode (F021)
+                category = request.query_params.get("category")
+                active_param = request.query_params.get("active")
+                active_only = active_param != "false" if active_param else True
+                confidence_min_str = request.query_params.get("confidence_min")
+                confidence_min = float(confidence_min_str) if confidence_min_str else None
+                date_from = request.query_params.get("date_from")
+                date_to = request.query_params.get("date_to")
+                sort = request.query_params.get("sort", "created_at")
+                order = request.query_params.get("order", "desc")
+
+                facts, total = await heart.list_facts(
+                    limit=limit, offset=offset, category=category,
+                    active_only=active_only, confidence_min=confidence_min,
+                    date_from=date_from, date_to=date_to, sort=sort, order=order,
+                )
+                return JSONResponse({
+                    "facts": [f.model_dump(mode="json") for f in facts],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                })
         except Exception as e:
-            logger.error("Search facts error: %s", e)
+            logger.error("Search/browse facts error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_censors(request: Request) -> JSONResponse:
-        """GET /censors - Active censors."""
+        """GET /censors - List censors with filters."""
         try:
-            censors = await heart.list_censors()
-            return JSONResponse(
-                {
-                    "censors": [c.model_dump(mode="json") for c in censors],
-                }
+            limit = int(request.query_params.get("limit", "50"))
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+
+        action = request.query_params.get("action")
+        active_param = request.query_params.get("active")
+        active_only = active_param != "false" if active_param else True
+        domain = request.query_params.get("domain")
+
+        try:
+            censors, total = await heart.list_censors_paginated(
+                limit=limit, offset=offset, action=action,
+                active_only=active_only, domain=domain,
             )
+            return JSONResponse({
+                "censors": [c.model_dump(mode="json") for c in censors],
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
         except Exception as e:
             logger.error("List censors error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def list_procedures(request: Request) -> JSONResponse:
+        """GET /procedures - List procedures with filters."""
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+        domain = request.query_params.get("domain")
+        active_param = request.query_params.get("active")
+        active_only = active_param != "false" if active_param else True
+        try:
+            procs, total = await heart.list_procedures(limit=limit, offset=offset, domain=domain, active_only=active_only)
+            return JSONResponse({"procedures": [p.model_dump(mode="json") for p in procs], "total": total, "limit": limit, "offset": offset})
+        except Exception as e:
+            logger.error("List procedures error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_frames(request: Request) -> JSONResponse:
@@ -667,6 +769,63 @@ def create_app(
             logger.error("Deactivate schedule error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # ------------------------------------------------------------------
+    # F021: Dashboard endpoints (route registration in Task 10)
+    # ------------------------------------------------------------------
+
+    async def dashboard_graph(request: Request) -> JSONResponse:
+        """GET /dashboard/graph - Graph visualization data."""
+        try:
+            limit = min(int(request.query_params.get("limit", "200")), 2000)
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_graph_data
+
+            async with database.session() as session:
+                data = await get_graph_data(session, settings.agent_id, limit=limit)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard graph error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_calibration(request: Request) -> JSONResponse:
+        """GET /dashboard/calibration - Calibration dashboard data."""
+        try:
+            from nous.api.dashboard_queries import get_calibration_data
+
+            async with database.session() as session:
+                data = await get_calibration_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard calibration error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_activity(request: Request) -> JSONResponse:
+        """GET /dashboard/activity - Activity timeline data."""
+        try:
+            from nous.api.dashboard_queries import get_activity_data
+
+            async with database.session() as session:
+                data = await get_activity_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard activity error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_health(request: Request) -> JSONResponse:
+        """GET /dashboard/health - Graph health metrics."""
+        try:
+            from nous.api.dashboard_queries import get_health_data
+
+            async with database.session() as session:
+                data = await get_health_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard health error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -679,6 +838,7 @@ def create_app(
         Route("/episodes", list_episodes),
         Route("/facts", search_facts),
         Route("/censors", list_censors),
+        Route("/procedures", list_procedures),
         Route("/frames", list_frames),
         Route("/calibration", calibration),
         Route("/identity", get_identity),
@@ -691,7 +851,23 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        # Dashboard API endpoints (F021) — MUST be before static Mount
+        Route("/dashboard/graph", dashboard_graph),
+        Route("/dashboard/calibration", dashboard_calibration),
+        Route("/dashboard/activity", dashboard_activity),
+        Route("/dashboard/health", dashboard_health),
     ]
+
+    # Static dashboard mount — only add if directory exists (avoids crash during tests)
+    # MUST be LAST in routes list (catch-all for /dashboard/*)
+    dashboard_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "static", "dashboard",
+    )
+    if os.path.isdir(dashboard_dir):
+        routes.append(
+            Mount("/dashboard", app=StaticFiles(directory=dashboard_dir, html=True)),
+        )
 
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:

@@ -517,6 +517,47 @@ class CensorManager:
         return [self._to_detail(c) for c in censors]
 
     # ------------------------------------------------------------------
+    # list_all() — F021 dashboard browse mode
+    # ------------------------------------------------------------------
+
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        action: str | None = None,
+        active_only: bool = True,
+        domain: str | None = None,
+        session: AsyncSession | None = None,
+    ) -> tuple[list[CensorDetail], int]:
+        """Paginated censor list with filters (F021)."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_all(limit, offset, action, active_only, domain, session)
+        return await self._list_all(limit, offset, action, active_only, domain, session)
+
+    async def _list_all(self, limit, offset, action, active_only, domain, session):
+        from sqlalchemy import func as sa_func
+
+        conditions = [Censor.agent_id == self.agent_id]
+        if active_only:
+            conditions.append(Censor.active == True)  # noqa: E712
+        if action:
+            conditions.append(Censor.action == action)
+        if domain:
+            conditions.append(Censor.domain == domain)
+
+        count_q = select(sa_func.count()).select_from(Censor).where(*conditions)
+        total = (await session.execute(count_q)).scalar() or 0
+
+        q = (select(Censor).where(*conditions)
+             .order_by(Censor.created_at.desc()).limit(limit).offset(offset))
+        result = await session.execute(q)
+        censors = list(result.scalars().all())
+
+        details = [self._to_detail(c) for c in censors]
+        return details, total
+
+    # ------------------------------------------------------------------
     # deactivate()
     # ------------------------------------------------------------------
 

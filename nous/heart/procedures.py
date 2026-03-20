@@ -255,6 +255,56 @@ class ProcedureManager:
         ]
 
     # ------------------------------------------------------------------
+    # list_all() — F021 dashboard browse mode
+    # ------------------------------------------------------------------
+
+    async def list_all(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        domain: str | None = None,
+        active_only: bool = True,
+        min_activations: int | None = None,
+        session: AsyncSession | None = None,
+    ) -> tuple[list[ProcedureSummary], int]:
+        """Paginated procedure list with filters (F021)."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._list_all(limit, offset, domain, active_only, min_activations, session)
+        return await self._list_all(limit, offset, domain, active_only, min_activations, session)
+
+    async def _list_all(self, limit, offset, domain, active_only, min_activations, session):
+        from sqlalchemy import func as sa_func
+        conditions = [Procedure.agent_id == self.agent_id]
+        if active_only:
+            conditions.append(Procedure.active == True)  # noqa: E712
+        if domain:
+            conditions.append(Procedure.domain == domain)
+        if min_activations is not None:
+            conditions.append(Procedure.activation_count >= min_activations)
+
+        count_q = select(sa_func.count()).select_from(Procedure).where(*conditions)
+        total = (await session.execute(count_q)).scalar() or 0
+
+        q = (select(Procedure).where(*conditions)
+             .order_by(Procedure.created_at.desc()).limit(limit).offset(offset))
+        result = await session.execute(q)
+        procs = list(result.scalars().all())
+
+        # ProcedureSummary fields: id, name, domain, description, activation_count, effectiveness, score
+        # NOTE: No success_count/failure_count fields. Compute effectiveness from counts.
+        summaries = [
+            ProcedureSummary(
+                id=p.id, name=p.name, domain=p.domain,
+                description=p.description,
+                activation_count=p.activation_count or 0,
+                effectiveness=self._compute_effectiveness(p),
+            )
+            for p in procs
+        ]
+        return summaries, total
+
+    # ------------------------------------------------------------------
     # retire()
     # ------------------------------------------------------------------
 

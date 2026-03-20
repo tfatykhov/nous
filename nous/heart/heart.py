@@ -168,6 +168,23 @@ class Heart:
         """List recent episodes."""
         return await self.episodes.list_recent(limit, outcome, hours=hours, session=session)
 
+    async def list_episodes_paginated(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        outcome: str | None = None,
+        frame: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        sort: str = "started_at",
+        order: str = "desc",
+        session: AsyncSession | None = None,
+    ) -> tuple[list[EpisodeSummary], int]:
+        """List episodes with pagination and filters (F021)."""
+        return await self.episodes.list_all(
+            limit, offset, outcome, frame, date_from, date_to, sort, order, session,
+        )
+
     async def link_decision_to_episode(
         self,
         episode_id: UUID,
@@ -319,6 +336,25 @@ class Heart:
         """Follow superseded_by chain to find current version."""
         return await self.facts.get_current(fact_id, session)
 
+    async def list_facts(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        category: str | None = None,
+        active_only: bool = True,
+        confidence_min: float | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        sort: str = "created_at",
+        order: str = "desc",
+        session: AsyncSession | None = None,
+    ) -> tuple[list[FactSummary], int]:
+        """List facts with pagination and filters (F021 browse mode)."""
+        return await self.facts.list_all(
+            limit, offset, category, active_only,
+            confidence_min, date_from, date_to, sort, order, session,
+        )
+
     async def deactivate_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> None:
         """Soft-delete a fact."""
         await self.facts.deactivate(fact_id, session)
@@ -360,6 +396,20 @@ class Heart:
     ) -> list[ProcedureSummary]:
         """Hybrid search over procedures."""
         return await self.procedures.search(query, limit, domain, session)
+
+    async def list_procedures(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        domain: str | None = None,
+        active_only: bool = True,
+        min_activations: int | None = None,
+        session: AsyncSession | None = None,
+    ) -> tuple[list[ProcedureSummary], int]:
+        """List procedures with pagination and filters (F021)."""
+        return await self.procedures.list_all(
+            limit, offset, domain, active_only, min_activations, session,
+        )
 
     async def retire_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
         """Retire a procedure."""
@@ -409,6 +459,14 @@ class Heart:
     ) -> list[CensorDetail]:
         """List all active censors."""
         return await self.censors.list_active(domain, session)
+
+    async def list_censors_paginated(
+        self, limit: int = 50, offset: int = 0,
+        action: str | None = None, active_only: bool = True,
+        domain: str | None = None, session: AsyncSession | None = None,
+    ) -> tuple[list[CensorDetail], int]:
+        """List censors with pagination and filters (F021)."""
+        return await self.censors.list_all(limit, offset, action, active_only, domain, session)
 
     async def deactivate_censor(self, censor_id: UUID, session: AsyncSession | None = None) -> None:
         """Deactivate a censor."""

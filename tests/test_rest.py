@@ -301,10 +301,12 @@ async def test_search_facts(client, heart, session):
 
 
 async def test_search_facts_no_query(client):
-    """GET /facts -> 400 (missing q param)."""
+    """GET /facts without q -> 200 (browse mode, F021)."""
     resp = await client.get("/facts")
-
-    assert resp.status_code == 400
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "facts" in data
+    assert "total" in data
 
 
 # ---------------------------------------------------------------------------
