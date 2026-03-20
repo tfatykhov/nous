@@ -9,9 +9,9 @@
 - TestKnowledgeExtractor (8): handler registered, facts extracted and stored,
   uses snapshot from event data, handles empty messages, skips short content,
   dedup skips high similarity (>0.85), skips low confidence (<0.6), max 5 cap
-- TestEpisodeBoundary (5): episode ended on compaction, new episode started,
-  no active episode = no error, active_episodes updated,
-  end_episode failure does not block start_episode
+- TestEpisodeBoundary (5): episode kept open on compaction (#169), no new
+  episode started, no active episode = no error, active_episodes unchanged,
+  bump failure non-fatal
 - TestRunnerSaveRestore (10): restore from DB on session resume, save after
   compaction, save on end_conversation, missing state = fresh conversation,
   _save_conversation serializes messages, _restore handles malformed data,
@@ -680,11 +680,11 @@ class TestKnowledgeExtractor:
 
 
 class TestEpisodeBoundary:
-    """Test episode boundary handling during pre_compaction."""
+    """Test episode kept open during pre_compaction (#169)."""
 
     @pytest.mark.asyncio
-    async def test_episode_ended_on_compaction(self):
-        """Active episode is ended when pre_compaction is called."""
+    async def test_episode_kept_open_on_compaction(self):
+        """Active episode stays open when pre_compaction is called (#169)."""
         from nous.cognitive.layer import CognitiveLayer
 
         brain = MagicMock()
@@ -692,13 +692,11 @@ class TestEpisodeBoundary:
         brain.embeddings = MagicMock()
         heart = MagicMock()
         heart.end_episode = AsyncMock()
-        new_ep = MagicMock(id=uuid4())
-        heart.start_episode = AsyncMock(return_value=new_ep)
+        heart.start_episode = AsyncMock()
+        heart.bump_episode_compaction_count = AsyncMock()
         settings = _mock_settings()
 
         cognitive = CognitiveLayer(brain, heart, settings, bus=None)
-
-        # Simulate active episode
         old_episode_id = str(uuid4())
         cognitive._active_episodes[TEST_SESSION] = old_episode_id
 
@@ -708,17 +706,14 @@ class TestEpisodeBoundary:
             message_snapshot=[{"role": "user", "content": "test"}],
         )
 
-        # Verify old episode was ended
-        heart.end_episode.assert_called_once()
-        call_args = heart.end_episode.call_args
-        assert str(call_args[0][0]) == old_episode_id
-        # outcome="success" (not "compacted" — CHECK constraint only allows
-        # success/partial/failure/ongoing/abandoned)
-        assert call_args.kwargs.get("outcome") == "success"
+        heart.end_episode.assert_not_called()
+        heart.start_episode.assert_not_called()
+        heart.bump_episode_compaction_count.assert_called_once()
+        assert cognitive._active_episodes[TEST_SESSION] == old_episode_id
 
     @pytest.mark.asyncio
-    async def test_new_episode_started_after_compaction(self):
-        """New episode is started after ending the old one."""
+    async def test_no_new_episode_on_compaction(self):
+        """No new episode created after compaction (#169)."""
         from nous.cognitive.layer import CognitiveLayer
 
         brain = MagicMock()
@@ -726,9 +721,8 @@ class TestEpisodeBoundary:
         brain.embeddings = MagicMock()
         heart = MagicMock()
         heart.end_episode = AsyncMock()
-        new_ep_id = uuid4()
-        new_ep = MagicMock(id=new_ep_id)
-        heart.start_episode = AsyncMock(return_value=new_ep)
+        heart.start_episode = AsyncMock()
+        heart.bump_episode_compaction_count = AsyncMock()
         settings = _mock_settings()
 
         cognitive = CognitiveLayer(brain, heart, settings, bus=None)
@@ -740,15 +734,7 @@ class TestEpisodeBoundary:
             message_snapshot=[{"role": "user", "content": "test"}],
         )
 
-        # Verify new episode was started
-        heart.start_episode.assert_called_once()
-        episode_input = heart.start_episode.call_args[0][0]
-        assert isinstance(episode_input, EpisodeInput)
-        assert "compaction" in episode_input.trigger
-        assert "Continuation" in episode_input.summary
-
-        # Verify _active_episodes updated to new episode
-        assert cognitive._active_episodes[TEST_SESSION] == str(new_ep_id)
+        heart.start_episode.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_active_episode_no_error(self):
@@ -759,12 +745,10 @@ class TestEpisodeBoundary:
         brain.db = MagicMock()
         brain.embeddings = MagicMock()
         heart = MagicMock()
-        heart.end_episode = AsyncMock()
-        heart.start_episode = AsyncMock()
+        heart.bump_episode_compaction_count = AsyncMock()
         settings = _mock_settings()
 
         cognitive = CognitiveLayer(brain, heart, settings, bus=None)
-        # No active episode for this session
 
         await cognitive.pre_compaction(
             agent_id=TEST_AGENT,
@@ -772,26 +756,22 @@ class TestEpisodeBoundary:
             message_snapshot=[{"role": "user", "content": "test"}],
         )
 
-        # Should not call end or start episode
-        heart.end_episode.assert_not_called()
-        heart.start_episode.assert_not_called()
+        heart.bump_episode_compaction_count.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_active_episodes_dict_updated(self):
-        """_active_episodes is updated from old to new episode ID."""
+    async def test_active_episodes_dict_unchanged(self):
+        """_active_episodes keeps the same episode ID after compaction (#169)."""
         from nous.cognitive.layer import CognitiveLayer
 
         brain = MagicMock()
         brain.db = MagicMock()
         brain.embeddings = MagicMock()
         heart = MagicMock()
-        heart.end_episode = AsyncMock()
-        old_id = uuid4()
-        new_id = uuid4()
-        heart.start_episode = AsyncMock(return_value=MagicMock(id=new_id))
+        heart.bump_episode_compaction_count = AsyncMock()
         settings = _mock_settings()
 
         cognitive = CognitiveLayer(brain, heart, settings, bus=None)
+        old_id = uuid4()
         cognitive._active_episodes[TEST_SESSION] = str(old_id)
 
         await cognitive.pre_compaction(
@@ -800,39 +780,31 @@ class TestEpisodeBoundary:
             message_snapshot=[],
         )
 
-        assert cognitive._active_episodes[TEST_SESSION] == str(new_id)
-        assert cognitive._active_episodes[TEST_SESSION] != str(old_id)
+        assert cognitive._active_episodes[TEST_SESSION] == str(old_id)
 
     @pytest.mark.asyncio
-    async def test_end_episode_failure_does_not_block_start(self):
-        """If end_episode fails, start_episode is still attempted."""
+    async def test_bump_failure_non_fatal(self):
+        """If bump_compaction_count fails, episode stays active."""
         from nous.cognitive.layer import CognitiveLayer
 
         brain = MagicMock()
         brain.db = MagicMock()
         brain.embeddings = MagicMock()
         heart = MagicMock()
-        heart.end_episode = AsyncMock(side_effect=RuntimeError("DB error"))
-        new_ep_id = uuid4()
-        heart.start_episode = AsyncMock(return_value=MagicMock(id=new_ep_id))
+        heart.bump_episode_compaction_count = AsyncMock(side_effect=RuntimeError("DB error"))
         settings = _mock_settings()
 
         cognitive = CognitiveLayer(brain, heart, settings, bus=None)
-        cognitive._active_episodes[TEST_SESSION] = str(uuid4())
+        old_id = str(uuid4())
+        cognitive._active_episodes[TEST_SESSION] = old_id
 
-        # Should not raise despite end_episode failure
         await cognitive.pre_compaction(
             agent_id=TEST_AGENT,
             session_id=TEST_SESSION,
             message_snapshot=[],
         )
 
-        # end_episode was attempted
-        heart.end_episode.assert_called_once()
-        # start_episode was still called despite end failure
-        heart.start_episode.assert_called_once()
-        # New episode ID stored
-        assert cognitive._active_episodes[TEST_SESSION] == str(new_ep_id)
+        assert cognitive._active_episodes[TEST_SESSION] == old_id
 
 
 # ===========================================================================
