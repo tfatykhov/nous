@@ -305,7 +305,13 @@ CREATE TABLE heart.facts (
     encoded_frame VARCHAR(100),
     encoded_censors JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    -- F023: Memory Admission Control
+    admission_score FLOAT DEFAULT NULL,
+    recall_count INTEGER DEFAULT 0,
+    last_recalled_at TIMESTAMPTZ DEFAULT NULL,
+    -- F021.1: Per-dimension scores for dashboard analytics
+    admission_scores JSONB DEFAULT NULL
 );
 
 CREATE INDEX idx_facts_encoded_frame ON heart.facts (encoded_frame) WHERE encoded_frame IS NOT NULL;

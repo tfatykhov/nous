@@ -398,6 +398,8 @@ class Fact(Base):
     admission_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     recall_count: Mapped[int | None] = mapped_column(Integer, server_default="0")
     last_recalled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # F021.1: Per-dimension scores for dashboard analytics
+    admission_scores = mapped_column(JSONB, nullable=True, default=None)
 
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])

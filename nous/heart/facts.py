@@ -212,6 +212,10 @@ class FactManager:
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
             admission_score=admission_result.composite_score if admission_result else None,
+            admission_scores=(
+                admission_result.scores if admission_result and not admission_result.bypassed and admission_result.scores
+                else None
+            ),
         )
         session.add(fact)
         await session.flush()
@@ -490,8 +494,8 @@ class FactManager:
             return None
 
         episode = await session.get(Episode, fact_input.source_episode_id)
-        if episode and episode.content:
-            return episode.content
+        if episode and episode.summary:
+            return episode.summary
 
         return None
 

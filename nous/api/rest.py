@@ -28,6 +28,8 @@ Endpoints:
   GET  /dashboard/calibration - Decision intelligence analytics (F021)
   GET  /dashboard/activity - System activity timeline (F021)
   GET  /dashboard/health  - Graph health trends (F021)
+  GET  /dashboard/admission - Admission control analytics (F021.1)
+  GET  /dashboard/admission/rejected - Paginated rejected facts (F021.1)
   GET  /dashboard         - Static dashboard SPA (F021)
 """
 
@@ -826,6 +828,72 @@ def create_app(
             logger.error("Dashboard health error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_admission(request: Request) -> JSONResponse:
+        """GET /dashboard/admission - Admission control analytics."""
+        try:
+            days = int(request.query_params.get("days", "30"))
+        except ValueError:
+            return JSONResponse({"error": "days must be an integer"}, status_code=400)
+
+        source_filter = request.query_params.get("source")
+        category_filter = request.query_params.get("category")
+
+        try:
+            from nous.api.dashboard_queries import get_admission_data
+
+            async with database.session() as session:
+                data = await get_admission_data(
+                    session, settings.agent_id,
+                    days=days,
+                    threshold=settings.admission_threshold,
+                    source=source_filter,
+                    category=category_filter,
+                )
+            # Prepend config block
+            data["config"] = {
+                "enabled": settings.admission_control_enabled,
+                "shadow_mode": settings.admission_shadow_mode,
+                "threshold": settings.admission_threshold,
+                "weights": {
+                    "utility": settings.admission_w_utility,
+                    "confidence": settings.admission_w_confidence,
+                    "novelty": settings.admission_w_novelty,
+                    "recency": settings.admission_w_recency,
+                    "type_prior": settings.admission_w_type_prior,
+                },
+            }
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard admission error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_admission_rejected(request: Request) -> JSONResponse:
+        """GET /dashboard/admission/rejected - Paginated rejected facts."""
+        try:
+            limit = min(int(request.query_params.get("limit", "50")), 200)
+            offset = int(request.query_params.get("offset", "0"))
+            days = int(request.query_params.get("days", "30"))
+        except ValueError:
+            return JSONResponse({"error": "limit, offset, days must be integers"}, status_code=400)
+
+        sort = request.query_params.get("sort", "admission_score")
+        order = request.query_params.get("order", "asc")
+
+        try:
+            from nous.api.dashboard_queries import get_admission_rejected
+
+            async with database.session() as session:
+                data = await get_admission_rejected(
+                    session, settings.agent_id,
+                    threshold=settings.admission_threshold,
+                    days=days, limit=limit, offset=offset,
+                    sort=sort, order=order,
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard admission rejected error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -856,6 +924,9 @@ def create_app(
         Route("/dashboard/calibration", dashboard_calibration),
         Route("/dashboard/activity", dashboard_activity),
         Route("/dashboard/health", dashboard_health),
+        # F021.1: Admission dashboard — rejected MUST be before admission (Starlette top-down matching)
+        Route("/dashboard/admission/rejected", dashboard_admission_rejected),
+        Route("/dashboard/admission", dashboard_admission),
     ]
 
     # Static dashboard mount — only add if directory exists (avoids crash during tests)
