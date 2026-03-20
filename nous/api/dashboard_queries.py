@@ -622,3 +622,312 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         "total_edges": totals.total_edges,
         "connected_nodes": totals.connected_nodes,
     }
+
+
+# ── F021.1: Admission Control Dashboard ───────────────────────────────
+
+
+async def get_admission_data(
+    session: AsyncSession,
+    agent_id: str,
+    days: int = 30,
+    threshold: float = 0.55,
+    source: str | None = None,
+    category: str | None = None,
+) -> dict:
+    """Return admission analytics: summary, histogram, dimensions, breakdowns, trends."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+
+    # Base filter — all queries add active=true to exclude superseded facts
+    base_where = "agent_id = :agent_id AND created_at >= :since AND active = true"
+    params: dict = {"agent_id": agent_id, "since": since, "threshold": threshold}
+    if source:
+        base_where += " AND source = :source"
+        params["source"] = source
+    if category:
+        base_where += " AND category = :category"
+        params["category"] = category
+
+    # ── Summary ──
+    result = await session.execute(
+        text(f"""
+            SELECT
+                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL) AS total_scored,
+                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL AND admission_score >= :threshold) AS admitted,
+                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL AND admission_score < :threshold) AS would_reject,
+                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NULL) AS bypassed,
+                AVG(admission_score) FILTER (WHERE admission_scores IS NOT NULL) AS avg_score
+            FROM heart.facts
+            WHERE {base_where}
+        """),
+        params,
+    )
+    row = result.one()
+    summary = {
+        "total_scored": row.total_scored or 0,
+        "admitted": row.admitted or 0,
+        "would_reject": row.would_reject or 0,
+        "bypassed": row.bypassed or 0,
+        "avg_composite_score": round(float(row.avg_score), 3) if row.avg_score else 0.0,
+        "rejection_rate": round(
+            (row.would_reject or 0) / max(row.total_scored or 1, 1), 3
+        ),
+        "threshold_note": f"Counts based on current threshold ({threshold}). Actual scores were computed at admission time.",
+        "_pre_migration_note": "Facts scored before migration 019 have admission_scores=NULL and are excluded from dimension/bypass stats.",
+    }
+
+    # ── Score distribution (0.05 buckets, cap at 0.95 for score=1.0) ──
+    result = await session.execute(
+        text(f"""
+            SELECT
+                LEAST(FLOOR(admission_score / 0.05) * 0.05, 0.95) AS bucket_start,
+                COUNT(*) AS cnt
+            FROM heart.facts
+            WHERE {base_where}
+              AND admission_score IS NOT NULL
+              AND admission_scores IS NOT NULL
+            GROUP BY bucket_start
+            ORDER BY bucket_start
+        """),
+        params,
+    )
+    score_distribution = [
+        {
+            "bucket": f"{row.bucket_start:.2f}-{row.bucket_start + 0.05:.2f}",
+            "count": row.cnt,
+        }
+        for row in result
+    ]
+
+    # ── Per-dimension stats (JSONB extraction) ──
+    dimensions = ["utility", "confidence", "novelty", "recency", "type_prior"]
+    dimension_stats: dict = {
+        "_note": "Excludes bypassed facts (admission_scores IS NULL). Only available for facts scored after JSONB migration.",
+    }
+    for dim in dimensions:
+        result = await session.execute(
+            text(f"""
+                WITH scored AS (
+                    SELECT
+                        (admission_scores->>'{dim}')::float AS val,
+                        CASE WHEN admission_score >= :threshold THEN 'admitted' ELSE 'rejected' END AS status
+                    FROM heart.facts
+                    WHERE {base_where}
+                      AND admission_scores IS NOT NULL
+                      AND admission_scores->>'{dim}' IS NOT NULL
+                )
+                SELECT
+                    status,
+                    MIN(val) AS min_val,
+                    percentile_cont(0.25) WITHIN GROUP (ORDER BY val) AS q1,
+                    percentile_cont(0.50) WITHIN GROUP (ORDER BY val) AS median,
+                    percentile_cont(0.75) WITHIN GROUP (ORDER BY val) AS q3,
+                    MAX(val) AS max_val
+                FROM scored
+                GROUP BY status
+            """),
+            params,
+        )
+        dim_data: dict = {"admitted": {}, "rejected": {}}
+        for row in result:
+            dim_data[row.status] = {
+                "min": round(float(row.min_val), 3),
+                "q1": round(float(row.q1), 3),
+                "median": round(float(row.median), 3),
+                "q3": round(float(row.q3), 3),
+                "max": round(float(row.max_val), 3),
+            }
+        dimension_stats[dim] = dim_data
+
+    # ── By source ──
+    result = await session.execute(
+        text(f"""
+            SELECT
+                COALESCE(source, 'unknown') AS src,
+                COUNT(*) FILTER (WHERE admission_scores IS NOT NULL AND admission_score >= :threshold) AS admitted,
+                COUNT(*) FILTER (WHERE admission_scores IS NOT NULL AND admission_score < :threshold) AS rejected,
+                COUNT(*) FILTER (WHERE admission_scores IS NULL AND admission_score IS NOT NULL) AS bypassed,
+                AVG(admission_score) FILTER (WHERE admission_scores IS NOT NULL) AS avg_score
+            FROM heart.facts
+            WHERE {base_where} AND admission_score IS NOT NULL
+            GROUP BY src ORDER BY src
+        """),
+        params,
+    )
+    by_source = {
+        row.src: {
+            "admitted": row.admitted or 0,
+            "rejected": row.rejected or 0,
+            "bypassed": row.bypassed or 0,
+            "avg_score": round(float(row.avg_score), 3) if row.avg_score else None,
+        }
+        for row in result
+    }
+
+    # ── By category ──
+    result = await session.execute(
+        text(f"""
+            SELECT
+                COALESCE(category, 'uncategorized') AS cat,
+                COUNT(*) FILTER (WHERE admission_scores IS NOT NULL AND admission_score >= :threshold) AS admitted,
+                COUNT(*) FILTER (WHERE admission_scores IS NOT NULL AND admission_score < :threshold) AS rejected,
+                AVG(admission_score) FILTER (WHERE admission_scores IS NOT NULL) AS avg_score
+            FROM heart.facts
+            WHERE {base_where} AND admission_score IS NOT NULL AND admission_scores IS NOT NULL
+            GROUP BY cat ORDER BY cat
+        """),
+        params,
+    )
+    by_category = {
+        row.cat: {
+            "admitted": row.admitted or 0,
+            "rejected": row.rejected or 0,
+            "avg_score": round(float(row.avg_score), 3) if row.avg_score else None,
+        }
+        for row in result
+    }
+
+    # ── Daily trend (respects source/category filters) ──
+    trend_join = "ON CAST(f.created_at AS date) = CAST(d AS date) AND f.agent_id = :agent_id AND f.admission_score IS NOT NULL AND f.active = true"
+    trend_params: dict = {"agent_id": agent_id, "since": since, "now": now, "threshold": threshold}
+    if source:
+        trend_join += " AND f.source = :source"
+        trend_params["source"] = source
+    if category:
+        trend_join += " AND f.category = :category"
+        trend_params["category"] = category
+
+    result = await session.execute(
+        text(f"""
+            SELECT
+                CAST(d AS date) AS day,
+                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL) AS scored,
+                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL AND f.admission_score >= :threshold) AS admitted,
+                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL AND f.admission_score < :threshold) AS rejected,
+                COUNT(f.id) FILTER (WHERE f.admission_scores IS NULL AND f.admission_score IS NOT NULL) AS bypassed,
+                AVG(f.admission_score) FILTER (WHERE f.admission_scores IS NOT NULL) AS avg_score
+            FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
+            LEFT JOIN heart.facts f
+                {trend_join}
+            GROUP BY day ORDER BY day
+        """),
+        trend_params,
+    )
+    daily_trend = [
+        {
+            "date": row.day.isoformat(),
+            "scored": row.scored or 0,
+            "admitted": row.admitted or 0,
+            "rejected": row.rejected or 0,
+            "bypassed": row.bypassed or 0,
+            "avg_score": round(float(row.avg_score), 3) if row.avg_score else None,
+        }
+        for row in result
+    ]
+
+    # ── Bypass breakdown ──
+    result = await session.execute(
+        text(f"""
+            SELECT
+                COALESCE(source, 'unknown') AS reason,
+                COUNT(*) AS cnt
+            FROM heart.facts
+            WHERE {base_where}
+              AND admission_score IS NOT NULL
+              AND admission_scores IS NULL
+            GROUP BY reason ORDER BY cnt DESC
+        """),
+        params,
+    )
+    bypass_breakdown = {row.reason: row.cnt for row in result}
+
+    return {
+        "summary": summary,
+        "score_distribution": score_distribution,
+        "dimension_stats": dimension_stats,
+        "by_source": by_source,
+        "by_category": by_category,
+        "daily_trend": daily_trend,
+        "bypass_breakdown": bypass_breakdown,
+    }
+
+
+# ── F021.1: Rejected facts list ───────────────────────────────────────
+
+
+async def get_admission_rejected(
+    session: AsyncSession,
+    agent_id: str,
+    threshold: float = 0.55,
+    days: int = 30,
+    limit: int = 50,
+    offset: int = 0,
+    sort: str = "admission_score",
+    order: str = "asc",
+) -> dict:
+    """Return paginated list of facts below admission threshold."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(days=days)
+
+    # Sort allowlist — includes spec alias "composite_score"
+    ALLOWED_SORTS = {"admission_score", "created_at", "category", "source"}
+    SORT_ALIASES = {"composite_score": "admission_score"}
+    sort = SORT_ALIASES.get(sort, sort)
+    if sort not in ALLOWED_SORTS:
+        sort = "admission_score"
+    if order not in ("asc", "desc"):
+        order = "asc"
+
+    base_where = """
+        agent_id = :agent_id
+        AND created_at >= :since
+        AND admission_score IS NOT NULL
+        AND admission_scores IS NOT NULL
+        AND admission_score < :threshold
+        AND active = true
+    """
+
+    # Total count
+    result = await session.execute(
+        text(f"SELECT COUNT(*) AS cnt FROM heart.facts WHERE {base_where}"),
+        {"agent_id": agent_id, "since": since, "threshold": threshold},
+    )
+    total = result.scalar() or 0
+
+    # Fetch page
+    result = await session.execute(
+        text(f"""
+            SELECT
+                id, content, category, source,
+                admission_score, admission_scores, created_at
+            FROM heart.facts
+            WHERE {base_where}
+            ORDER BY {sort} {order}
+            LIMIT :limit OFFSET :offset
+        """),
+        {
+            "agent_id": agent_id, "since": since, "threshold": threshold,
+            "limit": limit, "offset": offset,
+        },
+    )
+    facts = []
+    for row in result:
+        content = row.content or ""
+        facts.append({
+            "id": str(row.id),
+            "content_preview": content[:200],
+            "content_full": content,
+            "category": row.category,
+            "source": row.source,
+            "composite_score": round(float(row.admission_score), 3),
+            "scores": row.admission_scores or {},
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        })
+
+    return {
+        "facts": facts,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
