@@ -1013,7 +1013,7 @@ class CognitiveLayer:
                 await self._heart.bump_episode_compaction_count(UUID(episode_id))
                 logger.debug("Bumped compaction count on episode %s", episode_id)
             except Exception:
-                logger.warning("Failed to bump compaction count on episode %s", episode_id)
+                logger.warning("Failed to bump compaction count on episode %s", episode_id, exc_info=True)
 
         # 2. Emit event — handlers get the snapshot, not live state
         if self._bus:
