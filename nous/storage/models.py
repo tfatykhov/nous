@@ -334,6 +334,7 @@ class Episode(Base):
     encoded_censors = mapped_column(JSONB, nullable=True)
     compression_tier: Mapped[str | None] = mapped_column(String(20), server_default="raw")
     structured_summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    compaction_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     user_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     user_display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
