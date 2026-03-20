@@ -490,8 +490,8 @@ class FactManager:
             return None
 
         episode = await session.get(Episode, fact_input.source_episode_id)
-        if episode and episode.content:
-            return episode.content
+        if episode and episode.summary:
+            return episode.summary
 
         return None
 
