@@ -996,45 +996,24 @@ class CognitiveLayer:
         session_id: str,
         message_snapshot: list[dict[str, Any]],
     ) -> None:
-        """Emit pre-compaction event and handle episode boundary.
+        """Emit pre-compaction event and bump episode compaction count.
 
         Called by runner BEFORE compact() mutates the conversation.
         The message_snapshot is a copy of messages[:cut_point], decoupled
         from mutation timing so handlers can safely process it.
 
-        Episode boundary: ends the current episode (compaction marks a
-        natural break point) and starts a new one for the post-compaction
-        continuation.
+        Issue #169: Instead of ending the current episode and starting a new
+        one (which polluted the graph with generic edges), we keep the
+        episode open and increment its compaction_count.
         """
-        # 1. Episode boundary — end current, start new
+        # 1. Episode — keep open, bump compaction count
         episode_id = self._active_episodes.get(session_id)
         if episode_id:
             try:
-                await self._heart.end_episode(
-                    UUID(episode_id),
-                    outcome="success",
-                    lessons_learned=["Episode ended due to conversation compaction"],
-                    session=None,
-                )
-                logger.debug("Ended episode %s at compaction boundary", episode_id)
+                await self._heart.bump_episode_compaction_count(UUID(episode_id))
+                logger.debug("Bumped compaction count on episode %s", episode_id)
             except Exception:
-                logger.warning("Failed to end episode %s at compaction boundary", episode_id)
-
-            # Start new episode for post-compaction continuation
-            try:
-                new_episode = await self._heart.start_episode(
-                    EpisodeInput(
-                        summary="Continuation after conversation compaction",
-                        frame_used="task",  # Compaction happens during active work
-                        trigger="compaction",
-                    ),
-                    session=None,
-                )
-                self._active_episodes[session_id] = str(new_episode.id)
-                logger.debug("Started new episode %s after compaction", new_episode.id)
-            except Exception:
-                logger.warning("Failed to start new episode after compaction")
-                self._active_episodes.pop(session_id, None)
+                logger.warning("Failed to bump compaction count on episode %s", episode_id, exc_info=True)
 
         # 2. Emit event — handlers get the snapshot, not live state
         if self._bus:

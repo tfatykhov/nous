@@ -214,6 +214,12 @@ class Heart:
         """Store structured summary on episode."""
         await self.episodes.update_summary(episode_id, summary, session=session)
 
+    async def bump_episode_compaction_count(
+        self, episode_id: UUID, session: AsyncSession | None = None
+    ) -> None:
+        """Increment compaction counter on episode."""
+        await self.episodes.bump_compaction_count(episode_id, session=session)
+
     async def search_episodes(
         self,
         query: str,

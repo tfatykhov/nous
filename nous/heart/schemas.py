@@ -59,6 +59,7 @@ class EpisodeDetail(BaseModel):
     user_id: str | None = None
     user_display_name: str | None = None
     created_at: datetime
+    compaction_count: int = 0
 
 
 class EpisodeSummary(BaseModel):
