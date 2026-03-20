@@ -26,7 +26,7 @@ class SessionTimeoutMonitor:
 
     Runs a periodic check (every sleep_check_interval seconds) that:
     1. Finds sessions idle > session_idle_timeout -> calls cognitive.end_session()
-    2. If ALL sessions idle > sleep_timeout -> emits sleep_started
+    2. If global idle > sleep_timeout -> emits sleep_started
 
     P0-10 fix: The monitor calls cognitive.end_session() instead of emitting
     raw session_ended events. This ensures the timeout path has episode_id,
@@ -139,11 +139,22 @@ class SessionTimeoutMonitor:
             self._last_agent.pop(sid, None)
 
         # 2. Check global inactivity -> sleep_started
+        #
+        # Previous bug (#160): required `not self._last_activity` (zero tracked
+        # sessions). But session_idle_timeout (30min) << sleep_timeout (2hr), so
+        # by the time 2hr of global inactivity passes, all sessions are already
+        # timed out and popped from the dict. The check was redundant in theory
+        # but failed in practice because any new message within the 90-minute
+        # gap between session timeout and sleep timeout would reset
+        # _global_last_activity, preventing sleep from ever firing.
+        #
+        # Fix: remove the empty-dict guard. Sleep handler already has
+        # _interrupted flag — if a message arrives mid-sleep, it stops
+        # gracefully. The not-sleep_emitted flag prevents repeated triggers.
         global_idle = now - self._global_last_activity
         if (
             global_idle > self._settings.sleep_timeout
             and not self._sleep_emitted
-            and not self._last_activity  # No active sessions remaining
         ):
             logger.info("Global idle for %ds, emitting sleep_started", int(global_idle))
             await self._bus.emit(Event(
