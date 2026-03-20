@@ -29,7 +29,9 @@ KEEP_RECENT_RATIO = 0.20
 RELEVANCE_FLOORS: dict[str, float] = {
     "fact": 0.45,
     "decision": 0.40,
-    "procedure": 0.50,
+    "procedure": 0.25,  # Lowered from 0.50 — old floor filtered nearly all
+    # procedures, preventing activation and F012 reinforcement. 0.25 still
+    # blocks noise while allowing curated knowledge through.
     "episode": 0.35,
 }
 
@@ -183,6 +185,8 @@ class TurnContext(BaseModel):
     frame: FrameSelection
     decision_id: str | None = None  # Set if frame is 'decision' or 'task'
     active_censors: list[str] = Field(default_factory=list)
+    censor_blocked: bool = False  # Set if a block censor matched user input
+    censor_block_reason: str | None = None  # Reason for the block
     context_token_estimate: int = 0
     recalled_decision_ids: list[str] = Field(default_factory=list)
     recalled_fact_ids: list[str] = Field(default_factory=list)

@@ -437,8 +437,10 @@ class ContextEngine:
                     # Dedup + usage boost
                     procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
                     procedures = self._apply_usage_boost(procedures, usage_tracker)
-                    # F017: Relevance floor + diminishing returns cutoff
+                    # F017: Relevance floor (lowered to 0.25 for procedures — old
+                    # 0.50 floor filtered nearly all procedures, #160)
                     procedures = self._apply_relevance_floor(procedures, "procedure")
+                    # F017: Diminishing returns cutoff
                     procedures = self._apply_diminishing_returns_cutoff(procedures)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
