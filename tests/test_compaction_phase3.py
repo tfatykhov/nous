@@ -44,6 +44,15 @@ TEST_AGENT = "test-phase3-agent"
 TEST_SESSION = "test-session-p3"
 
 
+def _mock_llm_client(text: str = "") -> AsyncMock:
+    """Build a mock LLMClient returning an ApiResponse-like object."""
+    client = AsyncMock()
+    response = MagicMock()
+    response.content = [{"type": "text", "text": text}]
+    client.call = AsyncMock(return_value=response)
+    return client
+
+
 def _mock_settings(**overrides) -> MagicMock:
     """MagicMock Settings to avoid pydantic validation."""
     s = MagicMock()
@@ -429,27 +438,16 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_http = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps([
-                        {
-                            "subject": "user",
-                            "content": "User prefers Python 3.12",
-                            "category": "preference",
-                            "confidence": 0.9,
-                        }
-                    ]),
-                }
-            ]
-        }
-        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_llm = _mock_llm_client(json.dumps([
+            {
+                "subject": "user",
+                "content": "User prefers Python 3.12",
+                "category": "preference",
+                "confidence": 0.9,
+            }
+        ]))
 
-        extractor = KnowledgeExtractor(heart, settings, bus, http_client=mock_http)
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
         event = Event(
             type="conversation_compacting",
@@ -466,7 +464,7 @@ class TestKnowledgeExtractor:
         await extractor.handle(event)
 
         # Verify LLM was called
-        mock_http.post.assert_called_once()
+        mock_llm.call.assert_called_once()
 
         # Verify fact was stored
         heart.learn.assert_called_once()
@@ -484,15 +482,9 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_http = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "content": [{"type": "text", "text": "[]"}]
-        }
-        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_llm = _mock_llm_client("[]")
 
-        extractor = KnowledgeExtractor(heart, settings, bus, http_client=mock_http)
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
         # Pass specific content to verify it reaches the LLM prompt
         event = Event(
@@ -509,10 +501,12 @@ class TestKnowledgeExtractor:
         await extractor.handle(event)
 
         # Verify the prompt contains our marker text
-        call_kwargs = mock_http.post.call_args
-        request_body = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
-        user_message = request_body["messages"][0]["content"]
-        assert "unique-marker-text" in user_message
+        call_kwargs = mock_llm.call.call_args
+        payload = call_kwargs[0][0]
+        user_msg = payload["messages"][0]["content"]
+        if isinstance(user_msg, list):
+            user_msg = user_msg[0]["text"]
+        assert "unique-marker-text" in user_msg
 
     @pytest.mark.asyncio
     async def test_handles_empty_messages(self):
@@ -543,8 +537,8 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_http = AsyncMock()
-        extractor = KnowledgeExtractor(heart, settings, bus, http_client=mock_http)
+        mock_llm = _mock_llm_client()
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
         event = Event(
             type="conversation_compacting",
@@ -560,7 +554,7 @@ class TestKnowledgeExtractor:
         await extractor.handle(event)
 
         # Short content should skip LLM call entirely
-        mock_http.post.assert_not_called()
+        mock_llm.call.assert_not_called()
         heart.learn.assert_not_called()
 
     @pytest.mark.asyncio
@@ -575,27 +569,16 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_http = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps([
-                        {
-                            "subject": "user",
-                            "content": "Duplicate fact that already exists",
-                            "category": "preference",
-                            "confidence": 0.9,
-                        }
-                    ]),
-                }
-            ]
-        }
-        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_llm = _mock_llm_client(json.dumps([
+            {
+                "subject": "user",
+                "content": "Duplicate fact that already exists",
+                "category": "preference",
+                "confidence": 0.9,
+            }
+        ]))
 
-        extractor = KnowledgeExtractor(heart, settings, bus, http_client=mock_http)
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
         event = Event(
             type="conversation_compacting",
@@ -611,7 +594,7 @@ class TestKnowledgeExtractor:
         await extractor.handle(event)
 
         # LLM was called, but fact was NOT stored (duplicate)
-        mock_http.post.assert_called_once()
+        mock_llm.call.assert_called_once()
         heart.learn.assert_not_called()
 
     @pytest.mark.asyncio
@@ -623,27 +606,16 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_http = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps([
-                        {
-                            "subject": "user",
-                            "content": "Low confidence fact",
-                            "category": "preference",
-                            "confidence": 0.4,
-                        }
-                    ]),
-                }
-            ]
-        }
-        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_llm = _mock_llm_client(json.dumps([
+            {
+                "subject": "user",
+                "content": "Low confidence fact",
+                "category": "preference",
+                "confidence": 0.4,
+            }
+        ]))
 
-        extractor = KnowledgeExtractor(heart, settings, bus, http_client=mock_http)
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
         event = Event(
             type="conversation_compacting",
@@ -659,7 +631,7 @@ class TestKnowledgeExtractor:
         await extractor.handle(event)
 
         # LLM was called, but fact was NOT stored (low confidence)
-        mock_http.post.assert_called_once()
+        mock_llm.call.assert_called_once()
         heart.learn.assert_not_called()
 
     @pytest.mark.asyncio
@@ -681,15 +653,9 @@ class TestKnowledgeExtractor:
             }
             for i in range(8)
         ]
-        mock_http = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "content": [{"type": "text", "text": json.dumps(facts)}]
-        }
-        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_llm = _mock_llm_client(json.dumps(facts))
 
-        extractor = KnowledgeExtractor(heart, settings, bus, http_client=mock_http)
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
         event = Event(
             type="conversation_compacting",
