@@ -125,15 +125,37 @@ def build_anthropic_headers(settings: Settings) -> dict[str, str]:
 
     Shared by all handlers that make LLM calls (episode_summarizer,
     fact_extractor, sleep_handler).
+
+    Mirrors the header logic in anthropic_client.py HttpxAnthropicClient
+    to ensure handlers use the same auth + beta flags as the main chat path.
     """
-    headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
-    api_key = getattr(settings, "anthropic_auth_token", None) or getattr(
-        settings, "anthropic_api_key", None
-    )
-    if api_key and "sk-ant-oat" in api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-        headers["anthropic-beta"] = "oauth-2025-04-20"
-        headers["anthropic-dangerous-direct-browser-access"] = "true"
-    else:
-        headers["x-api-key"] = api_key or ""
+    headers: dict[str, str] = {
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+
+    auth_token = getattr(settings, "anthropic_auth_token", None) or ""
+    api_key = getattr(settings, "anthropic_api_key", None) or ""
+    is_oat = False
+
+    if auth_token:
+        headers["authorization"] = f"Bearer {auth_token}"
+        if "sk-ant-oat" in auth_token:
+            is_oat = True
+            headers["anthropic-dangerous-direct-browser-access"] = "true"
+    elif api_key:
+        if "sk-ant-oat" in api_key:
+            is_oat = True
+            headers["authorization"] = f"Bearer {api_key}"
+            headers["anthropic-dangerous-direct-browser-access"] = "true"
+        else:
+            headers["x-api-key"] = api_key
+
+    # Match beta features from anthropic_client.py
+    beta_features: list[str] = []
+    if is_oat:
+        beta_features.append("oauth-2025-04-20")
+    if beta_features:
+        headers["anthropic-beta"] = ",".join(beta_features)
+
     return headers
