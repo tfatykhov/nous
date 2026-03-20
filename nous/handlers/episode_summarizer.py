@@ -188,7 +188,7 @@ class EpisodeSummarizer:
             )
 
             if response.status_code != 200:
-                logger.warning("Summary LLM call failed: %d", response.status_code)
+                logger.warning("Summary LLM call failed: %d — %s", response.status_code, response.text[:500])
                 return None
 
             data = response.json()

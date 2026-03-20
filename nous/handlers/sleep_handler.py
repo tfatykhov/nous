@@ -239,6 +239,7 @@ class SleepHandler:
             )
 
             if response.status_code != 200:
+                logger.warning("Sleep reflect LLM call failed: %d — %s", response.status_code, response.text[:500])
                 return
 
             data = response.json()
