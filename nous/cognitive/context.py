@@ -437,8 +437,11 @@ class ContextEngine:
                     # Dedup + usage boost
                     procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
                     procedures = self._apply_usage_boost(procedures, usage_tracker)
-                    # F017: Relevance floor + diminishing returns cutoff
-                    procedures = self._apply_relevance_floor(procedures, "procedure")
+                    # F017: Diminishing returns cutoff (but skip relevance floor)
+                    # Procedures are exempt from relevance floor — they are curated
+                    # knowledge created explicitly via learn_skill or F012 clustering,
+                    # so they've already passed a quality gate. The 0.50 floor was
+                    # filtering out nearly all procedures (1/60 ever activated). #160
                     procedures = self._apply_diminishing_returns_cutoff(procedures)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)

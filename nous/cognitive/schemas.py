@@ -29,7 +29,10 @@ KEEP_RECENT_RATIO = 0.20
 RELEVANCE_FLOORS: dict[str, float] = {
     "fact": 0.45,
     "decision": 0.40,
-    "procedure": 0.50,
+    # "procedure" intentionally omitted — procedures are exempt from relevance
+    # floor. They are curated knowledge (learn_skill / F012 clustering) and
+    # already passed a quality gate. The previous 0.50 floor filtered nearly
+    # all procedures, preventing activation and F012 reinforcement.
     "episode": 0.35,
 }
 
