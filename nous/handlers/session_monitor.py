@@ -148,13 +148,19 @@ class SessionTimeoutMonitor:
         # gap between session timeout and sleep timeout would reset
         # _global_last_activity, preventing sleep from ever firing.
         #
-        # Fix: remove the empty-dict guard. Sleep handler already has
-        # _interrupted flag — if a message arrives mid-sleep, it stops
-        # gracefully. The not-sleep_emitted flag prevents repeated triggers.
+        # Fix: check that all remaining tracked sessions are idle beyond
+        # sleep_timeout, rather than requiring the dict to be empty. This
+        # handles both the normal case (dict already empty after session
+        # timeouts) and the edge case where sleep_timeout <= session_idle_timeout.
         global_idle = now - self._global_last_activity
+        all_sessions_sleeping = all(
+            (now - last) > self._settings.sleep_timeout
+            for last in self._last_activity.values()
+        ) if self._last_activity else True
         if (
             global_idle > self._settings.sleep_timeout
             and not self._sleep_emitted
+            and all_sessions_sleeping
         ):
             logger.info("Global idle for %ds, emitting sleep_started", int(global_idle))
             await self._bus.emit(Event(
