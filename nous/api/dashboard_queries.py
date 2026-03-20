@@ -102,10 +102,10 @@ async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
     for key, table, ts_col in tables:
         result = await session.execute(
             text(f"""
-                SELECT d::date AS day, COUNT(t.{ts_col}) AS cnt
-                FROM generate_series(:since::date, :now::date, '1 day') AS d
+                SELECT CAST(d AS date) AS day, COUNT(t.{ts_col}) AS cnt
+                FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
                 LEFT JOIN {table} t
-                    ON t.{ts_col}::date = d::date AND t.agent_id = :agent_id
+                    ON CAST(t.{ts_col} AS date) = CAST(d AS date) AND t.agent_id = :agent_id
                 GROUP BY day ORDER BY day
             """),
             {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
@@ -381,13 +381,13 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
     thirty_days_ago = now - timedelta(days=30)
     result = await session.execute(
         text("""
-            SELECT d::date AS day,
+            SELECT CAST(d AS date) AS day,
                    COUNT(t.created_at) AS total,
                    COUNT(t.created_at) FILTER (WHERE t.outcome = 'success') AS successes,
                    COUNT(t.created_at) FILTER (WHERE t.outcome IS NOT NULL AND t.outcome != 'pending') AS reviewed
-            FROM generate_series(:since::date, :now::date, '1 day') AS d
+            FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
             LEFT JOIN brain.decisions t
-                ON t.created_at::date = d::date AND t.agent_id = :agent_id
+                ON CAST(t.created_at AS date) = CAST(d AS date) AND t.agent_id = :agent_id
             GROUP BY day ORDER BY day
         """),
         {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
@@ -424,7 +424,7 @@ async def get_activity_data(session: AsyncSession, agent_id: str) -> dict:
     # Activity timeline from events (daily, grouped by event_type)
     result = await session.execute(
         text("""
-            SELECT created_at::date AS day, event_type, COUNT(*) AS cnt
+            SELECT CAST(created_at AS date) AS day, event_type, COUNT(*) AS cnt
             FROM nous_system.events
             WHERE agent_id = :agent_id AND created_at >= :since
             GROUP BY day, event_type
@@ -535,10 +535,10 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
     # Daily edge creation (last 30 days)
     result = await session.execute(
         text("""
-            SELECT d::date AS day, COUNT(e.created_at) AS cnt
-            FROM generate_series(:since::date, :now::date, '1 day') AS d
+            SELECT CAST(d AS date) AS day, COUNT(e.created_at) AS cnt
+            FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
             LEFT JOIN brain.graph_edges e
-                ON e.created_at::date = d::date AND e.agent_id = :agent_id
+                ON CAST(e.created_at AS date) = CAST(d AS date) AND e.agent_id = :agent_id
             GROUP BY day ORDER BY day
         """),
         {"agent_id": agent_id, "since": thirty_days_ago, "now": now},

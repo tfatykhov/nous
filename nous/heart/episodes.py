@@ -423,7 +423,7 @@ class EpisodeManager:
                 outcome=e.outcome,
                 started_at=e.started_at,
                 tags=e.tags or [],
-                structured_summary=e.structured_summary,
+                structured_summary=e.structured_summary if isinstance(e.structured_summary, dict) else None,
             )
             for e in episodes
         ]
