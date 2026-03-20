@@ -160,6 +160,38 @@ class EpisodeManager:
             await session.flush()
 
     # ------------------------------------------------------------------
+    # bump_compaction_count()
+    # ------------------------------------------------------------------
+
+    async def bump_compaction_count(
+        self, episode_id: UUID, session: AsyncSession | None = None
+    ) -> None:
+        """Increment compaction counter on an active episode.
+
+        Note: Episode embedding is NOT refreshed here — it still reflects the
+        initial session summary. EpisodeSummarizer refreshes it at session end
+        via update_summary(). If the session ends abnormally, the embedding
+        may be stale.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                await self._bump_compaction_count(episode_id, session)
+                await session.commit()
+                return
+        await self._bump_compaction_count(episode_id, session)
+
+    async def _bump_compaction_count(
+        self, episode_id: UUID, session: AsyncSession
+    ) -> None:
+        stmt = select(Episode).where(Episode.id == episode_id)
+        result = await session.execute(stmt)
+        episode = result.scalar_one_or_none()
+        if episode is None:
+            raise ValueError(f"Episode {episode_id} not found")
+        episode.compaction_count = (episode.compaction_count or 0) + 1
+        await session.flush()
+
+    # ------------------------------------------------------------------
     # end()
     # ------------------------------------------------------------------
 
@@ -595,4 +627,5 @@ class EpisodeManager:
             user_id=episode.user_id,
             user_display_name=episode.user_display_name,
             created_at=episode.created_at,
+            compaction_count=episode.compaction_count or 0,
         )
