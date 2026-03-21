@@ -1137,11 +1137,11 @@ class TestSleepHandler:
         handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Mock all phases to be no-ops (stubs in real implementation)
-        handler._phase_review_decisions = AsyncMock()
-        handler._phase_prune = AsyncMock()
-        handler._phase_compress = AsyncMock()
-        handler._phase_reflect = AsyncMock()
-        handler._phase_generalize = AsyncMock()
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
+        handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_generalize = AsyncMock(return_value=True)
 
         event = _make_event("sleep_started", agent_id="system")
         await handler._run_sleep(event)
@@ -1178,18 +1178,23 @@ class TestSleepHandler:
 
         async def track_review():
             order.append("review")
+            return True
 
         async def track_prune():
             order.append("prune")
+            return True
 
         async def track_compress():
             order.append("compress")
+            return True
 
-        async def track_reflect():
+        async def track_reflect(sleep_stats):
             order.append("reflect")
+            return True
 
-        async def track_generalize():
+        async def track_generalize(sleep_stats):
             order.append("generalize")
+            return True
 
         handler._phase_review_decisions = track_review
         handler._phase_prune = track_prune
@@ -1207,11 +1212,11 @@ class TestSleepHandler:
     async def test_sleep_completed_reports_phases_ran(self):
         """37. sleep_completed reports which phases ran."""
         handler, brain, heart, bus, llm_client = self._make_sleep_handler()
-        handler._phase_review_decisions = AsyncMock()
-        handler._phase_prune = AsyncMock()
-        handler._phase_compress = AsyncMock()
-        handler._phase_reflect = AsyncMock()
-        handler._phase_generalize = AsyncMock()
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
+        handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_generalize = AsyncMock(return_value=True)
 
         await handler._run_sleep(_make_event("sleep_started"))
 
@@ -1229,12 +1234,13 @@ class TestSleepHandler:
 
         async def interrupt_during_compress():
             handler._interrupted = True
+            return True
 
-        handler._phase_review_decisions = AsyncMock()
-        handler._phase_prune = AsyncMock()
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
         handler._phase_compress = interrupt_during_compress
-        handler._phase_reflect = AsyncMock()
-        handler._phase_generalize = AsyncMock()
+        handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_generalize = AsyncMock(return_value=True)
 
         await handler._run_sleep(_make_event("sleep_started"))
 
@@ -1275,7 +1281,7 @@ class TestSleepHandler:
             content=[{"type": "text", "text": json.dumps(reflection_json)}]
         ))
 
-        await handler._phase_reflect()
+        await handler._phase_reflect({"facts_created": 0, "procedures_created": 0, "censors_retired": 0})
 
         # Should store structured facts with subject/category
         assert heart.learn.call_count == 2
@@ -1298,7 +1304,7 @@ class TestSleepHandler:
         heart.list_episodes = AsyncMock(return_value=[ep1])
         heart.learn = AsyncMock()
 
-        await handler._phase_reflect()
+        await handler._phase_reflect({"facts_created": 0, "procedures_created": 0, "censors_retired": 0})
 
         heart.learn.assert_not_called()
         llm_client.call.assert_not_called()
@@ -1309,10 +1315,10 @@ class TestSleepHandler:
         handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Make all phases pass except reflect which has LLM failure
-        handler._phase_review_decisions = AsyncMock()
-        handler._phase_prune = AsyncMock()
-        handler._phase_compress = AsyncMock()
-        handler._phase_generalize = AsyncMock()
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
+        handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_generalize = AsyncMock(return_value=True)
 
         # Set up reflect to fail via LLM
         ep1 = MagicMock()

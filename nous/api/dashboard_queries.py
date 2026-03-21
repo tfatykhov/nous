@@ -416,108 +416,162 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
 # ── Task 8: Activity data (GET /dashboard/activity) ─────────────────────
 
 
-async def get_activity_data(session: AsyncSession, agent_id: str) -> dict:
-    """Return activity timeline from events table + censor/schedule/sleep stats."""
+async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 168) -> dict:
+    """Return activity events + censor/schedule/sleep stats for the dashboard."""
     now = datetime.now(timezone.utc)
-    thirty_days_ago = now - timedelta(days=30)
+    since = now - timedelta(hours=hours)
+    seven_days_ago = now - timedelta(days=7)
 
-    # Activity timeline from events (daily, grouped by event_type)
+    # Individual event rows
     result = await session.execute(
         text("""
-            SELECT CAST(created_at AS date) AS day, event_type, COUNT(*) AS cnt
+            SELECT event_type AS type, created_at, data
             FROM nous_system.events
             WHERE agent_id = :agent_id AND created_at >= :since
-            GROUP BY day, event_type
-            ORDER BY day, event_type
+            ORDER BY created_at DESC LIMIT 100
         """),
-        {"agent_id": agent_id, "since": thirty_days_ago},
+        {"agent_id": agent_id, "since": since},
     )
-    timeline: dict[str, dict[str, int]] = {}
+    events = []
     for row in result:
-        day_str = row.day.isoformat()
-        timeline.setdefault(day_str, {})[row.event_type] = row.cnt
+        evt: dict = {"type": row.type, "created_at": row.created_at.isoformat(), "data": row.data}
+        events.append(evt)
 
-    # Event type totals
+    # Censor base stats
     result = await session.execute(
         text("""
-            SELECT event_type, COUNT(*) AS cnt
-            FROM nous_system.events
-            WHERE agent_id = :agent_id
-            GROUP BY event_type ORDER BY cnt DESC
-        """),
-        {"agent_id": agent_id},
-    )
-    event_totals = {row.event_type: row.cnt for row in result}
-
-    # Censor stats
-    result = await session.execute(
-        text("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE active = true) AS active,
-                SUM(COALESCE(activation_count, 0)) AS total_activations,
-                SUM(COALESCE(false_positive_count, 0)) AS total_false_positives
-            FROM heart.censors
-            WHERE agent_id = :agent_id
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE active = true) AS active,
+                   COUNT(*) FILTER (WHERE created_by = 'manual') AS manual_created,
+                   COUNT(*) FILTER (WHERE created_by != 'manual') AS auto_created
+            FROM heart.censors WHERE agent_id = :agent_id
         """),
         {"agent_id": agent_id},
     )
     censor_row = result.one()
+
+    # Censor 7d activations from events (not cumulative counters)
+    result = await session.execute(
+        text("""
+            SELECT COUNT(*) AS cnt FROM nous_system.events
+            WHERE agent_id = :agent_id AND event_type = 'censor_activated'
+              AND created_at >= :since
+        """),
+        {"agent_id": agent_id, "since": seven_days_ago},
+    )
+    total_activations_7d = result.scalar() or 0
+
+    # False positives from events (event type may not exist yet)
+    result = await session.execute(
+        text("""
+            SELECT COUNT(*) AS cnt FROM nous_system.events
+            WHERE agent_id = :agent_id AND event_type = 'censor_false_positive'
+              AND created_at >= :since
+        """),
+        {"agent_id": agent_id, "since": seven_days_ago},
+    )
+    false_positives_7d = result.scalar() or 0
+
+    # Top 5 censors by activation_count
+    result = await session.execute(
+        text("""
+            SELECT id::text, trigger_pattern, activation_count AS activations
+            FROM heart.censors
+            WHERE agent_id = :agent_id AND activation_count > 0
+            ORDER BY activation_count DESC LIMIT 5
+        """),
+        {"agent_id": agent_id},
+    )
+    top_censors = [{"id": row.id, "trigger_pattern": row.trigger_pattern,
+                    "activations": row.activations} for row in result]
+
     censor_stats = {
         "total": censor_row.total,
         "active": censor_row.active,
-        "total_activations": int(censor_row.total_activations or 0),
-        "total_false_positives": int(censor_row.total_false_positives or 0),
+        "auto_created": censor_row.auto_created,
+        "manual_created": censor_row.manual_created,
+        "total_activations_7d": total_activations_7d,
+        "false_positives_7d": false_positives_7d,
+        "top_censors": top_censors,
     }
 
-    # Schedule stats
+    # Schedule base stats
     result = await session.execute(
         text("""
-            SELECT
-                COUNT(*) AS total,
-                COUNT(*) FILTER (WHERE active = true) AS active,
-                SUM(fire_count) AS total_fires
-            FROM heart.schedules
-            WHERE agent_id = :agent_id
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE active = true) AS active
+            FROM heart.schedules WHERE agent_id = :agent_id
         """),
         {"agent_id": agent_id},
     )
     sched_row = result.one()
+
+    # Schedule fires in 7d from events
+    result = await session.execute(
+        text("""
+            SELECT COUNT(*) FROM nous_system.events
+            WHERE agent_id = :agent_id AND event_type = 'schedule_fired'
+              AND created_at >= :since
+        """),
+        {"agent_id": agent_id, "since": seven_days_ago},
+    )
+    fires_7d = result.scalar() or 0
+
+    # Next upcoming fires
+    result = await session.execute(
+        text("""
+            SELECT id::text, task, next_fire_at
+            FROM heart.schedules
+            WHERE agent_id = :agent_id AND active = true AND next_fire_at IS NOT NULL
+            ORDER BY next_fire_at LIMIT 5
+        """),
+        {"agent_id": agent_id},
+    )
+    next_fires = [{"id": row.id, "task": row.task,
+                   "next_fire_at": row.next_fire_at.isoformat()} for row in result]
+
     schedule_stats = {
         "total": sched_row.total,
         "active": sched_row.active,
-        "total_fires": int(sched_row.total_fires or 0),
+        "fires_7d": fires_7d,
+        "next_fires": next_fires,
     }
 
-    # Sleep stats from events
+    # Sleep stats
     result = await session.execute(
         text("""
-            SELECT COUNT(*) AS cnt
+            SELECT COUNT(*) AS total_sleeps, MAX(created_at) AS last_sleep
             FROM nous_system.events
             WHERE agent_id = :agent_id AND event_type = 'sleep_started'
         """),
         {"agent_id": agent_id},
     )
-    sleep_count = result.scalar() or 0
+    sleep_row = result.one()
+    total_sleeps = sleep_row.total_sleeps or 0
+    last_sleep = sleep_row.last_sleep
 
+    # Last sleep_completed event data for facts/procedures/censors
     result = await session.execute(
         text("""
-            SELECT MAX(created_at) AS last_sleep
-            FROM nous_system.events
-            WHERE agent_id = :agent_id AND event_type = 'sleep_started'
+            SELECT data FROM nous_system.events
+            WHERE agent_id = :agent_id AND event_type = 'sleep_completed'
+            ORDER BY created_at DESC LIMIT 1
         """),
         {"agent_id": agent_id},
     )
-    last_sleep = result.scalar()
+    completed_row = result.first()
+    completed_data = (completed_row.data if completed_row else None) or {}
 
     sleep_stats = {
-        "total_sleeps": sleep_count,
-        "last_sleep_at": last_sleep.isoformat() if last_sleep else None,
+        "total_sleeps": total_sleeps,
+        "last_sleep": last_sleep.isoformat() if last_sleep else None,
+        "facts_created": completed_data.get("facts_created", 0),
+        "procedures_created": completed_data.get("procedures_created", 0),
+        "censors_retired": completed_data.get("censors_retired", 0),
     }
 
     return {
-        "timeline": timeline,
-        "event_totals": event_totals,
+        "events": events,
         "censor_stats": censor_stats,
         "schedule_stats": schedule_stats,
         "sleep_stats": sleep_stats,
