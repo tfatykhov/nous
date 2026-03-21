@@ -205,6 +205,24 @@ body {
     color: var(--muted);
 }
 
+/* Section Headers (sub-sections within views) */
+.section-header {
+    margin: 32px 0 16px;
+}
+
+.section-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.02em;
+}
+
+/* F026: Execution Integrity session table */
+.integrity-sessions {
+    margin-top: 16px;
+    overflow-x: auto;
+}
+
 /* Stat Cards */
 .stat-grid {
     display: grid;

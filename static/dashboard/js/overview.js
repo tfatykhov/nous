@@ -58,6 +58,10 @@ Dashboard.registerView('overview', async function(container) {
     html += buildStatCard('Active Schedules', mem.active_conversations || 0, null, 'var(--muted)');
     html += '</div>';
 
+    // F026: Execution Integrity section
+    var ei = data.execution_integrity || {};
+    html += buildIntegritySection(ei);
+
     // Charts
     html += '<div class="chart-grid">';
     html += '<div class="chart-card"><h3>Memory Growth (30 days)</h3><div class="chart-container"><canvas id="chart-growth"></canvas></div></div>';
@@ -270,6 +274,80 @@ function createOutcomesChart(outcomes) {
         }
     });
     Dashboard.trackChart(chart);
+}
+
+function buildIntegritySection(ei) {
+    var enabled = ei.enabled || {};
+    var modes = ei.modes || {};
+    var sessions = ei.sessions || {};
+    var pending = ei.pending_corrections || {};
+
+    var sessionIds = Object.keys(sessions);
+    var totalActions = 0;
+    var totalBlocked = 0;
+    sessionIds.forEach(function(sid) {
+        totalActions += sessions[sid].total_actions || 0;
+        totalBlocked += sessions[sid].blocked_actions || 0;
+    });
+    var totalPending = Object.values(pending).reduce(function(sum, n) { return sum + n; }, 0);
+
+    // Mode indicator: green for enforce, yellow for warn, grey for shadow
+    var claimMode = modes.claim_verification || 'off';
+    var gateMode = modes.action_gating || 'off';
+
+    var html = '<div class="section-header"><h2>Execution Integrity</h2></div>';
+    html += '<div class="stat-grid">';
+    html += buildStatCard('Active Sessions', ei.active_ledgers || 0, null, 'var(--muted)');
+    html += buildStatCard('Actions Recorded', totalActions, null, '#60a5fa');
+    html += buildBlockedCard(totalBlocked);
+    html += buildModeCard('Claim Verification', claimMode, !enabled.claim_verification);
+    html += buildModeCard('Action Gating', gateMode, !enabled.action_gating);
+    html += buildStatCard('Pending Corrections', totalPending, null, totalPending > 0 ? '#fbbf24' : 'var(--muted)');
+    html += '</div>';
+
+    // Per-session details (only if sessions exist)
+    if (sessionIds.length > 0) {
+        html += '<div class="integrity-sessions">';
+        html += '<table class="data-table"><thead><tr>';
+        html += '<th>Session</th><th>Turn</th><th>Actions</th><th>Blocked</th><th>Summary</th>';
+        html += '</tr></thead><tbody>';
+        sessionIds.forEach(function(sid) {
+            var s = sessions[sid];
+            var shortId = sid.length > 12 ? sid.slice(0, 12) + '…' : sid;
+            html += '<tr>';
+            html += '<td><code>' + escapeHtml(shortId) + '</code></td>';
+            html += '<td>' + (s.current_turn || 0) + '</td>';
+            html += '<td>' + (s.total_actions || 0) + '</td>';
+            html += '<td>' + (s.blocked_actions > 0 ? '<span style="color:var(--red)">' + s.blocked_actions + '</span>' : '0') + '</td>';
+            html += '<td class="text-muted">' + escapeHtml(s.summary || '-') + '</td>';
+            html += '</tr>';
+        });
+        html += '</tbody></table></div>';
+    }
+
+    return html;
+}
+
+function buildBlockedCard(blocked) {
+    var indicatorCls = blocked === 0 ? 'good' : 'bad';
+    return '<div class="stat-card">' +
+        '<div class="stat-value"><span class="stat-indicator ' + indicatorCls + '"></span>' + blocked + '</div>' +
+        '<div class="stat-label">Blocked Actions</div>' +
+        '</div>';
+}
+
+function buildModeCard(label, mode, disabled) {
+    if (disabled) {
+        return '<div class="stat-card">' +
+            '<div class="stat-value" style="color:var(--muted)">off</div>' +
+            '<div class="stat-label">' + escapeHtml(label) + '</div>' +
+            '</div>';
+    }
+    var color = mode === 'enforce' ? 'var(--green)' : mode === 'warn' ? 'var(--yellow)' : 'var(--muted)';
+    return '<div class="stat-card">' +
+        '<div class="stat-value" style="color:' + color + '">' + escapeHtml(mode) + '</div>' +
+        '<div class="stat-label">' + escapeHtml(label) + '</div>' +
+        '</div>';
 }
 
 function createEdgeTypesChart(edgeRelations) {
