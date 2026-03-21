@@ -39,6 +39,7 @@ class Settings(BaseSettings):
 
     # F025 prep: hybrid search vector weight (keyword_weight = 1 - vector_weight)
     vector_weight: float = 0.7
+    rrf_k: int = 60  # RRF smoothing constant (F025)
 
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
