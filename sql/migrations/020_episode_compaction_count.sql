@@ -6,7 +6,7 @@ ALTER TABLE heart.episodes ADD COLUMN IF NOT EXISTS compaction_count INTEGER NOT
 COMMENT ON COLUMN heart.episodes.compaction_count IS 'Number of conversation compactions during this episode lifetime';
 
 -- 2. Clean up existing compaction pollution edges.
-DELETE FROM brain.memory_edges
+DELETE FROM brain.graph_edges
 WHERE source_type = 'episode'
   AND target_type = 'episode'
   AND source_id IN (
