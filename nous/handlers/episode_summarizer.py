@@ -189,7 +189,7 @@ class EpisodeSummarizer:
             model=self._settings.background_model,
             system_prompt="You are summarizing a conversation episode for an AI agent's long-term memory.",
             user_message=prompt,
-            max_tokens=800,
+            max_tokens=1500,
         )
 
         if not text:

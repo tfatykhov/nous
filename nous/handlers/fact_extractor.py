@@ -209,7 +209,7 @@ class FactExtractor:
             model=self._settings.background_model,
             system_prompt="You are extracting facts from an AI agent's conversation summary.",
             user_message=prompt,
-            max_tokens=500,
+            max_tokens=1000,
         )
 
         if not text:
