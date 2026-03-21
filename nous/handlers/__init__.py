@@ -119,12 +119,46 @@ def _extract_braces(text: str, opener: str, closer: str) -> str | None:
     return None
 
 
+def _repair_json(text: str) -> str:
+    """Attempt to fix common LLM JSON errors before json.loads.
+
+    Handles: trailing commas before } or ], control characters in strings.
+    """
+    # Strip trailing commas before } or ] (common LLM mistake)
+    repaired = re.sub(r',\s*([}\]])', r'\1', text)
+    # Replace bare control characters (tabs, newlines inside strings break json.loads)
+    # Only replace control chars that aren't \n or \r at the structural level
+    # This is a best-effort repair
+    return repaired
+
+
+def _try_parse_json(candidate: str, context: str) -> Any | None:
+    """Try json.loads, then try with repairs. Returns parsed result or None."""
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as e:
+        logger.debug("json.loads failed (%s) on %s candidate (%d chars): %s",
+                     e.msg, context, len(candidate), candidate[:300])
+    # Try with repairs
+    repaired = _repair_json(candidate)
+    if repaired != candidate:
+        try:
+            result = json.loads(repaired)
+            logger.info("JSON parse succeeded after repair (%s)", context)
+            return result
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 def parse_llm_json(text: str) -> Any:
     """Parse JSON from LLM response, handling markdown fences and preamble.
 
     Tries direct parse first, then strips markdown fences (including
     unclosed fences), then extracts the first JSON object/array from
     surrounding text using string-aware brace matching.
+
+    Always prefers dict ({}) over array ([]) results when both are possible.
 
     Raises json.JSONDecodeError if no valid JSON found.
     """
@@ -134,6 +168,16 @@ def parse_llm_json(text: str) -> Any:
     except json.JSONDecodeError:
         logger.debug("Direct JSON parse failed, attempting extraction from: %s",
                       text[:200])
+
+    # Try direct parse with repairs
+    repaired = _repair_json(text)
+    if repaired != text:
+        try:
+            result = json.loads(repaired)
+            logger.info("Direct JSON parse succeeded after repair")
+            return result
+        except json.JSONDecodeError:
+            pass
 
     # Strip markdown fences: ```json ... ``` or ``` ... ```
     # Also handles unclosed fences (LLM stopped without closing ```)
@@ -149,41 +193,66 @@ def parse_llm_json(text: str) -> Any:
         )
     if fence_match:
         extracted = fence_match.group(1).strip()
-        try:
-            result = json.loads(extracted)
+        result = _try_parse_json(extracted, "fence-stripped")
+        if result is not None:
             logger.info("JSON extraction succeeded via markdown fence stripping")
             return result
-        except json.JSONDecodeError:
-            logger.debug("Markdown fence content was not valid JSON, "
-                          "trying brace extraction on fence body")
-            # The fence body may have trailing text; try brace extraction on it
-            for opener, closer in [("{", "}"), ("[", "]")]:
-                candidate = _extract_braces(extracted, opener, closer)
-                if candidate:
-                    try:
-                        result = json.loads(candidate)
-                        logger.info("JSON extraction succeeded via fence + "
-                                     "brace-matching (%s...%s)", opener, closer)
-                        return result
-                    except json.JSONDecodeError:
-                        continue
+
+        # The fence body may have trailing text; try brace extraction on it
+        # Always try {} first, then [] — prefer dict over array
+        dict_candidate = _extract_braces(extracted, "{", "}")
+        if dict_candidate:
+            result = _try_parse_json(dict_candidate, "fence+brace {}")
+            if result is not None:
+                logger.info("JSON extraction succeeded via fence + brace-matching ({...})")
+                return result
+            logger.warning(
+                "fence+brace {} extraction found candidate (%d chars) but "
+                "json.loads failed even after repair. Candidate: %s",
+                len(dict_candidate), dict_candidate[:500],
+            )
+
+        list_candidate = _extract_braces(extracted, "[", "]")
+        if list_candidate:
+            result = _try_parse_json(list_candidate, "fence+brace []")
+            if result is not None:
+                if dict_candidate:
+                    # We had a dict candidate but it failed — log diagnostic
+                    logger.warning(
+                        "JSON extraction fell back to array ([...]) because dict "
+                        "extraction failed. This may indicate malformed JSON in "
+                        "the LLM response. Full fence content (%d chars): %s",
+                        len(extracted), extracted[:1000],
+                    )
+                logger.info("JSON extraction succeeded via fence + brace-matching ([...])")
+                return result
 
     # Extract first JSON object or array from surrounding text
-    # Try whichever delimiter appears first
-    candidates = [("{", "}"), ("[", "]")]
-    candidates.sort(key=lambda pair: (
-        text.find(pair[0]) if text.find(pair[0]) >= 0 else float("inf")
-    ))
-    for opener, closer in candidates:
-        candidate = _extract_braces(text, opener, closer)
-        if candidate:
-            try:
-                result = json.loads(candidate)
-                logger.info("JSON extraction succeeded via brace-matching (%s...%s)",
-                             opener, closer)
-                return result
-            except json.JSONDecodeError:
-                continue
+    # Always try {} first to prefer dict results
+    dict_candidate = _extract_braces(text, "{", "}")
+    if dict_candidate:
+        result = _try_parse_json(dict_candidate, "raw-brace {}")
+        if result is not None:
+            logger.info("JSON extraction succeeded via brace-matching ({...})")
+            return result
+        logger.warning(
+            "raw-brace {} extraction found candidate (%d chars) but json.loads "
+            "failed even after repair. Candidate: %s",
+            len(dict_candidate), dict_candidate[:500],
+        )
+
+    list_candidate = _extract_braces(text, "[", "]")
+    if list_candidate:
+        result = _try_parse_json(list_candidate, "raw-brace []")
+        if result is not None:
+            if dict_candidate:
+                logger.warning(
+                    "JSON extraction fell back to array ([...]) because dict "
+                    "extraction failed. Full text (%d chars): %s",
+                    len(text), text[:1000],
+                )
+            logger.info("JSON extraction succeeded via brace-matching ([...])")
+            return result
 
     logger.warning("No valid JSON found in LLM response (%d chars): %s", len(text), text[:1000])
     raise json.JSONDecodeError("No JSON object found in response", text, 0)

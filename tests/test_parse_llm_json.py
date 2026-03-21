@@ -154,3 +154,36 @@ class TestParseLlmJson:
     def test_invalid_json_raises(self):
         with pytest.raises(json.JSONDecodeError):
             parse_llm_json("{not valid json}")
+
+    # --- Trailing comma repair ---
+
+    def test_trailing_comma_in_object(self):
+        text = '{"a": 1, "b": 2,}'
+        result = parse_llm_json(text)
+        assert result == {"a": 1, "b": 2}
+
+    def test_trailing_comma_in_array(self):
+        text = '["a", "b",]'
+        result = parse_llm_json(text)
+        assert result == ["a", "b"]
+
+    def test_trailing_comma_nested(self):
+        text = '{"items": [1, 2,], "x": 3,}'
+        result = parse_llm_json(text)
+        assert result == {"items": [1, 2], "x": 3}
+
+    def test_trailing_comma_in_fenced_json(self):
+        text = '```json\n{"patterns": ["a", "b",], "summary": "ok",}\n```'
+        result = parse_llm_json(text)
+        assert isinstance(result, dict)
+        assert result["patterns"] == ["a", "b"]
+
+    # --- Dict preferred over array fallback ---
+
+    def test_dict_preferred_when_both_extractable(self):
+        """When fence body has a valid dict, should return dict not sub-array."""
+        text = '```json\n{"patterns": ["p1"], "facts": [{"content": "f1"}]}\n```'
+        result = parse_llm_json(text)
+        assert isinstance(result, dict)
+        assert "patterns" in result
+        assert "facts" in result
