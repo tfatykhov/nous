@@ -265,7 +265,7 @@ class SleepHandler:
                 model=self._settings.background_model,
                 system_prompt="You are an AI agent reflecting on your recent activity.",
                 user_message=prompt,
-                max_tokens=500,
+                max_tokens=1500,
             )
 
             if not text:
