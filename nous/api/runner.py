@@ -105,8 +105,22 @@ class AgentRunner:
             IntentTracker() if settings.claim_verification_enabled else None
         )
         self._action_gate: ActionGate | None = (
-            ActionGate(settings) if settings.action_gating_enabled else None
+            ActionGate(settings, call_gate_model=self._call_gate_model)
+            if settings.action_gating_enabled else None
         )
+
+    async def _call_gate_model(self, prompt: str) -> str:
+        """F026: Call a Haiku-class model for Tier 3 action gating."""
+        if not self._api:
+            return '{"approved": true, "reason": "api-not-initialized"}'
+        resp = await self._call_api(
+            system_prompt="",
+            messages=[{"role": "user", "content": prompt}],
+            tools=None,
+            skip_thinking=True,
+            model_override=self._settings.action_gating_model,
+        )
+        return self._extract_text(resp.content)
 
     def set_dispatcher(self, dispatcher: Any) -> None:
         """Set the tool dispatcher for tool loop execution."""
