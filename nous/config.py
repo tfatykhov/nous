@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     # Anti-hallucination (F016 Phase 0)
     anti_hallucination_prompt: bool = True
 
+    # F025 prep: hybrid search vector weight (keyword_weight = 1 - vector_weight)
+    vector_weight: float = 0.7
+
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
 

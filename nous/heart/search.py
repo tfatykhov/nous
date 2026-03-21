@@ -13,6 +13,18 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
+def _resolve_vector_weight() -> float:
+    """Resolve vector_weight from runtime config > settings > default 0.7."""
+    from nous.config import Settings
+    from nous.runtime_config import RuntimeConfig
+
+    try:
+        settings = Settings()
+    except Exception:
+        return 0.7
+    return RuntimeConfig.get().get_vector_weight(settings)
+
+
 async def hybrid_search(
     session: AsyncSession,
     table: str,
@@ -22,7 +34,7 @@ async def hybrid_search(
     extra_where: str = "",
     extra_params: dict | None = None,
     limit: int = 10,
-    vector_weight: float = 0.7,
+    vector_weight: float | None = None,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table.
 
@@ -30,6 +42,12 @@ async def hybrid_search(
     1. Vector similarity via cosine distance on embedding column
     2. Keyword relevance via ts_rank_cd on search_tsv column
     3. Combined score = vector_weight * vector_score + (1 - vector_weight) * keyword_score
+
+    Weight resolution order:
+    1. Explicit vector_weight param (highest priority)
+    2. Runtime override (set via /admin/search-weights API)
+    3. NOUS_VECTOR_WEIGHT env var / config default
+    4. Fallback: 0.7
 
     Args:
         session: Active SQLAlchemy async session.
@@ -42,10 +60,14 @@ async def hybrid_search(
         extra_params: Additional parameters for extra_where bindings.
         limit: Maximum number of results to return.
         vector_weight: Weight for vector score (keyword weight = 1 - vector_weight).
+            None = resolve from runtime config / settings / default.
 
     Returns:
         List of (id, combined_score) ordered by score DESC.
     """
+    if vector_weight is None:
+        vector_weight = _resolve_vector_weight()
+
     params: dict = {
         "agent_id": agent_id,
         "query_text": query_text,

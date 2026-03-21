@@ -956,8 +956,8 @@ class CognitiveLayer:
         original episode.
 
         R-P1-2: Uses direct cosine similarity via EmbeddingProvider, NOT
-        hybrid_search (which returns 0.7*vector + 0.3*keyword combined scores
-        that max at ~0.79 for perfect vector match — making 0.85 unreachable).
+        hybrid_search (which returns vector*w + keyword*(1-w) combined scores
+        that max at ~0.79 at default weight — making 0.85 unreachable).
 
         R-P1-3: Filters to episodes started within last 48 hours to avoid
         matching ancient episodes about similar topics.
