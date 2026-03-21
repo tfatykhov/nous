@@ -50,6 +50,12 @@ async def create_components(settings: Settings) -> dict:
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
 
+    # Load runtime config overrides from DB (must be after migrations)
+    from nous.runtime_config import RuntimeConfig
+    runtime_cfg = RuntimeConfig.get()
+    async with database.session() as cfg_session:
+        await runtime_cfg.load_from_db(cfg_session)
+
     embedding_provider = None
     if settings.openai_api_key:
         embedding_provider = EmbeddingProvider(

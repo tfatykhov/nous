@@ -806,6 +806,71 @@ def create_app(
         return JSONResponse({"status": "started", "message": "Sleep cycle triggered"})
 
     # ------------------------------------------------------------------
+    # Admin: runtime config endpoints (F025 prep)
+    # ------------------------------------------------------------------
+
+    async def get_search_weights(request: Request) -> JSONResponse:
+        """GET /admin/search-weights — current vector/keyword weight + source."""
+        from nous.runtime_config import RuntimeConfig
+
+        rc = RuntimeConfig.get()
+        vw = rc.get_vector_weight(settings)
+        source = rc.get_vector_weight_source(settings)
+        return JSONResponse({
+            "vector_weight": vw,
+            "keyword_weight": round(1.0 - vw, 4),
+            "source": source,
+        })
+
+    async def set_search_weights(request: Request) -> JSONResponse:
+        """POST /admin/search-weights — update vector weight at runtime."""
+        from nous.runtime_config import RuntimeConfig
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        raw = body.get("vector_weight")
+        if raw is None:
+            return JSONResponse({"error": "Missing required field: vector_weight"}, status_code=400)
+
+        try:
+            vw = float(raw)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "vector_weight must be a number"}, status_code=400)
+
+        if not (0.0 <= vw <= 1.0):
+            return JSONResponse(
+                {"error": "vector_weight must be between 0.0 and 1.0"},
+                status_code=400,
+            )
+
+        rc = RuntimeConfig.get()
+        old_vw = rc.get_vector_weight(settings)
+        old_source = rc.get_vector_weight_source(settings)
+        rc.set_vector_weight(vw)
+
+        # Persist to DB
+        try:
+            async with database.session() as session:
+                await rc.persist_to_db(session, "vector_weight", vw)
+        except Exception as e:
+            logger.error("Failed to persist vector_weight: %s", e)
+            # In-memory override still applies for this process
+
+        logger.info(
+            "vector_weight updated to %.4f (was %.4f, source: %s)",
+            vw, old_vw, old_source,
+        )
+
+        return JSONResponse({
+            "vector_weight": vw,
+            "keyword_weight": round(1.0 - vw, 4),
+            "source": "runtime_override",
+        })
+
+    # ------------------------------------------------------------------
     # F021: Dashboard endpoints (route registration in Task 10)
     # ------------------------------------------------------------------
 
@@ -959,6 +1024,9 @@ def create_app(
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
         Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
+        # Admin API endpoints (F025 prep)
+        Route("/admin/search-weights", get_search_weights),
+        Route("/admin/search-weights", set_search_weights, methods=["POST"]),
         # Dashboard API endpoints (F021) — MUST be before static Mount
         Route("/dashboard/graph", dashboard_graph),
         Route("/dashboard/calibration", dashboard_calibration),

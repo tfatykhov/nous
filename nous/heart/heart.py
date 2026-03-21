@@ -678,10 +678,11 @@ class Heart:
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
 
-        Results carry their original hybrid search scores (0.7*vector +
-        0.3*keyword for episodes/facts/procedures via hybrid_search(),
-        cosine similarity for censors). Since most sub-searches use the
-        same scoring formula, scores are directly comparable.
+        Results carry their original hybrid search scores (configurable
+        vector/keyword weighting via hybrid_search(); default 0.7/0.3,
+        overridable at runtime). Censors use cosine similarity. Since
+        most sub-searches use the same scoring formula, scores are
+        directly comparable.
         """
         if session is None:
             async with self.db.session() as session:
@@ -733,9 +734,9 @@ class Heart:
                 results_list.append(exc)
 
         # Use original search scores instead of RRF positional scores.
-        # Episodes, facts, and procedures use hybrid_search() (0.7*vector
-        # + 0.3*keyword). Censors use cosine similarity. Scores are
-        # comparable enough for meaningful cross-type ranking.
+        # Episodes, facts, and procedures use hybrid_search() (configurable
+        # vector/keyword weight; default 0.7/0.3). Censors use cosine
+        # similarity. Scores are comparable enough for cross-type ranking.
         merged: list[RecallResult] = []
 
         for memory_type, raw_results in zip(keys, results_list):

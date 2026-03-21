@@ -811,7 +811,17 @@ class FactManager:
         category: str | None,
         session: AsyncSession,
     ) -> list[FactSummary]:
-        """Search all facts including inactive (no active filter)."""
+        """Search all facts including inactive (no active filter).
+
+        Uses same weight resolution as hybrid_search() but does NOT
+        call it — intentionally omits the active=true filter so
+        superseded/inactive facts are included.
+        """
+        from nous.heart.search import _resolve_vector_weight
+
+        vw = _resolve_vector_weight()
+        kw = 1.0 - vw
+
         params: dict = {
             "agent_id": self.agent_id,
             "query_text": query,
@@ -826,11 +836,11 @@ class FactManager:
             params["query_embedding"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
             sql = text(f"""
                 SELECT t.id,
-                    (COALESCE(1 - (t.embedding <=> CAST(:query_embedding AS vector)), 0) * 0.7
+                    (COALESCE(1 - (t.embedding <=> CAST(:query_embedding AS vector)), 0) * {vw}
                      + COALESCE(
                          ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
                          / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))),
-                       0) * 0.3
+                       0) * {kw}
                     ) AS combined_score
                 FROM heart.facts t
                 WHERE t.agent_id = :agent_id {filter_extra}
