@@ -1,6 +1,6 @@
 # F026 — Execution Integrity: Ledger, Action Gating, and Claim Verification
 
-> **Status:** Draft v1
+> **Status:** Draft v2 (post-review)
 > **Priority:** P1
 > **Depends on:** F003 (Cognitive Layer)
 > **Required by:** F024 (Critic Agent — parallel execution assumes integrity is guaranteed by F026)
@@ -33,9 +33,14 @@ When the model has a strong internal narrative ("I messed up"), it applies that 
 | **Compaction** | Summarizes discussion, drops execution details. "We talked about an article" survives; "write_file was called at 15:04" doesn't. |
 | **Conversation history** | Plans and actions look identical. "Here's what I'll write..." and "Here's what I wrote..." are both assistant text. |
 
+**4. Ghost Planning (Intent Without Execution)**
+Model produces a detailed plan — "Here's what I'll write to the file..." with full content — then concludes the turn as if the plan IS the execution. No tool call fires, so no gate triggers and no claim verb is used. The user sees detailed work product and assumes it was saved/sent.
+
 ### Root Cause: The Homunculus
 
-A single LLM interprets all context. Every safety measure — censors, memory, guardrails — is ultimately text in the context window that the LLM can ignore. The model's internal narrative can override evidence. This cannot be fully eliminated with a single-LLM architecture, but it can be dramatically reduced by making execution records **authoritative, non-prunable, and framework-generated** rather than model-generated.
+A single LLM interprets all context. Every safety measure — censors, memory, guardrails — is ultimately text in the context window that the LLM can ignore. The model's internal narrative can override evidence. This cannot be fully eliminated with a single-LLM architecture, but it can be dramatically reduced by making execution records **framework-generated, non-prunable, and high-salience** rather than model-generated.
+
+> **Honest framing:** The ledger is an *execution reference*, not absolute ground truth. The LLM can still ignore it (system prompt instructions are high-salience but not physically binding). The goal is to make ignoring the ledger require actively contradicting explicit, structured evidence — which models rarely do.
 
 ---
 
@@ -106,7 +111,7 @@ class ExecutionLedger:
         
         Recent actions listed individually.
         Older actions grouped by type.
-        Total budget: ~200-400 tokens.
+        Total budget: ~300-500 tokens.
         """
         if not self.actions:
             return ""
@@ -135,14 +140,36 @@ class ExecutionLedger:
         
         return "\n".join(lines)
     
-    def _classify_side_effect(self, tool_name: str) -> str:
+    def _classify_side_effect(self, tool_name: str, tool_input: dict | None = None) -> str:
         if tool_name in IRREVERSIBLE_TOOLS:
             return "irreversible"
         if tool_name in EXTERNAL_TOOLS:
             return "external"
         if tool_name in WRITE_TOOLS:
             return "write"
+        if tool_name == "bash" and tool_input:
+            return self._classify_bash(tool_input.get("command", ""))
         return "none"
+    
+    def _classify_bash(self, command: str) -> str:
+        """Dynamic bash classification based on command content."""
+        cmd_start = command.strip().split()[0] if command.strip() else ""
+        READ_COMMANDS = {"ls", "cat", "grep", "find", "head", "tail", "wc",
+                         "echo", "pwd", "env", "which", "file", "stat", "du", "df"}
+        # git subcommands that are read-only
+        if cmd_start == "git":
+            git_sub = command.strip().split()[1] if len(command.strip().split()) > 1 else ""
+            if git_sub in {"log", "status", "diff", "show", "branch", "remote", "tag"}:
+                return "none"
+            if git_sub in {"push"}:
+                return "external"
+            return "write"  # commit, checkout, merge, etc.
+        if cmd_start in READ_COMMANDS:
+            return "none"
+        # curl/wget to external services = external
+        if cmd_start in {"curl", "wget"}:
+            return "external"
+        return "write"  # conservative default
     
     def _summarize_args(self, tool_name: str, args: dict) -> dict[str, str]:
         """Extract only the key identifying args, not full content."""
@@ -155,6 +182,7 @@ class ExecutionLedger:
             "record_decision": ["description"],
             "recall_deep": ["query"],
             "web_search": ["query"],
+            "web_fetch": ["url"],
         }
         keys = KEY_ARGS.get(tool_name, list(args.keys())[:2])
         return {k: str(args.get(k, ""))[:80] for k in keys if k in args}
@@ -172,8 +200,12 @@ READ_TOOLS = {
 # Local writes — reversible
 WRITE_TOOLS = {
     "write_file", "learn_fact", "record_decision", "create_censor",
-    "store_identity", "bash",  # Some bash is read-only, but can't tell statically
+    "store_identity",
 }
+
+# Bash requires dynamic classification (see _classify_bash below)
+# Read-only bash (ls, cat, grep, git log) → READ_TOOLS
+# Write bash (rm, mv, git push, pip install) → WRITE_TOOLS or EXTERNAL_TOOLS
 
 # External side effects — leaves the system
 EXTERNAL_TOOLS = {
@@ -225,7 +257,7 @@ def build_system_prompt(self, ..., ledger: ExecutionLedger) -> str:
 - **Append-only:** Framework writes, model cannot modify
 - **Non-prunable:** Lives in system prompt, not conversation history
 - **Non-compactable:** Compaction operates on conversation messages, not system prompt sections
-- **Compact:** ~200-400 tokens via grouping old actions and listing recent ones
+- **Compact:** ~300-500 tokens via grouping old actions and listing recent ones
 - **Session-scoped:** Resets on `/new` (fresh session = fresh ledger)
 
 ---
@@ -366,10 +398,21 @@ Respond with JSON:
         return GateResult.from_json(response)
     
     def _args_similar(self, prior_args: dict, new_args: dict) -> bool:
-        """Check if two sets of tool args are effectively the same action."""
-        # Same file path, same email recipient, same query, etc.
+        """Check if two sets of tool args are effectively the same action.
+        
+        Uses normalized comparison to catch path variations (/tmp/foo vs ./tmp/foo),
+        whitespace differences, and case-insensitive email matching.
+        """
         for key in prior_args:
-            if key in new_args and prior_args[key] == str(new_args.get(key, ""))[:80]:
+            if key not in new_args:
+                continue
+            prior_val = prior_args[key].strip().lower()
+            new_val = str(new_args.get(key, ""))[:80].strip().lower()
+            # Normalize paths
+            if key in ("path", "file", "command"):
+                prior_val = prior_val.rstrip("/").replace("./", "")
+                new_val = new_val.rstrip("/").replace("./", "")
+            if prior_val == new_val:
                 return True
         return False
 
@@ -385,7 +428,7 @@ class GateResult:
 
 The full gate (Tier 3) uses a **Haiku-class model**. Rationale:
 - The gate is a classification task, not generation
-- Latency must be <1 second (Haiku: ~300-500ms)
+- Latency target: 1-2 seconds (Haiku: ~500ms-1.5s including network)
 - Cost must be negligible (~$0.001 per gate check)
 - The check is simple: "does this action match the user's request?"
 
@@ -589,7 +632,7 @@ This gives the summarizer a ground truth anchor even if the conversation message
 ## Phased Implementation
 
 ### Phase 1: Execution Ledger (standalone value)
-**Effort:** ~4-6 hours
+**Effort:** ~8-12 hours
 **Risk:** Low — purely additive, no existing behavior changes
 
 - Implement `ExecutionLedger` class
@@ -601,11 +644,11 @@ This gives the summarizer a ground truth anchor even if the conversation message
 **Success criteria:**
 - Ledger appears in system prompt for every turn
 - All tool calls are recorded with correct classification
-- System prompt budget stays under 500 tokens for ledger section
+- System prompt budget stays under 500 tokens for ledger section (300-500 typical)
 - Model can reference ledger when asked "what did you do?"
 
-### Phase 2: Claim Verification (catches fabrication)
-**Effort:** ~4-6 hours
+### Phase 2: Claim Verification + Intent Tracking (catches fabrication)
+**Effort:** ~12-16 hours
 **Risk:** Low-Medium — may produce false positives on edge cases
 **Depends on:** Phase 1 (needs ledger to check against)
 
@@ -620,7 +663,7 @@ This gives the summarizer a ground truth anchor even if the conversation message
 - Re-run produces correct execution > 90% of the time
 
 ### Phase 3: Action Gating (prevents bad actions)
-**Effort:** ~6-10 hours
+**Effort:** ~15-20 hours
 **Risk:** Medium — LLM gate adds latency and cost for external actions
 **Depends on:** Phase 1 (needs ledger for duplicate detection)
 
@@ -632,7 +675,7 @@ This gives the summarizer a ground truth anchor even if the conversation message
 
 **Success criteria:**
 - Catches duplicate actions (the replay loop from #179)
-- LLM gate latency < 1 second (Haiku)
+- LLM gate latency < 2 seconds (Haiku)
 - Gate correctly blocks obviously wrong actions > 95% of the time
 - Gate does not block legitimate actions > 95% of the time
 - Total cost of gating < 5% of session cost
@@ -646,7 +689,7 @@ This gives the summarizer a ground truth anchor even if the conversation message
 
 # F026: Execution Integrity
 execution_ledger_enabled: bool = True
-execution_ledger_max_tokens: int = 400
+execution_ledger_max_tokens: int = 500
 
 claim_verification_enabled: bool = True
 claim_verification_mode: str = "enforce"  # "shadow" | "warn" | "enforce"
@@ -668,7 +711,8 @@ Environment variables: `NOUS_EXECUTION_LEDGER_ENABLED`, `NOUS_CLAIM_VERIFICATION
 | Execution Ledger | None | 0 | $0 | Pure bookkeeping |
 | Claim Verification | None (regex) | 1 | $0 | Pattern matching only |
 | Action Gate (local) | None (rules) | 0-5 | $0 | Duplicate detection |
-| Action Gate (external) | Haiku | 0-1 | ~$0.001 | Only for email, notify, etc. |
+| Action Gate (external) | Haiku | 0-1 | ~$0.001 | Only for email, notify, etc. ~1-2s latency |
+| Intent Tracker | None (regex) | 0-1 | $0 | Only on zero-tool turns |
 
 **Total overhead per turn:** Effectively $0 for most turns. ~$0.001 for turns with external actions. Negligible compared to the primary Sonnet/Opus call.
 
@@ -704,6 +748,132 @@ F024's parallel execution makes confabulation WORSE (3 agents that can all fabri
 
 ---
 
+## Intent Tracking (Ghost Planning Detection)
+
+The ghost planning pattern (#182's original trigger) bypasses both the action gate (no tool call) and claim verifier (no action verb). The model produces detailed work product in its response text without ever calling a tool.
+
+### Detection Heuristic
+
+After each assistant turn with **zero tool calls**, scan for signals of intended-but-unexecuted work:
+
+```python
+class IntentTracker:
+    """Detect turns where the model produces work product without executing."""
+    
+    WORK_PRODUCT_SIGNALS = [
+        r"```[\w]*\n.{200,}```",           # Large code blocks (>200 chars)
+        r"(?:here'?s|below is) (?:the|a|my) (?:draft|plan|outline|report|email|message)",
+        r"(?:I'?ll|let me|going to) (?:write|create|save|send|push)",
+        r"[Ss]aved? to[:\s]+[/\w.-]+",     # Path-like after "saved to"
+    ]
+    
+    def check_ghost_planning(
+        self,
+        response: str,
+        tool_calls_this_turn: list[str],
+        ledger: ExecutionLedger,
+    ) -> bool:
+        """Returns True if the turn looks like ghost planning."""
+        if tool_calls_this_turn:
+            return False  # Tools were called, not ghost planning
+        
+        # Check for work product signals
+        signals_found = sum(
+            1 for pattern in self.WORK_PRODUCT_SIGNALS
+            if re.search(pattern, response, re.DOTALL)
+        )
+        
+        # 2+ signals in a no-tool turn = likely ghost planning
+        if signals_found >= 2:
+            return True
+        
+        return False
+    
+    def build_nudge(self) -> str:
+        """Injected into context when ghost planning detected."""
+        return (
+            "[IntentTracker] Your response contains detailed work product "
+            "but no tool calls were made this turn. If you intended to "
+            "save, send, or execute something, please use the appropriate "
+            "tool. The execution ledger shows no actions recorded."
+        )
+```
+
+**Behavior:** When ghost planning is detected, inject the nudge as a system message and allow the model to self-correct on the next turn. Do NOT block the response - the model may legitimately be drafting for user review.
+
+**Phase:** Ships with Phase 2 (alongside claim verification). Same risk profile.
+
+---
+
+## Interaction with A-MAC (F023)
+
+### Problem: Blocked Actions → False Memory
+
+If the action gate blocks a tool call (e.g., blocks `send_email`), the model might immediately call `learn_fact("I sent email to Tim about the report")`. This fact passes A-MAC's admission control (it's a plausible, grounded statement from the model's perspective) and persists as false memory.
+
+### Mitigation
+
+When the action gate blocks a tool call, set a **session-scoped flag** that marks the current turn as containing a blocked action:
+
+```python
+class ExecutionLedger:
+    # ... existing code ...
+    
+    @property
+    def has_blocked_actions_this_turn(self) -> bool:
+        """True if any action was blocked in the current turn."""
+        return any(
+            a.turn == self._current_turn and a.status == "blocked"
+            for a in self.actions
+        )
+```
+
+**A-MAC integration:** When `has_blocked_actions_this_turn` is True, A-MAC should apply heightened scrutiny to any `learn_fact` calls in the same turn:
+- Cross-reference the fact's subject/content against blocked actions
+- If the fact describes a blocked action as completed, reject it
+- Log as `admission_reason: "blocked_action_conflict"`
+
+This requires a small addition to A-MAC's scoring pipeline (one extra check, not a redesign).
+
+---
+
+## Interaction with F020 (Tool Output Intelligence) and F022 (Graph Recall)
+
+### F020: Cache Hits vs Real Calls
+
+F020's `ReversibleCache` serves cached tool results for repeated queries (e.g., `web_search` with same query). The ledger must distinguish:
+- **Real tool call:** Dispatched to the tool, result returned → recorded as normal
+- **Cache hit:** Served from F020 cache, no real dispatch → recorded with `source="cache"` flag
+
+Why it matters: A cache hit for `web_search("latest AI news")` is not the same as actually searching. If the model claims "I just searched for the latest news," the claim verifier should accept cache hits as valid (the information WAS retrieved), but the action gate's duplicate detection should NOT count cache hits as "already done" (the underlying data may be stale).
+
+```python
+@dataclass
+class ExecutedAction:
+    # ... existing fields ...
+    source: str = "direct"  # "direct" | "cache" | "blocked"
+```
+
+### F022: Graph Expansion
+
+Graph expansion in `recall_deep` triggers additional queries behind the scenes (spreading activation, neighbor traversal). These are **internal framework operations**, not model-initiated tool calls. They should NOT appear in the ledger - they'd confuse the model and waste tokens. The ledger records only model-initiated actions.
+
+---
+
+## Interaction with Compaction and Tool Pruning
+
+### Tool Pruning (F016)
+Tool pruning removes old tool results from conversation history. With F026, the ledger preserves a compact record of what happened even after pruning removes the full results. This means:
+- Pruning can be **more aggressive** with F026 active (ledger provides backup)
+- Pruned tool results should set a flag: `pruned: true` on the ledger entry (the full result is gone, but the record persists)
+
+### Compaction
+Compaction summarizes conversation turns. The ledger is immune (lives in system prompt). But the compaction summarizer benefits from the ledger:
+- Inject `ledger.one_line_summary()` into the compaction prompt as an anchor
+- Prevents compaction from fabricating action summaries that contradict the ledger
+
+---
+
 ## Hard Constraints
 
 1. **Ledger is append-only.** The model cannot modify, delete, or rewrite ledger entries.
@@ -711,16 +881,18 @@ F024's parallel execution makes confabulation WORSE (3 agents that can all fabri
 3. **Gate must not add perceptible latency for read-only operations.** Only external/irreversible actions hit the LLM gate.
 4. **Shadow mode for everything first.** Log decisions without blocking. Measure false positive rates before enforcing.
 5. **Claim verification does not modify the response.** It either delivers as-is, delivers with a correction queued for next turn, or blocks and re-runs. Never silently edits the assistant's words.
-6. **The ledger is ground truth.** If the ledger and the model disagree about what happened, the ledger wins. Always.
+6. **The ledger is the execution reference.** If the ledger and the model disagree about what happened, the ledger is presumed correct. The model can still ignore system prompt content (this is an LLM limitation, not a design flaw), but structured evidence in the system prompt is rarely overridden in practice.
 
 ---
 
 ## Open Questions
 
 1. **Ledger persistence across restarts.** Currently session-scoped (resets on `/new`). Should it persist to DB for audit purposes? Adds complexity but enables post-hoc analysis.
-2. **Claim verification sophistication.** Regex catches obvious patterns ("I saved", "email sent") but misses subtle claims ("the report is ready" without a write_file). LLM-based claim extraction would be more accurate but adds cost. Start with regex, upgrade if false negative rate is high.
+2. **Claim verification sophistication.** Regex catches explicit action verbs ("I saved", "email sent") but misses indirect claims ("the report is ready", "all set - check your inbox", "Done!"). Estimated coverage of regex-only: 40-60% of confabulation patterns. **Phase 2 roadmap:** start with regex + intent tracking, measure false negative rate in shadow mode, then add LLM-based semantic claim detection if >30% of confabulations slip through. Semantic detection adds ~$0.001/turn (Haiku) but catches the indirect patterns.
 3. **Gate bypass for autonomous mode.** If Nous is running autonomously (cron, sleep cycle), should the gate be stricter (block more) or looser (allow more, since no human is watching)? Argument for stricter: no human to catch mistakes. Argument for looser: autonomous tasks are pre-approved.
-4. **Multi-session ledger.** If Nous sends an email in session A, then session B asks "did I send that email?" — the ledger is session-scoped and won't know. Cross-session execution history requires DB persistence.
+4. **Frame-aware gating.** Bash in a task-frame ("implement feature X" → runs git, writes files) is normal. Bash in a conversation-frame ("tell me about...") is suspicious. The action gate should consider the active frame when deciding whether to gate. This requires F014 (Frame Reasoning) to be active.
+5. **Multi-turn distributed claims.** Model plans in turn 1, claims completion in turn 3 without executing in between. The claim verifier checks the current turn's tool calls and recent ledger, but a 2-turn gap may fall outside the "recent" window. Need to track open intents across turns.
+6. **Multi-session ledger.** If Nous sends an email in session A, then session B asks "did I send that email?" — the ledger is session-scoped and won't know. Cross-session execution history requires DB persistence.
 
 ---
 
@@ -731,7 +903,9 @@ Even with all three layers, the LLM can still:
 - Generate novel claim patterns that regex doesn't catch
 - Perform correct actions for wrong reasons (gate can't check intent, only alignment)
 
-This spec reduces confabulation risk by ~80-90%, not 100%. The remaining risk requires the architectural change proposed in F024 — multiple agents checking each other. F026 is the foundation that makes F024 safe to build.
+**Coverage estimate (honest):** Phase 1 alone (ledger) addresses the retroactive amnesia and narrative override patterns but not fabrication or ghost planning. Phase 2 adds syntactic claim detection, which catches explicit action verbs ("I saved", "email sent") but misses indirect phrasing ("the report is ready", "all set") - estimated 40-60% of confabulation uses indirect forms. Phase 3 catches duplicate actions and gates irreversible ones. Combined, the three phases likely cover 50-70% of observed confabulation patterns, not 80-90%. Reaching higher coverage requires semantic claim detection (LLM-based, future work) and the multi-agent architecture in F024.
+
+F026 is the foundation that makes F024 safe to build.
 
 ---
 
