@@ -48,12 +48,18 @@ const Dashboard = {
             name = 'overview';
         }
 
-        // Destroy charts from previous view
-        if (this.currentView && this.charts[this.currentView]) {
-            this.charts[this.currentView].forEach(c => {
-                try { c.destroy(); } catch (e) { /* ignore */ }
-            });
-            this.charts[this.currentView] = [];
+        // Destroy charts and reset loaded state for previous view
+        // so it re-fetches data when revisited
+        if (this.currentView && this.currentView !== name) {
+            if (this.charts[this.currentView]) {
+                this.charts[this.currentView].forEach(c => {
+                    try { c.destroy(); } catch (e) { /* ignore */ }
+                });
+                this.charts[this.currentView] = [];
+            }
+            if (this.views[this.currentView]) {
+                this.views[this.currentView].loaded = false;
+            }
         }
 
         // Stop D3 simulation if leaving graph view
