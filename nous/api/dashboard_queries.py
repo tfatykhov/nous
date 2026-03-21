@@ -736,8 +736,8 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
     density_history = [
         {
             "date": row.day.isoformat(),
-            "density": round(float(row.cum_edges) / float(row.cum_nodes), 2)
-            if row.cum_nodes > 0 else 0.0,
+            "density": round(int(row.cum_edges) / int(row.cum_nodes), 2)
+            if row.cum_nodes and int(row.cum_nodes) > 0 else 0.0,
         }
         for row in result
     ]
@@ -806,7 +806,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
     )
     orphan_trend = [
-        {"date": row.day.isoformat(), "count": row.orphan_count}
+        {"date": row.day.isoformat(), "count": int(row.orphan_count)}
         for row in result
     ]
 
