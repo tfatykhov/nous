@@ -20,10 +20,9 @@ Dashboard.registerView('health', async function(container) {
         return;
     }
 
-    // Check empty
-    var hasData = (data.density_history && data.density_history.length > 0) ||
-                  (data.daily_edges && data.daily_edges.length > 0) ||
-                  (data.degree_distribution && data.degree_distribution.length > 0);
+    // Check empty — total_edges is the authoritative signal since
+    // generate_series arrays are always 31 items even with no data
+    var hasData = (data.total_edges || 0) > 0;
 
     if (!hasData) {
         Dashboard.showEmpty(container, 'No graph data yet. Graph edges are created as Nous links facts, episodes, and decisions.');

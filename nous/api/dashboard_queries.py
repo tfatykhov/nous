@@ -278,10 +278,10 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
     )
     calibration_curve = [
         {
-            "bin": float(row.bin),
+            "bucket": f"{float(row.bin):.1f}",
+            "actual_success_rate": row.successes / row.total if row.total > 0 else 0.0,
             "total": row.total,
             "successes": row.successes,
-            "accuracy": row.successes / row.total if row.total > 0 else 0.0,
             "avg_confidence": float(row.avg_confidence) if row.avg_confidence else 0.0,
         }
         for row in result
@@ -300,7 +300,8 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
         {"agent_id": agent_id},
     )
     confidence_histogram = [
-        {"bin": float(row.bin), "count": row.cnt} for row in result
+        {"range": f"{float(row.bin):.1f}-{float(row.bin) + 0.1:.1f}", "count": row.cnt}
+        for row in result
     ]
 
     # Outcome by category
@@ -345,16 +346,15 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
         """),
         {"agent_id": agent_id},
     )
-    reason_stats = [
-        {
-            "type": row.type,
+    reason_stats = {
+        row.type: {
             "count": row.cnt,
+            "success_rate": row.successes / row.reviewed if row.reviewed > 0 else 0.0,
             "successes": row.successes,
             "reviewed": row.reviewed,
-            "success_rate": row.successes / row.reviewed if row.reviewed > 0 else None,
         }
         for row in result
-    ]
+    }
 
     # Brier history from calibration_snapshots
     result = await session.execute(
@@ -371,7 +371,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
         {
             "brier_score": row.brier_score,
             "accuracy": row.accuracy,
-            "snapshot_at": row.snapshot_at.isoformat() if row.snapshot_at else None,
+            "date": row.snapshot_at.isoformat() if row.snapshot_at else None,
         }
         for row in result
     ]
@@ -382,7 +382,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
     result = await session.execute(
         text("""
             SELECT CAST(d AS date) AS day,
-                   COUNT(t.created_at) AS total,
+                   COUNT(t.created_at) AS cnt,
                    COUNT(t.created_at) FILTER (WHERE t.outcome = 'success') AS successes,
                    COUNT(t.created_at) FILTER (WHERE t.outcome IS NOT NULL AND t.outcome != 'pending') AS reviewed
             FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
@@ -395,7 +395,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
     daily_decisions = [
         {
             "date": row.day.isoformat(),
-            "total": row.total,
+            "count": row.cnt,
             "successes": row.successes,
             "reviewed": row.reviewed,
         }
@@ -407,7 +407,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
         "confidence_histogram": confidence_histogram,
         "outcome_by_category": outcome_by_category,
         "outcome_by_stakes": outcome_by_stakes,
-        "reason_stats": reason_stats,
+        "reason_type_stats": reason_stats,
         "brier_history": brier_history,
         "daily_decisions": daily_decisions,
     }
@@ -586,10 +586,13 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
     now = datetime.now(timezone.utc)
     thirty_days_ago = now - timedelta(days=30)
 
-    # Daily edge creation (last 30 days)
+    # Daily edge creation with auto/manual split (last 30 days)
     result = await session.execute(
         text("""
-            SELECT CAST(d AS date) AS day, COUNT(e.created_at) AS cnt
+            SELECT CAST(d AS date) AS day,
+                   COUNT(e.created_at) AS cnt,
+                   COUNT(e.created_at) FILTER (WHERE e.auto_linked = true) AS auto_cnt,
+                   COUNT(e.created_at) FILTER (WHERE e.auto_linked = false OR e.auto_linked IS NULL) AS manual_cnt
             FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
             LEFT JOIN brain.graph_edges e
                 ON CAST(e.created_at AS date) = CAST(d AS date) AND e.agent_id = :agent_id
@@ -598,7 +601,13 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
     )
     daily_edges = [
-        {"date": row.day.isoformat(), "count": row.cnt} for row in result
+        {
+            "date": row.day.isoformat(),
+            "count": row.cnt,
+            "auto": row.auto_cnt,
+            "manual": row.manual_cnt,
+        }
+        for row in result
     ]
 
     # Degree distribution (how many nodes have degree 1, 2, 3, ...)
@@ -667,11 +676,147 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
     )
     totals = result.one()
 
+    # Density history: daily cumulative density using window functions
+    # Aggregates daily new edges/nodes, then running sum → density per day
+    result = await session.execute(
+        text("""
+            WITH daily AS (
+                SELECT CAST(d AS date) AS day
+                FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
+            ),
+            daily_new_edges AS (
+                SELECT CAST(created_at AS date) AS day, COUNT(*) AS cnt
+                FROM brain.graph_edges
+                WHERE agent_id = :agent_id AND created_at >= :since
+                GROUP BY CAST(created_at AS date)
+            ),
+            daily_new_nodes AS (
+                SELECT day, COUNT(DISTINCT node_id) AS cnt
+                FROM (
+                    SELECT CAST(created_at AS date) AS day, source_id AS node_id
+                    FROM brain.graph_edges
+                    WHERE agent_id = :agent_id
+                    UNION
+                    SELECT CAST(created_at AS date) AS day, target_id AS node_id
+                    FROM brain.graph_edges
+                    WHERE agent_id = :agent_id
+                ) first_seen
+                GROUP BY day
+            ),
+            pre_period AS (
+                SELECT
+                    COUNT(*) AS edge_base,
+                    COUNT(DISTINCT node_id) AS node_base
+                FROM (
+                    SELECT id, source_id AS node_id FROM brain.graph_edges
+                    WHERE agent_id = :agent_id AND created_at < :since
+                    UNION ALL
+                    SELECT id, target_id AS node_id FROM brain.graph_edges
+                    WHERE agent_id = :agent_id AND created_at < :since
+                ) pre
+            ),
+            joined AS (
+                SELECT d.day,
+                       COALESCE(e.cnt, 0) AS new_edges,
+                       COALESCE(n.cnt, 0) AS new_nodes
+                FROM daily d
+                LEFT JOIN daily_new_edges e ON e.day = d.day
+                LEFT JOIN daily_new_nodes n ON n.day = d.day
+            )
+            SELECT j.day,
+                   (SELECT edge_base FROM pre_period)
+                       + SUM(j.new_edges) OVER (ORDER BY j.day) AS cum_edges,
+                   (SELECT node_base FROM pre_period)
+                       + SUM(j.new_nodes) OVER (ORDER BY j.day) AS cum_nodes
+            FROM joined j
+            ORDER BY j.day
+        """),
+        {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
+    )
+    density_history = [
+        {
+            "date": row.day.isoformat(),
+            "density": round(float(row.cum_edges) / float(row.cum_nodes), 2)
+            if row.cum_nodes > 0 else 0.0,
+        }
+        for row in result
+    ]
+
+    # Orphan trend: daily orphan count using window functions
+    # Count new total nodes and new connected nodes per day, running sum, diff
+    result = await session.execute(
+        text("""
+            WITH daily AS (
+                SELECT CAST(d AS date) AS day
+                FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
+            ),
+            all_nodes AS (
+                SELECT id, created_at FROM brain.decisions WHERE agent_id = :agent_id
+                UNION ALL
+                SELECT id, created_at FROM heart.facts WHERE agent_id = :agent_id AND active = true
+                UNION ALL
+                SELECT id, created_at FROM heart.episodes WHERE agent_id = :agent_id
+                UNION ALL
+                SELECT id, created_at FROM heart.procedures WHERE agent_id = :agent_id AND active = true
+            ),
+            daily_new_total AS (
+                SELECT CAST(created_at AS date) AS day, COUNT(*) AS cnt
+                FROM all_nodes
+                GROUP BY CAST(created_at AS date)
+            ),
+            daily_new_connected AS (
+                SELECT day, COUNT(DISTINCT node_id) AS cnt
+                FROM (
+                    SELECT CAST(created_at AS date) AS day, source_id AS node_id
+                    FROM brain.graph_edges WHERE agent_id = :agent_id
+                    UNION
+                    SELECT CAST(created_at AS date) AS day, target_id AS node_id
+                    FROM brain.graph_edges WHERE agent_id = :agent_id
+                ) first_seen
+                GROUP BY day
+            ),
+            pre_period AS (
+                SELECT
+                    (SELECT COUNT(*) FROM all_nodes WHERE created_at < :since) AS total_base,
+                    (SELECT COUNT(DISTINCT node_id) FROM (
+                        SELECT source_id AS node_id FROM brain.graph_edges
+                        WHERE agent_id = :agent_id AND created_at < :since
+                        UNION
+                        SELECT target_id AS node_id FROM brain.graph_edges
+                        WHERE agent_id = :agent_id AND created_at < :since
+                    ) n) AS connected_base
+            ),
+            joined AS (
+                SELECT d.day,
+                       COALESCE(t.cnt, 0) AS new_total,
+                       COALESCE(c.cnt, 0) AS new_connected
+                FROM daily d
+                LEFT JOIN daily_new_total t ON t.day = d.day
+                LEFT JOIN daily_new_connected c ON c.day = d.day
+            )
+            SELECT j.day,
+                   GREATEST(
+                       ((SELECT total_base FROM pre_period) + SUM(j.new_total) OVER (ORDER BY j.day))
+                       - ((SELECT connected_base FROM pre_period) + SUM(j.new_connected) OVER (ORDER BY j.day)),
+                       0
+                   ) AS orphan_count
+            FROM joined j
+            ORDER BY j.day
+        """),
+        {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
+    )
+    orphan_trend = [
+        {"date": row.day.isoformat(), "count": row.orphan_count}
+        for row in result
+    ]
+
     return {
         "daily_edges": daily_edges,
         "degree_distribution": degree_distribution,
         "density": density,
+        "density_history": density_history,
         "orphan_counts": orphan_counts,
+        "orphan_trend": orphan_trend,
         "total_orphans": total_orphans,
         "total_edges": totals.total_edges,
         "connected_nodes": totals.connected_nodes,
