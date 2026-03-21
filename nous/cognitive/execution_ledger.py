@@ -247,38 +247,8 @@ class ExecutionLedger:
         return "write"
 
     def _classify_bash(self, command: str) -> str:
-        """Classify a bash command as 'none' | 'write' | 'external'.
-
-        Only the first command token is inspected; pipes and chains are
-        approximate — the conservative default is 'write'.
-        """
-        if not command:
-            return "write"
-
-        # Strip leading environment assignments (FOO=bar cmd ...)
-        tokens = command.strip().split()
-        first = ""
-        for tok in tokens:
-            if "=" not in tok:
-                first = tok.lstrip("(").lower()
-                break
-
-        if first in _READ_COMMANDS:
-            return "none"
-
-        if first == "git":
-            # Find the git sub-command
-            sub = tokens[tokens.index("git") + 1] if "git" in tokens else ""
-            if sub in ("log", "status", "diff", "show", "branch", "tag", "remote", "ls-files"):
-                return "none"
-            if sub in ("push", "push-upstream"):
-                return "external"
-            return "write"
-
-        if first in ("curl", "wget", "http", "httpie"):
-            return "external"
-
-        return "write"
+        """Classify a bash command. Delegates to module-level function."""
+        return _classify_bash_command(command)
 
     def _summarize_args(
         self,
@@ -310,7 +280,6 @@ class ExecutionLedger:
 
 def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = None) -> str:
     """Module-level classifier for use by ActionGate and other modules."""
-    # Delegate to a temporary ledger instance for the classification logic
     if tool_name in IRREVERSIBLE_TOOLS:
         return "irreversible"
     if tool_name in EXTERNAL_TOOLS:
@@ -320,28 +289,41 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
     if tool_name in WRITE_TOOLS:
         return "write"
     if tool_name == "bash":
-        command = _extract_bash_command(tool_input or {})
-        # Inline bash classification to avoid creating a ledger instance
-        if not command:
-            return "write"
-        tokens = command.strip().split()
-        first = ""
-        for tok in tokens:
-            if "=" not in tok:
-                first = tok.lstrip("(").lower()
-                break
-        if first in _READ_COMMANDS:
+        return _classify_bash_command(_extract_bash_command(tool_input or {}))
+    return "write"
+
+
+def _classify_bash_command(command: str) -> str:
+    """Classify a bash command as 'none' | 'write' | 'external'.
+
+    Only the first command token is inspected; pipes and chains are
+    approximate — the conservative default is 'write'.
+    """
+    if not command:
+        return "write"
+
+    # Strip leading environment assignments (FOO=bar cmd ...)
+    tokens = command.strip().split()
+    first = ""
+    for tok in tokens:
+        if "=" not in tok:
+            first = tok.lstrip("(").lower()
+            break
+
+    if first in _READ_COMMANDS:
+        return "none"
+
+    if first == "git":
+        sub = tokens[tokens.index("git") + 1] if "git" in tokens else ""
+        if sub in ("log", "status", "diff", "show", "branch", "tag", "remote", "ls-files"):
             return "none"
-        if first == "git":
-            sub = tokens[tokens.index("git") + 1] if "git" in tokens else ""
-            if sub in ("log", "status", "diff", "show", "branch", "tag", "remote", "ls-files"):
-                return "none"
-            if sub in ("push", "push-upstream"):
-                return "external"
-            return "write"
-        if first in ("curl", "wget", "http", "httpie"):
+        if sub in ("push", "push-upstream"):
             return "external"
         return "write"
+
+    if first in ("curl", "wget", "http", "httpie"):
+        return "external"
+
     return "write"
 
 

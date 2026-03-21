@@ -58,6 +58,7 @@ def _make_settings(**kwargs) -> types.SimpleNamespace:
         "action_gating_mode": "enforce",
         "action_gating_model": "claude-haiku-4-5-20251001",
         "action_gating_enabled": True,
+        "action_gating_external_only": False,
     }
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)

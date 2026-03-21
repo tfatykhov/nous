@@ -105,6 +105,8 @@ class ActionGate:
 
             if side_effect == "write":
                 # Tier 2: local write — duplicate check
+                if self._settings.action_gating_external_only:
+                    return GateResult(approved=True, reason="external-only-mode")
                 return self._consistency_check(tool_name, tool_input, ledger)
 
             if side_effect in ("external", "irreversible"):
@@ -207,7 +209,7 @@ class ActionGate:
         ``./`` is stripped so ``./foo.py`` and ``foo.py`` are treated as
         identical.
         """
-        PATH_KEYS = {"path", "file", "command"}
+        PATH_KEYS = {"path", "file"}
 
         for key in prior_args:
             if key not in new_args:
@@ -217,8 +219,8 @@ class ActionGate:
             new_val = new_args[key].strip().lower()
 
             if key in PATH_KEYS:
-                prior_val = prior_val.rstrip("/").replace("./", "")
-                new_val = new_val.rstrip("/").replace("./", "")
+                prior_val = prior_val.rstrip("/").removeprefix("./")
+                new_val = new_val.rstrip("/").removeprefix("./")
 
             if prior_val == new_val:
                 return True

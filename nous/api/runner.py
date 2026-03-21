@@ -1275,7 +1275,12 @@ Rules:
         tool_results: list[ToolResult],
         ledger: ExecutionLedger,
     ) -> None:
-        """F026: Post-response claim verification and ghost planning detection."""
+        """F026: Post-response claim verification and ghost planning detection.
+
+        Note: Spec says block-and-rerun for external claims, but streaming
+        can't unsend yielded text. Both paths use inject-correction-for-next-turn.
+        Accepted limitation from plan review.
+        """
         turn_tool_names = [tr.tool_name for tr in tool_results]
 
         # Claim verification
