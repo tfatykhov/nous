@@ -144,27 +144,43 @@ class FactExtractor:
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))
 
-    async def _store_candidate_facts(self, candidates: list[str], episode_id: str) -> None:
-        """008.4: Store pre-extracted candidate facts directly, with dedup."""
+    async def _store_candidate_facts(self, candidates: list[str | dict], episode_id: str) -> None:
+        """008.4: Store pre-extracted candidate facts directly, with dedup.
+
+        Accepts both structured dicts (with subject/category/content) and
+        plain strings for backward compatibility.
+        """
         stored = 0
-        for fact_text in candidates[:5]:  # Max 5 per episode
-            if not fact_text or not fact_text.strip():
+        for item in candidates[:5]:  # Max 5 per episode
+            # Handle both structured dicts and plain strings
+            if isinstance(item, dict):
+                content = item.get("content", "")
+                subject = item.get("subject")
+                category = item.get("category")
+            else:
+                content = item
+                subject = None
+                category = None
+
+            if not content or not str(content).strip():
                 continue
 
             # Dedup against existing facts
-            existing = await self._heart.search_facts(fact_text, limit=1)
+            existing = await self._heart.search_facts(content, limit=1)
             if existing and existing[0].score is not None and existing[0].score > 0.85:
-                logger.debug("Skipping duplicate candidate fact: %s", fact_text[:50])
+                logger.debug("Skipping duplicate candidate fact: %s", content[:50])
                 continue
 
             fact_input = FactInput(
-                content=fact_text,
+                content=content,
+                subject=subject or "unknown",
+                category=category,
                 source="episode_summarizer",
                 confidence=0.8,  # Default confidence for LLM-extracted candidates
             )
             result = await self._heart.learn(fact_input)
             if isinstance(result, FactRejected):
-                logger.debug("Admission rejected candidate fact: %s", fact_text[:50])
+                logger.debug("Admission rejected candidate fact: %s", content[:50])
                 continue
             stored += 1
 

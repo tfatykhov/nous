@@ -46,9 +46,21 @@ Return ONLY valid JSON (no markdown, no explanation):
   "outcome_rationale": "<1 sentence explaining why this outcome classification>",
   "topics": ["<topic1>", "<topic2>"],
   "candidate_facts": [
-    "<factual statement worth storing as long-term knowledge>"
+    {{
+      "subject": "<who/what the fact is about>",
+      "content": "<factual statement worth storing as long-term knowledge>",
+      "category": "<preference|person|rule|technical|concept|tool>"
+    }}
   ]
 }}
+
+Categories for candidate_facts:
+- "preference" — User preferences (formats, units, style)
+- "person" — People facts (names, roles, relationships)
+- "rule" — ONLY explicit directives from the user
+- "technical" — Architecture, implementation, project-specific knowledge
+- "concept" — General knowledge, research findings, theoretical insights
+- "tool" — Tool/library behavior, gotchas, configuration
 
 Outcome guidelines:
 - resolved: The user's request was fully addressed, task completed, question answered

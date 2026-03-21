@@ -51,8 +51,27 @@ Return ONLY valid JSON:
   "lessons": ["<lesson 1>", "<lesson 2>"],
   "connections": ["<connection 1>"],
   "gaps": ["<gap 1>"],
-  "summary": "<2-3 sentence reflection on the day>"
-}}"""
+  "summary": "<2-3 sentence reflection on the day>",
+  "facts": [
+    {{
+      "subject": "<who/what the fact is about>",
+      "content": "<the fact, stated clearly>",
+      "category": "<preference|person|rule|technical|concept|tool>"
+    }}
+  ]
+}}
+
+Categories for facts:
+- "preference" — User preferences (formats, units, style)
+- "person" — People facts (names, roles, relationships)
+- "rule" — ONLY explicit directives from the user
+- "technical" — Architecture, implementation, project-specific knowledge
+- "concept" — General knowledge, research findings, theoretical insights
+- "tool" — Tool/library behavior, gotchas, configuration
+
+For facts: Extract concrete, reusable knowledge from the reflection. Include the reflection
+summary and any lessons as structured facts with meaningful subjects (not generic labels).
+Max 5 facts."""
 
 _GENERALIZE_PROMPT = """These facts are about the same topic. Create one generalized fact
 that captures the essential knowledge from all of them.
@@ -237,37 +256,60 @@ class SleepHandler:
 
             reflection = parse_llm_json(text)
 
-            # Store reflection summary as a fact
-            if reflection.get("summary"):
-                result = await self._heart.learn(FactInput(
-                    subject="daily_reflection",
-                    content=reflection["summary"],
-                    source="sleep_reflection",
-                    confidence=0.8,
-                    category="concept",
-                ))
-                if isinstance(result, FactRejected):
-                    logger.debug("Admission rejected sleep-reflected fact: %s", reflection["summary"][:50])
-
-            # Store lessons as individual facts
-            for lesson in reflection.get("lessons", [])[:3]:
+            # Store structured facts from LLM (preferred path)
+            structured_facts = reflection.get("facts", [])
+            stored = 0
+            for fact in structured_facts[:5]:
                 if self._interrupted:
                     break
-                result = await self._heart.learn(FactInput(
-                    subject="lesson_learned",
-                    content=lesson,
-                    source="sleep_reflection",
-                    confidence=0.7,
-                    category="rule",
-                ))
-                if isinstance(result, FactRejected):
-                    logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])
-                    continue
+                if isinstance(fact, dict) and fact.get("content"):
+                    result = await self._heart.learn(FactInput(
+                        subject=fact.get("subject", "reflection"),
+                        content=fact["content"],
+                        source="sleep_reflection",
+                        confidence=0.8,
+                        category=fact.get("category", "concept"),
+                    ))
+                    if isinstance(result, FactRejected):
+                        logger.debug("Admission rejected sleep-reflected fact: %s", fact["content"][:50])
+                        continue
+                    stored += 1
+
+            # Fallback: if LLM didn't return structured facts, store summary + lessons
+            if not structured_facts:
+                if reflection.get("summary"):
+                    result = await self._heart.learn(FactInput(
+                        subject="daily_reflection",
+                        content=reflection["summary"],
+                        source="sleep_reflection",
+                        confidence=0.8,
+                        category="concept",
+                    ))
+                    if isinstance(result, FactRejected):
+                        logger.debug("Admission rejected sleep-reflected fact: %s", reflection["summary"][:50])
+                    else:
+                        stored += 1
+
+                for lesson in reflection.get("lessons", [])[:3]:
+                    if self._interrupted:
+                        break
+                    result = await self._heart.learn(FactInput(
+                        subject="lesson_learned",
+                        content=lesson,
+                        source="sleep_reflection",
+                        confidence=0.7,
+                        category="rule",
+                    ))
+                    if isinstance(result, FactRejected):
+                        logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])
+                        continue
+                    stored += 1
 
             logger.info(
-                "Reflection complete: %d patterns, %d lessons",
+                "Reflection complete: %d patterns, %d lessons, %d facts stored",
                 len(reflection.get("patterns", [])),
                 len(reflection.get("lessons", [])),
+                stored,
             )
 
         except (json.JSONDecodeError, Exception):

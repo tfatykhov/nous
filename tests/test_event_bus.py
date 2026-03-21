@@ -447,7 +447,9 @@ class TestEpisodeSummarizer:
             "outcome": "resolved",
             "outcome_rationale": "User's question was fully answered with a concrete decision",
             "topics": ["architecture", "database"],
-            "candidate_facts": ["Project uses PostgreSQL 17 with pgvector for embeddings"],
+            "candidate_facts": [
+                {"subject": "project_database", "content": "Project uses PostgreSQL 17 with pgvector for embeddings", "category": "technical"},
+            ],
         }
         summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
@@ -472,12 +474,13 @@ class TestEpisodeSummarizer:
         heart.update_episode_summary.assert_called_once()
         stored_summary = heart.update_episode_summary.call_args[0][1]
         assert stored_summary["outcome_rationale"] == "User's question was fully answered with a concrete decision"
-        assert stored_summary["candidate_facts"] == ["Project uses PostgreSQL 17 with pgvector for embeddings"]
+        assert stored_summary["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        assert stored_summary["candidate_facts"][0]["category"] == "technical"
 
         # Verify candidate_facts passed through in emitted event
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
-        assert emitted.data["candidate_facts"] == ["Project uses PostgreSQL 17 with pgvector for embeddings"]
+        assert emitted.data["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
 
     @pytest.mark.asyncio
     async def test_build_decision_context_with_decisions(self):
@@ -795,8 +798,8 @@ class TestFactExtractor:
                     "key_points": ["chose PostgreSQL"],
                 },
                 "candidate_facts": [
-                    "Project uses PostgreSQL 17 with pgvector",
-                    "Tim prefers direct architecture decisions",
+                    {"subject": "project_database", "content": "Project uses PostgreSQL 17 with pgvector", "category": "technical"},
+                    {"subject": "Tim", "content": "Tim prefers direct architecture decisions", "category": "preference"},
                 ],
             },
         )
@@ -804,11 +807,16 @@ class TestFactExtractor:
 
         # LLM should NOT be called
         llm_client.call.assert_not_called()
-        # Both facts should be stored
+        # Both facts should be stored with subject/category
         assert heart.learn.call_count == 2
-        stored_contents = [call[0][0].content for call in heart.learn.call_args_list]
-        assert "Project uses PostgreSQL 17 with pgvector" in stored_contents
-        assert "Tim prefers direct architecture decisions" in stored_contents
+        stored_facts = [call[0][0] for call in heart.learn.call_args_list]
+        contents = [f.content for f in stored_facts]
+        assert "Project uses PostgreSQL 17 with pgvector" in contents
+        assert "Tim prefers direct architecture decisions" in contents
+        # Verify structured metadata passed through
+        db_fact = next(f for f in stored_facts if "PostgreSQL" in f.content)
+        assert db_fact.subject == "project_database"
+        assert db_fact.category == "technical"
 
     @pytest.mark.asyncio
     async def test_candidate_facts_deduped(self):
@@ -825,7 +833,7 @@ class TestFactExtractor:
             data={
                 "episode_id": str(uuid4()),
                 "summary": {"summary": "Already known.", "key_points": []},
-                "candidate_facts": ["Project uses PostgreSQL"],
+                "candidate_facts": [{"subject": "project", "content": "Project uses PostgreSQL", "category": "technical"}],
             },
         )
         await extractor.handle(event)
@@ -872,7 +880,7 @@ class TestFactExtractor:
             data={
                 "episode_id": str(uuid4()),
                 "summary": {"summary": "Many facts.", "key_points": []},
-                "candidate_facts": [f"Fact number {i}" for i in range(8)],
+                "candidate_facts": [{"subject": f"topic_{i}", "content": f"Fact number {i}", "category": "technical"} for i in range(8)],
             },
         )
         await extractor.handle(event)
@@ -1258,6 +1266,10 @@ class TestSleepHandler:
             "connections": [],
             "gaps": [],
             "summary": "The agent primarily assists with Python development.",
+            "facts": [
+                {"subject": "user_workflow", "content": "User primarily works with Python development", "category": "preference"},
+                {"subject": "testing_practice", "content": "Always write tests first", "category": "rule"},
+            ],
         }
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(reflection_json)}]
@@ -1265,13 +1277,15 @@ class TestSleepHandler:
 
         await handler._phase_reflect()
 
-        # Should store reflection summary + lessons as facts
-        assert heart.learn.call_count >= 1
-        # Check that at least one fact was stored with source="sleep_reflection"
-        any_sleep_fact = any(
-            call[0][0].source == "sleep_reflection" for call in heart.learn.call_args_list
-        )
-        assert any_sleep_fact
+        # Should store structured facts with subject/category
+        assert heart.learn.call_count == 2
+        stored_facts = [call[0][0] for call in heart.learn.call_args_list]
+        # Check source
+        assert all(f.source == "sleep_reflection" for f in stored_facts)
+        # Check structured metadata
+        first_fact = stored_facts[0]
+        assert first_fact.subject == "user_workflow"
+        assert first_fact.category == "preference"
 
     @pytest.mark.asyncio
     async def test_reflection_skipped_when_few_episodes(self):
