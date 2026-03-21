@@ -221,7 +221,7 @@ class ProcedureLearner:
 
     async def _learn_from_decisions(self, max_new: int) -> int:
         """Fetch reviewed successful decisions, cluster, extract procedures."""
-        if not self._embeddings or not self._http:
+        if not self._embeddings or not self._llm:
             return 0
 
         try:
@@ -338,7 +338,7 @@ class ProcedureLearner:
 
     async def _learn_from_episodes(self, max_new: int) -> int:
         """Collect lessons from completed episodes, cluster, extract procedures."""
-        if not self._embeddings or not self._http:
+        if not self._embeddings or not self._llm:
             return 0
 
         try:
@@ -419,7 +419,7 @@ class ProcedureLearner:
 
     async def _review_weak_procedures(self) -> int:
         """Find and review auto-learned procedures with low effectiveness or stale activation."""
-        if not self._http:
+        if not self._llm:
             return 0
 
         try:
