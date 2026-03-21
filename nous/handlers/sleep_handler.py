@@ -136,35 +136,45 @@ class SleepHandler:
             self._run_sleep(event), name="sleep-work"
         )
 
+    @property
+    def is_sleeping(self) -> bool:
+        return self._sleeping
+
     async def _run_sleep(self, event: Event) -> None:
         """Actual sleep work — runs as independent task, NOT blocking bus."""
         self._sleeping = True
         self._interrupted = False
         phases_completed: list[str] = []
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
 
         try:
             logger.info("Sleep mode started — beginning consolidation")
 
             # Phase ordering: free first, LLM last
             if not self._interrupted:
-                await self._phase_review_decisions()
-                phases_completed.append("review")
+                success = await self._phase_review_decisions()
+                if success:
+                    phases_completed.append("review")
 
             if not self._interrupted:
-                await self._phase_prune()
-                phases_completed.append("prune")
+                success = await self._phase_prune()
+                if success:
+                    phases_completed.append("prune")
 
             if not self._interrupted:
-                await self._phase_compress()
-                phases_completed.append("compress")
+                success = await self._phase_compress()
+                if success:
+                    phases_completed.append("compress")
 
             if not self._interrupted:
-                await self._phase_reflect()
-                phases_completed.append("reflect")
+                success = await self._phase_reflect(sleep_stats)
+                if success:
+                    phases_completed.append("reflect")
 
             if not self._interrupted:
-                await self._phase_generalize()
-                phases_completed.append("generalize")
+                success = await self._phase_generalize(sleep_stats)
+                if success:
+                    phases_completed.append("generalize")
 
             await self._bus.emit(Event(
                 type="sleep_completed",
@@ -172,6 +182,7 @@ class SleepHandler:
                 data={
                     "phases_completed": phases_completed,
                     "interrupted": self._interrupted,
+                    **sleep_stats,
                 },
             ))
             logger.info(
@@ -190,7 +201,7 @@ class SleepHandler:
     # Free phases (no LLM)
     # ------------------------------------------------------------------
 
-    async def _phase_review_decisions(self) -> None:
+    async def _phase_review_decisions(self) -> bool:
         """Phase 1: Check pending decisions for observable outcomes. Free."""
         try:
             # Get recent unreviewed decisions
@@ -199,47 +210,53 @@ class SleepHandler:
                 "Sleep phase: decision review — checked %d recent decisions",
                 len(decisions),
             )
+            return True
         except Exception:
-            logger.warning("Decision review phase failed")
+            logger.warning("Decision review phase failed", exc_info=True)
+            return False
 
-    async def _phase_prune(self) -> None:
+    async def _phase_prune(self) -> bool:
         """Phase 2: Retire stale censors, clean working memory. Free."""
         try:
             logger.debug("Sleep phase: prune (stub)")
+            return True
         except Exception:
-            logger.warning("Prune phase failed")
+            logger.warning("Prune phase failed", exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # LLM phases
     # ------------------------------------------------------------------
 
-    async def _phase_compress(self) -> None:
+    async def _phase_compress(self) -> bool:
         """Phase 3: Compress old episodes (>7 days) without summaries."""
         if not self._llm:
-            return
+            return True
         try:
             # Find episodes older than 7 days without structured_summary
             # Generate summaries for up to 5 per sleep cycle
             logger.debug("Sleep phase: compress old episodes (stub)")
+            return True
         except Exception:
-            logger.warning("Compress phase failed")
+            logger.warning("Compress phase failed", exc_info=True)
+            return False
 
-    async def _phase_reflect(self) -> None:
+    async def _phase_reflect(self, sleep_stats: dict) -> bool:
         """Phase 4: Cross-session reflection on recent activity."""
         if not self._llm:
-            return
+            return True
         try:
             # Use list_recent instead of search_episodes("") — proper method
             recent = await self._heart.list_episodes(limit=10)
             if not recent or len(recent) < 2:
                 logger.debug("Not enough recent episodes for reflection")
-                return
+                return True
 
             episodes_text = "\n\n".join(
                 f"- {ep.summary[:200]}" for ep in recent if ep.summary
             )
             if not episodes_text:
-                return
+                return True
 
             prompt = _REFLECTION_PROMPT.format(episodes=episodes_text)
 
@@ -252,7 +269,7 @@ class SleepHandler:
             )
 
             if not text:
-                return
+                return True
 
             reflection = parse_llm_json(text)
 
@@ -274,6 +291,7 @@ class SleepHandler:
                         logger.debug("Admission rejected sleep-reflected fact: %s", fact["content"][:50])
                         continue
                     stored += 1
+                    sleep_stats["facts_created"] += 1
 
             # Fallback: if LLM didn't return structured facts, store summary + lessons
             if not structured_facts:
@@ -289,6 +307,7 @@ class SleepHandler:
                         logger.debug("Admission rejected sleep-reflected fact: %s", reflection["summary"][:50])
                     else:
                         stored += 1
+                        sleep_stats["facts_created"] += 1
 
                 for lesson in reflection.get("lessons", [])[:3]:
                     if self._interrupted:
@@ -304,6 +323,7 @@ class SleepHandler:
                         logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])
                         continue
                     stored += 1
+                    sleep_stats["facts_created"] += 1
 
             logger.info(
                 "Reflection complete: %d patterns, %d lessons, %d facts stored",
@@ -311,22 +331,28 @@ class SleepHandler:
                 len(reflection.get("lessons", [])),
                 stored,
             )
+            return True
 
-        except (json.JSONDecodeError, Exception):
-            logger.warning("Reflection phase failed")
+        except Exception:
+            logger.warning("Reflection phase failed", exc_info=True)
+            return False
 
-    async def _phase_generalize(self) -> None:
+    async def _phase_generalize(self, sleep_stats: dict) -> bool:
         """Phase 5: K-line learning — auto-create procedures from patterns."""
         if self._procedure_learner:
             try:
                 stats = await self._procedure_learner.run_sleep_learning()
+                sleep_stats["procedures_created"] += stats.get("decisions_learned", 0)
                 logger.info(
                     "Sleep generalize: %d decisions, %d episodes, %d reviewed",
                     stats.get("decisions_learned", 0),
                     stats.get("episodes_learned", 0),
                     stats.get("weak_reviewed", 0),
                 )
+                return True
             except Exception:
-                logger.warning("Generalize phase (procedure learning) failed")
+                logger.warning("Generalize phase (procedure learning) failed", exc_info=True)
+                return False
         else:
             logger.debug("Sleep phase: generalize (no procedure learner configured)")
+            return True

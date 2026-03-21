@@ -317,6 +317,7 @@ async def create_components(settings: Settings) -> dict:
         "task_scheduler": task_scheduler,
         "decision_reviewer": decision_reviewer,
         "api_client": api_client,
+        "sleep_handler": sleep_handler,
     }
 
 
@@ -425,6 +426,8 @@ def build_app(settings: Settings) -> Starlette:
         settings=settings,
         lifespan=lifespan,
         identity_manager=_lazy_component(components, "identity_manager"),
+        bus=_lazy_component(components, "bus"),
+        sleep_handler=_lazy_component(components, "sleep_handler"),
     )
 
     if settings.mcp_enabled:

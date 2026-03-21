@@ -51,6 +51,7 @@ from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.cognitive import CognitiveLayer
 from nous.config import Settings
+from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.storage.database import Database
 
@@ -66,6 +67,8 @@ def create_app(
     settings: Settings,
     lifespan: Any | None = None,
     identity_manager: Any | None = None,
+    bus: EventBus | None = None,
+    sleep_handler: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -772,6 +775,37 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
 
     # ------------------------------------------------------------------
+    # Sleep trigger endpoint (#173)
+    # ------------------------------------------------------------------
+
+    async def trigger_sleep(request: Request) -> JSONResponse:
+        """POST /sleep/trigger - Manually trigger a sleep cycle."""
+        try:
+            if sleep_handler.is_sleeping:
+                return JSONResponse(
+                    {"error": "Sleep cycle already in progress"},
+                    status_code=409,
+                )
+        except (RuntimeError, AttributeError):
+            return JSONResponse(
+                {"error": "Sleep handler not configured"},
+                status_code=503,
+            )
+        try:
+            _ = bus.emit  # Verify bus is available
+        except (RuntimeError, AttributeError):
+            return JSONResponse(
+                {"error": "Event bus not configured"},
+                status_code=503,
+            )
+        await bus.emit(Event(
+            type="sleep_started",
+            agent_id=settings.agent_id,
+            data={"manual": True},
+        ))
+        return JSONResponse({"status": "started", "message": "Sleep cycle triggered"})
+
+    # ------------------------------------------------------------------
     # F021: Dashboard endpoints (route registration in Task 10)
     # ------------------------------------------------------------------
 
@@ -807,10 +841,15 @@ def create_app(
     async def dashboard_activity(request: Request) -> JSONResponse:
         """GET /dashboard/activity - Activity timeline data."""
         try:
+            hours = int(request.query_params.get("hours", "168"))
+        except ValueError:
+            return JSONResponse({"error": "hours must be an integer"}, status_code=400)
+        hours = max(1, min(hours, 720))  # Cap 1h to 30d
+        try:
             from nous.api.dashboard_queries import get_activity_data
 
             async with database.session() as session:
-                data = await get_activity_data(session, settings.agent_id)
+                data = await get_activity_data(session, settings.agent_id, hours=hours)
             return JSONResponse(data)
         except Exception as e:
             logger.error("Dashboard activity error: %s", e)
@@ -919,6 +958,7 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Dashboard API endpoints (F021) — MUST be before static Mount
         Route("/dashboard/graph", dashboard_graph),
         Route("/dashboard/calibration", dashboard_calibration),
