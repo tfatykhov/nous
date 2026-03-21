@@ -1,8 +1,8 @@
 """Shared hybrid search utilities for Heart memory types.
 
 Provides a reusable hybrid vector + keyword search function that each
-Heart manager calls with table-specific parameters. Follows the same
-CTE pattern as Brain.query() (brain.py:418-456).
+Heart manager calls with table-specific parameters.  Uses Reciprocal
+Rank Fusion (RRF) to combine vector and keyword results (F025).
 """
 
 from __future__ import annotations
@@ -25,6 +25,54 @@ def _resolve_vector_weight() -> float:
     return RuntimeConfig.get().get_vector_weight(settings)
 
 
+def _resolve_rrf_k() -> int:
+    """Resolve rrf_k from runtime config > settings > default 60."""
+    from nous.config import Settings
+    from nous.runtime_config import RuntimeConfig
+
+    try:
+        settings = Settings()
+    except Exception:
+        return 60
+    return RuntimeConfig.get().get_rrf_k(settings)
+
+
+def _rrf_merge(
+    vector_ranked: list[tuple[UUID, float]],
+    keyword_ranked: list[tuple[UUID, float]],
+    k: int,
+    vector_weight: float,
+    limit: int,
+) -> list[tuple[UUID, float]]:
+    """Merge two ranked lists using Reciprocal Rank Fusion.
+
+    rrf_score(doc) = vector_weight / (k + vector_rank)
+                   + keyword_weight / (k + keyword_rank)
+
+    Docs appearing in only one list get a penalty rank of limit + 1.
+    """
+    keyword_weight = 1.0 - vector_weight
+    penalty_rank = limit + 1
+
+    # Build rank maps (0-indexed)
+    vector_ranks: dict[UUID, int] = {doc_id: i for i, (doc_id, _) in enumerate(vector_ranked)}
+    keyword_ranks: dict[UUID, int] = {doc_id: i for i, (doc_id, _) in enumerate(keyword_ranked)}
+
+    all_ids = set(vector_ranks) | set(keyword_ranks)
+    if not all_ids:
+        return []
+
+    scored: list[tuple[UUID, float]] = []
+    for doc_id in all_ids:
+        v_rank = vector_ranks.get(doc_id, penalty_rank)
+        k_rank = keyword_ranks.get(doc_id, penalty_rank)
+        score = vector_weight / (k + v_rank) + keyword_weight / (k + k_rank)
+        scored.append((doc_id, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return scored[:limit]
+
+
 async def hybrid_search(
     session: AsyncSession,
     table: str,
@@ -36,12 +84,15 @@ async def hybrid_search(
     limit: int = 10,
     vector_weight: float | None = None,
 ) -> list[tuple[UUID, float]]:
-    """Hybrid vector + keyword search over a Heart table.
+    """Hybrid vector + keyword search over a Heart table using RRF.
 
-    Uses same CTE pattern as Brain.query():
-    1. Vector similarity via cosine distance on embedding column
-    2. Keyword relevance via ts_rank_cd on search_tsv column
-    3. Combined score = vector_weight * vector_score + (1 - vector_weight) * keyword_score
+    Uses Reciprocal Rank Fusion to combine vector and keyword results:
+    1. Vector similarity via cosine distance on embedding column (ranked list)
+    2. Keyword relevance via ts_rank_cd on search_tsv column (ranked list)
+    3. RRF score = vector_weight / (k + vector_rank) + keyword_weight / (k + keyword_rank)
+
+    This solves the scale mismatch where keyword scores max at ~0.08
+    vs vector scores at 0.5-0.9, making weighted-sum keyword-blind.
 
     Weight resolution order:
     1. Explicit vector_weight param (highest priority)
@@ -63,10 +114,11 @@ async def hybrid_search(
             None = resolve from runtime config / settings / default.
 
     Returns:
-        List of (id, combined_score) ordered by score DESC.
+        List of (id, rrf_score) ordered by score DESC.
     """
     if vector_weight is None:
         vector_weight = _resolve_vector_weight()
+    rrf_k = _resolve_rrf_k()
 
     params: dict = {
         "agent_id": agent_id,
@@ -79,52 +131,41 @@ async def hybrid_search(
 
     filter_clauses = f"AND t.agent_id = :agent_id AND t.active = true {extra_where}"
 
+    vector_results: list[tuple[UUID, float]] = []
+    keyword_results: list[tuple[UUID, float]] = []
+
     if embedding is not None:
-        # Full hybrid search: vector + keyword CTEs with FULL OUTER JOIN
-        # Format embedding as pgvector string without spaces
+        # Vector search
         params["query_embedding"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
-        keyword_weight = 1.0 - vector_weight
-        sql = text(f"""
-            WITH semantic AS (
-                SELECT t.id, 1 - (t.embedding <=> CAST(:query_embedding AS vector)) AS score
-                FROM {table} t
-                WHERE t.embedding IS NOT NULL {filter_clauses}
-                ORDER BY t.embedding <=> CAST(:query_embedding AS vector)
-                LIMIT :limit_expanded
-            ),
-            keyword AS (
-                SELECT t.id,
-                    ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
-                    / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
-                FROM {table} t
-                WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
-                    {filter_clauses}
-                LIMIT :limit_expanded
-            )
-            SELECT COALESCE(s.id, k.id) AS id,
-                (COALESCE(s.score, 0) * {vector_weight} + COALESCE(k.score, 0) * {keyword_weight}) AS combined_score
-            FROM semantic s
-            FULL OUTER JOIN keyword k ON s.id = k.id
-            ORDER BY combined_score DESC
-            LIMIT :limit
-        """)
-    else:
-        # Keyword-only fallback (no embedding provider)
-        sql = text(f"""
-            SELECT t.id,
-                ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
-                / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
+        vector_sql = text(f"""
+            SELECT t.id, 1 - (t.embedding <=> CAST(:query_embedding AS vector)) AS score
             FROM {table} t
-            WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
-                {filter_clauses}
-            ORDER BY score DESC
-            LIMIT :limit
+            WHERE t.embedding IS NOT NULL {filter_clauses}
+            ORDER BY t.embedding <=> CAST(:query_embedding AS vector)
+            LIMIT :limit_expanded
         """)
+        result = await session.execute(vector_sql, params)
+        vector_results = [(row.id, float(row.score)) for row in result.all()]
 
-    result = await session.execute(sql, params)
-    rows = result.all()
+    # Keyword search
+    keyword_sql = text(f"""
+        SELECT t.id,
+            ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
+            / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
+        FROM {table} t
+        WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
+            {filter_clauses}
+        ORDER BY score DESC
+        LIMIT :limit_expanded
+    """)
+    result = await session.execute(keyword_sql, params)
+    keyword_results = [(row.id, float(row.score)) for row in result.all()]
 
-    return [(row.id, float(row.combined_score if hasattr(row, "combined_score") else row.score)) for row in rows]
+    if embedding is None:
+        # Keyword-only fallback — return keyword results directly
+        return keyword_results[:limit]
+
+    return _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, limit)
 
 
 class _ScoredWrapper:

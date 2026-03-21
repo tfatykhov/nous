@@ -810,7 +810,7 @@ def create_app(
     # ------------------------------------------------------------------
 
     async def get_search_weights(request: Request) -> JSONResponse:
-        """GET /admin/search-weights — current vector/keyword weight + source."""
+        """GET /admin/search-weights — current vector/keyword weight + rrf_k + source."""
         from nous.runtime_config import RuntimeConfig
 
         rc = RuntimeConfig.get()
@@ -819,11 +819,12 @@ def create_app(
         return JSONResponse({
             "vector_weight": vw,
             "keyword_weight": round(1.0 - vw, 4),
+            "rrf_k": rc.get_rrf_k(settings),
             "source": source,
         })
 
     async def set_search_weights(request: Request) -> JSONResponse:
-        """POST /admin/search-weights — update vector weight at runtime."""
+        """POST /admin/search-weights — update vector weight and/or rrf_k at runtime."""
         from nous.runtime_config import RuntimeConfig
 
         try:
@@ -831,43 +832,61 @@ def create_app(
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
+        rc = RuntimeConfig.get()
+
+        # Optional vector_weight update
         raw = body.get("vector_weight")
-        if raw is None:
-            return JSONResponse({"error": "Missing required field: vector_weight"}, status_code=400)
+        if raw is not None:
+            try:
+                vw = float(raw)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "vector_weight must be a number"}, status_code=400)
+            if not (0.0 <= vw <= 1.0):
+                return JSONResponse(
+                    {"error": "vector_weight must be between 0.0 and 1.0"},
+                    status_code=400,
+                )
+            old_vw = rc.get_vector_weight(settings)
+            old_source = rc.get_vector_weight_source(settings)
+            rc.set_vector_weight(vw)
+            try:
+                async with database.session() as session:
+                    await rc.persist_to_db(session, "vector_weight", vw)
+            except Exception as e:
+                logger.error("Failed to persist vector_weight: %s", e)
+            logger.info(
+                "vector_weight updated to %.4f (was %.4f, source: %s)",
+                vw, old_vw, old_source,
+            )
 
-        try:
-            vw = float(raw)
-        except (TypeError, ValueError):
-            return JSONResponse({"error": "vector_weight must be a number"}, status_code=400)
+        # Optional rrf_k update
+        raw_k = body.get("rrf_k")
+        if raw_k is not None:
+            try:
+                rrf_k_val = int(raw_k)
+            except (TypeError, ValueError):
+                return JSONResponse({"error": "rrf_k must be an integer"}, status_code=400)
+            if rrf_k_val < 1:
+                return JSONResponse({"error": "rrf_k must be >= 1"}, status_code=400)
+            rc.set_rrf_k(rrf_k_val)
+            try:
+                async with database.session() as session:
+                    await rc.persist_to_db(session, "rrf_k", rrf_k_val)
+            except Exception as e:
+                logger.error("Failed to persist rrf_k: %s", e)
 
-        if not (0.0 <= vw <= 1.0):
+        if raw is None and raw_k is None:
             return JSONResponse(
-                {"error": "vector_weight must be between 0.0 and 1.0"},
+                {"error": "Must provide at least one of: vector_weight, rrf_k"},
                 status_code=400,
             )
 
-        rc = RuntimeConfig.get()
-        old_vw = rc.get_vector_weight(settings)
-        old_source = rc.get_vector_weight_source(settings)
-        rc.set_vector_weight(vw)
-
-        # Persist to DB
-        try:
-            async with database.session() as session:
-                await rc.persist_to_db(session, "vector_weight", vw)
-        except Exception as e:
-            logger.error("Failed to persist vector_weight: %s", e)
-            # In-memory override still applies for this process
-
-        logger.info(
-            "vector_weight updated to %.4f (was %.4f, source: %s)",
-            vw, old_vw, old_source,
-        )
-
+        vw_now = rc.get_vector_weight(settings)
         return JSONResponse({
-            "vector_weight": vw,
-            "keyword_weight": round(1.0 - vw, 4),
-            "source": "runtime_override",
+            "vector_weight": vw_now,
+            "keyword_weight": round(1.0 - vw_now, 4),
+            "rrf_k": rc.get_rrf_k(settings),
+            "source": rc.get_vector_weight_source(settings),
         })
 
     # ------------------------------------------------------------------

@@ -813,60 +813,65 @@ class FactManager:
     ) -> list[FactSummary]:
         """Search all facts including inactive (no active filter).
 
-        Uses same weight resolution as hybrid_search() but does NOT
-        call it — intentionally omits the active=true filter so
+        Uses RRF (Reciprocal Rank Fusion) for hybrid search — same approach
+        as hybrid_search() but intentionally omits the active=true filter so
         superseded/inactive facts are included.
         """
-        from nous.heart.search import _resolve_vector_weight
+        from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
 
         vw = _resolve_vector_weight()
-        kw = 1.0 - vw
+        rrf_k = _resolve_rrf_k()
 
         params: dict = {
             "agent_id": self.agent_id,
             "query_text": query,
             "limit": limit,
+            "limit_expanded": limit * 3,
         }
         filter_extra = ""
         if category:
             filter_extra = "AND t.category = :category"
             params["category"] = category
 
+        vector_results: list[tuple] = []
+        keyword_results: list[tuple] = []
+
         if embedding is not None:
             params["query_embedding"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
-            sql = text(f"""
-                SELECT t.id,
-                    (COALESCE(1 - (t.embedding <=> CAST(:query_embedding AS vector)), 0) * {vw}
-                     + COALESCE(
-                         ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
-                         / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))),
-                       0) * {kw}
-                    ) AS combined_score
+            vector_sql = text(f"""
+                SELECT t.id, 1 - (t.embedding <=> CAST(:query_embedding AS vector)) AS score
                 FROM heart.facts t
-                WHERE t.agent_id = :agent_id {filter_extra}
-                  AND (t.embedding IS NOT NULL OR t.search_tsv @@ plainto_tsquery('english', :query_text))
-                ORDER BY combined_score DESC
-                LIMIT :limit
-            """)
-        else:
-            sql = text(f"""
-                SELECT t.id,
-                    ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
-                    / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
-                FROM heart.facts t
-                WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
+                WHERE t.embedding IS NOT NULL
                   AND t.agent_id = :agent_id {filter_extra}
-                ORDER BY score DESC
-                LIMIT :limit
+                ORDER BY t.embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :limit_expanded
             """)
+            result = await session.execute(vector_sql, params)
+            vector_results = [(row.id, float(row.score)) for row in result.all()]
 
-        result = await session.execute(sql, params)
-        rows = result.all()
-        if not rows:
+        keyword_sql = text(f"""
+            SELECT t.id,
+                ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
+                / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
+            FROM heart.facts t
+            WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
+              AND t.agent_id = :agent_id {filter_extra}
+            ORDER BY score DESC
+            LIMIT :limit_expanded
+        """)
+        result = await session.execute(keyword_sql, params)
+        keyword_results = [(row.id, float(row.score)) for row in result.all()]
+
+        if embedding is None:
+            ranked = keyword_results[:limit]
+        else:
+            ranked = _rrf_merge(vector_results, keyword_results, rrf_k, vw, limit)
+
+        if not ranked:
             return []
 
-        ids = [row.id for row in rows]
-        scores = {row.id: float(row[1]) for row in rows}
+        ids = [r[0] for r in ranked]
+        scores = {r[0]: r[1] for r in ranked}
 
         fact_result = await session.execute(select(Fact).where(Fact.id.in_(ids)))
         facts = {f.id: f for f in fact_result.scalars().all()}

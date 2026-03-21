@@ -266,6 +266,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame budget defaults (e.g. `{"total": 12000, "decisions": 3000}`) |
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
+| `NOUS_RRF_K` | `60` | RRF smoothing constant for hybrid search rank fusion |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
 | `NOUS_GRAPH_RECALL_ENABLED` | `true` | Enable graph expansion in recall_deep |

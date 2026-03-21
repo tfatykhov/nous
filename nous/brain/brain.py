@@ -663,35 +663,42 @@ class Brain:
             params["outcome"] = outcome
 
         if query_embedding is not None:
-            # Full hybrid search (P2-8: normalized ts_rank_cd)
-            # Format as pgvector string without spaces
+            # Full hybrid search using RRF (F025)
+            from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+
+            vw = _resolve_vector_weight()
+            rrf_k = _resolve_rrf_k()
+
             params["query_embedding"] = "[" + ",".join(str(float(v)) for v in query_embedding) + "]"
-            sql = text(f"""
-                WITH semantic AS (
-                    SELECT d.id, 1 - (d.embedding <=> CAST(:query_embedding AS vector)) AS score
-                    FROM brain.decisions d
-                    {bridge_join}
-                    WHERE d.embedding IS NOT NULL {filter_clauses}
-                    ORDER BY d.embedding <=> CAST(:query_embedding AS vector)
-                    LIMIT :limit_expanded
-                ),
-                keyword AS (
-                    SELECT d.id,
-                        ts_rank_cd(d.search_tsv, plainto_tsquery('english', :query_text))
-                        / (1.0 + ts_rank_cd(d.search_tsv, plainto_tsquery('english', :query_text))) AS score
-                    FROM brain.decisions d
-                    {bridge_join}
-                    WHERE d.search_tsv @@ plainto_tsquery('english', :query_text)
-                        {filter_clauses}
-                    LIMIT :limit_expanded
-                )
-                SELECT COALESCE(s.id, k.id) AS id,
-                    (COALESCE(s.score, 0) * 0.7 + COALESCE(k.score, 0) * 0.3) AS combined_score
-                FROM semantic s
-                FULL OUTER JOIN keyword k ON s.id = k.id
-                ORDER BY combined_score DESC
-                LIMIT :limit
+
+            # Vector search
+            vector_sql = text(f"""
+                SELECT d.id, 1 - (d.embedding <=> CAST(:query_embedding AS vector)) AS score
+                FROM brain.decisions d
+                {bridge_join}
+                WHERE d.embedding IS NOT NULL {filter_clauses}
+                ORDER BY d.embedding <=> CAST(:query_embedding AS vector)
+                LIMIT :limit_expanded
             """)
+            v_result = await session.execute(vector_sql, params)
+            vector_results = [(row.id, float(row.score)) for row in v_result.all()]
+
+            # Keyword search
+            keyword_sql = text(f"""
+                SELECT d.id,
+                    ts_rank_cd(d.search_tsv, plainto_tsquery('english', :query_text))
+                    / (1.0 + ts_rank_cd(d.search_tsv, plainto_tsquery('english', :query_text))) AS score
+                FROM brain.decisions d
+                {bridge_join}
+                WHERE d.search_tsv @@ plainto_tsquery('english', :query_text)
+                    {filter_clauses}
+                ORDER BY score DESC
+                LIMIT :limit_expanded
+            """)
+            k_result = await session.execute(keyword_sql, params)
+            keyword_results = [(row.id, float(row.score)) for row in k_result.all()]
+
+            merged = _rrf_merge(vector_results, keyword_results, rrf_k, vw, limit)
         else:
             # Keyword-only fallback (P2-14: weight=1.0)
             sql = text(f"""
@@ -705,17 +712,14 @@ class Brain:
                 ORDER BY score DESC
                 LIMIT :limit
             """)
+            result = await session.execute(sql, params)
+            merged = [(row.id, float(row.score)) for row in result.all()]
 
-        result = await session.execute(sql, params)
-        rows = result.all()
-
-        if not rows:
+        if not merged:
             return []
 
-        decision_ids = [row.id for row in rows]
-        scores_by_id = {
-            row.id: float(row.combined_score if hasattr(row, "combined_score") else row.score) for row in rows
-        }
+        decision_ids = [r[0] for r in merged]
+        scores_by_id = {r[0]: r[1] for r in merged}
 
         # Fetch decision data
         decisions_result = await session.execute(select(Decision).where(Decision.id.in_(decision_ids)))

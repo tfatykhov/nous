@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Keys used in nous_system.config table
 _KEY_VECTOR_WEIGHT = "vector_weight"
+_KEY_RRF_K = "rrf_k"
 
 
 class RuntimeConfig:
@@ -67,6 +68,30 @@ class RuntimeConfig:
         """Remove runtime override, falling back to settings."""
         self._overrides.pop(_KEY_VECTOR_WEIGHT, None)
 
+    # -- RRF K ----------------------------------------------------------------
+
+    def get_rrf_k(self, settings: Any) -> int:
+        """Resolve rrf_k: runtime override > env/settings > default."""
+        if _KEY_RRF_K in self._overrides:
+            return int(self._overrides[_KEY_RRF_K])
+        return int(settings.rrf_k)
+
+    def get_rrf_k_source(self, settings: Any) -> str:
+        """Return the source of the current effective rrf_k."""
+        if _KEY_RRF_K in self._overrides:
+            return "runtime_override"
+        if "rrf_k" in settings.model_fields_set:
+            return "env_var"
+        return "default"
+
+    def set_rrf_k(self, value: int) -> None:
+        """Set runtime override (call persist_to_db separately)."""
+        self._overrides[_KEY_RRF_K] = value
+
+    def clear_rrf_k(self) -> None:
+        """Remove runtime override, falling back to settings."""
+        self._overrides.pop(_KEY_RRF_K, None)
+
     # -- DB persistence -------------------------------------------------------
 
     async def load_from_db(self, session: AsyncSession) -> None:
@@ -82,6 +107,11 @@ class RuntimeConfig:
                     if 0.0 <= w <= 1.0:
                         self._overrides[key] = w
                         logger.info("Loaded runtime override: %s = %s", key, w)
+                if key == _KEY_RRF_K and value is not None:
+                    k = int(value)
+                    if k > 0:
+                        self._overrides[key] = k
+                        logger.info("Loaded runtime override: %s = %s", key, k)
         except Exception:
             logger.debug("nous_system.config table not available yet (normal on first run)")
 
