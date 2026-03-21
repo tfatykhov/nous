@@ -272,8 +272,18 @@ class SleepHandler:
                 return True
 
             reflection = parse_llm_json(text)
-            if not isinstance(reflection, dict):
-                logger.warning("Reflection LLM returned %s instead of dict, skipping", type(reflection).__name__)
+            if isinstance(reflection, list):
+                logger.warning(
+                    "Reflection LLM returned list instead of dict (len=%d), treating as facts array. Raw: %s",
+                    len(reflection), text[:500],
+                )
+                # Treat the list as a bare facts array
+                reflection = {"facts": reflection}
+            elif not isinstance(reflection, dict):
+                logger.warning(
+                    "Reflection LLM returned %s instead of dict, skipping. Raw: %s",
+                    type(reflection).__name__, text[:500],
+                )
                 return True
 
             # Store structured facts from LLM (preferred path)
