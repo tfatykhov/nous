@@ -380,12 +380,12 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
                 FROM reviewed
                 GROUP BY day
             )
-            SELECT d.day,
+            SELECT CAST(d AS date) AS day,
                    daily_brier.brier_score,
                    daily_brier.cnt
             FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
             LEFT JOIN daily_brier ON daily_brier.day = CAST(d AS date)
-            ORDER BY d
+            ORDER BY day
         """),
         {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
     )
