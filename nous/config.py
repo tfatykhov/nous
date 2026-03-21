@@ -266,6 +266,17 @@ class Settings(BaseSettings):
     admission_utility_model: str = ""
     admission_utility_llm_enabled: bool = True
 
+    # F026: Execution Integrity
+    execution_ledger_enabled: bool = True
+    execution_ledger_max_tokens: int = 500
+
+    claim_verification_enabled: bool = True
+    claim_verification_mode: str = "enforce"  # "shadow" | "warn" | "enforce"
+
+    action_gating_enabled: bool = True
+    action_gating_mode: str = "enforce"  # "shadow" | "warn" | "enforce"
+    action_gating_model: str = "claude-haiku-4-5-20251001"
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

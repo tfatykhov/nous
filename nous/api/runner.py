@@ -25,6 +25,9 @@ from nous.api.compaction import ConversationCompactor
 from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
 from nous.brain.brain import Brain
+from nous.cognitive.action_gate import ActionGate
+from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
+from nous.cognitive.execution_ledger import ExecutionLedger
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
@@ -91,6 +94,19 @@ class AgentRunner:
         if settings.tool_pruning_enabled or settings.compaction_enabled:
             self._compactor = ConversationCompactor(settings=settings)
         self._compaction_locks: dict[str, asyncio.Lock] = {}
+
+        # F026: Execution Integrity
+        self._ledgers: dict[str, ExecutionLedger] = {}
+        self._pending_corrections: dict[str, list[str]] = {}
+        self._claim_verifier: ClaimVerifier | None = (
+            ClaimVerifier() if settings.claim_verification_enabled else None
+        )
+        self._intent_tracker: IntentTracker | None = (
+            IntentTracker() if settings.claim_verification_enabled else None
+        )
+        self._action_gate: ActionGate | None = (
+            ActionGate(settings) if settings.action_gating_enabled else None
+        )
 
     def set_dispatcher(self, dispatcher: Any) -> None:
         """Set the tool dispatcher for tool loop execution."""
@@ -170,13 +186,21 @@ class AgentRunner:
             await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
             return response_text, usage
 
+        # F026: Get/create execution ledger and set turn
+        ledger = self._get_or_create_ledger(session_id)
+        ledger.set_turn((len(conversation.messages) + 1) // 2)
+
         # 4-6. Build system prompt and run tool loop
         response_text = ""
         tool_results: list[ToolResult] = []
         usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         error = None
         try:
-            system_prompt = self._build_system_prompt(turn_context, platform=platform)
+            corrections = self._pending_corrections.pop(session_id, None)
+            system_prompt = self._build_system_prompt(
+                turn_context, platform=platform,
+                ledger=ledger, corrections=corrections,
+            )
             if system_prompt_prefix:
                 system_prompt = system_prompt_prefix + "\n\n" + system_prompt
 
@@ -230,6 +254,8 @@ class AgentRunner:
                 is_subtask=is_subtask,
                 max_tool_calls=max_tool_calls,
                 model_override=model_override,
+                user_message=user_message,
+                ledger=ledger,
             )
             conversation.messages.append(Message(role="assistant", content=response_text))
         except Exception as e:
@@ -241,6 +267,10 @@ class AgentRunner:
             _caught_exc = e
         else:
             _caught_exc = None
+
+        # F026: Post-response claim verification + ghost planning detection
+        if _caught_exc is None:
+            self._verify_claims(session_id, response_text, tool_results, ledger)
 
         # 7. Post-turn (always called, even on error)
         turn_result = TurnResult(
@@ -301,6 +331,8 @@ class AgentRunner:
         # Remove conversation + persisted state (008.1 Phase 3)
         self._conversations.pop(session_id, None)
         self._compaction_locks.pop(session_id, None)
+        self._ledgers.pop(session_id, None)  # F026
+        self._pending_corrections.pop(session_id, None)  # F026
         await self._delete_conversation_state(session_id)
 
     # ------------------------------------------------------------------
@@ -476,7 +508,15 @@ class AgentRunner:
             yield StreamEvent(type="done")
             return
 
-        system_prompt = self._build_system_prompt(turn_context, platform=platform)
+        # F026: Get/create execution ledger and set turn
+        ledger = self._get_or_create_ledger(session_id)
+        ledger.set_turn((len(conversation.messages) + 1) // 2)
+
+        corrections = self._pending_corrections.pop(session_id, None)
+        system_prompt = self._build_system_prompt(
+            turn_context, platform=platform,
+            ledger=ledger, corrections=corrections,
+        )
         if system_prompt_prefix:
             system_prompt = system_prompt_prefix + "\n\n" + system_prompt
         tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
@@ -683,16 +723,45 @@ class AgentRunner:
                     # shared block dict that content_blocks already references.
                     dispatch_input = self._maybe_inject_episode_id(tc["name"], tc["input"], session_id)
 
-                    start_time = time.monotonic()
-                    result_text, is_error = "", False
-                    async for item in self._dispatch_with_keepalive(
-                        tc["name"], dispatch_input, session_id=session_id
-                    ):
-                        if isinstance(item, StreamEvent):
-                            yield item
-                        else:
-                            result_text, is_error = item
-                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                    # F026: Action gating (pre-dispatch)
+                    gated = False
+                    if self._action_gate and ledger:
+                        gate_result = await self._action_gate.check(
+                            tc["name"], dispatch_input, ledger, user_message=user_message,
+                        )
+                        if not gate_result.approved:
+                            if self._settings.action_gating_mode == "enforce":
+                                result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
+                                if gate_result.suggestion:
+                                    result_text += f"\n{gate_result.suggestion}"
+                                is_error = True
+                                gated = True
+                                ledger.record(tc["name"], dispatch_input, result_text, "blocked")
+                            elif self._settings.action_gating_mode == "warn":
+                                logger.warning("ActionGate would block %s: %s", tc["name"], gate_result.reason)
+                            else:
+                                logger.debug("ActionGate (shadow) would block %s: %s", tc["name"], gate_result.reason)
+
+                    if not gated:
+                        start_time = time.monotonic()
+                        result_text, is_error = "", False
+                        async for item in self._dispatch_with_keepalive(
+                            tc["name"], dispatch_input, session_id=session_id
+                        ):
+                            if isinstance(item, StreamEvent):
+                                yield item
+                            else:
+                                result_text, is_error = item
+                        duration_ms = int((time.monotonic() - start_time) * 1000)
+
+                        # F026: Record in execution ledger (post-dispatch)
+                        if ledger:
+                            ledger.record(
+                                tc["name"], dispatch_input, result_text,
+                                "error" if is_error else "success",
+                            )
+                    else:
+                        duration_ms = 0
 
                     tool_results_for_message.append({
                         "type": "tool_result",
@@ -751,6 +820,9 @@ class AgentRunner:
             _caught_exc = e
         else:
             _caught_exc = None
+
+            # F026: Post-response claim verification (streaming: warn+inject only)
+            self._verify_claims(session_id, response_text, all_tool_results, ledger)
         finally:
             # ALWAYS call post_turn (review P1: guaranteed cleanup)
             turn_result = TurnResult(
@@ -787,6 +859,8 @@ class AgentRunner:
         is_subtask: bool = False,
         max_tool_calls: int | None = None,
         model_override: str | None = None,
+        user_message: str = "",
+        ledger: ExecutionLedger | None = None,
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -871,11 +945,40 @@ class AgentRunner:
                     # F022: Auto-inject source_episode_id into learn_fact.
                     tool_input = self._maybe_inject_episode_id(tool_name, tool_input, session_id)
 
-                    start_time = time.monotonic()
-                    result_text, is_error = await self._dispatcher.dispatch(
-                        tool_name, tool_input, session_id=session_id
-                    )
-                    duration_ms = int((time.monotonic() - start_time) * 1000)
+                    # F026: Action gating (pre-dispatch)
+                    gated = False
+                    if self._action_gate and ledger:
+                        gate_result = await self._action_gate.check(
+                            tool_name, tool_input, ledger, user_message=user_message,
+                        )
+                        if not gate_result.approved:
+                            if self._settings.action_gating_mode == "enforce":
+                                result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
+                                if gate_result.suggestion:
+                                    result_text += f"\n{gate_result.suggestion}"
+                                is_error = True
+                                gated = True
+                                ledger.record(tool_name, tool_input, result_text, "blocked")
+                            elif self._settings.action_gating_mode == "warn":
+                                logger.warning("ActionGate would block %s: %s", tool_name, gate_result.reason)
+                            else:
+                                logger.debug("ActionGate (shadow) would block %s: %s", tool_name, gate_result.reason)
+
+                    if not gated:
+                        start_time = time.monotonic()
+                        result_text, is_error = await self._dispatcher.dispatch(
+                            tool_name, tool_input, session_id=session_id
+                        )
+                        duration_ms = int((time.monotonic() - start_time) * 1000)
+
+                        # F026: Record in execution ledger (post-dispatch)
+                        if ledger:
+                            ledger.record(
+                                tool_name, tool_input, result_text,
+                                "error" if is_error else "success",
+                            )
+                    else:
+                        duration_ms = 0
 
                     # F020: SmartCompress — ingestion-time compression
                     compress_result = await smart_compress(
@@ -1003,6 +1106,9 @@ Rules:
         self,
         turn_context: TurnContext,
         platform: str | None = None,
+        *,
+        ledger: ExecutionLedger | None = None,
+        corrections: list[str] | None = None,
     ) -> str:
         """Build the system prompt: cognitive context + frame instructions.
 
@@ -1015,6 +1121,18 @@ Rules:
         frame_instructions = self._get_frame_instructions(turn_context)
         if frame_instructions:
             parts.append(frame_instructions)
+
+        # F026: Execution ledger (non-prunable, non-compactable)
+        if ledger and self._settings.execution_ledger_enabled:
+            ledger_section = ledger.system_prompt_section(
+                self._settings.execution_ledger_max_tokens
+            )
+            if ledger_section:
+                parts.append(ledger_section)
+
+        # F026: Pending corrections from prior turn
+        if corrections:
+            parts.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
 
         # Platform-specific formatting
         if platform == "telegram":
@@ -1130,6 +1248,50 @@ Rules:
                 turn_context.decision_id,
             )
 
+    def _get_or_create_ledger(self, session_id: str) -> ExecutionLedger:
+        """Get or create a session-scoped execution ledger."""
+        if session_id not in self._ledgers:
+            self._ledgers[session_id] = ExecutionLedger(session_id=session_id)
+        return self._ledgers[session_id]
+
+    def _verify_claims(
+        self,
+        session_id: str,
+        response_text: str,
+        tool_results: list[ToolResult],
+        ledger: ExecutionLedger,
+    ) -> None:
+        """F026: Post-response claim verification and ghost planning detection."""
+        turn_tool_names = [tr.tool_name for tr in tool_results]
+
+        # Claim verification
+        if self._claim_verifier:
+            verification = self._claim_verifier.verify(response_text, turn_tool_names, ledger)
+            if not verification.verified:
+                mode = self._settings.claim_verification_mode
+                if mode == "enforce":
+                    logger.warning("Claim verification failed: %s", verification.correction)
+                    self._pending_corrections.setdefault(session_id, []).append(
+                        verification.correction or ""
+                    )
+                elif mode == "warn":
+                    logger.warning("Claim verification: %s", verification.correction)
+                else:
+                    logger.debug("Claim verification (shadow): %s", verification.correction)
+
+        # Ghost planning detection (only on zero-tool turns, respects mode)
+        if self._intent_tracker and not turn_tool_names:
+            if self._intent_tracker.check_ghost_planning(response_text, turn_tool_names, ledger):
+                mode = self._settings.claim_verification_mode
+                if mode == "enforce":
+                    logger.info("Ghost planning detected in session %s", session_id)
+                    nudge = self._intent_tracker.build_nudge()
+                    self._pending_corrections.setdefault(session_id, []).append(nudge)
+                elif mode == "warn":
+                    logger.warning("Ghost planning detected (warn) in session %s", session_id)
+                else:
+                    logger.debug("Ghost planning detected (shadow) in session %s", session_id)
+
     async def _get_or_create_conversation(self, session_id: str) -> Conversation:
         """Get existing or create new conversation with LRU eviction.
 
@@ -1145,6 +1307,8 @@ Rules:
         while len(self._conversations) >= MAX_CONVERSATIONS:
             evicted_id, _ = self._conversations.popitem(last=False)
             self._compaction_locks.pop(evicted_id, None)
+            self._ledgers.pop(evicted_id, None)  # F026
+            self._pending_corrections.pop(evicted_id, None)  # F026
 
         # 008.1 Phase 3: Try to restore from Heart persistence
         conversation = await self._restore_conversation(session_id)
