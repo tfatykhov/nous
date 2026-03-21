@@ -133,6 +133,7 @@ nous/
 | F012 | K-Line Procedure Learning (auto-create procedures from decision clusters, monitor reinforcement) | #134 |
 | F011 | Skill Discovery v2 (learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL) | — |
 | F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
+| F026 | Execution Integrity (execution ledger, action gating, claim verification, ghost planning detection) | #183 |
 
 ## How to Work
 
@@ -279,6 +280,14 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20251001` | Model for contradiction classification |
 | `NOUS_SPREADING_ACTIVATION_ENABLED` | `auto` | Spreading activation (auto/true/false) |
 | `NOUS_SPREADING_ACTIVATION_DENSITY_THRESHOLD` | `3.0` | Density threshold for auto-enable |
+| `NOUS_EXECUTION_LEDGER_ENABLED` | `true` | Enable execution ledger (F026) |
+| `NOUS_EXECUTION_LEDGER_MAX_TOKENS` | `500` | Token budget for ledger in system prompt |
+| `NOUS_CLAIM_VERIFICATION_ENABLED` | `true` | Enable claim verification (F026) |
+| `NOUS_CLAIM_VERIFICATION_MODE` | `enforce` | Claim verification mode (shadow/warn/enforce) |
+| `NOUS_ACTION_GATING_ENABLED` | `true` | Enable action gating (F026) |
+| `NOUS_ACTION_GATING_MODE` | `enforce` | Action gating mode (shadow/warn/enforce) |
+| `NOUS_ACTION_GATING_MODEL` | `claude-haiku-4-5-20251001` | Model for Tier 3 LLM gate |
+| `NOUS_ACTION_GATING_EXTERNAL_ONLY` | `false` | Skip Tier 2, only gate external/irreversible |
 
 ### REST Endpoints
 
