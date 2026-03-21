@@ -274,15 +274,17 @@ class SleepHandler:
             reflection = parse_llm_json(text)
             if isinstance(reflection, list):
                 logger.warning(
-                    "Reflection LLM returned list instead of dict (len=%d), treating as facts array. Raw: %s",
-                    len(reflection), text[:500],
+                    "Reflection LLM returned list instead of dict (len=%d), "
+                    "treating as facts array. Raw response (%d chars):\n%s",
+                    len(reflection), len(text), text,
                 )
                 # Treat the list as a bare facts array
                 reflection = {"facts": reflection}
             elif not isinstance(reflection, dict):
                 logger.warning(
-                    "Reflection LLM returned %s instead of dict, skipping. Raw: %s",
-                    type(reflection).__name__, text[:500],
+                    "Reflection LLM returned %s instead of dict, skipping. "
+                    "Raw response (%d chars):\n%s",
+                    type(reflection).__name__, len(text), text,
                 )
                 return True
 
