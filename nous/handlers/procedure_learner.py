@@ -524,7 +524,7 @@ class ProcedureLearner:
             model=self._settings.background_model,
             system_prompt="You are analyzing patterns to extract reusable procedures for an AI agent.",
             user_message=prompt,
-            max_tokens=1000,
+            max_tokens=1500,
         )
 
         if not text:

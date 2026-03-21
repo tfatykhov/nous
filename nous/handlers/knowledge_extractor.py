@@ -191,7 +191,7 @@ class KnowledgeExtractor:
             model=self._settings.background_model,
             system_prompt="You are extracting knowledge from a conversation before it is compacted.",
             user_message=prompt,
-            max_tokens=1000,
+            max_tokens=1500,
         )
 
         if not text:
