@@ -7,10 +7,13 @@ session-scoped and in-memory only — no database dependency.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tool classification constants (REVIEWED — matches actual registered tools)
@@ -128,6 +131,7 @@ class ExecutionLedger:
         status: str,
     ) -> ExecutedAction:
         """Record a completed (or blocked) tool execution and return it."""
+        side_effect = self._classify_side_effect(tool_name, tool_input)
         action = ExecutedAction(
             turn=self._current_turn,
             tool_name=tool_name,
@@ -135,9 +139,19 @@ class ExecutionLedger:
             status=status,
             timestamp=datetime.now(UTC),
             result_summary=str(result)[:100],
-            side_effect_type=self._classify_side_effect(tool_name, tool_input),
+            side_effect_type=side_effect,
         )
         self.actions.append(action)
+        if status == "blocked":
+            logger.info(
+                "F026 ledger: %s BLOCKED (turn %d, %s)",
+                tool_name, self._current_turn, side_effect,
+            )
+        else:
+            logger.info(
+                "F026 ledger: %s → %s (turn %d, %s)",
+                tool_name, status, self._current_turn, side_effect,
+            )
         return action
 
     @property
@@ -176,10 +190,19 @@ class ExecutionLedger:
         for recent_turns in (5, 3, 1):
             text = self._build_section(recent_turns)
             if _estimate_tokens(text) <= max_tokens:
+                logger.info(
+                    "F026 ledger prompt: ~%d tokens, %d actions, session=%s",
+                    _estimate_tokens(text), len(self.actions), self.session_id,
+                )
                 return text
 
         # Still over budget after window=1 — truncate grouped summary
-        return self._build_section(1, truncate_grouped=True, max_tokens=max_tokens)
+        text = self._build_section(1, truncate_grouped=True, max_tokens=max_tokens)
+        logger.info(
+            "F026 ledger prompt (truncated): ~%d tokens, %d actions, session=%s",
+            _estimate_tokens(text), len(self.actions), self.session_id,
+        )
+        return text
 
     # ------------------------------------------------------------------
     # Private helpers

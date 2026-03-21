@@ -345,7 +345,13 @@ class AgentRunner:
         # Remove conversation + persisted state (008.1 Phase 3)
         self._conversations.pop(session_id, None)
         self._compaction_locks.pop(session_id, None)
-        self._ledgers.pop(session_id, None)  # F026
+        ledger = self._ledgers.pop(session_id, None)  # F026
+        if ledger and ledger.actions:
+            blocked = sum(1 for a in ledger.actions if a.status == "blocked")
+            logger.info(
+                "F026: Session %s ended — %d actions recorded, %d blocked",
+                session_id, len(ledger.actions), blocked,
+            )
         self._pending_corrections.pop(session_id, None)  # F026
         await self._delete_conversation_state(session_id)
 
@@ -743,7 +749,9 @@ class AgentRunner:
                         gate_result = await self._action_gate.check(
                             tc["name"], dispatch_input, ledger, user_message=user_message,
                         )
-                        if not gate_result.approved:
+                        if gate_result.approved:
+                            logger.info("F026 gate: %s approved (%s)", tc["name"], gate_result.reason)
+                        else:
                             if self._settings.action_gating_mode == "enforce":
                                 result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
                                 if gate_result.suggestion:
@@ -751,10 +759,11 @@ class AgentRunner:
                                 is_error = True
                                 gated = True
                                 ledger.record(tc["name"], dispatch_input, result_text, "blocked")
+                                logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
                             elif self._settings.action_gating_mode == "warn":
-                                logger.warning("ActionGate would block %s: %s", tc["name"], gate_result.reason)
+                                logger.warning("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
                             else:
-                                logger.debug("ActionGate (shadow) would block %s: %s", tc["name"], gate_result.reason)
+                                logger.debug("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
 
                     if not gated:
                         start_time = time.monotonic()
@@ -965,7 +974,9 @@ class AgentRunner:
                         gate_result = await self._action_gate.check(
                             tool_name, tool_input, ledger, user_message=user_message,
                         )
-                        if not gate_result.approved:
+                        if gate_result.approved:
+                            logger.info("F026 gate: %s approved (%s)", tool_name, gate_result.reason)
+                        else:
                             if self._settings.action_gating_mode == "enforce":
                                 result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
                                 if gate_result.suggestion:
@@ -973,10 +984,11 @@ class AgentRunner:
                                 is_error = True
                                 gated = True
                                 ledger.record(tool_name, tool_input, result_text, "blocked")
+                                logger.info("F026 gate: %s BLOCKED (%s)", tool_name, gate_result.reason)
                             elif self._settings.action_gating_mode == "warn":
-                                logger.warning("ActionGate would block %s: %s", tool_name, gate_result.reason)
+                                logger.warning("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
                             else:
-                                logger.debug("ActionGate (shadow) would block %s: %s", tool_name, gate_result.reason)
+                                logger.debug("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
 
                     if not gated:
                         start_time = time.monotonic()
@@ -1266,6 +1278,7 @@ Rules:
         """Get or create a session-scoped execution ledger."""
         if session_id not in self._ledgers:
             self._ledgers[session_id] = ExecutionLedger(session_id=session_id)
+            logger.info("F026: Ledger created for session %s", session_id)
         return self._ledgers[session_id]
 
     def _verify_claims(
@@ -1286,7 +1299,9 @@ Rules:
         # Claim verification
         if self._claim_verifier:
             verification = self._claim_verifier.verify(response_text, turn_tool_names, ledger)
-            if not verification.verified:
+            if verification.verified:
+                logger.info("F026 claims: verified (%d tools this turn)", len(turn_tool_names))
+            else:
                 mode = self._settings.claim_verification_mode
                 if mode == "enforce":
                     logger.warning("Claim verification failed: %s", verification.correction)

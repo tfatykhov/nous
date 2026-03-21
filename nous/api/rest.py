@@ -249,6 +249,34 @@ def create_app(
                         "total_procedures": counts["total_procedures"],
                     },
                     "working_memory": working_memory_sessions,
+                    "execution_integrity": {
+                        "enabled": {
+                            "ledger": settings.execution_ledger_enabled,
+                            "claim_verification": settings.claim_verification_enabled,
+                            "action_gating": settings.action_gating_enabled,
+                        },
+                        "modes": {
+                            "claim_verification": settings.claim_verification_mode,
+                            "action_gating": settings.action_gating_mode,
+                        },
+                        "active_ledgers": len(runner._ledgers),
+                        "sessions": {
+                            sid: {
+                                "total_actions": len(ledger.actions),
+                                "blocked_actions": sum(
+                                    1 for a in ledger.actions if a.status == "blocked"
+                                ),
+                                "current_turn": ledger._current_turn,
+                                "summary": ledger.one_line_summary(),
+                            }
+                            for sid, ledger in runner._ledgers.items()
+                        },
+                        "pending_corrections": {
+                            sid: len(corrections)
+                            for sid, corrections in runner._pending_corrections.items()
+                            if corrections
+                        },
+                    },
                 }
 
             # F021: Dashboard extension
