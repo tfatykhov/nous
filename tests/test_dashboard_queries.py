@@ -237,7 +237,7 @@ class TestGetCalibrationData:
         assert data["confidence_histogram"] == []
         assert data["outcome_by_category"] == {}
         assert data["outcome_by_stakes"] == {}
-        assert data["reason_stats"] == []
+        assert data["reason_type_stats"] == {}
         assert data["brier_history"] == []
         assert len(data["daily_decisions"]) == 31
 
@@ -255,7 +255,7 @@ class TestGetCalibrationData:
         assert len(data["confidence_histogram"]) >= 1
         assert "architecture" in data["outcome_by_category"]
         assert "high" in data["outcome_by_stakes"]
-        assert len(data["reason_stats"]) == 2
+        assert len(data["reason_type_stats"]) == 2
 
 
 # ── Task 8: get_activity_data ───────────────────────────────────────────
