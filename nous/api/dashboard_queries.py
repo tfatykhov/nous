@@ -356,29 +356,50 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
         for row in result
     }
 
-    # Brier history from calibration_snapshots
-    result = await session.execute(
-        text("""
-            SELECT brier_score, accuracy, snapshot_at,
-                   category_stats, reason_stats
-            FROM brain.calibration_snapshots
-            WHERE agent_id = :agent_id
-            ORDER BY snapshot_at ASC
-        """),
-        {"agent_id": agent_id},
-    )
-    brier_history = [
-        {
-            "brier_score": row.brier_score,
-            "accuracy": row.accuracy,
-            "date": row.snapshot_at.isoformat() if row.snapshot_at else None,
-        }
-        for row in result
-    ]
-
-    # Daily decisions (last 30 days)
+    # Brier score over time: compute running Brier from reviewed decisions
+    # Brier score = mean of (confidence - outcome)^2 where outcome is 1 for success, 0 otherwise
     now = datetime.now(timezone.utc)
     thirty_days_ago = now - timedelta(days=30)
+    result = await session.execute(
+        text("""
+            WITH reviewed AS (
+                SELECT
+                    CAST(created_at AS date) AS day,
+                    confidence,
+                    CASE WHEN outcome = 'success' THEN 1.0 ELSE 0.0 END AS outcome_val
+                FROM brain.decisions
+                WHERE agent_id = :agent_id
+                  AND outcome IS NOT NULL AND outcome != 'pending'
+                  AND created_at >= :since
+                ORDER BY created_at
+            ),
+            daily_brier AS (
+                SELECT day,
+                       AVG(POWER(confidence - outcome_val, 2)) AS brier_score,
+                       COUNT(*) AS cnt
+                FROM reviewed
+                GROUP BY day
+            )
+            SELECT d.day,
+                   daily_brier.brier_score,
+                   daily_brier.cnt
+            FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
+            LEFT JOIN daily_brier ON daily_brier.day = CAST(d AS date)
+            ORDER BY d
+        """),
+        {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
+    )
+    # Only include days that had reviewed decisions
+    brier_history = [
+        {
+            "brier_score": round(float(row.brier_score), 4),
+            "date": row.day.isoformat(),
+        }
+        for row in result
+        if row.brier_score is not None
+    ]
+
+    # Daily decisions (last 30 days) — reuses now/thirty_days_ago from above
     result = await session.execute(
         text("""
             SELECT CAST(d AS date) AS day,
