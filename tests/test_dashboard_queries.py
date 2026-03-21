@@ -112,17 +112,19 @@ async def _insert_edge(session, source_id, target_id, *,
     )
 
 
-async def _insert_event(session, event_type="turn_completed", days_ago=0):
+async def _insert_event(session, event_type="turn_completed", days_ago=0, data=None):
     """Insert an event."""
+    import json as _json
     created = datetime.now(timezone.utc) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO nous_system.events (id, agent_id, event_type, data, created_at)
-            VALUES (:id, :agent_id, :etype, '{}', :created)
+            VALUES (:id, :agent_id, :etype, :data::jsonb, :created)
         """),
         {
             "id": uuid.uuid4(), "agent_id": AGENT_ID,
-            "etype": event_type, "created": created,
+            "etype": event_type, "data": _json.dumps(data or {}),
+            "created": created,
         },
     )
 
@@ -259,15 +261,59 @@ class TestGetCalibrationData:
 # ── Task 8: get_activity_data ───────────────────────────────────────────
 
 
+async def _insert_censor(session, *, trigger_pattern="test pattern",
+                         created_by="manual", activation_count=0, active=True):
+    """Insert a test censor and return its id."""
+    cid = uuid.uuid4()
+    await session.execute(
+        text("""
+            INSERT INTO heart.censors
+                (id, agent_id, trigger_pattern, action, reason, created_by,
+                 activation_count, active)
+            VALUES (:id, :agent_id, :pattern, 'warn', 'test', :created_by,
+                    :act_count, :active)
+        """),
+        {
+            "id": cid, "agent_id": AGENT_ID, "pattern": trigger_pattern,
+            "created_by": created_by, "act_count": activation_count,
+            "active": active,
+        },
+    )
+    return cid
+
+
+async def _insert_schedule(session, *, task="test task", active=True,
+                           next_fire_at=None):
+    """Insert a test schedule and return its id."""
+    sid = uuid.uuid4()
+    await session.execute(
+        text("""
+            INSERT INTO heart.schedules
+                (id, agent_id, task, schedule_type, active, next_fire_at,
+                 fire_at)
+            VALUES (:id, :agent_id, :task, 'once', :active, :next_fire,
+                    COALESCE(:next_fire, now() + interval '1 day'))
+        """),
+        {
+            "id": sid, "agent_id": AGENT_ID, "task": task,
+            "active": active, "next_fire": next_fire_at,
+        },
+    )
+    return sid
+
+
 class TestGetActivityData:
     @pytest.mark.asyncio
     async def test_empty_state(self, session):
         data = await get_activity_data(session, AGENT_ID)
-        assert data["timeline"] == {}
-        assert data["event_totals"] == {}
+        assert data["events"] == []
         assert data["censor_stats"]["total"] == 0
+        assert data["censor_stats"]["total_activations_7d"] == 0
         assert data["schedule_stats"]["total"] == 0
+        assert data["schedule_stats"]["fires_7d"] == 0
         assert data["sleep_stats"]["total_sleeps"] == 0
+        assert data["sleep_stats"]["last_sleep"] is None
+        assert data["sleep_stats"]["facts_created"] == 0
 
     @pytest.mark.asyncio
     async def test_with_events(self, session):
@@ -276,11 +322,98 @@ class TestGetActivityData:
         await _insert_event(session, "sleep_started", days_ago=2)
 
         data = await get_activity_data(session, AGENT_ID)
-        assert data["event_totals"]["turn_completed"] == 2
-        assert data["event_totals"]["sleep_started"] == 1
-        assert data["sleep_stats"]["total_sleeps"] == 1
-        assert data["sleep_stats"]["last_sleep_at"] is not None
-        assert len(data["timeline"]) >= 1
+        assert isinstance(data["events"], list)
+        assert len(data["events"]) == 3
+        # Verify event structure
+        evt = data["events"][0]
+        assert "type" in evt
+        assert "created_at" in evt
+        assert "data" in evt
+
+    @pytest.mark.asyncio
+    async def test_censor_stats(self, session):
+        await _insert_censor(session, created_by="manual", activation_count=5)
+        await _insert_censor(session, created_by="auto_failure", activation_count=3)
+        await _insert_censor(session, created_by="auto_escalation", activation_count=0,
+                             active=False)
+
+        data = await get_activity_data(session, AGENT_ID)
+        cs = data["censor_stats"]
+        assert cs["total"] == 3
+        assert cs["active"] == 2
+        assert cs["manual_created"] == 1
+        assert cs["auto_created"] == 2
+
+    @pytest.mark.asyncio
+    async def test_top_censors(self, session):
+        # Insert censors with varying activation counts
+        for i in range(7):
+            await _insert_censor(session, trigger_pattern=f"pattern-{i}",
+                                 activation_count=i * 10, created_by="auto_failure")
+
+        data = await get_activity_data(session, AGENT_ID)
+        top = data["censor_stats"]["top_censors"]
+        # Only censors with activation_count > 0, max 5
+        assert len(top) == 5
+        # Ordered by activation_count descending
+        activations = [c["activations"] for c in top]
+        assert activations == sorted(activations, reverse=True)
+        assert activations[0] == 60  # pattern-6
+
+    @pytest.mark.asyncio
+    async def test_next_fires(self, session):
+        now = datetime.now(timezone.utc)
+        await _insert_schedule(session, task="task-a",
+                               next_fire_at=now + timedelta(hours=2))
+        await _insert_schedule(session, task="task-b",
+                               next_fire_at=now + timedelta(hours=1))
+        await _insert_schedule(session, task="task-c", active=False,
+                               next_fire_at=now + timedelta(minutes=30))
+
+        data = await get_activity_data(session, AGENT_ID)
+        nf = data["schedule_stats"]["next_fires"]
+        # Only active schedules with next_fire_at
+        assert len(nf) == 2
+        # Ordered by next_fire_at ascending
+        assert nf[0]["task"] == "task-b"
+        assert nf[1]["task"] == "task-a"
+
+    @pytest.mark.asyncio
+    async def test_sleep_stats(self, session):
+        await _insert_event(session, "sleep_started", days_ago=1)
+        await _insert_event(session, "sleep_started", days_ago=3)
+        await _insert_event(session, "sleep_completed", days_ago=1, data={
+            "phases_completed": ["reflect", "generalize"],
+            "facts_created": 5,
+            "procedures_created": 2,
+            "censors_retired": 0,
+        })
+
+        data = await get_activity_data(session, AGENT_ID)
+        ss = data["sleep_stats"]
+        assert ss["total_sleeps"] == 2
+        assert ss["last_sleep"] is not None
+        assert ss["facts_created"] == 5
+        assert ss["procedures_created"] == 2
+        assert ss["censors_retired"] == 0
+
+    @pytest.mark.asyncio
+    async def test_hours_param(self, session):
+        # Insert event at 2 days ago and 10 days ago
+        await _insert_event(session, "turn_completed", days_ago=2)
+        await _insert_event(session, "turn_completed", days_ago=10)
+
+        # With 72 hours (3 days), should only see the recent event
+        data = await get_activity_data(session, AGENT_ID, hours=72)
+        assert len(data["events"]) == 1
+
+        # With default 168 hours (7 days), should see one event
+        data = await get_activity_data(session, AGENT_ID, hours=168)
+        assert len(data["events"]) == 1
+
+        # With 720 hours (30 days), should see both
+        data = await get_activity_data(session, AGENT_ID, hours=720)
+        assert len(data["events"]) == 2
 
 
 # ── Task 9: get_health_data ─────────────────────────────────────────────
