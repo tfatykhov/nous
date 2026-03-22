@@ -114,7 +114,7 @@ class AgentRunner:
         if not self._api:
             return '{"approved": true, "reason": "api-not-initialized"}'
         resp = await self._call_api(
-            system_prompt="",
+            system_prompt="You are a safety gate. Respond only with JSON.",
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             skip_thinking=True,
