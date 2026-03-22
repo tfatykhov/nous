@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 # Telegram Bot API base
 TG_API = "https://api.telegram.org/bot{token}/{method}"
 
+# Session TTL: if no activity for this long, start a new session.
+# Mirrors server-side session_idle_timeout (default 1800s = 30min).
+SESSION_TTL_SECONDS = 1800
+
 # Max Telegram message length
 TG_MAX_LEN = 4096
 
@@ -398,6 +402,8 @@ class NousTelegramBot:
         self._offset = 0
         # Map telegram chat_id -> nous session_id for continuity
         self._sessions: dict[int, str] = {}
+        # Track last activity time per chat to detect stale sessions
+        self._session_last_active: dict[int, float] = {}
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=300, write=10, pool=10))
 
     async def start(self) -> None:
@@ -447,6 +453,7 @@ class NousTelegramBot:
         # Handle /new - end current session properly, then start fresh
         if text == "/new":
             old_session_id = self._sessions.pop(chat_id, None)
+            self._session_last_active.pop(chat_id, None)
             if old_session_id:
                 try:
                     await self._http.delete(
@@ -499,6 +506,12 @@ class NousTelegramBot:
         # Send typing indicator
         await self._tg("sendChatAction", params={"chat_id": chat_id, "action": "typing"})
 
+        # Zombie session fix: expire stale session IDs
+        last_active = self._session_last_active.get(chat_id, 0)
+        if chat_id in self._sessions and (time.time() - last_active) > SESSION_TTL_SECONDS:
+            logger.info("Session %s expired (idle %.0fs), starting fresh",
+                        self._sessions[chat_id], time.time() - last_active)
+            del self._sessions[chat_id]
         session_id = self._sessions.get(chat_id)
         payload: dict[str, Any] = {"message": text, "platform": "telegram"}
         if session_id:
@@ -521,6 +534,7 @@ class NousTelegramBot:
             # Store session for continuity
             if "session_id" in data:
                 self._sessions[chat_id] = data["session_id"]
+                self._session_last_active[chat_id] = time.time()
 
             # Build response text (convert LLM markdown to Telegram HTML)
             reply = format_telegram_html(data.get("response", "No response"))
@@ -589,7 +603,14 @@ class NousTelegramBot:
         await self._tg("sendChatAction", params={"chat_id": chat_id, "action": "typing"})
 
         # P1 fix: generate session_id upfront so client and server use same ID
+        # Zombie session fix: expire stale session IDs to match server-side idle timeout
+        last_active = self._session_last_active.get(chat_id, 0)
+        if chat_id in self._sessions and (time.time() - last_active) > SESSION_TTL_SECONDS:
+            logger.info("Session %s expired (idle %.0fs), starting fresh",
+                        self._sessions[chat_id], time.time() - last_active)
+            del self._sessions[chat_id]
         session_id = self._sessions.setdefault(chat_id, str(uuid4()))
+        self._session_last_active[chat_id] = time.time()
         payload: dict[str, Any] = {"message": text, "session_id": session_id, "platform": "telegram"}
         # 007.4: Pass user identity for episode tracking
         if user_id:
