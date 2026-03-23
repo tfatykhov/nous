@@ -300,7 +300,7 @@ def create_mcp_server(
                 "brier_score": calibration.brier_score,
                 "accuracy": calibration.accuracy,
                 "total_decisions": calibration.total_decisions,
-                "reviewed_count": calibration.reviewed_count,
+                "reviewed_count": calibration.reviewed_decisions,
             },
         }
         return [TextContent(type="text", text=json.dumps(result, default=str))]
