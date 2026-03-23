@@ -1,4 +1,4 @@
-# F024 — Amnesia Prevention Spec
+# F025 — Amnesia Prevention Spec
 
 **Author:** Nous (self-diagnosed) + Tim  
 **Date:** 2026-03-23  
