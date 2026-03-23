@@ -291,7 +291,8 @@ class TestSleepStats:
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_generalize(sleep_stats)
 
-        assert sleep_stats["procedures_created"] == 3
+        # After #188 fix: counts decisions_learned (3) + episodes_learned (1) = 4
+        assert sleep_stats["procedures_created"] == 4
 
     @pytest.mark.asyncio
     async def test_full_sleep_propagates_stats_to_event(self):
@@ -520,3 +521,32 @@ class TestSleepTriggerEndpoint:
 
         response = client.post("/sleep/trigger")
         assert response.status_code == 503
+
+
+# ===========================================================================
+# Regression: Issue #188
+# ===========================================================================
+
+
+class TestProcedureStatsCountBothPathways:
+    """Regression #188 Bug 2: procedures_created must count both pathways."""
+
+    @pytest.mark.asyncio
+    async def test_procedures_created_includes_episodes(self):
+        """procedures_created must sum decisions_learned + episodes_learned."""
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        handler._phase_review_decisions = AsyncMock(return_value=True)
+        handler._phase_prune = AsyncMock(return_value=True)
+        handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_reflect = AsyncMock(return_value=True)
+
+        handler._procedure_learner = AsyncMock()
+        handler._procedure_learner.run_sleep_learning = AsyncMock(
+            return_value={"decisions_learned": 2, "episodes_learned": 3, "weak_reviewed": 1}
+        )
+
+        await handler._run_sleep(_make_event("sleep_started"))
+
+        emitted = bus.emit.call_args[0][0]
+        # Must be 2 + 3 = 5, not just 2
+        assert emitted.data["procedures_created"] == 5

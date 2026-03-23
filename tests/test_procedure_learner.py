@@ -11,7 +11,6 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from nous.brain.schemas import BridgeInfo, DecisionDetail, DecisionSummary
@@ -202,16 +201,14 @@ def _dissimilar_embedding(base: list[float]) -> list[float]:
     return [x / norm for x in raw] if norm > 0 else raw
 
 
-def _mock_llm_response(data: dict) -> httpx.Response:
-    """Create a mock httpx.Response with LLM JSON output."""
-    return httpx.Response(
-        200,
-        json={
-            "content": [
-                {"type": "text", "text": json.dumps(data)},
-            ]
-        },
-    )
+def _mock_llm_response(data: dict) -> MagicMock:
+    """Create a mock LLM response matching call_background_llm's expected format.
+
+    call_background_llm accesses response.content (list of dicts with type/text).
+    """
+    response = MagicMock()
+    response.content = [{"type": "text", "text": json.dumps(data)}]
+    return response
 
 
 def _llm_procedure_data(name: str = "Async DB Pattern") -> dict:
@@ -285,20 +282,22 @@ def _build_learner(settings: Settings | None = None):
     brain = AsyncMock()
     heart = AsyncMock()
     embeddings = AsyncMock()
-    http = AsyncMock(spec=httpx.AsyncClient)
+    # No spec= constraint — LLMClient protocol uses .call() which isn't on httpx.AsyncClient
+    llm_client = AsyncMock()
     s = settings or _make_settings()
-    learner = ProcedureLearner(brain, heart, embeddings, s, http)
-    return learner, brain, heart, embeddings, http
+    learner = ProcedureLearner(brain, heart, embeddings, s, llm_client)
+    return learner, brain, heart, embeddings, llm_client
 
 
 @pytest.mark.asyncio
 async def test_decision_cluster_creates_procedure():
     """3+ similar successful reviewed decisions -> 1 procedure."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
     # Set up 3 successful reviewed decisions
     summaries = [_make_decision_summary() for _ in range(3)]
-    brain.list_decisions.return_value = (summaries, 3)
+    # list_decisions called twice: outcome="success" then outcome="partial"
+    brain.list_decisions.side_effect = [(summaries, 3), ([], 0)]
 
     # Each decision has bridge function
     details = [_make_decision_detail(s) for s in summaries]
@@ -313,7 +312,7 @@ async def test_decision_cluster_creates_procedure():
     ]
 
     # LLM returns procedure data
-    http.post.return_value = _mock_llm_response(_llm_procedure_data())
+    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
 
     # No duplicate
     heart.search_procedures.return_value = []
@@ -333,10 +332,10 @@ async def test_decision_cluster_creates_procedure():
 @pytest.mark.asyncio
 async def test_small_cluster_rejected():
     """Only 2 successful decisions -> no cluster, no procedure."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
     summaries = [_make_decision_summary() for _ in range(2)]
-    brain.list_decisions.return_value = (summaries, 2)
+    brain.list_decisions.side_effect = [(summaries, 2), ([], 0)]
 
     details = [_make_decision_detail(s) for s in summaries]
     brain.get.side_effect = details
@@ -353,7 +352,7 @@ async def test_small_cluster_rejected():
 @pytest.mark.asyncio
 async def test_success_rate_gate():
     """Cluster where <70% are successful -> excluded."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
     # 2 success + 2 failure (all reviewed) = 50% success rate
     summaries = [
@@ -398,11 +397,11 @@ async def test_check_success_rate_method():
 @pytest.mark.asyncio
 async def test_recency_gate():
     """All decisions older than 7 days -> excluded."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
     old_date = _NOW - timedelta(days=14)
     summaries = [_make_decision_summary(created_at=old_date) for _ in range(3)]
-    brain.list_decisions.return_value = (summaries, 3)
+    brain.list_decisions.side_effect = [(summaries, 3), ([], 0)]
 
     details = [_make_decision_detail(s) for s in summaries]
     brain.get.side_effect = details
@@ -423,10 +422,10 @@ async def test_recency_gate():
 @pytest.mark.asyncio
 async def test_episode_lesson_clustering():
     """3+ similar lessons from episodes -> 1 procedure."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
     # No decisions (pathway 1 empty)
-    brain.list_decisions.return_value = ([], 0)
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
 
     # 3 episodes with similar lessons
     ep_summaries = [_make_episode_summary() for _ in range(3)]
@@ -447,7 +446,7 @@ async def test_episode_lesson_clustering():
     ]
 
     # LLM returns procedure
-    http.post.return_value = _mock_llm_response(_llm_procedure_data("Episode Lesson"))
+    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data("Episode Lesson"))
 
     # No duplicate
     heart.search_procedures.return_value = []
@@ -463,9 +462,9 @@ async def test_episode_lesson_clustering():
 @pytest.mark.asyncio
 async def test_too_few_episodes():
     """Only 1 episode with 1 lesson -> no cluster."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
-    brain.list_decisions.return_value = ([], 0)
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
 
     ep_summaries = [_make_episode_summary()]
     heart.list_episodes.return_value = ep_summaries
@@ -482,10 +481,10 @@ async def test_too_few_episodes():
 @pytest.mark.asyncio
 async def test_dedup_skips_similar_existing():
     """If similar procedure exists (score > 0.85), skip creation."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
     summaries = [_make_decision_summary() for _ in range(3)]
-    brain.list_decisions.return_value = (summaries, 3)
+    brain.list_decisions.side_effect = [(summaries, 3), ([], 0)]
     details = [_make_decision_detail(s) for s in summaries]
     brain.get.side_effect = details
 
@@ -496,7 +495,7 @@ async def test_dedup_skips_similar_existing():
         _similar_embedding(base, 0.01),
     ]
 
-    http.post.return_value = _mock_llm_response(_llm_procedure_data())
+    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
 
     # Existing procedure with high similarity score
     heart.search_procedures.return_value = [_make_procedure_summary(score=0.90)]
@@ -510,13 +509,13 @@ async def test_dedup_skips_similar_existing():
 @pytest.mark.asyncio
 async def test_max_cap_enforcement():
     """Respects procedure_max_per_sleep cap."""
-    learner, brain, heart, embeddings, http = _build_learner(
+    learner, brain, heart, embeddings, llm_client = _build_learner(
         _make_settings(procedure_max_per_sleep=1)
     )
 
     # Set up enough decisions for 2 clusters
     summaries = [_make_decision_summary() for _ in range(6)]
-    brain.list_decisions.return_value = (summaries, 6)
+    brain.list_decisions.side_effect = [(summaries, 6), ([], 0)]
     details = [_make_decision_detail(s) for s in summaries]
     brain.get.side_effect = details
 
@@ -532,7 +531,7 @@ async def test_max_cap_enforcement():
         _similar_embedding(base2, 0.01),
     ]
 
-    http.post.return_value = _mock_llm_response(_llm_procedure_data())
+    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
     heart.search_procedures.return_value = []
     heart.store_procedure.return_value = MagicMock()
 
@@ -546,7 +545,7 @@ async def test_max_cap_enforcement():
 @pytest.mark.asyncio
 async def test_disabled_learning_returns_empty():
     """When procedure_learning_enabled=False, returns empty stats."""
-    learner, brain, heart, embeddings, http = _build_learner(
+    learner, brain, heart, embeddings, llm_client = _build_learner(
         _make_settings(procedure_learning_enabled=False)
     )
 
@@ -565,11 +564,11 @@ async def test_no_embeddings_returns_zero():
     """If no EmbeddingProvider, pathways return 0."""
     brain = AsyncMock()
     heart = AsyncMock()
-    http = AsyncMock(spec=httpx.AsyncClient)
+    llm_client = AsyncMock()
     settings = _make_settings()
-    learner = ProcedureLearner(brain, heart, None, settings, http)
+    learner = ProcedureLearner(brain, heart, None, settings, llm_client)
 
-    brain.list_decisions.return_value = ([], 0)
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
     heart.list_episodes.return_value = []
 
     stats = await learner.run_sleep_learning()
@@ -581,9 +580,9 @@ async def test_no_embeddings_returns_zero():
 @pytest.mark.asyncio
 async def test_weak_review_retires():
     """Weak procedure with low effectiveness gets retired."""
-    learner, brain, heart, embeddings, http = _build_learner()
+    learner, brain, heart, embeddings, llm_client = _build_learner()
 
-    brain.list_decisions.return_value = ([], 0)
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
     heart.list_episodes.return_value = []
 
     weak_proc = _make_procedure_summary(name="Weak proc", score=0.5)
@@ -594,7 +593,7 @@ async def test_weak_review_retires():
         last_activated=_RECENT,
     )
 
-    http.post.return_value = _mock_llm_response({
+    llm_client.call.return_value = _mock_llm_response({
         "action": "retire",
         "reason": "Too unreliable",
     })
@@ -614,3 +613,65 @@ async def test_monitor_recovery_prompt_exists():
     assert "{recovery_actions}" in _MONITOR_RECOVERY_PROMPT
     assert "{context}" in _MONITOR_RECOVERY_PROMPT
     assert '"name"' in _MONITOR_RECOVERY_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Issue #188
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_decision_pathway_passes_db_filters():
+    """Regression #188 Bug 1: list_decisions must use outcome+reviewed DB filters.
+
+    Previously called list_decisions(limit=100) with no filters, returning
+    100 most recent (all pending), missing reviewed successful decisions.
+    """
+    learner, brain, heart, embeddings, llm_client = _build_learner()
+
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+    heart.list_episodes.return_value = []
+    heart.search_procedures.return_value = []
+
+    await learner.run_sleep_learning()
+
+    # Must be called twice: once for "success", once for "partial"
+    assert brain.list_decisions.call_count == 2
+    calls = brain.list_decisions.call_args_list
+
+    _, kwargs0 = calls[0]
+    assert kwargs0["outcome"] == "success"
+    assert kwargs0["reviewed"] is True
+
+    _, kwargs1 = calls[1]
+    assert kwargs1["outcome"] == "partial"
+    assert kwargs1["reviewed"] is True
+
+
+@pytest.mark.asyncio
+async def test_episode_pathway_logs_diagnostics(caplog):
+    """Regression #188 Bug 3: Episode pathway must log diagnostic info.
+
+    Previously failed silently with no logging.
+    """
+    import logging
+
+    learner, brain, heart, embeddings, llm_client = _build_learner()
+
+    brain.list_decisions.side_effect = [([], 0), ([], 0)]
+
+    ep_success = _make_episode_summary(outcome="success")
+    ep_failure = _make_episode_summary(outcome="failure")
+    ep_ongoing = _make_episode_summary(outcome="ongoing")
+    heart.list_episodes.return_value = [ep_success, ep_failure, ep_ongoing]
+
+    heart.get_episode.return_value = _make_episode_detail(
+        ep_success, lessons=["Single lesson"]
+    )
+    heart.search_procedures.return_value = []
+
+    with caplog.at_level(logging.INFO, logger="nous.handlers.procedure_learner"):
+        await learner.run_sleep_learning()
+
+    assert "Episode pathway" in caplog.text
+    assert "episodes fetched" in caplog.text or "lessons collected" in caplog.text

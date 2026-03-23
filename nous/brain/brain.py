@@ -198,6 +198,7 @@ class Brain:
                 outcome=d.outcome or "pending",
                 pattern=d.pattern,
                 tags=tags_by_id.get(d.id, []),
+                reviewed_at=d.reviewed_at,
                 created_at=d.created_at,
             )
             for d in decisions

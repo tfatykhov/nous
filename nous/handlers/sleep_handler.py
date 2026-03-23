@@ -357,7 +357,7 @@ class SleepHandler:
         if self._procedure_learner:
             try:
                 stats = await self._procedure_learner.run_sleep_learning()
-                sleep_stats["procedures_created"] += stats.get("decisions_learned", 0)
+                sleep_stats["procedures_created"] += stats.get("decisions_learned", 0) + stats.get("episodes_learned", 0)
                 logger.info(
                     "Sleep generalize: %d decisions, %d episodes, %d reviewed",
                     stats.get("decisions_learned", 0),
