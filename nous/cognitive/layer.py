@@ -1224,6 +1224,7 @@ class CognitiveLayer:
         self._session_tool_history.pop(session_id, None)
         self._pending_nudges.pop(session_id, None)
         self._session_response_lengths.pop(session_id, None)
+        self._session_user_messages.pop(session_id, None)
 
         # 4. Emit session_ended event — 006: bus.emit with backward compat
         transcript_text = "\n\n".join(meta.transcript) if meta else ""
