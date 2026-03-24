@@ -184,9 +184,10 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
 
         except asyncio.TimeoutError:
             elapsed = int(time.time() * 1000) - start_ms
-            logger.warning("CriticAgent classification timed out after %dms", elapsed)
+            logger.warning("CriticAgent classification timed out after %dms (limit=%dms)",
+                           elapsed, self._settings.critic_max_latency_ms)
             return CriticResult(
-                routing=RoutingMode.SINGLE_ADVISED,
+                routing=RoutingMode.PASSTHROUGH,
                 recommended_frame=heuristic_frame.frame_id,
                 rationale="Fallback: classification timed out",
                 heuristic_frame=heuristic_frame.frame_id,
@@ -194,9 +195,9 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             )
         except Exception as e:
             elapsed = int(time.time() * 1000) - start_ms
-            logger.warning("CriticAgent classification failed: %s", e)
+            logger.warning("CriticAgent classification failed (%dms): %s", elapsed, e)
             return CriticResult(
-                routing=RoutingMode.SINGLE_ADVISED,
+                routing=RoutingMode.PASSTHROUGH,
                 recommended_frame=heuristic_frame.frame_id,
                 rationale="Fallback: classification error",
                 heuristic_frame=heuristic_frame.frame_id,

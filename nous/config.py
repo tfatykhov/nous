@@ -282,7 +282,7 @@ class Settings(BaseSettings):
     critic_enabled: bool = True
     critic_mode: Literal["shadow", "advised", "parallel"] = "shadow"
     critic_model: str = "claude-sonnet-4-6"
-    critic_max_latency_ms: int = 2000
+    critic_max_latency_ms: int = 5000
     critic_passthrough_max_words: int = 5
 
     @model_validator(mode="after")

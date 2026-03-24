@@ -71,7 +71,7 @@ class TestCriticConfig:
         assert s.critic_enabled is True
         assert s.critic_mode == "shadow"
         assert s.critic_model == "claude-sonnet-4-6"
-        assert s.critic_max_latency_ms == 2000
+        assert s.critic_max_latency_ms == 5000
         assert s.critic_passthrough_max_words == 5
 
     def test_critic_disabled(self):
@@ -203,6 +203,8 @@ class TestCriticClassification:
 
     @pytest.mark.asyncio
     async def test_classify_handles_api_exception(self):
+        """API errors are caught by call_background_llm (returns None),
+        which becomes empty string → parse fallback to heuristic frame."""
         agent = CriticAgent(_settings())
         mock_api = AsyncMock()
         mock_api.call = AsyncMock(side_effect=RuntimeError("rate limited"))
@@ -213,6 +215,7 @@ class TestCriticClassification:
             heuristic_frame=_frame("task", 0.8, "pattern"),
             available_frames=["task"],
         )
+        # call_background_llm catches the error and returns None → parse fallback
         assert result.routing == RoutingMode.SINGLE_ADVISED
         assert result.recommended_frame == "task"
 
