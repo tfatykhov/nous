@@ -89,6 +89,11 @@ All shipped implementation specs with PR references:
 | 015 | Graph-Augmented Recall (F022) | ✅ Shipped | — polymorphic edges, 1-hop expansion, cross-type linking, contradiction bridge, spreading activation |
 | F011 | Skill Discovery v2 | ✅ Shipped | — learn_skill tool, SkillParser, bootstrap, FRAME_TOOLS wiring |
 
+### P1: Cognitive Enhancement
+| Feature | Name | Status | Description |
+|---------|------|--------|-------------|
+| F024 | [Critic Agent](F024-critic-agent.md) | Phase 0 ✅ | Smart frame selector (B-Brain) — LLM classification, 6 diagnostic critics, shadow mode. Phase 1+ (parallelism) planned. |
+
 ### Phase 2 — Quality (next to build)
 
 | Feature | Name | Priority | Description |

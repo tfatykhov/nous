@@ -1148,6 +1148,10 @@ Rules:
         if frame_instructions:
             parts.append(frame_instructions)
 
+        # F024: Diagnostic nudges from Critic
+        if turn_context.diagnostic_nudges:
+            parts.append(turn_context.diagnostic_nudges)
+
         # F026: Execution ledger (non-prunable, non-compactable)
         if ledger and self._settings.execution_ledger_enabled:
             ledger_section = ledger.system_prompt_section(
