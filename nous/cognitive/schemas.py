@@ -194,6 +194,7 @@ class TurnContext(BaseModel):
     recalled_episode_ids: list[str] = Field(default_factory=list)
     recalled_content_map: dict[str, str] = Field(default_factory=dict)
     recalled_score_map: dict[str, float] = Field(default_factory=dict)
+    diagnostic_nudges: str = ""  # F024: Critic diagnostic observations
 
 
 class ToolResult(BaseModel):

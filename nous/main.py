@@ -99,15 +99,25 @@ async def create_components(settings: Settings) -> dict:
     except Exception:
         logger.warning("Identity auto-seed check failed (non-fatal)")
 
-    cognitive = CognitiveLayer(
-        brain, heart, settings, settings.identity_prompt,
-        bus=bus, identity_manager=identity_manager,
-    )
-
-    # Create shared API client for all LLM calls (handlers + runner + admission)
+    # Create shared API client for all LLM calls (handlers + runner + admission + critic)
     from nous.api.anthropic_client import create_client
     api_client = create_client(settings)
     await api_client.start()
+
+    # F024: Critic Agent (uses shared api_client)
+    critic = None
+    if settings.critic_enabled:
+        from nous.cognitive.critic import CriticAgent
+        critic = CriticAgent(settings)
+        critic.set_api_client(api_client)
+        logger.info("F024: CriticAgent wired (mode=%s, model=%s)",
+                     settings.critic_mode, settings.critic_model)
+
+    cognitive = CognitiveLayer(
+        brain, heart, settings, settings.identity_prompt,
+        bus=bus, identity_manager=identity_manager,
+        critic=critic,
+    )
 
     # F023: Wire admission LLM client using shared api_client
     if heart.facts._admission_controller is not None:

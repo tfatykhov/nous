@@ -278,6 +278,13 @@ class Settings(BaseSettings):
     action_gating_model: str = "claude-haiku-4-5-20251001"
     action_gating_external_only: bool = False  # True = skip Tier 2, only gate external/irreversible
 
+    # F024: Critic Agent
+    critic_enabled: bool = True
+    critic_mode: Literal["shadow", "advised", "parallel"] = "shadow"
+    critic_model: str = "claude-sonnet-4-6"
+    critic_max_latency_ms: int = 2000
+    critic_passthrough_max_words: int = 5
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

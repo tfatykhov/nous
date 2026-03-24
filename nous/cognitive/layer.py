@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import update as sa_update
@@ -33,6 +33,9 @@ from nous.events import Event, EventBus
 from nous.heart.heart import Heart
 from nous.heart.schemas import EpisodeInput, FactInput, OpenThread, WorkingMemoryItem
 from nous.storage.models import Agent
+
+if TYPE_CHECKING:
+    from nous.cognitive.critic import CriticAgent
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +121,7 @@ class CognitiveLayer:
         *,
         bus: EventBus | None = None,
         identity_manager: "IdentityManager | None" = None,
+        critic: "CriticAgent | None" = None,
     ) -> None:
         self._brain = brain
         self._heart = heart
@@ -139,6 +143,12 @@ class CognitiveLayer:
         )
         self._deliberation = DeliberationEngine(brain)
         self._monitor = MonitorEngine(brain, heart, settings)
+
+        # F024: Critic Agent
+        self._critic = critic
+        self._session_tool_history: dict[str, list[dict]] = {}
+        self._pending_nudges: dict[str, str] = {}
+        self._session_response_lengths: dict[str, list[int]] = {}
 
         # Track active episodes per session.
         # P2-10: Known race condition at await boundaries — two coroutines
@@ -263,6 +273,71 @@ class CognitiveLayer:
             except Exception:
                 logger.warning("Frame selection failed, falling back to conversation")
                 frame = self._frames._default_selection()
+
+        # F024: Critic Agent pre-turn classification
+        if self._critic and self._settings.critic_enabled and not _is_initiation:
+            from nous.cognitive.critic_schemas import RoutingMode
+
+            heuristic_frame = frame  # preserve for shadow logging
+            try:
+                all_frames = await self._frames.list_frames(agent_id, session=session)
+                available_frame_ids = [f.frame_id for f in all_frames
+                                       if f.frame_id != "initiation"]
+            except Exception:
+                available_frame_ids = ["conversation", "task", "question",
+                                       "decision", "debug", "creative"]
+
+            tool_history = self._session_tool_history.get(session_id, [])
+            critic_result = await self._critic.classify(
+                user_message=user_input,
+                heuristic_frame=frame,
+                available_frames=available_frame_ids,
+                tool_call_history=tool_history,
+            )
+
+            # In advised mode, override frame selection
+            if (self._settings.critic_mode == "advised"
+                    and critic_result.routing == RoutingMode.SINGLE_ADVISED
+                    and critic_result.recommended_frame != frame.frame_id):
+                try:
+                    frame = await self._frames.get(
+                        critic_result.recommended_frame, agent_id, session=session,
+                    )
+                    logger.info(
+                        "F024 Critic overriding frame: %s -> %s (reason: %s)",
+                        heuristic_frame.frame_id, critic_result.recommended_frame,
+                        critic_result.rationale,
+                    )
+                except ValueError:
+                    logger.warning("F024 Critic recommended unknown frame: %s",
+                                   critic_result.recommended_frame)
+            elif self._settings.critic_mode == "shadow":
+                if critic_result.recommended_frame != frame.frame_id:
+                    logger.info(
+                        "F024 Critic shadow: heuristic=%s, critic=%s, reason=%s",
+                        frame.frame_id, critic_result.recommended_frame,
+                        critic_result.rationale,
+                    )
+
+            # Emit critic_classified event
+            if self._bus:
+                try:
+                    await self._bus.emit(Event(
+                        type="critic_classified",
+                        agent_id=agent_id,
+                        session_id=session_id,
+                        data={
+                            "heuristic_frame": heuristic_frame.frame_id,
+                            "critic_frame": critic_result.recommended_frame,
+                            "routing": critic_result.routing.value,
+                            "rationale": critic_result.rationale,
+                            "latency_ms": critic_result.latency_ms,
+                            "mode": self._settings.critic_mode,
+                            "agreed": heuristic_frame.frame_id == critic_result.recommended_frame,
+                        },
+                    ))
+                except Exception:
+                    pass  # non-critical
 
         # 2b. CLASSIFY — extract intent signals and plan retrieval (005.1)
         signals = self._intent_classifier.classify(user_input, frame)
@@ -445,6 +520,9 @@ class CognitiveLayer:
         except Exception:
             logger.debug("Censor check failed during pre_turn")
 
+        # F024: Attach pending diagnostic nudges from previous turn
+        _diagnostic_nudges = self._pending_nudges.pop(session_id, "")
+
         return TurnContext(
             system_prompt=system_prompt,
             frame=frame,
@@ -459,6 +537,7 @@ class CognitiveLayer:
             recalled_episode_ids=recalled_episode_ids,
             recalled_content_map=recalled_content_map,
             recalled_score_map=recalled_score_map,
+            diagnostic_nudges=_diagnostic_nudges,
         )
 
     async def post_turn(
@@ -679,6 +758,34 @@ class CognitiveLayer:
                 await self._brain.emit_event("turn_completed", event_data, session=session)
         except Exception:
             logger.warning("Failed to emit turn_completed event")
+
+        # F024: Track tool calls and run diagnostic critics
+        if self._critic and self._settings.critic_enabled:
+            if turn_result.tool_results:
+                history = self._session_tool_history.setdefault(session_id, [])
+                for tr in turn_result.tool_results:
+                    entry: dict[str, Any] = {"tool": tr.tool_name, "args": str(tr.arguments)[:200]}
+                    if isinstance(tr.arguments, dict):
+                        entry["query"] = tr.arguments.get("query", "")
+                        entry["confidence"] = tr.arguments.get("confidence")
+                    history.append(entry)
+                self._session_tool_history[session_id] = history[-20:]
+
+            resp_lengths = self._session_response_lengths.setdefault(session_id, [])
+            resp_lengths.append(len(turn_result.response_text))
+
+            meta_for_diag = self._session_metadata.get(session_id)
+            turn_num = meta_for_diag.turn_count if meta_for_diag else 1
+            diagnostics = self._critic.run_diagnostics(
+                self._session_tool_history.get(session_id, []),
+                turn_number=turn_num,
+                current_frame=turn_context.frame.frame_id if turn_context else "",
+                response_lengths=resp_lengths,
+            )
+            nudges = self._critic.format_nudges(diagnostics)
+            if nudges:
+                self._pending_nudges[session_id] = nudges
+                logger.info("F024 diagnostic nudge queued for session %s", session_id)
 
         return assessment
 
@@ -1103,6 +1210,11 @@ class CognitiveLayer:
 
         # 3b. Clean up monitor session censor counts
         self._monitor._session_censor_counts.pop(session_id, None)
+
+        # F024: Clean up critic session state
+        self._session_tool_history.pop(session_id, None)
+        self._pending_nudges.pop(session_id, None)
+        self._session_response_lengths.pop(session_id, None)
 
         # 4. Emit session_ended event — 006: bus.emit with backward compat
         transcript_text = "\n\n".join(meta.transcript) if meta else ""
