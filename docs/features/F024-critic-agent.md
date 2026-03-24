@@ -1,12 +1,13 @@
 # F024 — Critic Agent: Speculative Parallel Cognitive Execution
 
-> **Status:** Draft v2
+> **Status:** Draft v3
 > **Priority:** P1
 > **Depends on:** F003 (Cognitive Layer), F009 (Async Subtasks), F015 (Subtask Hardening — specifically: error recovery [§3.1] and per-frame tool limits [§4.2])
 > **Supersedes:** F013 (Frame Splitting — conceptually absorbed; no F013 code exists to remove)
-> **Theoretical basis:** Minsky, *The Emotion Machine* Ch.7 (Critic-Selector Model), Ch.5 (6 Levels of Mental Activity); *Society of Mind* Ch.6 (B-Brains), Ch.18 (Parallel Bundles), Ch.24 (Frames)
+> **Theoretical basis:** Minsky, *The Emotion Machine* Ch.7 (Critic-Selector Model), Ch.5 (6 Levels of Mental Activity); *Society of Mind* Ch.6 (B-Brains), Ch.18 (Parallel Bundles), Ch.24 (Frames); Mouzouni 2026, *Black-Box Reliability Certification for AI Agents via Self-Consistency Sampling and Conformal Calibration* (arXiv:2602.21368)
 > **Reviewers:** Emerson (A2A), Tim
 > **Changelog:**
+> - v3: Add self-consistency evaluation mode — parallel instances for calibrated evaluation (Tier 2/3 from evaluation skill). Sequential stopping rule, agreement-rate metrics, cross-model sampling. Reference: Mouzouni 2026 (arXiv:2602.21368)
 > - v2: Address Emerson review — transaction read-through, Critic content generation in merge, bash blocking, F015 specificity, recall_deep side effects, cost model revision, Critic model selection, F020/F022 interaction, skills auto-activation connection
 
 ---
@@ -133,6 +134,8 @@ The Critic classifies each turn into one of four routing modes:
 **Parallel-Select** — Ambiguous or multi-faceted task. Spawn 2-3 instances, pick best. Cost: +1 Critic call + N×Sonnet.
 
 **Parallel-Merge** — Task with complementary aspects. Spawn 2-3 instances, Critic synthesizes outputs. Cost: +2 Critic calls (classification + synthesis) + N×Sonnet.
+
+**Parallel-Evaluate** *(v3 addition)* — Self-consistency evaluation mode. All instances get the **same prompt and same frame**, run independently, produce independent judgments. Critic aggregates by agreement rate rather than picking a winner. Used when the task is *evaluation/judgment* rather than *generation*. Cost: +1 Critic call + K×model (K=3-5, can use cheaper models). See §Self-Consistency Evaluation Mode below.
 
 ### Complexity Classifier (Passthrough Gate)
 
@@ -534,6 +537,151 @@ When F022 is active, `recall_deep` uses graph traversal for richer results. In p
 
 ---
 
+## Self-Consistency Evaluation Mode (v3 addition)
+
+### Motivation
+
+The existing parallel modes (select, merge) assume instances run **different frames** to produce **different perspectives**. But there's a distinct use case: running the **same evaluation task K times** to measure **how consistent the judgment is**.
+
+This is grounded in Mouzouni 2026's reliability certification framework, which demonstrates that:
+- Single-pass LLM evaluation has high variance that's invisible to the user
+- LLM-as-judge has low variance but potentially high, undetectable bias
+- Self-consistency sampling (K independent runs, rank by frequency) separates signal from noise
+- Conformal calibration on top provides distribution-free coverage guarantees
+
+### How It Maps to F024
+
+Self-consistency evaluation is a natural fifth routing mode for the Critic:
+
+```
+User: "Evaluate this architecture rigorously"
+    |
+    v
+Critic detects: evaluation task + high stakes
+    |
+    v
+Routes to: Parallel-Evaluate
+    |
+    +-- Instance 1: Evaluate X (same prompt, same frame)
+    +-- Instance 2: Evaluate X (same prompt, same frame)
+    +-- Instance 3: Evaluate X (same prompt, same frame)
+    |   ... up to K=5
+    |
+    v
+Critic Aggregation (different from select/merge):
+    - Per-dimension agreement rate
+    - Majority score per dimension
+    - Flagged dimensions where instances diverge
+    - Overall reliability level
+```
+
+### Key Differences from Parallel-Select
+
+- **Instance prompts:** Select uses different per-frame instructions; Evaluate uses identical prompts
+- **Instance frames:** Select uses different frames; Evaluate uses the same frame
+- **Goal:** Select finds the best response; Evaluate produces a calibrated judgment
+- **Critic action:** Select picks a winner; Evaluate computes agreement rates
+- **Output:** Select returns a single response; Evaluate returns scores + confidence levels
+- **Side effects:** Select commits winner's side effects; Evaluate commits none (evaluation only)
+
+### Sequential Stopping Rule
+
+To reduce cost, the Critic can stop spawning instances early if consensus is already clear:
+
+```python
+class SequentialStopper:
+    def __init__(self, k_max: int = 5, min_instances: int = 3):
+        self.k_max = k_max
+        self.min_instances = min_instances
+        self.results = []
+    
+    def add_result(self, scores: dict[str, float]) -> bool:
+        """Add a result. Returns True if we should stop."""
+        self.results.append(scores)
+        
+        if len(self.results) < self.min_instances:
+            return False
+        
+        # Check per-dimension agreement
+        for dimension in scores.keys():
+            values = [r[dimension] for r in self.results]
+            if max(values) - min(values) > 1.0:  # >1 point spread
+                return False  # Still diverging, keep sampling
+        
+        return True  # All dimensions converged
+    
+    def agreement_report(self) -> dict:
+        """Generate per-dimension agreement statistics."""
+        if not self.results:
+            return {}
+        
+        import statistics
+        dimensions = self.results[0].keys()
+        report = {}
+        for dim in dimensions:
+            values = [r[dim] for r in self.results]
+            stdev = statistics.stdev(values) if len(values) > 1 else 0
+            report[dim] = {
+                "majority_score": statistics.mode(values) if len(values) >= 3 else statistics.mean(values),
+                "mean": statistics.mean(values),
+                "stdev": stdev,
+                "agreement_rate": round(1.0 - (stdev / 5.0), 2),
+                "n_samples": len(values),
+                "flagged": stdev > 1.0
+            }
+        return report
+```
+
+The paper's sequential stopping rule cuts API costs ~40-50% in practice — if the first 3 instances agree, we skip instances 4 and 5.
+
+### Cross-Model Sampling
+
+For higher-stakes evaluations, instances can use **different models** to detect model-specific bias:
+
+- Instance 1-2: Sonnet (primary model)
+- Instance 3: Haiku (cheaper, different biases)
+- Instance 4: Opus (if available, highest quality)
+
+If Sonnet instances agree but Haiku diverges, that's a signal of **model-specific bias** rather than genuine uncertainty. The Critic reports this distinction.
+
+### Tiered Evaluation Strategy
+
+The evaluation skill defines three tiers that map directly to F024 routing:
+
+- **Tier 1 (routine)** -> Single-Advised routing, single evaluation pass
+- **Tier 2 (medium stakes)** -> Parallel-Evaluate, K=3-5, sequential stopping, agreement rate as confidence
+- **Tier 3 (high stakes)** -> Parallel-Evaluate, K=5-10, cross-model sampling, conformal calibration against labeled set
+
+Tier selection is automatic based on Critic's stakes assessment, or can be requested explicitly by the user ("evaluate this rigorously").
+
+### Conformal Calibration (Tier 3 — Phase 3+)
+
+For formal reliability certification, the framework requires a small labeled calibration set (~50 human-judged examples per task type). The process:
+
+1. Collect K self-consistency samples -> rank by frequency
+2. Compute nonconformity score from rank distribution
+3. Apply conformal prediction with user-specified coverage level (e.g., 95%)
+4. Output: "This evaluation has reliability level 0.92 with 95% coverage guarantee"
+
+This is aspirational until we build calibration sets, but the data collection starts in Phase 1 — every Parallel-Evaluate run produces training data for future calibration.
+
+### Integration with Decision Recording
+
+Agreement rate from Parallel-Evaluate maps directly to Nous's decision confidence:
+
+```python
+def agreement_to_confidence(report: dict) -> float:
+    """Convert evaluation agreement report to decision confidence score."""
+    rates = [dim["agreement_rate"] for dim in report.values()]
+    weights = [0.5 if dim["flagged"] else 1.0 for dim in report.values()]
+    weighted_avg = sum(r * w for r, w in zip(rates, weights)) / sum(weights)
+    return round(weighted_avg, 2)
+```
+
+This replaces "vibes-based" confidence with empirically grounded confidence on evaluation tasks.
+
+---
+
 ## Phased Implementation
 
 ### Phase 0: Critic as Smart Frame Selector (no parallelism)
@@ -585,11 +733,13 @@ Phase 0 starts with **Sonnet** as the Critic model, not Haiku. Rationale:
 - `CognitiveTransaction` class — journaled side effects with read-through
 - `TransactionInterceptor` — wraps tool execution in parallel mode, including read-through layer for pending facts/files
 - Critic can route to "parallel-select" — spawn 2-3 instances
+- Critic can route to "parallel-evaluate" — spawn K=3-5 instances with identical prompts for self-consistency evaluation (v3)
+- `SequentialStopper` — monitors incoming evaluation results, cancels remaining instances on early consensus (v3)
 - Each instance runs in isolated transaction
 - `recall_deep`/`recall_recent` access count updates suppressed in parallel mode
 - **`bash` blocked entirely** in parallel instances (v2: static write detection is unreliable)
-- Critic evaluates outputs, selects winner
-- Winner's journal committed, losers rolled back
+- Critic evaluates outputs: selects winner (select mode) or computes agreement rate (evaluate mode — v3)
+- Winner's journal committed, losers rolled back. Evaluate mode: no side effects committed (evaluation only — v3)
 - Spawn/schedule tools blocked in parallel instances
 
 **What doesn't change:**
@@ -603,6 +753,9 @@ Phase 0 starts with **Sonnet** as the Critic model, not Haiku. Rationale:
 - Parallel route produces better responses than single-frame on >50% of complex tasks (human judged)
 - Total latency for parallel turns < 2× single turn (parallelism saves time vs serial)
 - Cost per parallel turn < 3× single turn
+- (v3) Parallel-Evaluate: agreement rate correlates with actual correctness (measured on tasks with known answers)
+- (v3) Sequential stopping fires on >30% of evaluate runs, saving cost without degrading agreement accuracy
+- (v3) Cross-model divergence detected on >10% of evaluate runs (validates the bias detection signal)
 
 **Key technical risks:**
 - Transaction interceptor must be invisible to instances (they shouldn't know they're buffered)
@@ -690,6 +843,8 @@ Phase 0 starts with **Sonnet** as the Critic model, not Haiku. Rationale:
 
 **Parallel-Merge** — Critic: 2× Sonnet (~$0.02) / Instance: 2-3× Sonnet / Total: ~$0.08-0.10 / vs Current: +300-400%
 
+**Parallel-Evaluate** *(v3)* — Critic: 1× Sonnet (~$0.01) / Instance: K×Haiku-or-Sonnet / Total: ~$0.02-0.06 (K=3-5, cheaper models viable) / vs Current: +100-200%. Sequential stopping reduces to ~$0.02-0.04 in practice.
+
 ### Blended Cost Estimate (v2 revised)
 
 **v1 assumption** (casual/mixed usage): 35% passthrough, 40% single, 20% parallel-select, 5% merge → ~40% increase.
@@ -731,6 +886,8 @@ This needs validation with real data. Phase 0 shadow mode will give us actual co
 
 **F023** (Admission Control) — Transaction journals must respect admission control on commit. Facts from winning transaction go through A-MAC scoring before persisting.
 
+**Evaluation Skill** (v3 addition) — The evaluation skill's Tier 2/3 framework maps directly to Parallel-Evaluate routing. F024 provides the execution infrastructure; the evaluation skill provides the rubric dimensions, scoring criteria, and bias mitigation strategies. Self-consistency sampling from Mouzouni 2026 provides the theoretical grounding for why this works.
+
 ---
 
 ## Open Questions
@@ -743,6 +900,9 @@ This needs validation with real data. Phase 0 shadow mode will give us actual co
 6. **Diagnostic critic tuning.** How do we evaluate if diagnostic interventions actually help? Need a feedback signal.
 7. ~~**F015 readiness.**~~ (v2: resolved — specified §3.1 and §4.2 as concrete prerequisites)
 8. **Embedding model for read-through.** (v2 new) Should pending fact search in read-through use the same embedding model as recall_deep, or a lighter one for speed?
+9. **Evaluate mode K value.** (v3 new) What is the right default K for Parallel-Evaluate? Paper uses K=10 but that is expensive. K=3 with sequential stopping may be sufficient for most cases. Need empirical data.
+10. **Calibration set bootstrapping.** (v3 new) How do we build the ~50 labeled examples needed for Tier 3 conformal calibration? Could collect them passively from Tier 2 runs where Tim provides feedback.
+11. **Evaluate mode for non-evaluation tasks.** (v3 new) Self-consistency sampling could also calibrate confidence on *any* decision, not just explicit evaluations. Should Critic auto-trigger evaluate mode when recording high-stakes decisions?
 
 ---
 
@@ -777,7 +937,8 @@ This needs validation with real data. Phase 0 shadow mode will give us actual co
 ### Files to Create/Modify (Phase 1)
 
 - `nous/cognitive/transaction.py` — New. CognitiveTransaction, TransactionInterceptor, read-through layer
-- `nous/cognitive/critic.py` — Modify. Add parallel routing, post-execution evaluation
+- `nous/cognitive/critic.py` — Modify. Add parallel routing, post-execution evaluation, parallel-evaluate mode (v3)
+- `nous/cognitive/eval_aggregator.py` — New (v3). SequentialStopper, agreement rate computation, cross-model divergence detection
 - `nous/tools/interceptor.py` — New. Tool-level write interception + read-through for parallel mode
 - `nous/subtasks/worker.py` — Modify. Support transactional execution mode
 
