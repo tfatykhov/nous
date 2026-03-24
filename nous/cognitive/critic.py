@@ -130,6 +130,10 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         start_ms = int(time.time() * 1000)
 
         if not self._needs_critic(user_message, tool_call_history or []):
+            logger.info(
+                "F024 Critic passthrough: frame=%s, message=%s",
+                heuristic_frame.frame_id, user_message[:80],
+            )
             return CriticResult(
                 routing=RoutingMode.PASSTHROUGH,
                 recommended_frame=heuristic_frame.frame_id,

@@ -312,19 +312,29 @@ class CognitiveLayer:
                         critic_result.recommended_frame, agent_id, session=session,
                     )
                     logger.info(
-                        "F024 Critic overriding frame: %s -> %s (reason: %s)",
+                        "F024 Critic override: %s -> %s (reason: %s, latency=%dms)",
                         heuristic_frame.frame_id, critic_result.recommended_frame,
-                        critic_result.rationale,
+                        critic_result.rationale, critic_result.latency_ms,
                     )
                 except ValueError:
                     logger.warning("F024 Critic recommended unknown frame: %s",
                                    critic_result.recommended_frame)
+            elif self._settings.critic_mode == "advised":
+                logger.info(
+                    "F024 Critic advised agree: frame=%s, latency=%dms",
+                    frame.frame_id, critic_result.latency_ms,
+                )
             elif self._settings.critic_mode == "shadow":
                 if critic_result.recommended_frame != frame.frame_id:
                     logger.info(
-                        "F024 Critic shadow: heuristic=%s, critic=%s, reason=%s",
+                        "F024 Critic shadow disagree: heuristic=%s, critic=%s, reason=%s, latency=%dms",
                         frame.frame_id, critic_result.recommended_frame,
-                        critic_result.rationale,
+                        critic_result.rationale, critic_result.latency_ms,
+                    )
+                else:
+                    logger.info(
+                        "F024 Critic shadow agree: frame=%s, latency=%dms",
+                        frame.frame_id, critic_result.latency_ms,
                     )
 
             # Emit critic_classified event
