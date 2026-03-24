@@ -149,6 +149,7 @@ class CognitiveLayer:
         self._session_tool_history: dict[str, list[dict]] = {}
         self._pending_nudges: dict[str, str] = {}
         self._session_response_lengths: dict[str, list[int]] = {}
+        self._session_user_messages: dict[str, list[str]] = {}
 
         # Track active episodes per session.
         # P2-10: Known race condition at await boundaries — two coroutines
@@ -273,6 +274,13 @@ class CognitiveLayer:
             except Exception:
                 logger.warning("Frame selection failed, falling back to conversation")
                 frame = self._frames._default_selection()
+
+        # F024: Track user messages for frustration detection
+        if self._critic and self._settings.critic_enabled:
+            user_msgs = self._session_user_messages.setdefault(session_id, [])
+            user_msgs.append(user_input)
+            if len(user_msgs) > 5:
+                self._session_user_messages[session_id] = user_msgs[-5:]
 
         # F024: Critic Agent pre-turn classification
         if self._critic and self._settings.critic_enabled and not _is_initiation:
@@ -781,6 +789,7 @@ class CognitiveLayer:
                 turn_number=turn_num,
                 current_frame=turn_context.frame.frame_id if turn_context else "",
                 response_lengths=resp_lengths,
+                recent_user_messages=self._session_user_messages.get(session_id),
             )
             nudges = self._critic.format_nudges(diagnostics)
             if nudges:

@@ -68,6 +68,9 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._api: Any = None
+        # Known limitation: cooldowns are instance-level, not session-scoped.
+        # In the current single-agent runtime this is acceptable. For multi-session
+        # scenarios, scope to dict[str, dict[str, int]] keyed by session_id.
         self._diagnostic_cooldowns: dict[str, int] = {}
         self._current_turn: int = 0
 
@@ -95,7 +98,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         words = message.split()
         max_words = self._settings.critic_passthrough_max_words
 
-        if len(words) < max_words and not message.rstrip().endswith("?"):
+        if len(words) <= max_words and not message.rstrip().endswith("?"):
             return False
 
         sentence_endings = message.count(".") + message.count("?") + message.count("!")

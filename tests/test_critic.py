@@ -120,7 +120,7 @@ class TestComplexityGate:
         assert self._make()._needs_critic("find it", history) is True
 
     def test_default_invokes_critic(self):
-        assert self._make()._needs_critic("tell me about the architecture", []) is True
+        assert self._make()._needs_critic("please explain the full architecture of the system", []) is True
 
     def test_emoji_only_skips(self):
         assert self._make()._needs_critic("\U0001f44d", []) is False
