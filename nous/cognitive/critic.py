@@ -162,6 +162,10 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             from nous.handlers import call_background_llm
 
             timeout_s = self._settings.critic_max_latency_ms / 1000.0
+            logger.info(
+                "F024 Critic calling LLM: model=%s, timeout=%.1fs, prompt_len=%d",
+                self._settings.critic_model, timeout_s, len(prompt),
+            )
             raw_text = await asyncio.wait_for(
                 call_background_llm(
                     self._api,
@@ -174,7 +178,10 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             )
 
             if raw_text is None:
+                logger.warning("F024 Critic LLM returned None (call_background_llm failed silently)")
                 raw_text = ""
+            else:
+                logger.info("F024 Critic LLM responded: %s", raw_text[:200])
 
             parsed = self._parse_classification(raw_text, heuristic_frame)
             elapsed = int(time.time() * 1000) - start_ms
