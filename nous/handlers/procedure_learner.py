@@ -225,14 +225,25 @@ class ProcedureLearner:
             return 0
 
         try:
-            # Fetch recent reviewed successful decisions
-            decisions, _ = await self._brain.list_decisions(limit=100)
-            # Filter: reviewed + successful/partial outcome
-            successful = [
-                d for d in decisions
-                if d.outcome in ("success", "partial") and d.reviewed_at is not None
-            ]
+            # Fetch reviewed successful decisions — pass filters to DB
+            # to avoid the window problem where 100 most recent are all pending.
+            # Issue #188 Bug 1: was list_decisions(limit=100) with no filters.
+            decisions_success, _ = await self._brain.list_decisions(
+                limit=50, outcome="success", reviewed=True
+            )
+            decisions_partial, _ = await self._brain.list_decisions(
+                limit=50, outcome="partial", reviewed=True
+            )
+            successful = list(decisions_success) + list(decisions_partial)
+            logger.info(
+                "Decision pathway: %d success + %d partial = %d reviewed decisions",
+                len(decisions_success), len(decisions_partial), len(successful),
+            )
             if len(successful) < self._settings.procedure_cluster_min_size:
+                logger.info(
+                    "Decision pathway: too few reviewed decisions (%d < %d)",
+                    len(successful), self._settings.procedure_cluster_min_size,
+                )
                 return 0
 
             # Get full details for bridge function text
@@ -344,20 +355,36 @@ class ProcedureLearner:
         try:
             # Fetch completed/resolved episodes
             episodes_summary = await self._heart.list_episodes(limit=50)
+            logger.info("Episode pathway: %d episodes fetched", len(episodes_summary))
 
             # Collect lessons from completed episodes (need full details)
             all_lessons: list[str] = []
+            skipped_outcome = 0
+            skipped_no_lessons = 0
             for ep_summary in episodes_summary:
                 if ep_summary.outcome not in ("success", "partial"):
+                    skipped_outcome += 1
                     continue
                 try:
                     ep_detail = await self._heart.get_episode(ep_summary.id)
                     if ep_detail.lessons_learned:
                         all_lessons.extend(ep_detail.lessons_learned)
+                    else:
+                        skipped_no_lessons += 1
                 except (ValueError, Exception):
                     continue
 
+            logger.info(
+                "Episode pathway: %d lessons collected (%d skipped: %d wrong outcome, %d no lessons)",
+                len(all_lessons), skipped_outcome + skipped_no_lessons,
+                skipped_outcome, skipped_no_lessons,
+            )
+
             if len(all_lessons) < self._settings.procedure_cluster_min_size:
+                logger.info(
+                    "Episode pathway: too few lessons (%d < %d)",
+                    len(all_lessons), self._settings.procedure_cluster_min_size,
+                )
                 return 0
 
             # Embed lessons
@@ -368,6 +395,12 @@ class ProcedureLearner:
                 embeddings,
                 threshold=self._settings.procedure_episode_similarity,
                 min_size=self._settings.procedure_cluster_min_size,
+            )
+            logger.info(
+                "Episode pathway: %d clusters found from %d embeddings (threshold=%.2f, min_size=%d)",
+                len(clusters), len(embeddings),
+                self._settings.procedure_episode_similarity,
+                self._settings.procedure_cluster_min_size,
             )
 
             created = 0
