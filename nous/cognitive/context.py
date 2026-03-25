@@ -28,14 +28,17 @@ logger = logging.getLogger(__name__)
 # Tier 1 fact categories — loaded by category (always-on), excluded from Tier 3 search
 TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 
-# Tier 3 min-score thresholds (hybrid search with embeddings)
-# When embeddings are unavailable, keyword-only scores are much lower (0.01-0.15)
-# so thresholds are skipped to avoid filtering everything out.
-TIER3_THRESHOLDS = {
-    "decision": 0.20,
-    "fact": 0.25,
-    "procedure": 0.3,
-    "episode": 0.3,
+# Sources exempt from relevance filter gap detection
+FILTER_EXEMPT_SOURCES: set[str] = {
+    "pre_prune_extraction",
+}
+
+# Per-type result count bounds for adaptive relevance filtering
+RELEVANCE_MIN_RESULTS: dict[str, int] = {
+    "fact": 3, "decision": 2, "procedure": 2, "episode": 2,
+}
+RELEVANCE_MAX_RESULTS: dict[str, int] = {
+    "fact": 8, "decision": 5, "procedure": 3, "episode": 4,
 }
 
 # Markers that identify internal/system episodes (handler tasks, summarizers)
@@ -320,19 +323,13 @@ class ContextEngine:
                     len(decisions) if decisions else 0, self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
                     [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
-                if decisions and self._has_embeddings and not self._settings.relevance_floor_enabled:
-                    # Tier 3: min_score threshold (only with embeddings — keyword scores too low)
-                    # Superseded by F017 relevance floor when enabled
-                    decisions = [d for d in decisions if (getattr(d, "score", None) or 0) >= TIER3_THRESHOLDS["decision"]]
-                    logger.info("Tier3 decisions after threshold: %d", len(decisions))
                 if decisions:
                     # F017: Staleness penalty (before boosts)
                     decisions = self._apply_staleness_penalty(decisions)
                     # 007.2: Diversity filter — use category as topic key
                     decisions = self._enforce_diversity(decisions, "category", max_per_subject=3)
-                    # F017: Relevance floor + diminishing returns cutoff
-                    decisions = self._apply_relevance_floor(decisions, "decision")
-                    decisions = self._apply_diminishing_returns_cutoff(decisions)
+                    # Adaptive relevance filter (min/max K + gap detection)
+                    decisions = self._apply_relevance_filter(decisions, "decision")
                     # F1: Collect recalled IDs and scores
                     for d in decisions:
                         mid = str(getattr(d, "id", ""))
@@ -372,10 +369,6 @@ class ContextEngine:
                     len(facts) if facts else 0, self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
-                if facts and self._has_embeddings and not self._settings.relevance_floor_enabled:
-                    # Tier 3: min_score threshold (only with embeddings)
-                    # Superseded by F017 relevance floor when enabled
-                    facts = [f for f in facts if (getattr(f, "score", None) or 0) >= TIER3_THRESHOLDS["fact"]]
                 if facts:
                     # F017: Staleness penalty (before boosts)
                     facts = self._apply_staleness_penalty(facts)
@@ -390,9 +383,8 @@ class ContextEngine:
 
                     # Usage boost
                     facts = self._apply_usage_boost(facts, usage_tracker)
-                    # F017: Relevance floor + diminishing returns cutoff
-                    facts = self._apply_relevance_floor(facts, "fact")
-                    facts = self._apply_diminishing_returns_cutoff(facts)
+                    # Adaptive relevance filter (min/max K + gap detection)
+                    facts = self._apply_relevance_filter(facts, "fact")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
@@ -424,10 +416,6 @@ class ContextEngine:
                 limit = _limits.get("procedure", 5)
                 q_text = _query_texts.get("procedure", _default_query)
                 procedures = await self._heart.search_procedures(q_text, limit=limit, session=session)
-                if procedures and self._has_embeddings and not self._settings.relevance_floor_enabled:
-                    # Tier 3: min_score threshold (only with embeddings)
-                    # Superseded by F017 relevance floor when enabled
-                    procedures = [p for p in procedures if (getattr(p, "score", None) or 0) >= TIER3_THRESHOLDS["procedure"]]
                 if procedures:
                     # F017: Staleness penalty (before boosts)
                     procedures = self._apply_staleness_penalty(procedures)
@@ -437,11 +425,8 @@ class ContextEngine:
                     # Dedup + usage boost
                     procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
                     procedures = self._apply_usage_boost(procedures, usage_tracker)
-                    # F017: Relevance floor (lowered to 0.25 for procedures — old
-                    # 0.50 floor filtered nearly all procedures, #160)
-                    procedures = self._apply_relevance_floor(procedures, "procedure")
-                    # F017: Diminishing returns cutoff
-                    procedures = self._apply_diminishing_returns_cutoff(procedures)
+                    # Adaptive relevance filter (min/max K + gap detection)
+                    procedures = self._apply_relevance_filter(procedures, "procedure")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for p in procedures:
@@ -507,10 +492,6 @@ class ContextEngine:
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
-                if episodes and self._has_embeddings and not self._settings.relevance_floor_enabled:
-                    # Tier 3: min_score threshold (only with embeddings)
-                    # Superseded by F017 relevance floor when enabled
-                    episodes = [e for e in episodes if (getattr(e, "score", None) or 0) >= TIER3_THRESHOLDS["episode"]]
                 if episodes:
                     # F017: Staleness penalty (before boosts)
                     episodes = self._apply_staleness_penalty(episodes)
@@ -523,9 +504,8 @@ class ContextEngine:
                     # Dedup + usage boost
                     episodes = await self._apply_dedup(episodes, _conv_msgs, "summary")
                     episodes = self._apply_usage_boost(episodes, usage_tracker)
-                    # F017: Relevance floor + diminishing returns cutoff
-                    episodes = self._apply_relevance_floor(episodes, "episode")
-                    episodes = self._apply_diminishing_returns_cutoff(episodes)
+                    # Adaptive relevance filter (min/max K + gap detection)
+                    episodes = self._apply_relevance_filter(episodes, "episode")
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
                     for e in episodes:
@@ -618,28 +598,47 @@ class ContextEngine:
         boosted.sort(key=lambda x: x[1], reverse=True)
         return [item for item, _ in boosted]
 
-    def _apply_relevance_floor(self, results: list, memory_type: str) -> list:
-        """Remove results below the relevance floor (F017 Phase 1)."""
+    def _apply_relevance_filter(self, results: list, memory_type: str) -> list:
+        """Adaptive relevance filtering (replaces F017 floor + diminishing returns).
+
+        Strategy: Keep top-K results, then cut at score gaps.
+        - Always keep at least min_results (don't return empty)
+        - Always keep at most max_results (don't flood context)
+        - Between min and max, cut at sharp score drops
+        - Items from exempt sources bypass gap detection
+        """
         if not self._settings.relevance_floor_enabled:
             return results
-        from nous.cognitive.schemas import RELEVANCE_FLOORS, FLOOR_EXEMPT_SOURCES
-        floor = RELEVANCE_FLOORS.get(memory_type, 0.40)
-        return [
-            r for r in results
-            if (getattr(r, "score", 0) or 0) >= floor
-            or getattr(r, "source", None) in FLOOR_EXEMPT_SOURCES
-        ]
-
-    def _apply_diminishing_returns_cutoff(self, results: list) -> list:
-        """Cut results at sharp score drops (F017 Phase 2)."""
-        if len(results) < 2:
+        if not results:
             return results
+
+        # Merge defaults with config overrides
+        min_k = {**RELEVANCE_MIN_RESULTS, **self._settings.relevance_min_results}.get(memory_type, 2)
+        max_k = {**RELEVANCE_MAX_RESULTS, **self._settings.relevance_max_results}.get(memory_type, 5)
+
+        # Always keep at least min_k
+        if len(results) <= min_k:
+            return results
+
+        # Cap at max_k
+        results = results[:max_k]
+
+        # Within [min_k, max_k], cut at sharp score drops
         drop_ratio = self._settings.relevance_drop_ratio
-        for i in range(1, len(results)):
+        for i in range(min_k, len(results)):
+            # Preserve exempt-source items (e.g. pre_prune_extraction)
+            if getattr(results[i], "source", None) in FILTER_EXEMPT_SOURCES:
+                continue
             score = getattr(results[i], "score", 0) or 0
             prev = getattr(results[i - 1], "score", 0) or 0
             if prev > 0 and score < prev * drop_ratio:
-                return results[:i]
+                # Keep any exempt items beyond the cut point
+                tail_exempt = [
+                    r for r in results[i:]
+                    if getattr(r, "source", None) in FILTER_EXEMPT_SOURCES
+                ]
+                return results[:i] + tail_exempt
+
         return results
 
     def _apply_staleness_penalty(self, results: list) -> list:

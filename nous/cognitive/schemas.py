@@ -25,21 +25,6 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
 COMPACTION_THRESHOLD_RATIO = 0.60
 KEEP_RECENT_RATIO = 0.20
 
-# F017 Phase 1: Per-type minimum relevance scores
-RELEVANCE_FLOORS: dict[str, float] = {
-    "fact": 0.45,
-    "decision": 0.40,
-    "procedure": 0.25,  # Lowered from 0.50 — old floor filtered nearly all
-    # procedures, preventing activation and F012 reinforcement. 0.25 still
-    # blocks noise while allowing curated knowledge through.
-    "episode": 0.35,
-}
-
-# Sources exempt from relevance floor filtering
-FLOOR_EXEMPT_SOURCES: set[str] = {
-    "pre_prune_extraction",
-}
-
 # F016 Phase 4: Per-tool decay profiles for content-type-aware pruning
 TOOL_DECAY_PROFILES: dict[str, str] = {
     "read_file": "preserve",

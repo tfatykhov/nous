@@ -44,8 +44,13 @@ class Settings(BaseSettings):
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
 
-    # F017: Diminishing returns cutoff
+    # F017: Diminishing returns cutoff (used by adaptive relevance filter)
     relevance_drop_ratio: float = 0.6
+
+    # Adaptive relevance filter: per-type min/max result overrides (JSON dicts)
+    # e.g. NOUS_RELEVANCE_MIN_RESULTS='{"fact": 2, "decision": 1}'
+    relevance_min_results: dict[str, int] = Field(default_factory=dict)
+    relevance_max_results: dict[str, int] = Field(default_factory=dict)
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True
