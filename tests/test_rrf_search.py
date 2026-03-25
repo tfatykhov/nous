@@ -62,8 +62,8 @@ class TestRRFMerge:
         result = _rrf_merge(vector_ranked, keyword_ranked, k=60, vector_weight=0.5, limit=10)
         assert len(result) == 1
         assert result[0][0] == doc_a
-        expected = 0.5 / 60 + 0.5 / 60
-        assert abs(result[0][1] - expected) < 1e-9
+        # Normalized: (0.5/60 + 0.5/60) / (1/60) = 1.0
+        assert abs(result[0][1] - 1.0) < 1e-9
 
     def test_disjoint_lists(self):
         """Docs in only one list get penalty rank for the other."""
@@ -76,10 +76,12 @@ class TestRRFMerge:
         result = _rrf_merge(vector_ranked, keyword_ranked, k=60, vector_weight=0.5, limit=10)
         assert len(result) == 2
         # penalty rank = limit + 1 = 11
-        score_v = 0.5 / 60 + 0.5 / 71
-        score_k = 0.5 / 71 + 0.5 / 60
-        assert abs(result[0][1] - score_v) < 1e-9
-        assert abs(result[1][1] - score_k) < 1e-9
+        # Normalized: raw / (1/k) = raw * k
+        raw_v = 0.5 / 60 + 0.5 / 71
+        raw_k = 0.5 / 71 + 0.5 / 60
+        max_score = 1.0 / 60
+        assert abs(result[0][1] - raw_v / max_score) < 1e-9
+        assert abs(result[1][1] - raw_k / max_score) < 1e-9
 
     def test_vector_only(self):
         """Empty keyword list — all docs use penalty rank for keyword."""
@@ -88,7 +90,8 @@ class TestRRFMerge:
         doc = uuid4()
         result = _rrf_merge([(doc, 0.9)], [], k=60, vector_weight=0.7, limit=5)
         assert len(result) == 1
-        expected = 0.7 / 60 + 0.3 / (60 + 6)
+        raw = 0.7 / 60 + 0.3 / (60 + 6)
+        expected = raw / (1.0 / 60)
         assert abs(result[0][1] - expected) < 1e-9
 
     def test_keyword_only(self):
@@ -98,7 +101,8 @@ class TestRRFMerge:
         doc = uuid4()
         result = _rrf_merge([], [(doc, 0.05)], k=60, vector_weight=0.7, limit=5)
         assert len(result) == 1
-        expected = 0.7 / (60 + 6) + 0.3 / 60
+        raw = 0.7 / (60 + 6) + 0.3 / 60
+        expected = raw / (1.0 / 60)
         assert abs(result[0][1] - expected) < 1e-9
 
     def test_both_empty(self):
@@ -126,3 +130,33 @@ class TestRRFMerge:
         result = _rrf_merge(vector, keyword, k=60, vector_weight=0.5, limit=10)
         scores = [s for _, s in result]
         assert scores == sorted(scores, reverse=True)
+
+    def test_normalization_rank1_both_is_1(self):
+        """Doc ranked #1 in both lists normalizes to 1.0."""
+        from nous.heart.search import _rrf_merge
+
+        doc = uuid4()
+        result = _rrf_merge([(doc, 0.9)], [(doc, 0.1)], k=60, vector_weight=0.7, limit=10)
+        assert abs(result[0][1] - 1.0) < 1e-9
+
+    def test_normalization_preserves_order(self):
+        """Normalization doesn't change relative ranking."""
+        from nous.heart.search import _rrf_merge
+
+        docs = [uuid4() for _ in range(5)]
+        vector = [(docs[i], 0.9 - i * 0.1) for i in range(5)]
+        keyword = [(docs[i], 0.05 - i * 0.01) for i in range(5)]
+        result = _rrf_merge(vector, keyword, k=60, vector_weight=0.7, limit=10)
+        # Order should match input order since both lists agree
+        assert [doc_id for doc_id, _ in result] == docs
+
+    def test_normalization_scores_in_range(self):
+        """All normalized scores are between 0 and 1 (before downstream boosts)."""
+        from nous.heart.search import _rrf_merge
+
+        docs = [uuid4() for _ in range(10)]
+        vector = [(docs[i], 0.9 - i * 0.05) for i in range(10)]
+        keyword = [(docs[i], 0.1 - i * 0.005) for i in range(8)]  # fewer keyword results
+        result = _rrf_merge(vector, keyword, k=60, vector_weight=0.7, limit=10)
+        for _, score in result:
+            assert 0.0 <= score <= 1.0, f"Score {score} out of [0,1] range"

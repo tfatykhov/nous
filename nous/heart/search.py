@@ -70,6 +70,14 @@ def _rrf_merge(
         scored.append((doc_id, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Normalize to 0-1 range relative to theoretical max
+    # Max RRF = vector_weight/(k+0) + keyword_weight/(k+0) = 1/k
+    # (since vector_weight + keyword_weight = 1.0 by construction)
+    max_score = 1.0 / k
+    if max_score > 0 and scored:
+        scored = [(doc_id, score / max_score) for doc_id, score in scored]
+
     return scored[:limit]
 
 
