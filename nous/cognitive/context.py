@@ -624,20 +624,22 @@ class ContextEngine:
         results = results[:max_k]
 
         # Within [min_k, max_k], cut at sharp score drops
+        # Track prev_score separately to avoid exempt items contaminating gap check
         drop_ratio = self._settings.relevance_drop_ratio
+        prev_score = getattr(results[min_k - 1], "score", 0) or 0
         for i in range(min_k, len(results)):
             # Preserve exempt-source items (e.g. pre_prune_extraction)
             if getattr(results[i], "source", None) in FILTER_EXEMPT_SOURCES:
                 continue
             score = getattr(results[i], "score", 0) or 0
-            prev = getattr(results[i - 1], "score", 0) or 0
-            if prev > 0 and score < prev * drop_ratio:
+            if prev_score > 0 and score < prev_score * drop_ratio:
                 # Keep any exempt items beyond the cut point
                 tail_exempt = [
                     r for r in results[i:]
                     if getattr(r, "source", None) in FILTER_EXEMPT_SOURCES
                 ]
                 return results[:i] + tail_exempt
+            prev_score = score
 
         return results
 

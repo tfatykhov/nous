@@ -123,3 +123,16 @@ class TestRelevanceFilter:
         engine = self._make_engine()
         result = engine._apply_relevance_filter([FakeItem(0.5)], "fact")
         assert len(result) == 1
+
+    def test_exempt_item_does_not_contaminate_prev(self):
+        """Gap check uses last non-exempt score as prev, not exempt item's score."""
+        engine = self._make_engine()
+        items = [
+            FakeItem(0.90),
+            FakeItem(0.85),
+            FakeItem(0.05, source="pre_prune_extraction"),  # Exempt, low score
+            FakeItem(0.80),  # Should compare against 0.85 (last non-exempt), not 0.05
+        ]
+        result = engine._apply_relevance_filter(items, "decision")
+        # 0.80 vs prev 0.85: 0.80 >= 0.85*0.6=0.51 → kept
+        assert len(result) == 4
