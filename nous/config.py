@@ -290,6 +290,17 @@ class Settings(BaseSettings):
     critic_max_latency_ms: int = 5000
     critic_passthrough_max_words: int = 5
 
+    # F024 Phase 3b: Self-Modifying Rubrics
+    rubric_enabled: bool = True
+    rubric_outcome_detection_enabled: bool = True
+    rubric_evolution_enabled: bool = False  # Phase 1+ — start disabled
+    rubric_min_episodes_for_correlation: int = 50
+    rubric_weight_change_cap: float = 0.05
+    rubric_min_dimensions: int = 3
+    rubric_max_dimensions: int = 7
+    rubric_max_versions_per_week: int = 1
+    rubric_outcome_model: str = "claude-haiku-4-5-20251001"
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',
