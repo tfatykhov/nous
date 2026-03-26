@@ -486,22 +486,24 @@ class CognitiveLayer:
         # 6. WORKING MEMORY — update focus
         # P1-7: Must call get_or_create before focus
         # 007.2 spike: preserve current_task when input is ambiguous/short
+        wm_ready = False
         try:
             await self._heart.get_or_create_working_memory(session_id, session=session)
+            wm_ready = True
             focus_text = self._resolve_focus_text(user_input)
             if focus_text is not None:
                 await self._heart.focus(session_id, focus_text, frame.frame_id, session=session)
         except Exception:
-            logger.warning("Failed to update working memory for session %s", session_id)
+            logger.warning("Failed to update working memory for session %s", session_id, exc_info=True)
 
-        # 6b. WORKING MEMORY — load recalled items
-        if build_result is not None:
+        # 6b. WORKING MEMORY — load recalled items (skip if step 6 failed)
+        if build_result is not None and wm_ready:
             try:
                 await self._load_recalled_to_working_memory(
                     session_id, build_result, session=session
                 )
             except Exception:
-                logger.warning("Failed to load items to working memory")
+                logger.warning("Failed to load items to working memory", exc_info=True)
 
         # Get active censor patterns for TurnContext
         active_censors: list[str] = []
