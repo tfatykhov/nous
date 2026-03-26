@@ -226,7 +226,7 @@ def apply_frame_boost(
                 jaccard = len(enc_censors & cur_censors) / len(union)
                 boost *= 1.0 + 0.2 * jaccard
 
-        wrapped = _wrap_with_score(item, (getattr(item, "score", 0) or 0) * boost)
+        wrapped = _wrap_with_score(item, min((getattr(item, "score", 0) or 0) * boost, 1.0))
         boosted.append((wrapped, boost))
 
     # Sort by boost descending (stable sort preserves relevance order within same boost)

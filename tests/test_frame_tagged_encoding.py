@@ -126,6 +126,19 @@ class TestApplyFrameBoost:
         assert results[1].name == "frame_only"
         assert results[2].name == "neither"
 
+    def test_boosted_score_clamped_to_one(self):
+        """Frame + censor boost should never produce scores > 1.0."""
+        item = _make_item(
+            encoded_frame="task",
+            encoded_censors=["censor-a"],
+            name="high_score",
+        )
+        item.score = 0.95  # High base score + 1.3x frame boost = 1.235 unclamped
+        results = apply_frame_boost(
+            [item], current_frame="task", current_censors=["censor-a"]
+        )
+        assert results[0].score <= 1.0
+
     def test_empty_list(self):
         """Empty input returns empty list."""
         assert apply_frame_boost([], current_frame="task") == []
