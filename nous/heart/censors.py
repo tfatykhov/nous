@@ -136,11 +136,17 @@ class CensorManager:
                 embedding = await self.embeddings.embed(text_input)
                 matches = await self._semantic_match(embedding, domain, session)
             except Exception:
-                logger.warning("Embedding failed for censor check, falling back to ILIKE")
-                matches = await self._keyword_match(text_input, domain, session)
-        else:
-            # P1-3: ILIKE fallback when no embedding provider
-            matches = await self._keyword_match(text_input, domain, session)
+                logger.warning("Embedding failed for censor check, skipping semantic")
+
+        # Always run keyword matching to catch censors without embeddings
+        # or those below the semantic similarity threshold.
+        keyword_matches = await self._keyword_match(text_input, domain, session)
+        if keyword_matches:
+            seen_ids = {c.id for c, _ in matches}
+            for censor, sim in keyword_matches:
+                if censor.id not in seen_ids:
+                    matches.append((censor, sim))
+                    seen_ids.add(censor.id)
 
         # Apply side effects for each match
         results: list[CensorMatch] = []
