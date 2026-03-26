@@ -950,7 +950,7 @@ class CognitiveLayer:
                 type=mem_type,
                 ref_id=UUID(mid),
                 summary=content[:200],
-                relevance=score,
+                relevance=min(score, 1.0),
                 loaded_at=now,
             )
             await self._heart.load_to_working_memory(session_id, item, session=session)
