@@ -345,6 +345,21 @@ class TestGetActivityData:
         assert cs["auto_created"] == 2
 
     @pytest.mark.asyncio
+    async def test_censor_activations_7d(self, session):
+        """total_activations_7d counts censor_triggered events in last 7 days."""
+        await _insert_censor(session, activation_count=2)
+        # 3 events within 7 days
+        for _ in range(3):
+            await _insert_event(session, "censor_triggered", days_ago=1,
+                                data={"censor_id": str(uuid.uuid4()), "matched_text": "test"})
+        # 1 event outside 7-day window
+        await _insert_event(session, "censor_triggered", days_ago=10,
+                            data={"censor_id": str(uuid.uuid4()), "matched_text": "old"})
+
+        data = await get_activity_data(session, AGENT_ID)
+        assert data["censor_stats"]["total_activations_7d"] == 3
+
+    @pytest.mark.asyncio
     async def test_top_censors(self, session):
         # Insert censors with varying activation counts
         for i in range(7):
