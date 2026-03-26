@@ -69,6 +69,8 @@ def create_app(
     identity_manager: Any | None = None,
     bus: EventBus | None = None,
     sleep_handler: Any | None = None,
+    rubric_manager: Any | None = None,
+    rubric_evolver: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1045,6 +1047,82 @@ def create_app(
             logger.error("Dashboard admission rejected error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F024 Phase 3b: Rubric endpoints ---
+
+    async def get_rubric(request: Request) -> JSONResponse:
+        """GET /rubric — current active rubric version."""
+        try:
+            _ = rubric_manager.get_active  # trigger proxy resolution
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        if not rubric_manager:
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        active = await rubric_manager.get_active()
+        if not active:
+            return JSONResponse({"error": "No active rubric"}, status_code=404)
+        detail = rubric_manager.to_detail(active)
+        return JSONResponse(detail.model_dump(mode="json"))
+
+    async def get_rubric_history(request: Request) -> JSONResponse:
+        """GET /rubric/history — rubric version history."""
+        try:
+            _ = rubric_manager.get_history  # trigger proxy resolution
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        if not rubric_manager:
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        limit = int(request.query_params.get("limit", "20"))
+        history = await rubric_manager.get_history(limit=limit)
+        return JSONResponse([h.model_dump(mode="json") for h in history])
+
+    async def get_outcome_signals(request: Request) -> JSONResponse:
+        """GET /rubric/signals — outcome signals with optional episode filter."""
+        from sqlalchemy import select as sa_select
+        from uuid import UUID as _UUID
+        from nous.storage.models import OutcomeSignal
+
+        agent_id = settings.agent_id
+        episode_id_param = request.query_params.get("episode_id")
+
+        async with database.session() as session:
+            q = sa_select(OutcomeSignal).where(
+                OutcomeSignal.agent_id == agent_id,
+            ).order_by(OutcomeSignal.created_at.desc()).limit(100)
+
+            if episode_id_param:
+                q = q.where(OutcomeSignal.episode_id == _UUID(episode_id_param))
+
+            result = await session.execute(q)
+            rows = result.scalars().all()
+
+        return JSONResponse([
+            {
+                "id": str(r.id),
+                "episode_id": str(r.episode_id),
+                "signal_type": r.signal_type,
+                "confidence": r.confidence,
+                "evidence": r.evidence,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ])
+
+    async def trigger_evolution(request: Request) -> JSONResponse:
+        """POST /rubric/evolve — manually trigger a rubric evolution cycle."""
+        try:
+            _ = rubric_evolver.run_evolution_cycle  # trigger proxy resolution
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric evolution not enabled"}, status_code=503)
+        if not rubric_evolver:
+            return JSONResponse({"error": "Rubric evolution not enabled"}, status_code=503)
+        try:
+            report = await rubric_evolver.run_evolution_cycle()
+            if report:
+                return JSONResponse(report.model_dump(mode="json"))
+            return JSONResponse({"status": "no_change", "message": "Insufficient data or no weight changes needed"})
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1074,6 +1152,11 @@ def create_app(
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),
         Route("/admin/search-weights", set_search_weights, methods=["POST"]),
+        # F024 Phase 3b: Rubric endpoints
+        Route("/rubric/history", get_rubric_history),
+        Route("/rubric/signals", get_outcome_signals),
+        Route("/rubric/evolve", trigger_evolution, methods=["POST"]),
+        Route("/rubric", get_rubric),
         # Dashboard API endpoints (F021) — MUST be before static Mount
         Route("/dashboard/graph", dashboard_graph),
         Route("/dashboard/calibration", dashboard_calibration),
