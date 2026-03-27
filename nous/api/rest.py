@@ -1055,8 +1055,6 @@ def create_app(
             _ = rubric_manager.get_active  # trigger proxy resolution
         except (RuntimeError, AttributeError):
             return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
-        if not rubric_manager:
-            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
         active = await rubric_manager.get_active()
         if not active:
             return JSONResponse({"error": "No active rubric"}, status_code=404)
@@ -1069,43 +1067,19 @@ def create_app(
             _ = rubric_manager.get_history  # trigger proxy resolution
         except (RuntimeError, AttributeError):
             return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
-        if not rubric_manager:
-            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
         limit = int(request.query_params.get("limit", "20"))
         history = await rubric_manager.get_history(limit=limit)
         return JSONResponse([h.model_dump(mode="json") for h in history])
 
     async def get_outcome_signals(request: Request) -> JSONResponse:
         """GET /rubric/signals — outcome signals with optional episode filter."""
-        from sqlalchemy import select as sa_select
-        from uuid import UUID as _UUID
-        from nous.storage.models import OutcomeSignal
-
-        agent_id = settings.agent_id
-        episode_id_param = request.query_params.get("episode_id")
-
-        async with database.session() as session:
-            q = sa_select(OutcomeSignal).where(
-                OutcomeSignal.agent_id == agent_id,
-            ).order_by(OutcomeSignal.created_at.desc()).limit(100)
-
-            if episode_id_param:
-                q = q.where(OutcomeSignal.episode_id == _UUID(episode_id_param))
-
-            result = await session.execute(q)
-            rows = result.scalars().all()
-
-        return JSONResponse([
-            {
-                "id": str(r.id),
-                "episode_id": str(r.episode_id),
-                "signal_type": r.signal_type,
-                "confidence": r.confidence,
-                "evidence": r.evidence,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ])
+        try:
+            _ = rubric_manager.get_signals
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        episode_id = request.query_params.get("episode_id")
+        signals = await rubric_manager.get_signals(episode_id=episode_id)
+        return JSONResponse(signals)
 
     async def trigger_evolution(request: Request) -> JSONResponse:
         """POST /rubric/evolve — manually trigger a rubric evolution cycle."""

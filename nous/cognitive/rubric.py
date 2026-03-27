@@ -224,6 +224,38 @@ class RubricManager:
                 await s.commit()
             return rv
 
+    async def get_signals(
+        self,
+        episode_id: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get outcome signals, optionally filtered by episode."""
+        from nous.storage.models import OutcomeSignal
+
+        async with self.db.session() as session:
+            q = select(OutcomeSignal).where(
+                OutcomeSignal.agent_id == self.agent_id,
+            ).order_by(OutcomeSignal.created_at.desc()).limit(limit)
+
+            if episode_id:
+                from uuid import UUID as _UUID
+                q = q.where(OutcomeSignal.episode_id == _UUID(episode_id))
+
+            result = await session.execute(q)
+            rows = result.scalars().all()
+
+        return [
+            {
+                "id": str(r.id),
+                "episode_id": str(r.episode_id),
+                "signal_type": r.signal_type,
+                "confidence": r.confidence,
+                "evidence": r.evidence,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
     def to_detail(self, rv: RubricVersion) -> RubricVersionDetail:
         """Convert ORM model to Pydantic DTO."""
         dims = [RubricDimension(**d) for d in rv.dimensions]
