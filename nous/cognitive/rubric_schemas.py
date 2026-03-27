@@ -87,6 +87,7 @@ class CorrelationReport(BaseModel):
     suggested_splits: list[str] = Field(default_factory=list)
     suggested_merges: list[tuple[str, str]] = Field(default_factory=list)
     episode_count: int
+    degradation_detected: bool = False
 
 
 class DimensionProposal(BaseModel):

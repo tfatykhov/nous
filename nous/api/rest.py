@@ -1123,6 +1123,136 @@ def create_app(
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def propose_dimension(request: Request) -> JSONResponse:
+        """POST /rubric/propose-dimension — propose a new rubric dimension (Tim approval required)."""
+        try:
+            _ = rubric_manager.get_active
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+        required = ["name", "description", "scoring_criteria", "gap_analysis"]
+        missing = [k for k in required if k not in body]
+        if missing:
+            return JSONResponse({"error": f"Missing fields: {missing}"}, status_code=400)
+
+        # Store as a pending proposal fact for Tim's review
+        from nous.heart.schemas import FactInput
+        fact = FactInput(
+            content=f"[RUBRIC PROPOSAL] New dimension: {body['name']}\n\n"
+                    f"Description: {body['description']}\n"
+                    f"Scoring: {body['scoring_criteria']}\n"
+                    f"Evidence: {body['gap_analysis']}\n"
+                    f"Suggested weight: {body.get('suggested_weight', 0.15)}",
+            category="technical",
+            subject="rubric_dimension_proposal",
+            source="f024_phase3b",
+            tags=["rubric", "proposal", "pending_approval"],
+        )
+        result = await heart.learn_fact(fact)
+
+        return JSONResponse({
+            "status": "pending_approval",
+            "fact_id": str(result.id) if result else None,
+            "message": "Dimension proposal stored. Requires Tim's approval to activate.",
+        }, status_code=201)
+
+    async def list_proposals(request: Request) -> JSONResponse:
+        """GET /rubric/proposals — list pending dimension proposals."""
+        try:
+            _ = heart.search_facts
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "System not available"}, status_code=503)
+
+        results = await heart.search_facts(
+            query="rubric_dimension_proposal",
+            agent_id=settings.agent_id,
+            limit=20,
+            tags=["rubric", "proposal", "pending_approval"],
+        )
+        return JSONResponse([
+            {
+                "id": str(f.id),
+                "content": f.content,
+                "created_at": f.created_at.isoformat() if hasattr(f, "created_at") and f.created_at else None,
+            }
+            for f in results
+        ])
+
+    async def approve_proposal(request: Request) -> JSONResponse:
+        """POST /rubric/proposals/{id}/approve — approve a proposed dimension."""
+        try:
+            _ = rubric_manager.get_active
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        name = body.get("name")
+        description = body.get("description")
+        scoring_criteria = body.get("scoring_criteria", "1-10 scale")
+        weight = float(body.get("weight", 0.15))
+
+        if not name or not description:
+            return JSONResponse({"error": "Approval must include 'name' and 'description'"}, status_code=400)
+
+        active = await rubric_manager.get_active()
+        if not active:
+            return JSONResponse({"error": "No active rubric"}, status_code=404)
+
+        new_dims = list(active.dimensions) + [{
+            "name": name,
+            "weight": weight,
+            "description": description,
+            "scoring_criteria": scoring_criteria,
+            "min_weight": 0.10,
+            "max_weight": 0.40,
+        }]
+
+        # Normalize weights
+        from nous.cognitive.correlation import _normalize_weights
+        norm = _normalize_weights({d["name"]: d["weight"] for d in new_dims})
+        for d in new_dims:
+            d["weight"] = norm[d["name"]]
+
+        base_version = active.version.split("-")[0]
+        parts = base_version.split(".")
+        new_version = f"{int(parts[0]) + 1}.0.0"
+
+        try:
+            await rubric_manager.create_version(
+                new_version=new_version,
+                dimensions=new_dims,
+                change_reason=f"Phase 3: Added '{name}' dimension (Tim approved)",
+            )
+            return JSONResponse({"status": "approved", "new_version": new_version})
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+    async def rollback_rubric(request: Request) -> JSONResponse:
+        """POST /rubric/rollback — rollback to a previous version."""
+        try:
+            _ = rubric_manager.rollback
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Rubric system not enabled"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+        target = body.get("target_version")
+        if not target:
+            return JSONResponse({"error": "Missing target_version"}, status_code=400)
+        result = await rubric_manager.rollback(target)
+        if result:
+            return JSONResponse({"status": "rolled_back", "new_version": result.version})
+        return JSONResponse({"error": "Target version not found"}, status_code=404)
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1153,6 +1283,10 @@ def create_app(
         Route("/admin/search-weights", get_search_weights),
         Route("/admin/search-weights", set_search_weights, methods=["POST"]),
         # F024 Phase 3b: Rubric endpoints
+        Route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
+        Route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),
+        Route("/rubric/proposals", list_proposals),
+        Route("/rubric/rollback", rollback_rubric, methods=["POST"]),
         Route("/rubric/history", get_rubric_history),
         Route("/rubric/signals", get_outcome_signals),
         Route("/rubric/evolve", trigger_evolution, methods=["POST"]),

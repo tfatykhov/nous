@@ -99,3 +99,57 @@ class TestRubricEndpoints:
         response = client.get("/rubric/history")
         assert response.status_code == 200
         assert response.json() == []
+
+    def test_get_rubric_503_when_disabled(self):
+        from nous.api.rest import create_app
+        from starlette.testclient import TestClient
+
+        app = create_app(
+            runner=MagicMock(),
+            brain=MagicMock(),
+            heart=MagicMock(),
+            cognitive=MagicMock(),
+            database=MagicMock(),
+            settings=MagicMock(agent_id="test"),
+            rubric_manager=None,
+        )
+        client = TestClient(app)
+        response = client.get("/rubric")
+        assert response.status_code == 503
+
+    def test_rollback_missing_version(self):
+        from nous.api.rest import create_app
+        from starlette.testclient import TestClient
+
+        rubric_mgr = MagicMock()
+        app = create_app(
+            runner=MagicMock(),
+            brain=MagicMock(),
+            heart=MagicMock(),
+            cognitive=MagicMock(),
+            database=MagicMock(),
+            settings=MagicMock(agent_id="test"),
+            rubric_manager=rubric_mgr,
+        )
+        client = TestClient(app)
+        response = client.post("/rubric/rollback", json={})
+        assert response.status_code == 400
+
+    def test_approve_proposal_missing_fields(self):
+        from nous.api.rest import create_app
+        from starlette.testclient import TestClient
+
+        rubric_mgr = MagicMock()
+        rubric_mgr.get_active = AsyncMock(return_value=MagicMock(dimensions=[], version="1.0.0"))
+        app = create_app(
+            runner=MagicMock(),
+            brain=MagicMock(),
+            heart=MagicMock(),
+            cognitive=MagicMock(),
+            database=MagicMock(),
+            settings=MagicMock(agent_id="test"),
+            rubric_manager=rubric_mgr,
+        )
+        client = TestClient(app)
+        response = client.post("/rubric/proposals/fake-id/approve", json={})
+        assert response.status_code == 400
