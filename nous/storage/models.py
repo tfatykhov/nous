@@ -483,11 +483,11 @@ class RubricVersion(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(100), ForeignKey("nous_system.agents.id"), nullable=False)
     version: Mapped[str] = mapped_column(String(20), nullable=False)
     parent_version: Mapped[str | None] = mapped_column(String(20))
     change_reason: Mapped[str] = mapped_column(Text, nullable=False)
-    dimensions: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    dimensions: Mapped[list] = mapped_column(JSONB, nullable=False)
     outcome_correlations: Mapped[dict] = mapped_column(JSONB, server_default="{}")
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -500,11 +500,15 @@ class OutcomeSignal(Base):
             "signal_type IN ('corrected', 'completed', 'praised', 'reworked', 'self_corrected')",
             name="ck_outcome_signals_type",
         ),
+        CheckConstraint(
+            "confidence BETWEEN 0 AND 1",
+            name="ck_outcome_signals_confidence",
+        ),
         {"schema": "heart"},
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    agent_id: Mapped[str] = mapped_column(String(100), ForeignKey("nous_system.agents.id"), nullable=False)
     episode_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("heart.episodes.id", ondelete="CASCADE"), nullable=False)
     signal_type: Mapped[str] = mapped_column(String(30), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.5")

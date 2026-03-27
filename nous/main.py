@@ -121,8 +121,15 @@ async def create_components(settings: Settings) -> dict:
         # Seed v1.0.0 if no active rubric exists
         existing = await rubric_manager.get_active()
         if not existing:
-            await rubric_manager.seed_v1()
-            logger.info("F024-3b: Seeded initial rubric v1.0.0")
+            try:
+                await rubric_manager.seed_v1()
+                logger.info("F024-3b: Seeded initial rubric v1.0.0")
+            except Exception as e:
+                # Race condition: another process seeded first — that's fine
+                if "unique" in str(e).lower() or "integrity" in str(e).lower():
+                    logger.debug("F024-3b: Rubric v1 already seeded by another process")
+                else:
+                    raise
 
     cognitive = CognitiveLayer(
         brain, heart, settings, settings.identity_prompt,

@@ -29,6 +29,11 @@ class TestOutcomeSignalModel:
         from nous.storage.models import OutcomeSignal
         assert OutcomeSignal.__table_args__[-1]["schema"] == "heart"
 
+    def test_outcome_signal_confidence_constraint(self):
+        from nous.storage.models import OutcomeSignal
+        constraints = [a for a in OutcomeSignal.__table_args__ if hasattr(a, "name")]
+        assert any(c.name == "ck_outcome_signals_confidence" for c in constraints)
+
 
 class TestRubricDimension:
     def test_dimension_defaults(self):

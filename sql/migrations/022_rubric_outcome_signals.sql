@@ -21,11 +21,12 @@ CREATE UNIQUE INDEX idx_rubric_active_agent
 -- Outcome signals — per-episode ground truth for rubric evolution
 CREATE TABLE IF NOT EXISTS heart.outcome_signals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_id VARCHAR(100) NOT NULL,
+    agent_id VARCHAR(100) NOT NULL REFERENCES nous_system.agents(id),
     episode_id UUID NOT NULL REFERENCES heart.episodes(id) ON DELETE CASCADE,
     signal_type VARCHAR(30) NOT NULL
         CHECK (signal_type IN ('corrected', 'completed', 'praised', 'reworked', 'self_corrected')),
-    confidence FLOAT NOT NULL DEFAULT 0.5,  -- detector confidence in classification
+    confidence FLOAT NOT NULL DEFAULT 0.5  -- detector confidence in classification
+        CHECK (confidence BETWEEN 0 AND 1),
     evidence TEXT,                           -- what triggered the classification
     self_improvement_scores JSONB,          -- snapshot of rubric scores at time of episode
     created_at TIMESTAMPTZ DEFAULT NOW()
