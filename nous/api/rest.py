@@ -1126,7 +1126,7 @@ def create_app(
             source="f024_phase3b",
             tags=["rubric", "proposal", "pending_approval"],
         )
-        result = await heart.learn_fact(fact)
+        result = await heart.learn(fact)
 
         return JSONResponse({
             "status": "pending_approval",
@@ -1143,9 +1143,8 @@ def create_app(
 
         results = await heart.search_facts(
             query="rubric_dimension_proposal",
-            agent_id=settings.agent_id,
             limit=20,
-            tags=["rubric", "proposal", "pending_approval"],
+            category="technical",
         )
         return JSONResponse([
             {

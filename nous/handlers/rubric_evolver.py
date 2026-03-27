@@ -146,17 +146,18 @@ class RubricEvolver:
         parts = base_version.split(".")
         new_version = f"{parts[0]}.{int(parts[1]) + 1}.0"
 
+        # Build correlations dict accumulating all signal types per dimension
+        oc = dict(active.outcome_correlations or {})
+        for c in correlations:
+            oc.setdefault(c.dimension, {})[c.signal_type] = {
+                "pearson_r": c.pearson_r, "spearman_rho": c.spearman_rho,
+            }
+
         await self._rubric.create_version(
             new_version=new_version,
             dimensions=new_dims,
             change_reason=f"Phase 1 weight adjustment based on {len(episodes)} episodes",
-            outcome_correlations={
-                c.dimension: {
-                    **(active.outcome_correlations or {}).get(c.dimension, {}),
-                    c.signal_type: {"pearson_r": c.pearson_r, "spearman_rho": c.spearman_rho},
-                }
-                for c in correlations
-            },
+            outcome_correlations=oc,
         )
 
         logger.info("F024-3b: Created rubric %s — weights: %s", new_version, suggested)
