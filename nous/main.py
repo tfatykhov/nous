@@ -208,6 +208,10 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("RubricEvolver not available yet")
 
+        # F024-3b: Wire rubric evolver into sleep handler
+        if sleep_handler is not None and rubric_evolver is not None:
+            sleep_handler._rubric_evolver = rubric_evolver
+
         # F022 Phase 2: Wire fact->decision graph linking
         try:
             from nous.handlers.fact_graph_linker import FactGraphLinker

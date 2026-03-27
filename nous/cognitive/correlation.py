@@ -96,6 +96,29 @@ def correlate_dimensions_with_outcomes(
     return results
 
 
+def _normalize_weights(
+    weights: dict[str, float],
+    min_w: float = 0.10,
+    max_w: float = 0.40,
+) -> dict[str, float]:
+    """Iteratively clamp and normalize until stable.
+
+    Single-pass clamp+normalize can push weights back outside bounds.
+    This iterates until convergence (typically 2-3 iterations).
+    """
+    result = dict(weights)
+    for _ in range(10):
+        total = sum(result.values())
+        if total == 0:
+            return result
+        result = {d: w / total for d, w in result.items()}
+        clamped = {d: max(min_w, min(max_w, w)) for d, w in result.items()}
+        if all(abs(clamped[d] - result[d]) < 0.0001 for d in result):
+            return {d: round(w, 4) for d, w in clamped.items()}
+        result = clamped
+    return {d: round(w, 4) for d, w in result.items()}
+
+
 def suggest_weights(
     correlations: list[CorrelationResult],
     current_weights: dict[str, float],
@@ -139,11 +162,7 @@ def suggest_weights(
         new_weight = max(min_weight, min(max_weight, current + clamped_delta))
         new_weights[dim] = round(new_weight, 4)
 
-    total = sum(new_weights.values())
-    if total > 0:
-        new_weights = {d: round(w / total, 4) for d, w in new_weights.items()}
-
-    return new_weights
+    return _normalize_weights(new_weights, min_weight, max_weight)
 
 
 def detect_split_candidates(

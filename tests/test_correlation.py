@@ -101,3 +101,21 @@ class TestMergeDetection:
         }
         merges = detect_merge_candidates(dim_profiles, threshold=0.85)
         assert ("Recall", "Memory Hygiene") in merges or ("Memory Hygiene", "Recall") in merges
+
+
+class TestNormalizeWeights:
+    def test_iterative_normalization_respects_bounds(self):
+        """Regression: single-pass normalize can violate max_weight."""
+        from nous.cognitive.correlation import _normalize_weights
+        # 3 dims: one at ceiling, others at floor → normalize pushes ceiling higher
+        weights = {"A": 0.40, "B": 0.10, "C": 0.10}
+        result = _normalize_weights(weights, min_w=0.10, max_w=0.40)
+        assert abs(sum(result.values()) - 1.0) < 0.01
+        for w in result.values():
+            assert 0.10 <= w <= 0.40 + 0.001  # small tolerance for rounding
+
+    def test_equal_weights_unchanged(self):
+        from nous.cognitive.correlation import _normalize_weights
+        weights = {"A": 0.25, "B": 0.25, "C": 0.25, "D": 0.25}
+        result = _normalize_weights(weights)
+        assert abs(sum(result.values()) - 1.0) < 0.01

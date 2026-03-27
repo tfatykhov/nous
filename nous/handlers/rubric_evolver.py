@@ -11,12 +11,15 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from typing import Any
-from uuid import UUID
 
 from sqlalchemy import func as sa_func, select
 
-from nous.cognitive.correlation import correlate_dimensions_with_outcomes, suggest_weights
+from nous.cognitive.correlation import (
+    correlate_dimensions_with_outcomes,
+    detect_merge_candidates,
+    detect_split_candidates,
+    suggest_weights,
+)
 from nous.cognitive.rubric import RubricManager
 from nous.cognitive.rubric_schemas import CorrelationReport
 from nous.config import Settings
@@ -70,7 +73,6 @@ class RubricEvolver:
             sig_result = await session.execute(
                 select(OutcomeSignal).where(
                     OutcomeSignal.agent_id == self._agent_id,
-                    OutcomeSignal.self_improvement_scores.isnot(None),
                 )
             )
             signals = sig_result.scalars().all()
@@ -80,6 +82,7 @@ class RubricEvolver:
                 select(RubricVersion).where(
                     RubricVersion.agent_id == self._agent_id,
                     RubricVersion.created_at >= week_ago,
+                    RubricVersion.status != "rollback",
                 )
             )
             recent_versions = recent_result.scalars().all()
@@ -87,20 +90,13 @@ class RubricEvolver:
                 logger.info("F024-3b: Rate limited — %d versions this week", len(recent_versions))
                 return None
 
-        episode_signals: dict[UUID, dict] = defaultdict(lambda: {"scores": {}, "signals": []})
-        for sig in signals:
-            ep = episode_signals[sig.episode_id]
-            ep["signals"].append(sig.signal_type)
-            if sig.self_improvement_scores and not ep["scores"]:
-                ep["scores"] = sig.self_improvement_scores
-
-        episodes = [ep for ep in episode_signals.values() if ep["scores"]]
+        dim_names = [d["name"] for d in active.dimensions]
+        episodes = self._build_episodes_for_correlation(signals, dim_names)
 
         if len(episodes) < 3:
-            logger.info("F024-3b: Only %d episodes with scores, need at least 3", len(episodes))
+            logger.info("F024-3b: Only %d episodes, need at least 3", len(episodes))
             return None
 
-        dim_names = [d["name"] for d in active.dimensions]
         correlations = correlate_dimensions_with_outcomes(episodes, dim_names)
 
         current_weights = {d["name"]: d["weight"] for d in active.dimensions}
@@ -115,6 +111,15 @@ class RubricEvolver:
             suggested_weights=suggested,
             episode_count=len(episodes),
         )
+
+        # Phase 2: detect split/merge candidates
+        report.suggested_splits = detect_split_candidates(correlations)
+        dim_profiles = {}
+        for dim_name in dim_names:
+            dim_profiles[dim_name] = [
+                c.pearson_r for c in correlations if c.dimension == dim_name
+            ]
+        report.suggested_merges = detect_merge_candidates(dim_profiles)
 
         weight_changed = any(
             abs(suggested.get(d, 0) - current_weights.get(d, 0)) > 0.001
@@ -156,6 +161,37 @@ class RubricEvolver:
 
         logger.info("F024-3b: Created rubric %s — weights: %s", new_version, suggested)
         return report
+
+    @staticmethod
+    def _build_episodes_for_correlation(
+        signals: list,
+        dim_names: list[str],
+    ) -> list[dict]:
+        """Build episode dicts for correlation, handling missing scores.
+
+        When self_improvement_scores are available, uses them directly.
+        Otherwise, generates proxy scores from signal types so correlation
+        is non-degenerate even without per-dimension scoring data.
+        """
+        _PROXY_SCORES = {
+            "completed": 7, "praised": 8, "corrected": 3,
+            "reworked": 2, "self_corrected": 5,
+        }
+
+        episode_signals: dict = defaultdict(lambda: {"scores": {}, "signals": []})
+        for sig in signals:
+            ep = episode_signals[sig.episode_id]
+            ep["signals"].append(sig.signal_type)
+            if sig.self_improvement_scores and not ep["scores"]:
+                ep["scores"] = sig.self_improvement_scores
+
+        # For episodes without real scores, generate proxy scores from signal types
+        for ep in episode_signals.values():
+            if not ep["scores"] and ep["signals"]:
+                proxy = sum(_PROXY_SCORES.get(s, 5) for s in ep["signals"]) / len(ep["signals"])
+                ep["scores"] = {dim: proxy for dim in dim_names}
+
+        return list(episode_signals.values())
 
     async def execute_split(
         self,
@@ -199,9 +235,12 @@ class RubricEvolver:
 
         result_dims = dims[:parent_idx] + new_dims + dims[parent_idx + 1:]
 
-        total = sum(d["weight"] for d in result_dims)
+        from nous.cognitive.correlation import _normalize_weights
+        norm = _normalize_weights(
+            {d["name"]: d["weight"] for d in result_dims},
+        )
         for d in result_dims:
-            d["weight"] = round(d["weight"] / total, 4)
+            d["weight"] = norm[d["name"]]
 
         base_version = active.version.split("-")[0]
         parts = base_version.split(".")
@@ -257,9 +296,12 @@ class RubricEvolver:
         result_dims = [d for d in dims if d["name"] not in (dim_a, dim_b)]
         result_dims.append(merged)
 
-        total = sum(d["weight"] for d in result_dims)
+        from nous.cognitive.correlation import _normalize_weights
+        norm = _normalize_weights(
+            {d["name"]: d["weight"] for d in result_dims},
+        )
         for d in result_dims:
-            d["weight"] = round(d["weight"] / total, 4)
+            d["weight"] = norm[d["name"]]
 
         base_version = active.version.split("-")[0]
         parts = base_version.split(".")
