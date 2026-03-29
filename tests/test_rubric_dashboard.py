@@ -84,3 +84,63 @@ async def test_get_rubric_dashboard_data(db, settings, seed_rubric):
     assert len(data["version_history"]) >= 1
     assert len(data["weight_history"]) >= 1
     assert "config" in data
+
+
+# --- Task 2: REST endpoint tests ---
+
+# brain, heart, db, settings fixtures come from conftest.py — do NOT redefine heart.
+
+@pytest_asyncio.fixture
+async def brain(db, settings):
+    from nous.brain.brain import Brain
+    b = Brain(database=db, settings=settings)
+    yield b
+    await b.close()
+
+
+@pytest_asyncio.fixture
+async def cognitive(brain, heart, settings):
+    from nous.cognitive.layer import CognitiveLayer
+    return CognitiveLayer(brain, heart, settings, identity_prompt="You are Nous.")
+
+
+@pytest.fixture
+def app(brain, heart, cognitive, db, settings):
+    from nous.api.rest import create_app
+    return create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
+
+
+@pytest_asyncio.fixture
+async def client(app):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rubric_endpoint(client, seed_rubric):
+    resp = await client.get("/dashboard/rubric")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["active_rubric"]["version"] == "1.0.0"
+    assert data["outcome_signals"]["total"] == 2
+    assert "config" in data
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rubric_endpoint_empty(client):
+    """Returns gracefully when no rubric data exists."""
+    resp = await client.get("/dashboard/rubric")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["active_rubric"] is None
+    assert data["outcome_signals"]["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_rubric_endpoint_no_correlations(client, seed_rubric):
+    """Rubric exists with signals but no correlations yet."""
+    resp = await client.get("/dashboard/rubric")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["correlations"]["data"] == []
+    assert data["correlations"]["sample_size"] == 0

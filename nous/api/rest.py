@@ -981,6 +981,18 @@ def create_app(
             logger.error("Dashboard health error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_rubric(request: Request) -> JSONResponse:
+        """GET /dashboard/rubric - Rubric analytics for dashboard."""
+        try:
+            from nous.api.dashboard_queries import get_rubric_dashboard_data
+
+            async with database.session() as session:
+                data = await get_rubric_dashboard_data(session, settings.agent_id, settings)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard rubric error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_admission(request: Request) -> JSONResponse:
         """GET /dashboard/admission - Admission control analytics."""
         try:
@@ -1269,6 +1281,7 @@ def create_app(
         Route("/dashboard/calibration", dashboard_calibration),
         Route("/dashboard/activity", dashboard_activity),
         Route("/dashboard/health", dashboard_health),
+        Route("/dashboard/rubric", dashboard_rubric),
         # F021.1: Admission dashboard — rejected MUST be before admission (Starlette top-down matching)
         Route("/dashboard/admission/rejected", dashboard_admission_rejected),
         Route("/dashboard/admission", dashboard_admission),
