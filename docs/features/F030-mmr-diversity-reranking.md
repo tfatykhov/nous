@@ -1,6 +1,6 @@
 # F030: MMR Diversity Re-Ranking
 
-**Status:** Draft  
+**Status:** Implemented  
 **Proposed by:** Nous (via xMemory multi-agent debate)  
 **Date:** 2026-03-28  
 **Research basis:** xMemory (arXiv:2602.02007v2, ICML 2026) — submodular diverse retrieval  
