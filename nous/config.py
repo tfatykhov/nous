@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     relevance_floor_enabled: bool = True
 
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
-    relevance_drop_ratio: float = 0.6
+    relevance_drop_ratio: float = 0.5
 
     # Adaptive relevance filter: per-type min/max result overrides (JSON dicts)
     # e.g. NOUS_RELEVANCE_MIN_RESULTS='{"fact": 2, "decision": 1}'
@@ -61,7 +61,7 @@ class Settings(BaseSettings):
 
     # F017: Staleness penalty
     staleness_penalty_enabled: bool = True
-    staleness_half_life_days: int = 14
+    staleness_half_life_days: int = 30
 
     # Runtime
     host: str = "0.0.0.0"

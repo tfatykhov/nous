@@ -38,7 +38,7 @@ class TestRelevanceFilter:
     def test_max_k_cap(self):
         """Items > max_k are always trimmed."""
         engine = self._make_engine()
-        max_k = RELEVANCE_MAX_RESULTS["fact"]  # 8
+        max_k = RELEVANCE_MAX_RESULTS["fact"]  # 12
         items = [FakeItem(0.9 - i * 0.01) for i in range(max_k + 5)]
         result = engine._apply_relevance_filter(items, "fact")
         assert len(result) <= max_k
