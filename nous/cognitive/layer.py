@@ -454,7 +454,7 @@ class CognitiveLayer:
         try:
             if await self._deliberation.should_deliberate(frame):
                 decision_id = await self._deliberation.start(
-                    agent_id, user_input[:200], frame,
+                    agent_id, user_input[:500], frame,
                     session_id=session_id, session=session,
                 )
         except Exception:
@@ -649,7 +649,7 @@ class CognitiveLayer:
 
                     await self._deliberation.finalize(
                         decision_id,
-                        description=turn_result.response_text[:200],
+                        description=turn_result.response_text[:500],
                         confidence=confidence,
                         has_tool_errors=has_tool_errors,
                         session=session,
