@@ -1161,6 +1161,8 @@ async def get_rubric_dashboard_data(
     session: AsyncSession, agent_id: str, settings: Any = None,
 ) -> dict:
     """Return rubric dashboard data: active rubric, signals, history, correlations, config."""
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
 
     # Active rubric
     result = await session.execute(
@@ -1256,18 +1258,14 @@ async def get_rubric_dashboard_data(
                    COUNT(*) FILTER (WHERE s.signal_type = 'praised') AS praised,
                    COUNT(*) FILTER (WHERE s.signal_type = 'reworked') AS reworked,
                    COUNT(*) FILTER (WHERE s.signal_type = 'self_corrected') AS self_corrected
-            FROM generate_series(
-                CAST(NOW() - INTERVAL '30 days' AS date),
-                CAST(NOW() AS date),
-                '1 day'::interval
-            ) d
+            FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
             LEFT JOIN heart.outcome_signals s
                 ON CAST(s.created_at AS date) = CAST(d AS date)
                 AND s.agent_id = :agent_id
             GROUP BY CAST(d AS date)
             ORDER BY CAST(d AS date)
         """),
-        {"agent_id": agent_id},
+        {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
     )
     daily_trend = [
         {
