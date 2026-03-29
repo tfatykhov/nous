@@ -288,6 +288,15 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_ACTION_GATING_MODE` | `enforce` | Action gating mode (shadow/warn/enforce) |
 | `NOUS_ACTION_GATING_MODEL` | `claude-haiku-4-5-20251001` | Model for Tier 3 LLM gate |
 | `NOUS_ACTION_GATING_EXTERNAL_ONLY` | `false` | Skip Tier 2, only gate external/irreversible |
+| `NOUS_RUBRIC_ENABLED` | `true` | Enable self-modifying rubric system (F024-3b) |
+| `NOUS_RUBRIC_OUTCOME_DETECTION_ENABLED` | `true` | Enable outcome signal detection on episodes |
+| `NOUS_RUBRIC_EVOLUTION_ENABLED` | `false` | Enable weight/split/merge evolution (Phase 1+) |
+| `NOUS_RUBRIC_MIN_EPISODES_FOR_CORRELATION` | `50` | Minimum episodes before correlation runs |
+| `NOUS_RUBRIC_WEIGHT_CHANGE_CAP` | `0.05` | Max weight shift per adjustment cycle (±5%) |
+| `NOUS_RUBRIC_MIN_DIMENSIONS` | `3` | Floor for dimension count |
+| `NOUS_RUBRIC_MAX_DIMENSIONS` | `7` | Ceiling for dimension count |
+| `NOUS_RUBRIC_MAX_VERSIONS_PER_WEEK` | `1` | Rate limit on rubric evolution |
+| `NOUS_RUBRIC_OUTCOME_MODEL` | `claude-haiku-4-5-20251001` | Model for outcome classification |
 
 ### REST Endpoints
 
