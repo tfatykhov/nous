@@ -263,7 +263,7 @@ Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for th
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NOUS_IDENTITY_PROMPT` | Built-in default | **Agent identity.** Injected as the first section of every system prompt. This is how Nous knows who it is and how to behave. Override to customize personality. |
-| `NOUS_MODEL` | `claude-sonnet-4-5-20250514` | LLM model for the main agent loop |
+| `NOUS_MODEL` | `claude-sonnet-4-6` | LLM model for the main agent loop |
 | `NOUS_MAX_TURNS` | `10` | Max tool-use iterations per turn. Increase for complex multi-step tasks. |
 | `NOUS_THINKING_MODE` | `off` | Extended thinking: `off`, `adaptive` (recommended for 4.6), or `manual` |
 | `NOUS_EFFORT` | `high` | Thinking depth for adaptive mode: `low`, `medium`, `high`, `max` |
@@ -338,9 +338,17 @@ All core architecture is implemented and running:
 | Context Pruning (F016) | ✅ Shipped | 4-tier tool pruning, anti-hallucination prompt, model-aware compaction, content-type decay profiles, pre-prune fact extraction |
 | Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
 | K-Line Learning (F012) | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery |
+| Skill Discovery (F011) | ✅ Shipped | learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL |
+| Graph-Augmented Recall (F022) | ✅ Shipped | Polymorphic graph edges, cross-type linking, contradiction bridge, spreading activation |
+| Async Subtasks (F009) | ✅ Shipped | Background task queue, worker pool, scheduling, time parser, inline subtask execution |
+| Memory Admission Control (F023) | ✅ Shipped | 5-dimension scoring, LLM utility assessment, shadow mode |
+| Critic Agent (F024) | ✅ Phase 0 | Smart frame selector, LLM classification, 6 diagnostic critics |
+| Self-Modifying Rubrics (F024-3b) | ✅ Shipped | Outcome signals, dimension proposals, approval flow, rubric evolution, dashboard tab |
+| Execution Integrity (F026) | ✅ Shipped | Execution ledger, tiered action gating, claim verification, ghost planning detection |
+| MMR Diversity (F030) | ✅ Shipped | Maximal Marginal Relevance re-ranking in recall_deep |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
-**Stats:** ~44,000 lines of Python (21K production + 23K tests) · 1,200+ tests · 23 Postgres tables · Docker deployment
+**Stats:** ~61,000 lines of Python (30K production + 31K tests) · 1,690+ tests · 27 Postgres tables · 42 REST endpoints · Docker deployment
 
 See [Feature Index](docs/features/INDEX.md) for the full breakdown.
 

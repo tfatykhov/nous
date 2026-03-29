@@ -23,7 +23,11 @@
 |---------|------|--------|-------------|
 | F009 | [Async Subtasks](F009-async-subtasks.md) | ✅ Shipped | Background task queue — parallel execution, non-blocking chat, Postgres-backed workers, scheduled/recurring tasks |
 | F010 | [Memory Improvements](F010-memory-improvements.md) | ✅ Shipped | Episode summaries, clean decision descriptions, proactive fact learning, user-tagged episodes |
+| F011 | [Skill Discovery](F011-skill-discovery.md) | ✅ Shipped | `learn_skill` tool acquires skills from URL/marketplace/local — registered as procedures, auto-surface in RECALL |
+| F012 | [K-Line Learning](F012-kline-learning.md) | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery. 3 pathways: sleep-cycle clustering + real-time monitor recovery |
+| F015 | [Subtask Hardening](F015-subtask-hardening.md) | ✅ Shipped | Timeout limits, concurrent limits, tool call limits, worker pool configuration |
 | F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | ✅ Shipped | Polymorphic graph edges, cross-type linking, contradiction bridge, density-gated spreading activation |
+| F030 | [MMR Diversity Reranking](F030-mmr-diversity-reranking.md) | ✅ Shipped | Maximal Marginal Relevance diversity re-ranking in recall_deep, configurable relevance/diversity weight |
 
 ### P0: Identity & Context
 | Feature | Name | Status | Description |
@@ -88,11 +92,19 @@ All shipped implementation specs with PR references:
 | 014.1 | Context Quality Engine (F016+F017) | ✅ Shipped | #122 — 4-tier pruning, relevance floor, staleness penalty, model-aware thresholds, usage tracking, pre-prune extraction |
 | 015 | Graph-Augmented Recall (F022) | ✅ Shipped | — polymorphic edges, 1-hop expansion, cross-type linking, contradiction bridge, spreading activation |
 | F011 | Skill Discovery v2 | ✅ Shipped | — learn_skill tool, SkillParser, bootstrap, FRAME_TOOLS wiring |
+| 011.2 | Multimodal File Support | 📋 Draft | — image/document processing across input channels |
+| 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred) |
+| 012.2 | Subtask Enhancements Light | 📋 Specced | — replaces 012.1 with lighter subtask improvements |
+| 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
+| 014.2 | Tool Output Intelligence | 📋 Specced | — SmartCompress + ReversibleCache for tool results |
 
 ### P1: Cognitive Enhancement
 | Feature | Name | Status | Description |
 |---------|------|--------|-------------|
+| F023 | [Memory Admission Control](F023-memory-admission-control.md) | ✅ Shipped | 5-dimension scoring (utility, confidence, novelty, recency, type_prior), LLM-based utility scoring. Running in shadow mode. |
 | F024 | [Critic Agent](F024-critic-agent.md) | Phase 0 ✅ | Smart frame selector (B-Brain) — LLM classification, 6 diagnostic critics, shadow mode. Phase 1+ (parallelism) planned. |
+| F024-3b | [Self-Modifying Rubrics](F024-phase3b-self-modifying-rubrics.md) | ✅ Shipped | Data-driven rubric evolution — outcome signals, dimension proposals, approval flow, rollback, dashboard tab |
+| F026 | [Execution Integrity](F026-execution-integrity.md) | ✅ Shipped | Execution ledger, tiered action gating (read/write/external/irreversible), claim verification, ghost planning detection |
 
 ### Phase 2 — Quality (next to build)
 
@@ -100,7 +112,9 @@ All shipped implementation specs with PR references:
 |---------|------|----------|-------------|
 | #38 | _is_informational() Phase 2 | P1 | Partially addressed by PR #76 (delete instead of abandon). Further tuning possible. |
 | #52 | Topic-Aware Recall v2 | P1 | Spike merged (#75). Full 008.2 spec exists if spike proves insufficient. |
-| F011 | [Skill Discovery](F011-skill-discovery.md) | ✅ Shipped | `learn_skill` tool acquires skills from URL/marketplace/local — registered as procedures, auto-surface in RECALL. No filesystem scanner. |
+| F021 | [Memory Dashboard](F021-memory-dashboard.md) | P1 | Memory browser, graph visualization, health metrics, calibration inspection |
+| F025 | [Amnesia Prevention](F025-amnesia-prevention.md) | P1 | 7 root causes identified (over-filtered retrieval, tiny limits, naive grouping). Partial mitigations in context.py. |
+| F027 | [Supersession Detection](F027-supersession-detection.md) | Partial | Basic subject-based supersession shipped. Missing: retrieval-time suppression, periodic conflict scanning, LLM conflict classification. |
 | 010.1 | Health Dashboard | P1 | Enrich GET /status with episode outcome breakdown, fact health, decision stats. |
 
 ### Phase 3 — Growth
@@ -109,7 +123,6 @@ All shipped implementation specs with PR references:
 |---------|------|----------|-------------|
 | F007 | Metrics & Growth | P2 | Calibration, Brier scores, outcome tracking. Decision data now clean (27 real decisions). |
 | F008 | Memory Lifecycle | P2 | Shelved — system too young. Revisit when data grows. Specs 009.1-009.4 written. |
-| F012 | K-Line Learning | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery. 3 pathways: sleep-cycle clustering + real-time monitor recovery. |
 | 008.1-P4 | Adaptive Compaction | P2 | LLM-powered summarization with configurable triggers. Spec written. |
 
 ### Future
@@ -118,19 +131,19 @@ All shipped implementation specs with PR references:
 |---------|------|-------------|
 | F013 | Frame Splitting | Parallel cognitive frames via sub-agents |
 | F014 | Model Router | LLM portability via proxy layer |
-| F015 | Growth Engine | Administrative self-improvement (Papert's Principle) |
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
 | F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | SmartCompress (ingestion-time statistical compression) + ReversibleCache (CCR-style cache for web_search/web_fetch) |
-| F021 | Dashboard | Visual growth tracking and cognitive state |
+| F028 | [Context Demand Paging](F028-context-demand-paging.md) | OS-inspired 4-level memory hierarchy with retrieval handles and demand loading |
+| F029 | [Trajectory Learning](F029-trajectory-learning.md) | Post-execution tip extraction from failure traces and optimization patterns |
 
 ## Stats
 
-- **Total source:** ~34,000 lines of Python
-- **Test count:** 1250+ tests across 60 test files
-- **Database:** 18 tables across 2 schemas (brain, heart)
-- **Tools:** 15 agent tools (record_decision, recall_deep, learn_fact, learn_skill, create_censor, store_identity, complete_initiation, spawn_task, schedule_task, list_tasks, cancel_task, bash, read_file, write_file, web_search, web_fetch)
-- **Endpoints:** 23 REST endpoints + MCP server + Telegram bot
-- **Feature specs:** 17 feature docs + 17 research notes
+- **Total source:** ~30,000 lines of production Python + ~31,000 lines of tests
+- **Test count:** 1,690+ tests across 90 test files
+- **Database:** 27 tables across 3 schemas (brain, heart, nous_system)
+- **Tools:** 18 agent tools (record_decision, recall_deep, recall_recent, learn_fact, learn_skill, get_procedure, create_censor, cache_retrieve, spawn_task, schedule_task, list_tasks, cancel_task, run_python, bash, read_file, write_file, web_search, web_fetch)
+- **Endpoints:** 42 REST endpoints + MCP server + Telegram bot
+- **Feature specs:** 22 feature docs + 16 research notes
 - **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors
 
 ## Research Notes
@@ -158,9 +171,10 @@ All shipped implementation specs with PR references:
 
 ![Nous Architecture](../nous-architecture.png)
 
-## Database: 16 Tables, 2 Schemas
+## Database: 27 Tables, 3 Schemas
 
 | Schema | Tables | Purpose |
 |--------|--------|---------|
 | `brain` (8) | decisions, decision_tags, decision_reasons, decision_bridge, thoughts, graph_edges, guardrails, calibration_snapshots | Decision intelligence |
-| `heart` (10) | episodes, episode_decisions, episode_procedures, facts, procedures, censors, working_memory, conversation_state, subtasks, schedules | Memory system |
+| `heart` (13) | episodes, episode_decisions, episode_procedures, facts, procedures, censors, working_memory, conversation_state, subtasks, schedules, outcome_signals, rubric_versions, tool_cache | Memory system |
+| `nous_system` (6) | agents, agent_identity, config, events, frames, schema_migrations | System infrastructure |

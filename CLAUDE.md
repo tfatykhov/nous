@@ -17,7 +17,7 @@ Cognitive Layer (hooks into LLM calls)
 
 Runtime: Direct Anthropic API + tool dispatch loop
 Storage: PostgreSQL + pgvector (one DB, three schemas: brain/heart/system)
-API: REST (23 endpoints) + MCP server + Telegram bot (streaming)
+API: REST (42 endpoints) + MCP server + Telegram bot (streaming)
 ```
 
 ## Project Structure
@@ -27,10 +27,10 @@ nous/
 ├── docker-compose.yml          # Nous agent + Postgres + pgvector
 ├── Dockerfile                  # Python container with OAT support
 ├── sql/
-│   ├── init.sql                # Base schema (19 tables, 3 schemas)
+│   ├── init.sql                # Base schema (21 tables, 3 schemas)
 │   ├── migrations/             # Schema migrations (006-016)
 │   └── seed.sql                # Default agent, frames, guardrails
-├── nous/                       # Python package (~21,000 lines)
+├── nous/                       # Python package (~30,000 lines)
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
 │   ├── telegram_bot.py         # Telegram interface (streaming + usage)
@@ -38,7 +38,7 @@ nous/
 │   ├── utils.py                # Shared utilities
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
-│   │   ├── models.py           # ORM models for all 23 tables
+│   │   ├── models.py           # ORM models for all 27 tables
 │   │   └── migrator.py         # Schema migration runner
 │   ├── brain/                  # Decision intelligence organ
 │   │   ├── brain.py            # Core: record, query, review, calibrate
@@ -89,7 +89,7 @@ nous/
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
 │   └── api/                    # External interfaces
-│       ├── rest.py             # Starlette REST API (23 endpoints)
+│       ├── rest.py             # Starlette REST API (42 endpoints)
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration
@@ -99,10 +99,10 @@ nous/
 │       ├── smart_compress.py   # Smart compression for tool results
 │       ├── tool_cache.py       # Tool result caching
 │       └── models.py           # API request/response models
-├── tests/                      # 1200+ tests across 66 files
+├── tests/                      # 1690+ tests across 90 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)
-    ├── features/               # High-level feature specs (F001-F022)
+    ├── features/               # High-level feature specs (F001-F030)
     ├── implementation/         # Build specs (001-014.1, all shipped)
     ├── plans/                  # Implementation plans
     └── reviews/                # Code review documents
@@ -133,7 +133,12 @@ nous/
 | F012 | K-Line Procedure Learning (auto-create procedures from decision clusters, monitor reinforcement) | #134 |
 | F011 | Skill Discovery v2 (learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL) | — |
 | F022 | Graph-Augmented Recall (polymorphic edges, cross-type linking, contradiction bridge, spreading activation) | — |
+| F023 | Memory Admission Control (5-dimension scoring, shadow mode) | — |
+| F024 | Critic Agent Phase 0 (smart frame selector, LLM classification, diagnostic critics) | — |
+| F024-3b | Self-Modifying Rubrics (outcome signals, dimension proposals, rubric evolution) | #196 |
 | F026 | Execution Integrity (execution ledger, action gating, claim verification, ghost planning detection) | #183 |
+| F030 | MMR Diversity Reranking (Maximal Marginal Relevance in recall_deep) | #205 |
+| 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 
 ## How to Work
 
@@ -169,7 +174,7 @@ nous/
 
 ### Database
 
-- Three schemas: `brain`, `heart`, `nous_system` (23 tables total)
+- Three schemas: `brain`, `heart`, `nous_system` (27 tables total)
 - All tables are agent-scoped (`agent_id` column) for multi-agent readiness
 - Use `vector(1536)` for embeddings (text-embedding-3-small)
 - Full-text search via `tsvector` + GIN indexes
@@ -309,19 +314,43 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | DELETE | `/chat/{session_id}` | End conversation |
 | GET | `/status` | Agent status + memory stats + calibration |
 | GET | `/decisions` | List recent decisions |
+| GET | `/decisions/unreviewed` | Unreviewed decisions |
+| POST | `/decisions/{id}/review` | Review a decision |
 | GET | `/decisions/{id}` | Decision detail |
 | GET | `/episodes` | List recent episodes |
 | GET | `/facts?q=query` | Search facts |
 | GET | `/censors` | Active censors |
+| GET | `/procedures` | List procedures |
 | GET | `/frames` | Available cognitive frames |
 | GET | `/calibration` | Calibration report |
+| GET | `/identity` | Get agent identity |
+| PUT | `/identity/{section}` | Update identity section |
+| POST | `/reinitiate` | Re-run initiation protocol |
 | GET | `/health` | Health check |
+| POST | `/sleep/trigger` | Trigger sleep cycle |
 | GET | `/subtasks` | List subtasks |
 | GET | `/subtasks/{id}` | Subtask detail |
 | DELETE | `/subtasks/{id}` | Cancel a subtask |
 | GET | `/schedules` | List schedules |
 | POST | `/schedules` | Create a schedule |
 | DELETE | `/schedules/{id}` | Deactivate a schedule |
+| GET | `/admin/search-weights` | Get search weights |
+| POST | `/admin/search-weights` | Set search weights |
+| GET | `/rubric` | Current rubric |
+| GET | `/rubric/history` | Rubric version history |
+| GET | `/rubric/signals` | Outcome signals |
+| GET | `/rubric/proposals` | List dimension proposals |
+| POST | `/rubric/propose-dimension` | Propose a new dimension |
+| POST | `/rubric/proposals/{id}/approve` | Approve a proposal |
+| POST | `/rubric/rollback` | Rollback rubric version |
+| POST | `/rubric/evolve` | Trigger rubric evolution |
+| GET | `/dashboard/graph` | Graph visualization data |
+| GET | `/dashboard/calibration` | Calibration dashboard data |
+| GET | `/dashboard/activity` | Activity dashboard data |
+| GET | `/dashboard/health` | Health dashboard data |
+| GET | `/dashboard/rubric` | Rubric dashboard data |
+| GET | `/dashboard/admission` | Admission control dashboard |
+| GET | `/dashboard/admission/rejected` | Rejected admission entries |
 
 ### Agent Tools
 
@@ -329,9 +358,12 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 |------|-------------|-------------|
 | `record_decision` | decision, task, debug, conversation, question | Record a decision with confidence + reasoning |
 | `recall_deep` | all | Search memory (decisions, facts, episodes) |
+| `recall_recent` | all | Retrieve recent memory items |
 | `learn_fact` | conversation, question, creative, task | Store a new fact |
 | `learn_skill` | conversation, question, task | Register a skill from URL, local path, or inline markdown |
+| `get_procedure` | all | Retrieve a specific procedure by ID |
 | `create_censor` | all | Create a guardrail censor |
+| `cache_retrieve` | all | Retrieve original content from SmartCompressed results |
 | `bash` | task, debug, conversation, question | Execute shell commands |
 | `read_file` | task, debug, question | Read file contents |
 | `write_file` | task, creative | Write/create files |
