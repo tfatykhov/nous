@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1150,4 +1151,177 @@ async def get_admission_rejected(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+# ── F024-3b: Rubric Dashboard ─────────────────────────────────────────
+
+
+async def get_rubric_dashboard_data(
+    session: AsyncSession, agent_id: str, settings: Any = None,
+) -> dict:
+    """Return rubric dashboard data: active rubric, signals, history, correlations, config."""
+
+    # Active rubric
+    result = await session.execute(
+        text("""
+            SELECT id, version, status, change_reason, dimensions,
+                   outcome_correlations, created_at
+            FROM heart.rubric_versions
+            WHERE agent_id = :agent_id AND status = 'active'
+            LIMIT 1
+        """),
+        {"agent_id": agent_id},
+    )
+    active_row = result.one_or_none()
+    active_rubric = None
+    if active_row:
+        dims = active_row.dimensions if isinstance(active_row.dimensions, list) else []
+        active_rubric = {
+            "version": active_row.version,
+            "status": active_row.status,
+            "dimension_count": len(dims),
+            "created_at": active_row.created_at.isoformat() if active_row.created_at else None,
+            "dimensions": dims,
+        }
+
+    # Version history
+    result = await session.execute(
+        text("""
+            SELECT id, version, status, change_reason, dimensions, created_at
+            FROM heart.rubric_versions
+            WHERE agent_id = :agent_id
+            ORDER BY created_at DESC
+            LIMIT 20
+        """),
+        {"agent_id": agent_id},
+    )
+    version_history = []
+    weight_history = []
+    for row in result:
+        dims = row.dimensions if isinstance(row.dimensions, list) else []
+        version_history.append({
+            "version": row.version,
+            "status": row.status,
+            "change_reason": row.change_reason,
+            "dimension_count": len(dims),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        })
+        weight_history.append({
+            "version": row.version,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "weights": {d["name"]: d["weight"] for d in dims if "name" in d and "weight" in d},
+        })
+
+    # Outcome signals — totals by type
+    result = await session.execute(
+        text("""
+            SELECT signal_type, COUNT(*) AS cnt
+            FROM heart.outcome_signals
+            WHERE agent_id = :agent_id
+            GROUP BY signal_type
+        """),
+        {"agent_id": agent_id},
+    )
+    by_type = {row.signal_type: row.cnt for row in result}
+    total_signals = sum(by_type.values())
+
+    # Outcome signals — recent 20
+    result = await session.execute(
+        text("""
+            SELECT signal_type, confidence, evidence, created_at
+            FROM heart.outcome_signals
+            WHERE agent_id = :agent_id
+            ORDER BY created_at DESC
+            LIMIT 20
+        """),
+        {"agent_id": agent_id},
+    )
+    recent_signals = [
+        {
+            "signal_type": row.signal_type,
+            "confidence": float(row.confidence) if row.confidence else 0.0,
+            "evidence": row.evidence,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in result
+    ]
+
+    # Outcome signals — daily trend (last 30 days)
+    result = await session.execute(
+        text("""
+            SELECT CAST(d AS date) AS date,
+                   COUNT(*) FILTER (WHERE s.signal_type = 'completed') AS completed,
+                   COUNT(*) FILTER (WHERE s.signal_type = 'corrected') AS corrected,
+                   COUNT(*) FILTER (WHERE s.signal_type = 'praised') AS praised,
+                   COUNT(*) FILTER (WHERE s.signal_type = 'reworked') AS reworked,
+                   COUNT(*) FILTER (WHERE s.signal_type = 'self_corrected') AS self_corrected
+            FROM generate_series(
+                CAST(NOW() - INTERVAL '30 days' AS date),
+                CAST(NOW() AS date),
+                '1 day'::interval
+            ) d
+            LEFT JOIN heart.outcome_signals s
+                ON CAST(s.created_at AS date) = CAST(d AS date)
+                AND s.agent_id = :agent_id
+            GROUP BY CAST(d AS date)
+            ORDER BY CAST(d AS date)
+        """),
+        {"agent_id": agent_id},
+    )
+    daily_trend = [
+        {
+            "date": row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
+            "completed": row.completed,
+            "corrected": row.corrected,
+            "praised": row.praised,
+            "reworked": row.reworked,
+            "self_corrected": row.self_corrected,
+        }
+        for row in result
+    ]
+
+    # Correlations from active rubric's stored data
+    correlations_data = []
+    correlation_sample = 0
+    if active_row and active_row.outcome_correlations:
+        oc = active_row.outcome_correlations
+        for dim_name, signals in oc.items():
+            if isinstance(signals, dict):
+                for sig_type, stats in signals.items():
+                    if isinstance(stats, dict):
+                        correlations_data.append({
+                            "dimension": dim_name,
+                            "signal_type": sig_type,
+                            "pearson_r": stats.get("pearson_r", 0),
+                            "spearman_rho": stats.get("spearman_rho", 0),
+                        })
+                        correlation_sample = max(correlation_sample, stats.get("sample_size", 0))
+
+    # Config
+    config = {}
+    if settings:
+        config = {
+            "rubric_enabled": getattr(settings, "rubric_enabled", False),
+            "evolution_enabled": getattr(settings, "rubric_evolution_enabled", False),
+            "outcome_detection_enabled": getattr(settings, "rubric_outcome_detection_enabled", False),
+            "min_episodes_for_correlation": getattr(settings, "rubric_min_episodes_for_correlation", 50),
+            "weight_change_cap": getattr(settings, "rubric_weight_change_cap", 0.05),
+        }
+
+    return {
+        "active_rubric": active_rubric,
+        "version_history": version_history,
+        "outcome_signals": {
+            "total": total_signals,
+            "by_type": by_type,
+            "recent": recent_signals,
+            "daily_trend": daily_trend,
+        },
+        "correlations": {
+            "data": correlations_data,
+            "sample_size": correlation_sample,
+        },
+        "weight_history": weight_history,
+        "config": config,
     }
