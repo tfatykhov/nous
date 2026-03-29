@@ -772,16 +772,28 @@ class Heart:
                 embeddings = await batch_fetch_embeddings(
                     session, type_ids, self.agent_id
                 )
+                logger.info(
+                    "MMR: fetched %d/%d embeddings for reranking (λ=%.2f)",
+                    len(embeddings), len(merged), self.settings.mmr_diversity_weight,
+                )
 
                 # Generate query embedding for MMR relevance term
                 query_embedding = await self._embeddings.embed(query)
 
+                pre_mmr_order = [r.id for r in merged[:limit]]
                 merged = mmr_rerank(
                     candidates=merged,
                     embeddings=embeddings,
                     query_embedding=query_embedding,
                     lambda_=self.settings.mmr_diversity_weight,
                     limit=limit,
+                )
+                post_mmr_order = [r.id for r in merged]
+                reordered = pre_mmr_order != post_mmr_order
+                types_in_result = set(r.type for r in merged)
+                logger.info(
+                    "MMR: selected %d results across %d types, reordered=%s",
+                    len(merged), len(types_in_result), reordered,
                 )
             except Exception as exc:
                 logger.warning("MMR reranking failed, falling back to score sort: %s", exc)

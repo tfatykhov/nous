@@ -349,7 +349,7 @@ def mmr_rerank(
             continue
         selected.append(c)
     if dropped:
-        _mmr_logger.debug("MMR: %d unembedded candidates dropped (limit reached)", dropped)
+        _mmr_logger.info("MMR: %d unembedded candidates dropped (limit reached)", dropped)
 
     return selected
 
