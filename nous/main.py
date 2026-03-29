@@ -208,10 +208,6 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("RubricEvolver not available yet")
 
-        # F024-3b: Wire rubric evolver into sleep handler
-        if sleep_handler is not None and rubric_evolver is not None:
-            sleep_handler._rubric_evolver = rubric_evolver
-
         # F022 Phase 2: Wire fact->decision graph linking
         try:
             from nous.handlers.fact_graph_linker import FactGraphLinker
@@ -246,6 +242,10 @@ async def create_components(settings: Settings) -> dict:
                 sleep_handler = SleepHandler(brain, heart, settings, bus, api_client)
         except ImportError:
             logger.debug("SleepHandler not available yet")
+
+        # F024-3b: Wire rubric evolver into sleep handler
+        if sleep_handler is not None and rubric_evolver is not None:
+            sleep_handler._rubric_evolver = rubric_evolver
 
         # F012: Wire procedure learner into sleep handler + monitor
         procedure_learner = None
