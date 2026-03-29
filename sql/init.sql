@@ -340,7 +340,15 @@ CREATE TABLE heart.procedures (
     embedding vector(1536),
     tags TEXT[],
     search_tsv tsvector GENERATED ALWAYS AS (
-        to_tsvector('english', name || ' ' || COALESCE(description, ''))
+        to_tsvector('english',
+            name || ' '
+            || COALESCE(description, '') || ' '
+            || COALESCE(array_to_string(core_patterns, ' '), '') || ' '
+            || COALESCE(array_to_string(implementation_notes, ' '), '') || ' '
+            || COALESCE(array_to_string(goals, ' '), '') || ' '
+            || COALESCE(array_to_string(core_tools, ' '), '') || ' '
+            || COALESCE(array_to_string(core_concepts, ' '), '')
+        )
     ) STORED,
     active BOOLEAN DEFAULT TRUE,
     encoded_frame VARCHAR(100),

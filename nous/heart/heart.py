@@ -434,6 +434,10 @@ class Heart:
         """List inactive skill procedures."""
         return await self.procedures.list_inactive_skills(session)
 
+    async def reembed_procedures(self, session: AsyncSession | None = None) -> int:
+        """Recompute embeddings for all active procedures (issue #197 backfill)."""
+        return await self.procedures.reembed_all(session=session)
+
     # ==================================================================
     # Censors
     # ==================================================================

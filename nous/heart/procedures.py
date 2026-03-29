@@ -22,6 +22,29 @@ from nous.storage.models import Event, Procedure
 logger = logging.getLogger(__name__)
 
 
+def _build_embed_text(
+    name: str,
+    description: str | None,
+    core_patterns: list[str] | None,
+    goals: list[str] | None,
+    core_tools: list[str] | None,
+    core_concepts: list[str] | None,
+    implementation_notes: list[str] | None,
+) -> str:
+    """Build the text used for procedure embedding (issue #197).
+
+    Includes all body fields, not just metadata, for full-body search accuracy.
+    """
+    return (
+        f"{name} {description or ''} "
+        f"{' '.join(core_patterns or [])} "
+        f"{' '.join(goals or [])} "
+        f"{' '.join(core_tools or [])} "
+        f"{' '.join(core_concepts or [])} "
+        f"{' '.join(implementation_notes or [])}"
+    ).strip()
+
+
 class ProcedureManager:
     """Manages procedural memory — how to do things (K-lines with level-bands)."""
 
@@ -62,10 +85,14 @@ class ProcedureManager:
         return await self._store(input, session)
 
     async def _store(self, input: ProcedureInput, session: AsyncSession) -> ProcedureDetail:
-        # Generate embedding from name + description + core_patterns
+        # Generate embedding from all body fields (issue #197)
         embedding = None
         if self.embeddings:
-            embed_text = (f"{input.name} {input.description or ''} {' '.join(input.core_patterns)}").strip()
+            embed_text = _build_embed_text(
+                input.name, input.description, input.core_patterns,
+                input.goals, input.core_tools, input.core_concepts,
+                input.implementation_notes,
+            )
             try:
                 embedding = await self.embeddings.embed(embed_text)
             except Exception:
@@ -343,6 +370,50 @@ class ProcedureManager:
             raise ValueError(f"Procedure {procedure_id} not found")
         procedure.active = True
         await session.flush()
+
+    # ------------------------------------------------------------------
+    # reembed_all() — issue #197 backfill
+    # ------------------------------------------------------------------
+
+    async def reembed_all(self, session: AsyncSession | None = None) -> int:
+        """Recompute embeddings for all active procedures using expanded embed_text.
+
+        Use after changing the embedding formula to backfill existing records.
+        Returns the number of procedures re-embedded.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                count = await self._reembed_all(session)
+                await session.commit()
+                return count
+        return await self._reembed_all(session)
+
+    async def _reembed_all(self, session: AsyncSession) -> int:
+        if not self.embeddings:
+            return 0
+
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == True)  # noqa: E712
+        )
+        procedures = list(result.scalars().all())
+
+        count = 0
+        for proc in procedures:
+            embed_text = _build_embed_text(
+                proc.name, proc.description, proc.core_patterns,
+                proc.goals, proc.core_tools, proc.core_concepts,
+                proc.implementation_notes,
+            )
+            try:
+                proc.embedding = await self.embeddings.embed(embed_text)
+                count += 1
+            except Exception:
+                logger.warning("Re-embed failed for procedure %s", proc.id)
+
+        await session.flush()
+        return count
 
     # ------------------------------------------------------------------
     # list_inactive_skills()
