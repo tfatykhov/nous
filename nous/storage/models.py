@@ -472,6 +472,51 @@ class EpisodeProcedure(Base):
     procedure: Mapped["Procedure"] = relationship(back_populates="episode_procedures")
 
 
+class RubricVersion(Base):
+    __tablename__ = "rubric_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'superseded', 'rollback')",
+            name="ck_rubric_versions_status",
+        ),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    agent_id: Mapped[str] = mapped_column(String(100), ForeignKey("nous_system.agents.id"), nullable=False)
+    version: Mapped[str] = mapped_column(String(20), nullable=False)
+    parent_version: Mapped[str | None] = mapped_column(String(20))
+    change_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    dimensions: Mapped[list] = mapped_column(JSONB, nullable=False)
+    outcome_correlations: Mapped[dict] = mapped_column(JSONB, server_default="{}")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutcomeSignal(Base):
+    __tablename__ = "outcome_signals"
+    __table_args__ = (
+        CheckConstraint(
+            "signal_type IN ('corrected', 'completed', 'praised', 'reworked', 'self_corrected')",
+            name="ck_outcome_signals_type",
+        ),
+        CheckConstraint(
+            "confidence BETWEEN 0 AND 1",
+            name="ck_outcome_signals_confidence",
+        ),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    agent_id: Mapped[str] = mapped_column(String(100), ForeignKey("nous_system.agents.id"), nullable=False)
+    episode_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("heart.episodes.id", ondelete="CASCADE"), nullable=False)
+    signal_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.5")
+    evidence: Mapped[str | None] = mapped_column(Text)
+    self_improvement_scores: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Censor(Base):
     __tablename__ = "censors"
     __table_args__ = (

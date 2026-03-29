@@ -475,7 +475,7 @@ async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 1
     result = await session.execute(
         text("""
             SELECT COUNT(*) AS cnt FROM nous_system.events
-            WHERE agent_id = :agent_id AND event_type = 'censor_activated'
+            WHERE agent_id = :agent_id AND event_type = 'censor_triggered'
               AND created_at >= :since
         """),
         {"agent_id": agent_id, "since": seven_days_ago},

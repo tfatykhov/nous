@@ -141,8 +141,8 @@ function buildEventSummary(event) {
     var type = event.type || '';
 
     switch (type) {
-        case 'censor_activated':
-            return 'Censor <strong>' + escapeHtml(data.trigger || '') + '</strong> fired (' + escapeHtml(data.action || 'warn') + ')';
+        case 'censor_triggered':
+            return 'Censor <strong>' + escapeHtml(data.censor_id || '') + '</strong> fired — matched: ' + escapeHtml(data.matched_text || '');
         case 'sleep_completed':
             return 'Sleep cycle completed. ' + (data.facts_created || 0) + ' facts, ' + (data.procedures_created || 0) + ' procedures.';
         case 'schedule_fired':

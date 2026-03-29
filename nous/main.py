@@ -113,6 +113,24 @@ async def create_components(settings: Settings) -> dict:
         logger.info("F024: CriticAgent wired (mode=%s, model=%s)",
                      settings.critic_mode, settings.critic_model)
 
+    # F024 Phase 3b: Rubric manager
+    rubric_manager = None
+    if settings.rubric_enabled:
+        from nous.cognitive.rubric import RubricManager
+        rubric_manager = RubricManager(db=database, agent_id=settings.agent_id)
+        # Seed v1.0.0 if no active rubric exists
+        existing = await rubric_manager.get_active()
+        if not existing:
+            try:
+                await rubric_manager.seed_v1()
+                logger.info("F024-3b: Seeded initial rubric v1.0.0")
+            except Exception as e:
+                # Race condition: another process seeded first — that's fine
+                if "unique" in str(e).lower() or "integrity" in str(e).lower():
+                    logger.debug("F024-3b: Rubric v1 already seeded by another process")
+                else:
+                    raise
+
     cognitive = CognitiveLayer(
         brain, heart, settings, settings.identity_prompt,
         bus=bus, identity_manager=identity_manager,
@@ -125,6 +143,8 @@ async def create_components(settings: Settings) -> dict:
         heart.facts._admission_controller.llm_client = AdmissionLLMClient(
             api_client=api_client,
         )
+
+    rubric_evolver = None
 
     # 006: Register handlers on bus (after cognitive exists for monitor)
     if bus is not None:
@@ -161,6 +181,36 @@ async def create_components(settings: Settings) -> dict:
                 FactExtractor(heart, settings, bus, api_client)
         except ImportError:
             logger.debug("FactExtractor not available yet")
+
+        # F024 Phase 3b: Outcome signal detection
+        try:
+            from nous.handlers.outcome_detector import OutcomeDetector
+
+            if settings.rubric_outcome_detection_enabled:
+                OutcomeDetector(
+                    db=database, settings=settings, bus=bus,
+                    llm_client=api_client, agent_id=settings.agent_id,
+                )
+        except ImportError:
+            logger.debug("OutcomeDetector not available yet")
+
+        # F024 Phase 3b: Rubric evolver (triggered via REST or sleep handler)
+        rubric_evolver = None
+        try:
+            if rubric_manager:
+                from nous.handlers.rubric_evolver import RubricEvolver
+                rubric_evolver = RubricEvolver(
+                    rubric_manager=rubric_manager,
+                    db=database,
+                    settings=settings,
+                    agent_id=settings.agent_id,
+                )
+        except ImportError:
+            logger.debug("RubricEvolver not available yet")
+
+        # F024-3b: Wire rubric evolver into sleep handler
+        if sleep_handler is not None and rubric_evolver is not None:
+            sleep_handler._rubric_evolver = rubric_evolver
 
         # F022 Phase 2: Wire fact->decision graph linking
         try:
@@ -334,6 +384,8 @@ async def create_components(settings: Settings) -> dict:
         "decision_reviewer": decision_reviewer,
         "api_client": api_client,
         "sleep_handler": sleep_handler,
+        "rubric_manager": rubric_manager,
+        "rubric_evolver": rubric_evolver if bus else None,
     }
 
 
@@ -444,6 +496,8 @@ def build_app(settings: Settings) -> Starlette:
         identity_manager=_lazy_component(components, "identity_manager"),
         bus=_lazy_component(components, "bus"),
         sleep_handler=_lazy_component(components, "sleep_handler"),
+        rubric_manager=_lazy_component(components, "rubric_manager"),
+        rubric_evolver=_lazy_component(components, "rubric_evolver"),
     )
 
     if settings.mcp_enabled:

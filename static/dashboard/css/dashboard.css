@@ -850,7 +850,7 @@ body {
     border: 2px solid var(--bg);
 }
 
-.timeline-item.event-censor_activated::before { background: var(--red); }
+.timeline-item.event-censor_triggered::before { background: var(--red); }
 .timeline-item.event-sleep_completed::before { background: var(--green); }
 .timeline-item.event-schedule_fired::before { background: var(--yellow); }
 .timeline-item.event-subtask_completed::before { background: var(--fact-color); }

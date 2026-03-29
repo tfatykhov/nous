@@ -317,3 +317,39 @@ async def test_search_read_only(heart, session):
     updated = await session.execute(select(Censor).where(Censor.id == censor.id))
     c = updated.scalar_one()
     assert (c.activation_count or 0) == initial_count
+
+
+# ---------------------------------------------------------------------------
+# 12. test_keyword_fallback_for_null_embeddings
+# ---------------------------------------------------------------------------
+
+
+async def test_keyword_fallback_for_null_embeddings(heart, session):
+    """Censors without embeddings still match via keyword (ILIKE) fallback."""
+    # Create censor normally (gets embedding from mock provider)
+    censor = await heart.add_censor(
+        _censor_input(
+            trigger_pattern="never rebase main",
+            reason="rebasing main breaks shared history",
+        ),
+        session=session,
+    )
+
+    # Null out the embedding to simulate a censor created without embeddings
+    await session.execute(
+        select(Censor).where(Censor.id == censor.id)
+    )
+    from sqlalchemy import update
+    await session.execute(
+        update(Censor).where(Censor.id == censor.id).values(embedding=None)
+    )
+    await session.flush()
+
+    # Semantic match will skip this censor (embedding IS NULL),
+    # but keyword matching should find "never rebase main" as a substring
+    matches = await heart.check_censors(
+        "I think we should never rebase main because it causes issues",
+        session=session,
+    )
+    assert len(matches) >= 1
+    assert any(m.trigger_pattern == "never rebase main" for m in matches)

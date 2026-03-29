@@ -114,6 +114,7 @@ class SleepHandler:
         self._sleeping = False
         self._sleep_task: asyncio.Task | None = None
         self._procedure_learner = None  # F012: Set externally if enabled
+        self._rubric_evolver = None  # F024-3b: Set externally if enabled
 
         bus.on("sleep_started", self.handle)
         bus.on("message_received", self._on_wake)
@@ -175,6 +176,11 @@ class SleepHandler:
                 success = await self._phase_generalize(sleep_stats)
                 if success:
                     phases_completed.append("generalize")
+
+            if not self._interrupted:
+                success = await self._phase_evolve_rubric(sleep_stats)
+                if success:
+                    phases_completed.append("evolve_rubric")
 
             await self._bus.emit(Event(
                 type="sleep_completed",
@@ -370,4 +376,23 @@ class SleepHandler:
                 return False
         else:
             logger.debug("Sleep phase: generalize (no procedure learner configured)")
+            return True
+
+    async def _phase_evolve_rubric(self, sleep_stats: dict) -> bool:
+        """Phase 6: Rubric evolution — adjust weights based on outcome correlations."""
+        if self._rubric_evolver:
+            try:
+                report = await self._rubric_evolver.run_evolution_cycle()
+                if report and report.suggested_weights:
+                    sleep_stats["rubric_evolved"] = True
+                    logger.info("Sleep rubric evolution: new weights suggested")
+                else:
+                    sleep_stats["rubric_evolved"] = False
+                    logger.debug("Sleep rubric evolution: no changes")
+                return True
+            except Exception:
+                logger.warning("Rubric evolution phase failed", exc_info=True)
+                return False
+        else:
+            logger.debug("Sleep phase: rubric evolution (no evolver configured)")
             return True
