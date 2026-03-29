@@ -1,10 +1,15 @@
 -- 023: Expand procedure search_tsv to include full body text (issue #197)
 --
 -- Before: to_tsvector('english', name || ' ' || COALESCE(description, ''))
--- After:  includes implementation_notes, goals, core_tools, core_concepts
+-- After:  includes core_patterns, implementation_notes, goals, core_tools, core_concepts
 --
--- PostgreSQL recomputes all rows automatically on generated column rebuild.
--- The GIN index idx_procedures_fts is also rebuilt automatically.
+-- PostgreSQL's array_to_string() is STABLE not IMMUTABLE, so it can't be used
+-- directly in GENERATED ALWAYS columns. We create an IMMUTABLE wrapper.
+
+-- Immutable wrapper for array_to_string (safe for text[] with constant delimiter)
+CREATE OR REPLACE FUNCTION immutable_array_to_string(arr text[], sep text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT array_to_string(arr, sep) $$;
 
 ALTER TABLE heart.procedures DROP COLUMN search_tsv;
 
@@ -14,11 +19,11 @@ GENERATED ALWAYS AS (
   to_tsvector('english',
     name || ' '
     || COALESCE(description, '') || ' '
-    || COALESCE(array_to_string(core_patterns, ' '), '') || ' '
-    || COALESCE(array_to_string(implementation_notes, ' '), '') || ' '
-    || COALESCE(array_to_string(goals, ' '), '') || ' '
-    || COALESCE(array_to_string(core_tools, ' '), '') || ' '
-    || COALESCE(array_to_string(core_concepts, ' '), '')
+    || COALESCE(immutable_array_to_string(core_patterns, ' '), '') || ' '
+    || COALESCE(immutable_array_to_string(implementation_notes, ' '), '') || ' '
+    || COALESCE(immutable_array_to_string(goals, ' '), '') || ' '
+    || COALESCE(immutable_array_to_string(core_tools, ' '), '') || ' '
+    || COALESCE(immutable_array_to_string(core_concepts, ' '), '')
   )
 ) STORED;
 

@@ -28,6 +28,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ---------------------------------------------------------------------------
+-- 3b. Immutable wrapper for array_to_string (issue #197)
+--     PostgreSQL's array_to_string() is STABLE, not IMMUTABLE, so it cannot
+--     be used directly in GENERATED ALWAYS columns.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION immutable_array_to_string(arr text[], sep text)
+RETURNS text LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$ SELECT array_to_string(arr, sep) $$;
+
 -- ===========================================================================
 -- NOUS_SYSTEM SCHEMA (4 tables)
 -- ===========================================================================
@@ -343,11 +352,11 @@ CREATE TABLE heart.procedures (
         to_tsvector('english',
             name || ' '
             || COALESCE(description, '') || ' '
-            || COALESCE(array_to_string(core_patterns, ' '), '') || ' '
-            || COALESCE(array_to_string(implementation_notes, ' '), '') || ' '
-            || COALESCE(array_to_string(goals, ' '), '') || ' '
-            || COALESCE(array_to_string(core_tools, ' '), '') || ' '
-            || COALESCE(array_to_string(core_concepts, ' '), '')
+            || COALESCE(immutable_array_to_string(core_patterns, ' '), '') || ' '
+            || COALESCE(immutable_array_to_string(implementation_notes, ' '), '') || ' '
+            || COALESCE(immutable_array_to_string(goals, ' '), '') || ' '
+            || COALESCE(immutable_array_to_string(core_tools, ' '), '') || ' '
+            || COALESCE(immutable_array_to_string(core_concepts, ' '), '')
         )
     ) STORED,
     active BOOLEAN DEFAULT TRUE,
