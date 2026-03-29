@@ -187,3 +187,132 @@ async def test_search_domain_filter(heart, session):
     )
     for r in results:
         assert r.domain == "development"
+
+
+# ---------------------------------------------------------------------------
+# 7. test_search_by_implementation_notes (issue #197)
+# ---------------------------------------------------------------------------
+
+
+async def test_search_by_implementation_notes(heart, session):
+    """Issue #197: search should match on implementation_notes body text."""
+    await heart.store_procedure(
+        _procedure_input(
+            name="Deploy checklist",
+            description="Production deployment steps",
+            core_patterns=["deployment"],
+            implementation_notes=[
+                "Run database migrations before deploying new code",
+                "Verify health checks pass after rollout",
+                "Monitor error rates for 15 minutes post-deploy",
+            ],
+        ),
+        session=session,
+    )
+
+    # Search for content that only exists in implementation_notes
+    results = await heart.search_procedures("health checks rollout", session=session)
+    assert len(results) >= 1
+    assert results[0].name == "Deploy checklist"
+
+
+# ---------------------------------------------------------------------------
+# 8. test_embed_text_includes_body_fields (issue #197)
+# ---------------------------------------------------------------------------
+
+
+async def test_embed_text_includes_body_fields(heart, session):
+    """Issue #197: embedding should be generated from all fields, not just name+desc+patterns."""
+    await heart.store_procedure(
+        _procedure_input(
+            name="Generic procedure",
+            description="A generic procedure",
+            core_patterns=["generic"],
+            implementation_notes=["kubernetes pod autoscaling configuration"],
+            goals=["scale infrastructure"],
+            core_tools=["kubectl", "helm"],
+            core_concepts=["container orchestration"],
+        ),
+        session=session,
+    )
+    await heart.store_procedure(
+        _procedure_input(
+            name="Another procedure",
+            description="Another generic procedure",
+            core_patterns=["generic"],
+            implementation_notes=["watercolor painting techniques for landscapes"],
+            goals=["create art"],
+            core_tools=["brushes", "palette"],
+            core_concepts=["color theory"],
+        ),
+        session=session,
+    )
+
+    # Search for kubernetes — should rank first procedure higher due to body content
+    results = await heart.search_procedures("kubernetes autoscaling", session=session)
+    assert len(results) >= 1
+    assert results[0].name == "Generic procedure"
+
+
+# ---------------------------------------------------------------------------
+# 9. test_reembed_all (issue #197)
+# ---------------------------------------------------------------------------
+
+
+async def test_reembed_all(heart, session):
+    """reembed_all() recomputes embeddings for all active procedures."""
+    await heart.store_procedure(
+        _procedure_input(
+            name="Reembed test",
+            description="Test procedure",
+            implementation_notes=["specialized quantum computing algorithms"],
+        ),
+        session=session,
+    )
+
+    count = await heart.reembed_procedures(session=session)
+    assert count >= 1
+
+
+# ---------------------------------------------------------------------------
+# 10. test_build_embed_text_helper (issue #197)
+# ---------------------------------------------------------------------------
+
+
+def test_build_embed_text_helper():
+    """_build_embed_text includes all fields and handles None gracefully."""
+    from nous.heart.procedures import _build_embed_text
+
+    result = _build_embed_text(
+        name="Test",
+        description="A test",
+        core_patterns=["pattern1"],
+        goals=["goal1"],
+        core_tools=["tool1"],
+        core_concepts=["concept1"],
+        implementation_notes=["note1", "note2"],
+    )
+    assert "Test" in result
+    assert "A test" in result
+    assert "pattern1" in result
+    assert "goal1" in result
+    assert "tool1" in result
+    assert "concept1" in result
+    assert "note1" in result
+    assert "note2" in result
+
+
+def test_build_embed_text_none_fields():
+    """_build_embed_text handles None fields without error."""
+    from nous.heart.procedures import _build_embed_text
+
+    result = _build_embed_text(
+        name="Minimal",
+        description=None,
+        core_patterns=None,
+        goals=None,
+        core_tools=None,
+        core_concepts=None,
+        implementation_notes=None,
+    )
+    assert result == "Minimal"
