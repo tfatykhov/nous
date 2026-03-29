@@ -569,6 +569,25 @@ async def test_enforce_diversity_empty_list():
     assert result == []
 
 
+async def test_enforce_diversity_multiword_subjects_not_collapsed():
+    """F025: Multi-word subjects like 'Nous architecture' and 'Nous memory' are distinct topics."""
+    engine = _make_context_engine_light()
+    facts = [
+        _mock_fact(content="Nous arch uses event sourcing", subject="Nous architecture"),
+        _mock_fact(content="Nous arch uses CQRS", subject="Nous architecture"),
+        _mock_fact(content="Nous arch uses DDD", subject="Nous architecture"),
+        _mock_fact(content="Nous memory uses pgvector", subject="Nous memory"),
+        _mock_fact(content="Nous memory uses embeddings", subject="Nous memory"),
+    ]
+    result = engine._enforce_diversity(facts, "subject", max_per_subject=2)
+    # 2 from "Nous architecture" + 2 from "Nous memory" = 4
+    assert len(result) == 4
+    arch_count = sum(1 for f in result if f.subject == "Nous architecture")
+    mem_count = sum(1 for f in result if f.subject == "Nous memory")
+    assert arch_count == 2
+    assert mem_count == 2
+
+
 async def test_enforce_diversity_missing_attr_defaults_unknown():
     """23. Items without topic attr all map to 'unknown'."""
     engine = _make_context_engine_light()

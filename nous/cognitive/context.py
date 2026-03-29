@@ -38,7 +38,15 @@ RELEVANCE_MIN_RESULTS: dict[str, int] = {
     "fact": 3, "decision": 2, "procedure": 2, "episode": 2,
 }
 RELEVANCE_MAX_RESULTS: dict[str, int] = {
-    "fact": 8, "decision": 5, "procedure": 3, "episode": 4,
+    "fact": 12, "decision": 7, "procedure": 5, "episode": 6,
+}
+
+# Default per-type fetch limits when RetrievalPlan doesn't specify.
+# Intentionally higher than RELEVANCE_MAX_RESULTS — upstream filters
+# (staleness, diversity, dedup) reduce the candidate pool before the
+# relevance filter caps results.
+DEFAULT_FETCH_LIMITS: dict[str, int] = {
+    "fact": 15, "decision": 8, "procedure": 5, "episode": 8,
 }
 
 # Markers that identify internal/system episodes (handler tasks, summarizers)
@@ -316,7 +324,7 @@ class ContextEngine:
         # 5. Decisions (F26: skip_types is primary skip mechanism)
         if budget.decisions > 0 and "decision" not in skip_types:
             try:
-                limit = _limits.get("decision", 5)
+                limit = _limits.get("decision", DEFAULT_FETCH_LIMITS.get("decision", 5))
                 q_text = _query_texts.get("decision", _default_query)
                 decisions = await self._brain.query(q_text, limit=limit, session=session)
                 logger.info("Tier3 decisions: %d results, has_embeddings=%s, scores=%s, descs=%s",
@@ -358,7 +366,7 @@ class ContextEngine:
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
         if budget.facts > 0 and "fact" not in skip_types:
             try:
-                limit = _limits.get("fact", 5)
+                limit = _limits.get("fact", DEFAULT_FETCH_LIMITS.get("fact", 5))
                 q_text = _query_texts.get("fact", _default_query)
                 # Tier 3: exclude Tier 1 categories from semantic search
                 facts = await self._heart.search_facts(
@@ -413,7 +421,7 @@ class ContextEngine:
         # 7. Procedures
         if budget.procedures > 0 and "procedure" not in skip_types:
             try:
-                limit = _limits.get("procedure", 5)
+                limit = _limits.get("procedure", DEFAULT_FETCH_LIMITS.get("procedure", 5))
                 q_text = _query_texts.get("procedure", _default_query)
                 procedures = await self._heart.search_procedures(q_text, limit=limit, session=session)
                 if procedures:
@@ -484,7 +492,7 @@ class ContextEngine:
         # 8. Episodes
         if budget.episodes > 0 and "episode" not in skip_types:
             try:
-                limit = _limits.get("episode", 5)
+                limit = _limits.get("episode", DEFAULT_FETCH_LIMITS.get("episode", 5))
                 q_text = _query_texts.get("episode", _default_query)
                 episodes = await self._heart.search_episodes(q_text, limit=limit, session=session)
                 # Filter out system/internal episodes
@@ -660,7 +668,7 @@ class ContextEngine:
                 adjusted.append(r)
                 continue
             category = getattr(r, "category", "")
-            if category in {"rule", "preference"}:
+            if category in {"rule", "preference", "technical", "concept"}:
                 adjusted.append(r)
                 continue
             age_days = (now - created).days
@@ -675,7 +683,7 @@ class ContextEngine:
         """Prevent one topic from dominating recall results (007.2).
 
         Extracts a topic key from each item using topic_attr:
-        - String attrs (e.g. 'subject', 'category'): first word, lowercased
+        - String attrs (e.g. 'subject', 'category'): full string, stripped and lowercased
         - List attrs (e.g. 'tags'): first element, lowercased
         Items without the attr default to 'unknown'.
         """
@@ -689,7 +697,7 @@ class ContextEngine:
             if isinstance(raw, list):
                 topic_key = raw[0].lower() if raw else "unknown"
             elif isinstance(raw, str) and raw:
-                topic_key = raw.split()[0].lower()
+                topic_key = raw.strip().lower()
             else:
                 topic_key = "unknown"
 

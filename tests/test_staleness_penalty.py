@@ -29,7 +29,8 @@ class TestStalenessPenalty:
         assert result[0].score == 0.8
 
     def test_14_day_old_halved(self):
-        engine = self._make_engine()
+        # Uses explicit half_life=14; default changed to 30 in issue #203
+        engine = self._make_engine(half_life=14)
         item = FakeItem(score=0.8, created_at=datetime.now(timezone.utc) - timedelta(days=14))
         result = engine._apply_staleness_penalty([item])
         assert abs(result[0].score - 0.4) < 0.05
@@ -43,6 +44,18 @@ class TestStalenessPenalty:
     def test_preference_category_exempt(self):
         engine = self._make_engine()
         item = FakeItem(score=0.8, created_at=datetime.now(timezone.utc) - timedelta(days=60), category="preference")
+        result = engine._apply_staleness_penalty([item])
+        assert result[0].score == 0.8
+
+    def test_technical_category_exempt(self):
+        engine = self._make_engine()
+        item = FakeItem(score=0.8, created_at=datetime.now(timezone.utc) - timedelta(days=60), category="technical")
+        result = engine._apply_staleness_penalty([item])
+        assert result[0].score == 0.8
+
+    def test_concept_category_exempt(self):
+        engine = self._make_engine()
+        item = FakeItem(score=0.8, created_at=datetime.now(timezone.utc) - timedelta(days=60), category="concept")
         result = engine._apply_staleness_penalty([item])
         assert result[0].score == 0.8
 
