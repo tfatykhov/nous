@@ -1102,3 +1102,15 @@ body {
     color: var(--red);
     padding: 2rem;
 }
+
+/* Rubric correlation heatmap */
+.correlation-table td.corr-cell {
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.85rem;
+    min-width: 70px;
+    transition: opacity 0.15s;
+}
+.correlation-table td.corr-cell:hover {
+    opacity: 0.8;
+}
