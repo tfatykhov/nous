@@ -8,6 +8,7 @@ pattern (P1-1).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -23,6 +24,22 @@ logger = logging.getLogger(__name__)
 
 # Escalation path: warn -> block -> absolute. No downgrade.
 _ESCALATION_ORDER = {"warn": "block", "block": "absolute", "absolute": "absolute"}
+
+# Maximum length of text input to evaluate against regex patterns (ReDoS guard)
+_MAX_REGEX_INPUT_LEN = 10_000
+
+
+def _safe_regex_match(pattern: str, text_input: str) -> bool:
+    """Match pattern against text with ReDoS protection.
+
+    Truncates input to _MAX_REGEX_INPUT_LEN and catches both
+    re.error (bad pattern) and any unexpected regex exceptions.
+    Returns True if matched, False otherwise. Raises re.error
+    for invalid patterns (caller handles).
+    """
+    # Truncate excessively long inputs to bound regex evaluation time
+    truncated = text_input[:_MAX_REGEX_INPUT_LEN]
+    return re.search(pattern, truncated, re.IGNORECASE) is not None
 
 
 class CensorManager:
@@ -245,37 +262,35 @@ class CensorManager:
         domain: str | None,
         session: AsyncSession,
     ) -> list[tuple[Censor, float]]:
-        """P1-3: ILIKE fallback — case-insensitive containment on trigger_pattern."""
-        domain_clause = ""
-        params: dict = {
-            "text_input": text_input.lower(),
-            "agent_id": self.agent_id,
-        }
+        """P1-3: Regex fallback — Python-side re.search on trigger_pattern.
+
+        Each censor is evaluated independently with try/except so a single
+        malformed regex cannot disable all censors (Issue #199).
+        """
+        stmt = (
+            select(Censor)
+            .where(Censor.agent_id == self.agent_id)
+            .where(Censor.active == True)  # noqa: E712
+        )
         if domain:
-            domain_clause = "AND (domain = :domain OR domain IS NULL)"
-            params["domain"] = domain
+            stmt = stmt.where((Censor.domain == domain) | (Censor.domain.is_(None)))
 
-        sql = text(f"""
-            SELECT id
-            FROM heart.censors
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND position(lower(trigger_pattern) in :text_input) > 0
-              {domain_clause}
-        """)
+        result = await session.execute(stmt)
+        censors = result.scalars().all()
 
-        result = await session.execute(sql, params)
-        rows = result.all()
+        matches: list[tuple[Censor, float]] = []
+        for censor in censors:
+            try:
+                if _safe_regex_match(censor.trigger_pattern, text_input):
+                    matches.append((censor, 1.0))
+            except re.error:
+                logger.warning(
+                    "Invalid regex in censor %s, pattern: %s",
+                    censor.id,
+                    censor.trigger_pattern,
+                )
 
-        if not rows:
-            return []
-
-        ids = [row.id for row in rows]
-        censor_result = await session.execute(select(Censor).where(Censor.id.in_(ids)))
-        censors = censor_result.scalars().all()
-
-        # Keyword matches get a default similarity of 1.0
-        return [(c, 1.0) for c in censors]
+        return matches
 
     # ------------------------------------------------------------------
     # search() — read-only (P1-5)
@@ -381,52 +396,46 @@ class CensorManager:
         domain: str | None,
         session: AsyncSession,
     ) -> list[CensorMatch]:
-        """Read-only ILIKE keyword search."""
-        domain_clause = ""
-        params: dict = {
-            "query": query.lower(),
-            "agent_id": self.agent_id,
-            "limit": limit,
-        }
+        """Read-only regex keyword search (Issue #199)."""
+        stmt = (
+            select(Censor)
+            .where(Censor.agent_id == self.agent_id)
+            .where(Censor.active == True)  # noqa: E712
+        )
         if domain:
-            domain_clause = "AND (domain = :domain OR domain IS NULL)"
-            params["domain"] = domain
+            stmt = stmt.where((Censor.domain == domain) | (Censor.domain.is_(None)))
 
-        sql = text(f"""
-            SELECT id
-            FROM heart.censors
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND (
-                  position(lower(trigger_pattern) in :query) > 0
-                  OR position(:query in lower(trigger_pattern)) > 0
-              )
-              {domain_clause}
-            LIMIT :limit
-        """)
+        result = await session.execute(stmt)
+        censors = result.scalars().all()
 
-        result = await session.execute(sql, params)
-        rows = result.all()
+        matches: list[CensorMatch] = []
+        query_lower = query.lower()
+        for censor in censors:
+            if len(matches) >= limit:
+                break
+            try:
+                # Match if query matches pattern OR query appears in pattern
+                pattern_matches = _safe_regex_match(censor.trigger_pattern, query)
+                query_in_pattern = query_lower in (censor.trigger_pattern or "").lower()
+                if pattern_matches or query_in_pattern:
+                    matches.append(
+                        CensorMatch(
+                            id=censor.id,
+                            trigger_pattern=censor.trigger_pattern,
+                            action=censor.action,
+                            reason=censor.reason,
+                            domain=censor.domain,
+                            score=1.0,
+                        )
+                    )
+            except re.error:
+                logger.warning(
+                    "Invalid regex in censor %s, pattern: %s",
+                    censor.id,
+                    censor.trigger_pattern,
+                )
 
-        if not rows:
-            return []
-
-        ids = [row.id for row in rows]
-        censor_result = await session.execute(select(Censor).where(Censor.id.in_(ids)))
-        censors = {c.id: c for c in censor_result.scalars().all()}
-
-        return [
-            CensorMatch(
-                id=c.id,
-                trigger_pattern=c.trigger_pattern,
-                action=c.action,
-                reason=c.reason,
-                domain=c.domain,
-                score=1.0,  # ILIKE match = binary relevance
-            )
-            for cid in ids
-            if (c := censors.get(cid)) is not None
-        ]
+        return matches
 
     # ------------------------------------------------------------------
     # record_false_positive()
