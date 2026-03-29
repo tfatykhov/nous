@@ -353,3 +353,142 @@ async def test_keyword_fallback_for_null_embeddings(heart, session):
     )
     assert len(matches) >= 1
     assert any(m.trigger_pattern == "never rebase main" for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# 13. test_keyword_match_pipe_separated_pattern (Issue #199)
+# ---------------------------------------------------------------------------
+
+
+async def test_keyword_match_pipe_separated_pattern(heart, session):
+    """Pipe-separated patterns match individual keywords via regex."""
+    from sqlalchemy import update
+
+    censor = await heart.add_censor(
+        _censor_input(
+            trigger_pattern="api_key|token|secret|password",
+            reason="Block credential exposure",
+            action="block",
+        ),
+        session=session,
+    )
+
+    # Null out embedding so only keyword matching is used
+    await session.execute(
+        update(Censor).where(Censor.id == censor.id).values(embedding=None)
+    )
+    await session.flush()
+
+    # Should match "token" from the pipe-separated pattern
+    matches = await heart.check_censors(
+        "here is my auth token for the service",
+        session=session,
+    )
+    assert len(matches) >= 1
+    assert any(m.trigger_pattern == "api_key|token|secret|password" for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# 14. test_keyword_match_regex_wildcard_pattern (Issue #199)
+# ---------------------------------------------------------------------------
+
+
+async def test_keyword_match_regex_wildcard_pattern(heart, session):
+    """Regex patterns with .* wildcards work correctly."""
+    from sqlalchemy import update
+
+    censor = await heart.add_censor(
+        _censor_input(
+            trigger_pattern="send.*email|smtp|mail.*to",
+            reason="Email protection",
+            action="warn",
+        ),
+        session=session,
+    )
+
+    await session.execute(
+        update(Censor).where(Censor.id == censor.id).values(embedding=None)
+    )
+    await session.flush()
+
+    matches = await heart.check_censors(
+        "I want to send an email to the team",
+        session=session,
+    )
+    assert len(matches) >= 1
+    assert any(m.trigger_pattern == "send.*email|smtp|mail.*to" for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# 15. test_keyword_match_invalid_regex_skipped (Issue #199)
+# ---------------------------------------------------------------------------
+
+
+async def test_keyword_match_invalid_regex_skipped(heart, session):
+    """Invalid regex patterns are skipped without breaking other censors."""
+    from sqlalchemy import update
+
+    # Create a censor with invalid regex
+    bad_censor = await heart.add_censor(
+        _censor_input(
+            trigger_pattern="[invalid(regex",
+            reason="Bad pattern",
+            action="warn",
+        ),
+        session=session,
+    )
+
+    # Create a valid censor that should still match
+    good_censor = await heart.add_censor(
+        _censor_input(
+            trigger_pattern="password|secret",
+            reason="Credential protection",
+            action="block",
+        ),
+        session=session,
+    )
+
+    # Null out embeddings so only keyword matching is used
+    await session.execute(
+        update(Censor).where(Censor.id.in_([bad_censor.id, good_censor.id])).values(embedding=None)
+    )
+    await session.flush()
+
+    # The bad regex should be skipped, but "password" should still match
+    matches = await heart.check_censors(
+        "my password is hunter2",
+        session=session,
+    )
+    assert any(m.trigger_pattern == "password|secret" for m in matches)
+    # The bad censor should NOT be in matches
+    assert not any(m.id == bad_censor.id for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# 16. test_keyword_match_no_false_positive (Issue #199)
+# ---------------------------------------------------------------------------
+
+
+async def test_keyword_match_no_false_positive(heart, session):
+    """Pipe-separated pattern does NOT match unrelated text."""
+    from sqlalchemy import update
+
+    censor = await heart.add_censor(
+        _censor_input(
+            trigger_pattern="api_key|token|secret|password",
+            reason="Block credential exposure",
+            action="block",
+        ),
+        session=session,
+    )
+
+    await session.execute(
+        update(Censor).where(Censor.id == censor.id).values(embedding=None)
+    )
+    await session.flush()
+
+    matches = await heart.check_censors(
+        "the weather is sunny today and I like ice cream",
+        session=session,
+    )
+    assert not any(m.id == censor.id for m in matches)
