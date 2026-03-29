@@ -283,6 +283,13 @@ class Settings(BaseSettings):
     action_gating_model: str = "claude-haiku-4-5-20251001"
     action_gating_external_only: bool = False  # True = skip Tier 2, only gate external/irreversible
 
+    # F030: MMR Diversity Re-Ranking
+    mmr_enabled: bool = False
+    mmr_diversity_weight: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description="MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity)",
+    )
+
     # F024: Critic Agent
     critic_enabled: bool = True
     critic_mode: Literal["shadow", "advised", "parallel"] = "shadow"

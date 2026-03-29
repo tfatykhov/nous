@@ -3,14 +3,32 @@
 Provides a reusable hybrid vector + keyword search function that each
 Heart manager calls with table-specific parameters.  Uses Reciprocal
 Rank Fusion (RRF) to combine vector and keyword results (F025).
+
+Also provides MMR diversity re-ranking (F030) for reducing redundancy
+in cross-type recall results.
 """
 
 from __future__ import annotations
 
+import json
+import math
 from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity between two vectors (pure Python — no numpy dependency).
+
+    Used by MMR re-ranking (F030). Returns 0.0 if either vector is zero.
+    """
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 def _resolve_vector_weight() -> float:
@@ -232,3 +250,156 @@ def apply_frame_boost(
     # Sort by boost descending (stable sort preserves relevance order within same boost)
     boosted.sort(key=lambda x: x[1], reverse=True)
     return [item for item, _ in boosted]
+
+
+# --- F030: MMR Diversity Re-Ranking ---
+
+import logging
+
+_mmr_logger = logging.getLogger(__name__)
+
+# Table mapping for batch embedding fetch
+_TYPE_TO_TABLE = {
+    "fact": "heart.facts",
+    "episode": "heart.episodes",
+    "procedure": "heart.procedures",
+    "censor": "heart.censors",
+}
+
+
+def mmr_rerank(
+    candidates: list,
+    embeddings: dict,
+    query_embedding: list[float],
+    lambda_: float = 0.7,
+    limit: int = 10,
+) -> list:
+    """Maximal Marginal Relevance re-ranking for diversity (F030).
+
+    Greedily selects items maximizing:
+      MMR(d) = λ · cos_sim(d, query) − (1−λ) · max(cos_sim(d, selected))
+
+    Items without embeddings are appended after MMR-selected items
+    in descending score order.
+
+    Args:
+        candidates: Pre-scored results (must have .id and .score attrs).
+        embeddings: Map of result ID → embedding vector (list[float]).
+        query_embedding: The query's embedding vector.
+        lambda_: Relevance vs diversity weight (0.0–1.0). Default 0.7.
+        limit: Number of results to return.
+
+    Returns:
+        Re-ranked list, length ≤ limit.
+    """
+    if not candidates:
+        return []
+
+    # Separate candidates with/without embeddings
+    with_emb = [(c, embeddings[c.id]) for c in candidates if c.id in embeddings]
+    without_emb = sorted(
+        [c for c in candidates if c.id not in embeddings],
+        key=lambda c: c.score,
+        reverse=True,
+    )
+
+    if len(with_emb) <= 1:
+        # Not enough candidates for diversity — fall back to score sort
+        all_sorted = sorted(candidates, key=lambda c: c.score, reverse=True)
+        return all_sorted[:limit]
+
+    # Precompute query similarities
+    query_sims: dict = {}
+    for c, emb in with_emb:
+        query_sims[c.id] = cosine_similarity(query_embedding, emb)
+
+    selected: list = []
+    selected_embs: list[list[float]] = []
+    remaining = list(with_emb)
+
+    while len(selected) < limit and remaining:
+        best_score = -float("inf")
+        best_idx = 0
+
+        for i, (c, emb) in enumerate(remaining):
+            relevance = query_sims[c.id]
+
+            if selected_embs:
+                max_sim = max(
+                    cosine_similarity(emb, s_emb) for s_emb in selected_embs
+                )
+            else:
+                max_sim = 0.0
+
+            mmr = lambda_ * relevance - (1 - lambda_) * max_sim
+
+            if mmr > best_score:
+                best_score = mmr
+                best_idx = i
+
+        winner, winner_emb = remaining.pop(best_idx)
+        selected.append(winner)
+        selected_embs.append(winner_emb)
+
+    # Append non-embedded items if space remains
+    dropped = 0
+    for c in without_emb:
+        if len(selected) >= limit:
+            dropped += 1
+            continue
+        selected.append(c)
+    if dropped:
+        _mmr_logger.info("MMR: %d unembedded candidates dropped (limit reached)", dropped)
+
+    return selected
+
+
+async def batch_fetch_embeddings(
+    session: AsyncSession,
+    type_ids: dict[str, list[UUID]],
+    agent_id: str,
+) -> dict[UUID, list[float]]:
+    """Batch-fetch embeddings for recall results grouped by memory type (F030).
+
+    Issues one query per memory type (2-4 small index scans on primary key).
+    Returns a flat dict mapping result ID → embedding vector.
+
+    Args:
+        session: Active SQLAlchemy async session.
+        type_ids: Map of memory type → list of IDs to fetch embeddings for.
+        agent_id: Agent ID for scoping (defensive filter).
+
+    Returns:
+        Dict of {UUID: list[float]} for all IDs that have embeddings.
+    """
+    embeddings: dict[UUID, list[float]] = {}
+
+    for mem_type, ids in type_ids.items():
+        table = _TYPE_TO_TABLE.get(mem_type)
+        if not table or not ids:
+            continue
+
+        # Build parameterized IN clause
+        placeholders = ", ".join(f":id_{i}" for i in range(len(ids)))
+        sql = text(f"""
+            SELECT id, embedding::text
+            FROM {table}
+            WHERE id IN ({placeholders})
+              AND agent_id = :agent_id
+              AND embedding IS NOT NULL
+        """)
+        params: dict = {f"id_{i}": uid for i, uid in enumerate(ids)}
+        params["agent_id"] = agent_id
+
+        result = await session.execute(sql, params)
+        for row in result.all():
+            emb_str = row.embedding
+            if isinstance(emb_str, str):
+                emb = json.loads(emb_str)
+            elif isinstance(emb_str, list):
+                emb = emb_str
+            else:
+                continue
+            embeddings[row.id] = emb
+
+    return embeddings
