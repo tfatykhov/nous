@@ -141,8 +141,9 @@ Constraints:
 - All versions immutable — rollback = activate previous version, don't edit
 
 **Success criteria:**
-- At least one weight adjustment with clear statistical justification
-- Adjusted rubric's dimension-outcome correlations measured against holdout episodes
+- Correlation analysis runs successfully on 50+ episodes
+- Weight adjustment applied *only if* correlations meet significance threshold (p < 0.05 and |r| > 0.2); no-op is a valid outcome when evidence is insufficient
+- If weights are adjusted: dimension-outcome correlations measured against holdout episodes
 - No dimension weight hits floor (0.10) or ceiling (0.40) — if it does, it's a signal to split/merge
 
 ### Phase 2: Dimension Splits and Merges
@@ -162,8 +163,9 @@ Example split (pre-identified candidate):
 - If Phase 1 data shows these predict different outcomes, split into "Tool Choice" + "Tool Efficiency"
 
 **Success criteria:**
-- At least one split or merge with documented statistical evidence
-- Post-split rubric shows improved outcome prediction vs pre-split version
+- Split and merge detectors run successfully on accumulated data
+- Structural changes applied *only when* evidence thresholds are crossed (Δcorrelation > 0.3 for splits, r > 0.85 for merges); no structural change is a valid outcome when dimensions are stable
+- If split/merge occurs: post-change rubric shows improved outcome prediction vs previous version
 - Dimension count stays in 3-7 range
 
 ### Phase 3: Full Evolution (New Dimensions)
