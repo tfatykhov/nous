@@ -483,6 +483,20 @@ class Heart:
         """Deactivate a censor."""
         await self.censors.deactivate(censor_id, session)
 
+    async def update_censor(
+        self,
+        censor_id: UUID,
+        session: AsyncSession | None = None,
+        **kwargs,
+    ) -> CensorDetail:
+        """Update specific fields on an existing censor (F031).
+
+        Pass only the fields you want to change:
+            trigger_action, action_instruction, unblock_pattern, reason, domain
+        Pass None to clear a field.
+        """
+        return await self.censors.update(censor_id, session=session, **kwargs)
+
     # ==================================================================
     # Working Memory
     # ==================================================================

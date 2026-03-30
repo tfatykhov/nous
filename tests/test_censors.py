@@ -839,3 +839,52 @@ async def test_backward_compat_censor_no_action(heart, session):
     assert matches[0].trigger_action is None
     assert matches[0].action_instruction is None
     assert matches[0].unblock_pattern is None
+
+
+# ---------------------------------------------------------------------------
+# F031 Task 7: Censor Update API tests
+# ---------------------------------------------------------------------------
+
+
+async def test_update_censor_add_action_fields(heart, session):
+    """Update an existing censor to add trigger_action and related fields."""
+    inp = CensorInput(
+        trigger_pattern="deploy.*friday",
+        reason="No Friday deploys",
+        action="warn",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.trigger_action is None
+
+    updated = await heart.update_censor(
+        detail.id,
+        trigger_action={"tool": "recall", "args": {"query": "deploy incidents", "limit": 3}},
+        action_instruction="Check past deploy incidents before proceeding.",
+        session=session,
+    )
+    assert updated.trigger_action == {"tool": "recall", "args": {"query": "deploy incidents", "limit": 3}}
+    assert updated.action_instruction == "Check past deploy incidents before proceeding."
+    assert updated.trigger_pattern == "deploy.*friday"
+    assert updated.reason == "No Friday deploys"
+    assert updated.action == "warn"
+
+
+async def test_update_censor_add_unblock_pattern(heart, session):
+    """Upgrade a block censor with unblock_pattern."""
+    inp = CensorInput(
+        trigger_pattern="delete.*production",
+        reason="No production deletes",
+        action="block",
+    )
+    detail = await heart.add_censor(inp, session=session)
+
+    updated = await heart.update_censor(
+        detail.id,
+        trigger_action={"tool": "search_facts", "args": {"query": "allowed admins"}},
+        unblock_pattern=r"admin@company\.com",
+        action_instruction="Contact infra team.",
+        session=session,
+    )
+    assert updated.unblock_pattern == r"admin@company\.com"
+    assert updated.trigger_action is not None
+    assert updated.action == "block"

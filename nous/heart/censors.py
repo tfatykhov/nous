@@ -605,6 +605,76 @@ class CensorManager:
         await session.flush()
 
     # ------------------------------------------------------------------
+    # update() — F031: modify existing censor fields
+    # ------------------------------------------------------------------
+
+    _SENTINEL = object()
+
+    async def update(
+        self,
+        censor_id: UUID,
+        *,
+        trigger_action: dict | None | object = _SENTINEL,
+        action_instruction: str | None | object = _SENTINEL,
+        unblock_pattern: str | None | object = _SENTINEL,
+        reason: str | None | object = _SENTINEL,
+        domain: str | None | object = _SENTINEL,
+        session: AsyncSession | None = None,
+    ) -> CensorDetail:
+        """Update specific fields on an existing censor.
+
+        Only fields explicitly passed are updated. Pass None to clear a field.
+        Fields not passed are left unchanged.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                result = await self._update(
+                    censor_id, trigger_action=trigger_action,
+                    action_instruction=action_instruction,
+                    unblock_pattern=unblock_pattern,
+                    reason=reason, domain=domain, session=session,
+                )
+                await session.commit()
+                return result
+        return await self._update(
+            censor_id, trigger_action=trigger_action,
+            action_instruction=action_instruction,
+            unblock_pattern=unblock_pattern,
+            reason=reason, domain=domain, session=session,
+        )
+
+    async def _update(
+        self,
+        censor_id: UUID,
+        *,
+        trigger_action,
+        action_instruction,
+        unblock_pattern,
+        reason,
+        domain,
+        session: AsyncSession,
+    ) -> CensorDetail:
+        censor = await self._get_censor_orm(censor_id, session)
+        if censor is None:
+            raise ValueError(f"Censor {censor_id} not found")
+
+        SENTINEL = self._SENTINEL
+        if trigger_action is not SENTINEL:
+            censor.trigger_action = trigger_action
+        if action_instruction is not SENTINEL:
+            censor.action_instruction = action_instruction
+        if unblock_pattern is not SENTINEL:
+            censor.unblock_pattern = unblock_pattern
+        if reason is not SENTINEL and reason is not None:
+            censor.reason = reason
+        if domain is not SENTINEL:
+            censor.domain = domain
+
+        censor.updated_at = datetime.now(UTC)
+        await session.flush()
+        return self._to_detail(censor)
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 

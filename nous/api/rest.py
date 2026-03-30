@@ -453,6 +453,32 @@ def create_app(
             logger.error("List censors error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def update_censor(request: Request) -> JSONResponse:
+        """PUT /censors/{id} - Update censor fields (F031)."""
+        censor_id = request.path_params["id"]
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        update_fields = {}
+        for field in ("trigger_action", "action_instruction", "unblock_pattern", "reason", "domain"):
+            if field in body:
+                update_fields[field] = body[field]
+
+        if not update_fields:
+            return JSONResponse({"error": "No fields to update"}, status_code=400)
+
+        try:
+            from uuid import UUID
+            detail = await heart.update_censor(UUID(censor_id), **update_fields)
+            return JSONResponse(detail.model_dump(mode="json"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            logger.error("Update censor error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def list_procedures(request: Request) -> JSONResponse:
         """GET /procedures - List procedures with filters."""
         try:
@@ -1249,6 +1275,7 @@ def create_app(
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
         Route("/facts", search_facts),
+        Route("/censors/{id}", update_censor, methods=["PUT"]),
         Route("/censors", list_censors),
         Route("/procedures", list_procedures),
         Route("/frames", list_frames),
