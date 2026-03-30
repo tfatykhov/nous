@@ -252,15 +252,7 @@ def create_app(
                     },
                     "working_memory": working_memory_sessions,
                     "execution_integrity": {
-                        "enabled": {
-                            "ledger": settings.execution_ledger_enabled,
-                            "claim_verification": settings.claim_verification_enabled,
-                            "action_gating": settings.action_gating_enabled,
-                        },
-                        "modes": {
-                            "claim_verification": settings.claim_verification_mode,
-                            "action_gating": settings.action_gating_mode,
-                        },
+                        **_build_integrity_config(),
                         "active_ledgers": len(runner._ledgers),
                         "sessions": {
                             sid: {
@@ -1098,6 +1090,78 @@ def create_app(
             logger.error("Dashboard admission rejected error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F032: Execution Ledger Dashboard ---
+
+    def _build_integrity_config() -> dict[str, Any]:
+        """Shared helper for execution integrity config (used by /status and /dashboard/ledger)."""
+        return {
+            "enabled": {
+                "ledger": settings.execution_ledger_enabled,
+                "claim_verification": settings.claim_verification_enabled,
+                "action_gating": settings.action_gating_enabled,
+            },
+            "modes": {
+                "claim_verification": settings.claim_verification_mode,
+                "action_gating": settings.action_gating_mode,
+            },
+        }
+
+    async def dashboard_ledger(request: Request) -> JSONResponse:
+        """GET /dashboard/ledger - Execution ledger detail for dashboard."""
+        from collections import Counter
+
+        from nous.cognitive.execution_ledger import redact_key_args
+
+        try:
+            action_limit = max(1, min(int(request.query_params.get("action_limit", "50")), 200))
+        except ValueError:
+            action_limit = 50
+
+        try:
+            # Snapshot ledgers to avoid concurrent-mutation issues
+            ledger_snapshot = list(runner._ledgers.items())
+
+            sessions = []
+            for sid, ledger in ledger_snapshot:
+                actions_snapshot = list(ledger.actions)
+                status_counts: Counter[str] = Counter(a.status for a in actions_snapshot)
+
+                # Serialize actions (most recent first, capped by limit)
+                truncated = len(actions_snapshot) > action_limit
+                display_actions = actions_snapshot[-action_limit:] if truncated else actions_snapshot
+
+                serialized_actions = []
+                for a in display_actions:
+                    serialized_actions.append({
+                        "turn": a.turn,
+                        "tool_name": a.tool_name,
+                        "key_args": redact_key_args(a.tool_name, a.key_args),
+                        "status": a.status,
+                        "timestamp": a.timestamp.isoformat(),
+                        "result_summary": a.result_summary,
+                        "side_effect_type": a.side_effect_type,
+                    })
+
+                sessions.append({
+                    "session_id": sid,
+                    "current_turn": ledger.current_turn,
+                    "total_actions": len(actions_snapshot),
+                    "success_actions": status_counts.get("success", 0),
+                    "blocked_actions": status_counts.get("blocked", 0),
+                    "error_actions": status_counts.get("error", 0),
+                    "timeout_actions": status_counts.get("timeout", 0),
+                    "summary": ledger.one_line_summary(),
+                    "actions": serialized_actions,
+                    "actions_truncated": truncated,
+                })
+
+            result = _build_integrity_config()
+            result["sessions"] = sessions
+            return JSONResponse(result)
+        except Exception as e:
+            logger.error("Dashboard ledger error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -1325,6 +1389,8 @@ def create_app(
         # F021.1: Admission dashboard — rejected MUST be before admission (Starlette top-down matching)
         Route("/dashboard/admission/rejected", dashboard_admission_rejected),
         Route("/dashboard/admission", dashboard_admission),
+        # F032: Execution ledger dashboard
+        Route("/dashboard/ledger", dashboard_ledger),
     ]
 
     # Static dashboard mount — only add if directory exists (avoids crash during tests)

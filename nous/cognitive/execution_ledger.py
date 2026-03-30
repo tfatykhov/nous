@@ -8,6 +8,7 @@ session-scoped and in-memory only — no database dependency.
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -153,6 +154,11 @@ class ExecutionLedger:
                 tool_name, status, self._current_turn, side_effect,
             )
         return action
+
+    @property
+    def current_turn(self) -> int:
+        """Public accessor for the current turn number."""
+        return self._current_turn
 
     @property
     def has_blocked_actions_this_turn(self) -> bool:
@@ -314,6 +320,26 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
     if tool_name == "bash":
         return _classify_bash_command(_extract_bash_command(tool_input or {}))
     return "write"
+
+
+_REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"[A-Z_]{2,}=\S+"), "[REDACTED_ENV]"),
+    (re.compile(r"Bearer\s+\S+", re.IGNORECASE), "Bearer [REDACTED]"),
+    (re.compile(r"://\w+:[^@\s]+@"), "://[REDACTED]@"),
+]
+
+
+def redact_key_args(tool_name: str, key_args: dict[str, str]) -> dict[str, str]:
+    """Redact sensitive patterns from key_args before external exposure."""
+    if tool_name != "bash":
+        return key_args
+    result = {}
+    for k, v in key_args.items():
+        redacted = v
+        for pattern, replacement in _REDACT_PATTERNS:
+            redacted = pattern.sub(replacement, redacted)
+        result[k] = redacted
+    return result
 
 
 def _classify_bash_command(command: str) -> str:
