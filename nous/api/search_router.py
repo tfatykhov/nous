@@ -115,7 +115,11 @@ class SearchRouter:
                     provider.name, query[:50], e,
                 )
 
+        if errors:
+            raise RuntimeError(
+                f"All search providers failed for '{query[:80]}'. "
+                f"Errors: {'; '.join(errors)}"
+            )
         raise RuntimeError(
-            f"All search providers failed for '{query[:80]}'. "
-            f"Errors: {'; '.join(errors)}"
+            f"No results found for '{query[:80]}' from any provider."
         )

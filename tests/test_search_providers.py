@@ -108,6 +108,18 @@ class TestBraveProvider:
     def test_is_available_without_key(self):
         assert self._make_provider("").is_available is False
 
+    @pytest.mark.asyncio
+    async def test_freshness_maps_to_brave_param(self):
+        """freshness='week' maps to Brave freshness param 'pw'."""
+        provider = self._make_provider()
+        http = _mock_http(_mock_response(200, {"web": {"results": []}}))
+
+        await provider.search("test", count=5, http=http, freshness="week")
+
+        call_kwargs = http.get.call_args
+        params = call_kwargs.kwargs.get("params") or call_kwargs[1].get("params", {})
+        assert params.get("freshness") == "pw"
+
 
 # ---------------------------------------------------------------------------
 # TavilyProvider
@@ -189,6 +201,18 @@ class TestTavilyProvider:
         assert payload["max_results"] == 3
         assert payload["api_key"] == "tvly-abc"
 
+    @pytest.mark.asyncio
+    async def test_freshness_maps_to_days(self):
+        """freshness='day' maps to Tavily days=1 param."""
+        provider = self._make_provider()
+        http = _mock_http(_mock_response(200, {"results": []}))
+
+        await provider.search("test", count=5, http=http, freshness="day")
+
+        call_kwargs = http.post.call_args
+        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json", {})
+        assert payload["days"] == 1
+
 
 # ---------------------------------------------------------------------------
 # ExaProvider
@@ -267,3 +291,17 @@ class TestExaProvider:
         call_kwargs = http.post.call_args
         headers = call_kwargs.kwargs.get("headers") or {}
         assert headers.get("Authorization") == "Bearer exa-secret"
+
+    @pytest.mark.asyncio
+    async def test_freshness_maps_to_start_published_date(self):
+        """freshness='month' adds start_published_date to Exa payload."""
+        provider = self._make_provider()
+        http = _mock_http(_mock_response(200, {"results": []}))
+
+        await provider.search("test", count=5, http=http, freshness="month")
+
+        call_kwargs = http.post.call_args
+        payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json", {})
+        assert "start_published_date" in payload
+        # Should be a date string roughly 30 days ago
+        assert "T" in payload["start_published_date"]

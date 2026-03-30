@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 import httpx
@@ -229,7 +230,6 @@ class ExaProvider:
         }
         # Exa supports start_published_date for recency filtering
         if freshness:
-            from datetime import datetime, timedelta, timezone
             days_map = {"day": 1, "week": 7, "month": 30}
             days = days_map.get(freshness)
             if days:

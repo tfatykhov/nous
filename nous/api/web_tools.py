@@ -12,13 +12,16 @@ import logging
 import re
 import socket
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
 
 from nous.api.tools import ToolDispatcher
 from nous.config import Settings
+
+if TYPE_CHECKING:
+    from nous.api.search_router import SearchRouter
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +120,7 @@ async def _web_search(
     *,
     _settings: Settings,
     _http: httpx.AsyncClient,
-    _router: Any | None = None,
+    _router: SearchRouter | None = None,
 ) -> dict[str, Any]:
     """Search via multi-tier search router (F033).
 
@@ -135,10 +138,8 @@ async def _web_search(
 
         # Route through multi-tier search if router available
         if _router is not None:
-            from nous.api.search_router import SearchRouter
-            router: SearchRouter = _router
             try:
-                results, provider_name = await router.search(
+                results, provider_name = await _router.search(
                     query, count=count, http=_http, freshness=freshness,
                 )
             except RuntimeError as e:
@@ -362,7 +363,7 @@ def register_web_tools(
     dispatcher: ToolDispatcher,
     settings: Settings,
     http_client: httpx.AsyncClient,
-    router: Any | None = None,
+    router: SearchRouter | None = None,
 ) -> None:
     """Register web tools (web_search, web_fetch) with the dispatcher.
 
