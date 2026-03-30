@@ -8,12 +8,14 @@
 /* global Dashboard, escapeHtml */
 
 var _ledgerRefreshInterval = null;
+var _ledgerRefreshInFlight = false;
+var _ledgerAbortController = null;
 
 Dashboard.registerView('execution', async function (container) {
     Dashboard.showLoading(container);
 
     try {
-        var data = await Dashboard.apiGet('/dashboard/ledger');
+        var data = await ledgerFetch();
         renderLedger(container, data);
         startAutoRefresh(container);
     } catch (err) {
@@ -23,6 +25,22 @@ Dashboard.registerView('execution', async function (container) {
     }
 });
 
+function ledgerFetch() {
+    // Abort any in-flight request before starting a new one
+    if (_ledgerAbortController) {
+        _ledgerAbortController.abort();
+    }
+    _ledgerAbortController = new AbortController();
+    return fetch('/dashboard/ledger', { signal: _ledgerAbortController.signal })
+        .then(function (res) {
+            if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+            return res.json();
+        })
+        .finally(function () {
+            _ledgerAbortController = null;
+        });
+}
+
 function startAutoRefresh(container) {
     stopAutoRefresh();
     _ledgerRefreshInterval = setInterval(async function () {
@@ -30,8 +48,11 @@ function startAutoRefresh(container) {
             stopAutoRefresh();
             return;
         }
+        // Skip if a refresh is already in progress
+        if (_ledgerRefreshInFlight) return;
+        _ledgerRefreshInFlight = true;
         try {
-            var data = await Dashboard.apiGet('/dashboard/ledger');
+            var data = await ledgerFetch();
             // Preserve expanded state
             var expanded = {};
             container.querySelectorAll('.ledger-session.expanded').forEach(function (el) {
@@ -50,7 +71,9 @@ function startAutoRefresh(container) {
             });
             renderLedger(container, data, expanded, activeFilter, activeEffectFilter);
         } catch (err) {
-            // Silently skip refresh on error
+            // Silently skip refresh on error (including aborted requests)
+        } finally {
+            _ledgerRefreshInFlight = false;
         }
     }, 15000);
 }
@@ -59,6 +82,11 @@ function stopAutoRefresh() {
     if (_ledgerRefreshInterval) {
         clearInterval(_ledgerRefreshInterval);
         _ledgerRefreshInterval = null;
+    }
+    // Abort any in-flight request when leaving the tab
+    if (_ledgerAbortController) {
+        _ledgerAbortController.abort();
+        _ledgerAbortController = null;
     }
 }
 
