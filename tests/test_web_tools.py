@@ -753,3 +753,81 @@ class TestRegisterWebTools:
 
         assert is_error is False
         assert "Page content here" in result_text
+
+
+# ---------------------------------------------------------------------------
+# Router integration tests (F033)
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchWithRouter:
+    """Tests for web_search backed by SearchRouter."""
+
+    @pytest.fixture(autouse=True)
+    def reset_rate_limit(self):
+        wt = _import_web_tools()
+        wt._rate_limit["date"] = ""
+        wt._rate_limit["count"] = 0
+        yield
+
+    @pytest.mark.asyncio
+    async def test_search_uses_router(self):
+        """web_search delegates to SearchRouter and includes provider tag."""
+        wt = _import_web_tools()
+        from nous.api.search_providers import SearchResult
+
+        mock_router = MagicMock()
+        mock_router.search = AsyncMock(return_value=(
+            [SearchResult(title="T1", url="https://t.com", snippet="S1", provider="tavily")],
+            "tavily",
+        ))
+
+        settings = _make_settings()
+        result = await wt._web_search(
+            "test query", count=5, freshness=None,
+            _settings=settings, _http=AsyncMock(), _router=mock_router,
+        )
+
+        text = _extract_text(result)
+        assert "T1" in text
+        assert "https://t.com" in text
+        assert "tavily" in text.lower()
+        mock_router.search.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_router_failure_returns_error(self):
+        """When all providers fail, returns error message."""
+        wt = _import_web_tools()
+
+        mock_router = MagicMock()
+        mock_router.search = AsyncMock(side_effect=RuntimeError("All search providers failed"))
+
+        settings = _make_settings()
+        result = await wt._web_search(
+            "test", count=5, freshness=None,
+            _settings=settings, _http=AsyncMock(), _router=mock_router,
+        )
+
+        text = _extract_text(result)
+        assert "failed" in text.lower() or "error" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_fallback_to_brave_when_no_router(self):
+        """When _router is None, falls back to direct Brave (backward compat)."""
+        wt = _import_web_tools()
+        settings = _make_settings()
+        response = _mock_response(
+            status_code=200,
+            json_data=_brave_search_response([
+                {"title": "Brave Result", "url": "https://b.com", "description": "From Brave"},
+            ]),
+        )
+        client = _mock_http_client(response)
+
+        result = await wt._web_search(
+            "test", count=5, freshness=None,
+            _settings=settings, _http=client, _router=None,
+        )
+
+        text = _extract_text(result)
+        assert "Brave Result" in text
