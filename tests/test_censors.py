@@ -888,3 +888,86 @@ async def test_update_censor_add_unblock_pattern(heart, session):
     assert updated.unblock_pattern == r"admin@company\.com"
     assert updated.trigger_action is not None
     assert updated.action == "block"
+
+
+# ---------------------------------------------------------------------------
+# F031 Subtask censor handling
+# ---------------------------------------------------------------------------
+
+
+def test_pre_turn_accepts_is_subtask_param():
+    """pre_turn signature includes is_subtask parameter."""
+    import inspect
+    from nous.cognitive.layer import CognitiveLayer
+    sig = inspect.signature(CognitiveLayer.pre_turn)
+    assert "is_subtask" in sig.parameters
+    param = sig.parameters["is_subtask"]
+    assert param.default is False
+
+
+async def test_spawn_task_rejects_blocked_subtask(heart, session):
+    """spawn_task censor check rejects subtasks that match a block censor."""
+    # Create a block censor
+    inp = CensorInput(
+        trigger_pattern="delete.*production",
+        reason="No production deletes from subtasks",
+        action="block",
+    )
+    await heart.add_censor(inp, session=session)
+
+    # Simulate what spawn_task does: check censors on task text
+    matches = await heart.check_censors("delete production logs", session=session)
+    block_matches = [m for m in matches if m.action == "block"]
+    assert len(block_matches) >= 1, "Block censor should fire on subtask text"
+
+
+async def test_spawn_task_allows_unblocked_subtask(heart, session):
+    """spawn_task censor check allows subtask when unblock_pattern matches."""
+    from nous.heart.schemas import FactInput
+    await heart.learn(
+        FactInput(content="Subtask-authorized operations: log-analysis, report-generation", category="access", subject="subtask-perms"),
+        session=session,
+    )
+
+    inp = CensorInput(
+        trigger_pattern="production.*logs",
+        reason="Production access restricted",
+        action="block",
+        trigger_action={"tool": "search_facts", "args": {"query": "subtask authorized operations"}},
+        unblock_pattern=r"log-analysis",
+    )
+    await heart.add_censor(inp, session=session)
+
+    matches = await heart.check_censors("analyze production logs", session=session)
+    block_matches = [m for m in matches if m.action == "block"]
+    assert len(block_matches) >= 1
+
+    # Verify unblock would work
+    from nous.heart.censor_actions import CensorActionExecutor
+    import re
+    executor = CensorActionExecutor(heart)
+    for match in block_matches:
+        if match.trigger_action and match.unblock_pattern:
+            result = await executor.execute(match.trigger_action, session=session)
+            if result and re.search(match.unblock_pattern, result, re.IGNORECASE):
+                # Would be unblocked — subtask should proceed
+                assert True
+                return
+    # If we get here, unblock didn't work
+    assert False, "Unblock pattern should have matched"
+
+
+async def test_warn_censor_does_not_block_subtask(heart, session):
+    """Warn censors on subtask creation should not block the task."""
+    inp = CensorInput(
+        trigger_pattern="sensitive.*data",
+        reason="Handle with care",
+        action="warn",
+    )
+    await heart.add_censor(inp, session=session)
+
+    matches = await heart.check_censors("process sensitive data export", session=session)
+    block_matches = [m for m in matches if m.action == "block"]
+    warn_matches = [m for m in matches if m.action == "warn"]
+    assert len(block_matches) == 0, "Warn censors should not block"
+    assert len(warn_matches) >= 1, "Warn censor should fire but not block"

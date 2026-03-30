@@ -187,10 +187,12 @@ class AgentRunner:
             user_id=user_id,
             user_display_name=user_display_name,
             skip_episode=skip_episode,
+            is_subtask=is_subtask,
         )
 
         # 3. Append user message
         conversation.messages.append(Message(role="user", content=user_message))
+        usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
         # 3b. Censor block check — skip LLM if input was blocked
         if turn_context.censor_blocked:
@@ -207,7 +209,6 @@ class AgentRunner:
         # 4-6. Build system prompt and run tool loop
         response_text = ""
         tool_results: list[ToolResult] = []
-        usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
         error = None
         try:
             corrections = self._pending_corrections.pop(session_id, None)
