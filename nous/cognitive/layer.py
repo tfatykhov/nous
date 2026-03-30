@@ -94,6 +94,35 @@ def _format_subtask_results(subtasks: list) -> str:
     return "\n".join(lines).strip()
 
 
+def _check_censor_compliance(
+    censor_injected_context: dict[str, str],
+    response_text: str,
+) -> dict[str, bool]:
+    """Check if the agent's response references censor-injected context.
+
+    Returns a dict mapping censor_id -> True if the response appears to
+    reference the injected content, False otherwise. Uses simple keyword
+    overlap heuristic — not a semantic check.
+    """
+    results: dict[str, bool] = {}
+    response_lower = response_text.lower()
+    for censor_id, injected_text in censor_injected_context.items():
+        # Extract meaningful words from injected text (skip formatting)
+        words = set()
+        for line in injected_text.split("\n"):
+            line = line.strip()
+            if line.startswith("[Censor"):
+                continue  # Skip header lines
+            for word in line.split():
+                cleaned = word.strip(".,;:()[]'\"").lower()
+                if len(cleaned) > 4:  # Skip short/common words
+                    words.add(cleaned)
+        # Consider compliant if at least 2 meaningful words appear in response
+        matches = sum(1 for w in words if w in response_lower)
+        results[censor_id] = matches >= 2
+    return results
+
+
 class CognitiveLayer:
     """The Nous Loop — orchestrates Brain and Heart into cognition.
 
@@ -544,15 +573,14 @@ class CognitiveLayer:
 
                         # Check unblock condition
                         if action_result and match.unblock_pattern:
-                            import re as _re
                             try:
-                                if _re.search(match.unblock_pattern, action_result, _re.IGNORECASE):
+                                if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
                                     unblocked = True
                                     logger.info(
                                         "Censor UNBLOCK: pattern matched (session=%s, censor=%s)",
                                         session_id, match.id,
                                     )
-                            except _re.error:
+                            except re.error:
                                 logger.warning("Invalid unblock_pattern regex: %s", match.unblock_pattern)
 
                     if unblocked:
@@ -801,6 +829,24 @@ class CognitiveLayer:
                     )
         except Exception:
             logger.debug("Censor check failed during post_turn")
+
+        # F031: Post-turn compliance check for censor-injected context
+        if turn_context.censor_injected_context:
+            compliance = _check_censor_compliance(
+                turn_context.censor_injected_context,
+                turn_result.response_text,
+            )
+            for censor_id, used in compliance.items():
+                if used:
+                    logger.info(
+                        "Censor compliance: agent referenced injected context (session=%s, censor=%s)",
+                        session_id, censor_id,
+                    )
+                else:
+                    logger.warning(
+                        "Censor compliance: agent did NOT reference injected context (session=%s, censor=%s)",
+                        session_id, censor_id,
+                    )
 
         # 5. Update session metadata for significance tracking (005.5)
         meta = self._session_metadata.setdefault(session_id, SessionMetadata())

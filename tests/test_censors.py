@@ -635,3 +635,33 @@ def test_turn_context_censor_injected_context_default_empty():
         frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
     )
     assert ctx.censor_injected_context == {}
+
+
+# ---------------------------------------------------------------------------
+# F031 Task 5: Post-turn compliance check tests
+# ---------------------------------------------------------------------------
+
+
+def test_check_censor_compliance_used():
+    """Compliance check detects when agent referenced injected context."""
+    from nous.cognitive.layer import _check_censor_compliance
+    injected = {"censor-1": "[Censor recall for 'citations': 2 results]\n  1. [fact] Source Alpha from research paper"}
+    response = "Based on Source Alpha from the research paper, the data shows significant improvement."
+    result = _check_censor_compliance(injected, response)
+    assert result["censor-1"] is True
+
+
+def test_check_censor_compliance_not_used():
+    """Compliance check detects when agent did NOT reference injected context."""
+    from nous.cognitive.layer import _check_censor_compliance
+    injected = {"censor-1": "[Censor recall for 'citations': 2 results]\n  1. [fact] Source Alpha from research paper"}
+    response = "I think the answer is 42."
+    result = _check_censor_compliance(injected, response)
+    assert result["censor-1"] is False
+
+
+def test_check_censor_compliance_empty_injected():
+    """Empty injected context returns empty results."""
+    from nous.cognitive.layer import _check_censor_compliance
+    result = _check_censor_compliance({}, "Some response")
+    assert result == {}
