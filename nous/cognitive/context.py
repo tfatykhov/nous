@@ -802,8 +802,8 @@ class ContextEngine:
 
         P1-4: Use action (not severity).
         Format: - **{ACTION}:** {trigger_pattern} -- {reason}
+        F031: Append action_instruction for warn censors if present.
         """
-        # Sort by action severity: block/absolute first, warn last
         action_order = {"absolute": 0, "block": 1, "warn": 2}
         sorted_censors = sorted(
             censors,
@@ -814,7 +814,12 @@ class ContextEngine:
             action = getattr(c, "action", "warn").upper()
             pattern = getattr(c, "trigger_pattern", "")
             reason = getattr(c, "reason", "")
-            lines.append(f"- **{action}:** {pattern} -- {reason}")
+            line = f"- **{action}:** {pattern} -- {reason}"
+            # F031: Append action_instruction for warn censors
+            instruction = getattr(c, "action_instruction", None)
+            if instruction and action == "WARN":
+                line += f"\n  *Instruction:* {instruction}"
+            lines.append(line)
         return "\n".join(lines)
 
     def _format_frame(self, frame: FrameSelection) -> str:

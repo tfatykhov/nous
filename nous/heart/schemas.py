@@ -220,6 +220,9 @@ class CensorInput(BaseModel):
     domain: str | None = None
     learned_from_decision: UUID | None = None
     learned_from_episode: UUID | None = None
+    trigger_action: dict | None = None  # F031: e.g. {"tool": "recall", "args": {...}}
+    action_instruction: str | None = None  # F031: human-readable instruction
+    unblock_pattern: str | None = None  # F031: regex — if action results match, downgrade block→warn
 
 
 class CensorDetail(BaseModel):
@@ -240,6 +243,9 @@ class CensorDetail(BaseModel):
     escalation_threshold: int
     active: bool
     created_at: datetime
+    trigger_action: dict | None = None  # F031
+    action_instruction: str | None = None  # F031
+    unblock_pattern: str | None = None  # F031
 
 
 class CensorMatch(BaseModel):
@@ -251,6 +257,9 @@ class CensorMatch(BaseModel):
     reason: str
     domain: str | None
     score: float | None = None  # Search relevance score
+    trigger_action: dict | None = None  # F031
+    action_instruction: str | None = None  # F031
+    unblock_pattern: str | None = None  # F031
 
 
 # --- Working Memory ---

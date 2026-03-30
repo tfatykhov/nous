@@ -30,6 +30,7 @@ from nous.cognitive.schemas import Assessment, BuildResult, SessionMetadata, Tur
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.events import Event, EventBus
+from nous.heart.censor_actions import CensorActionExecutor
 from nous.heart.heart import Heart
 from nous.heart.schemas import EpisodeInput, FactInput, OpenThread, WorkingMemoryItem
 from nous.storage.models import Agent
@@ -93,6 +94,35 @@ def _format_subtask_results(subtasks: list) -> str:
     return "\n".join(lines).strip()
 
 
+def _check_censor_compliance(
+    censor_injected_context: dict[str, str],
+    response_text: str,
+) -> dict[str, bool]:
+    """Check if the agent's response references censor-injected context.
+
+    Returns a dict mapping censor_id -> True if the response appears to
+    reference the injected content, False otherwise. Uses simple keyword
+    overlap heuristic — not a semantic check.
+    """
+    results: dict[str, bool] = {}
+    response_lower = response_text.lower()
+    for censor_id, injected_text in censor_injected_context.items():
+        # Extract meaningful words from injected text (skip formatting)
+        words = set()
+        for line in injected_text.split("\n"):
+            line = line.strip()
+            if line.startswith("[Censor"):
+                continue  # Skip header lines
+            for word in line.split():
+                cleaned = word.strip(".,;:()[]'\"").lower()
+                if len(cleaned) > 4:  # Skip short/common words
+                    words.add(cleaned)
+        # Consider compliant if at least 2 meaningful words appear in response
+        matches = sum(1 for w in words if w in response_lower)
+        results[censor_id] = matches >= 2
+    return results
+
+
 class CognitiveLayer:
     """The Nous Loop — orchestrates Brain and Heart into cognition.
 
@@ -147,6 +177,7 @@ class CognitiveLayer:
         # F024: Critic Agent
         self._critic = critic
         self._session_tool_history: dict[str, list[dict]] = {}
+        self._censor_executor = CensorActionExecutor(heart)
         self._pending_nudges: dict[str, str] = {}
         self._session_response_lengths: dict[str, list[int]] = {}
         self._session_user_messages: dict[str, list[str]] = {}
@@ -517,28 +548,96 @@ class CognitiveLayer:
         # This complements the prompt-based censors (soft) with actual
         # pattern matching (hard). check_censors() increments
         # activation_count as a side effect.
+        censor_injected: dict[str, str] = {}
         censor_blocked = False
         censor_block_reason: str | None = None
         try:
             matches = await self._heart.check_censors(user_input, session=session)
             for match in matches:
                 if match.action == "block":
-                    censor_blocked = True
-                    censor_block_reason = (
-                        f"Blocked by censor: {match.reason or match.trigger_pattern}"
-                    )
-                    logger.warning(
-                        "Censor BLOCK on user input (session=%s, censor=%s): %s",
-                        session_id, match.id, match.trigger_pattern,
-                    )
-                    break  # One block is enough
+                    # F031: Conditional unblock — if trigger_action + unblock_pattern,
+                    # execute action and check if results match unblock_pattern.
+                    # Match → downgrade to warn (skip block). No match → block as normal.
+                    unblocked = False
+                    action_result: str | None = None
+                    if match.trigger_action:
+                        try:
+                            action_result = await self._censor_executor.execute(
+                                match.trigger_action, session=session,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Censor block action failed (session=%s, censor=%s)",
+                                session_id, match.id, exc_info=True,
+                            )
+
+                        # Check unblock condition
+                        if action_result and match.unblock_pattern:
+                            try:
+                                if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
+                                    unblocked = True
+                                    logger.info(
+                                        "Censor UNBLOCK: pattern matched (session=%s, censor=%s)",
+                                        session_id, match.id,
+                                    )
+                            except re.error:
+                                logger.warning("Invalid unblock_pattern regex: %s", match.unblock_pattern)
+
+                    if unblocked:
+                        # Downgrade to warn — inject context like a warn censor
+                        logger.info(
+                            "Censor BLOCK→WARN downgrade (session=%s, censor=%s): %s",
+                            session_id, match.id, match.trigger_pattern,
+                        )
+                        if action_result:
+                            censor_injected[str(match.id)] = action_result
+                    else:
+                        # Block as normal
+                        censor_blocked = True
+                        censor_block_reason = (
+                            f"Blocked by censor: {match.reason or match.trigger_pattern}"
+                        )
+                        logger.warning(
+                            "Censor BLOCK on user input (session=%s, censor=%s): %s",
+                            session_id, match.id, match.trigger_pattern,
+                        )
+                        if action_result:
+                            censor_block_reason += f"\n\nRelated context:\n{action_result}"
+                        if match.action_instruction:
+                            censor_block_reason += f"\n\n{match.action_instruction}"
+                        break  # One block is enough
                 elif match.action == "warn":
                     logger.info(
                         "Censor WARN on user input (session=%s, censor=%s): %s",
                         session_id, match.id, match.trigger_pattern,
                     )
+                    # F031: Execute trigger_action if present
+                    if match.trigger_action:
+                        try:
+                            action_result = await self._censor_executor.execute(
+                                match.trigger_action, session=session,
+                            )
+                            if action_result:
+                                censor_injected[str(match.id)] = action_result
+                                logger.info(
+                                    "Censor action executed (session=%s, censor=%s, tool=%s)",
+                                    session_id, match.id, match.trigger_action.get("tool"),
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Censor action failed (session=%s, censor=%s)",
+                                session_id, match.id, exc_info=True,
+                            )
         except Exception:
             logger.debug("Censor check failed during pre_turn")
+
+        # F031: Append censor-injected context to system prompt
+        if censor_injected:
+            injected_section = "\n\n## Censor-Injected Context\n"
+            injected_section += "The following information was automatically retrieved by active censors. Use it to inform your response:\n\n"
+            for censor_id, result_text in censor_injected.items():
+                injected_section += f"{result_text}\n\n"
+            system_prompt += injected_section
 
         # F024: Attach pending diagnostic nudges from previous turn
         _diagnostic_nudges = self._pending_nudges.pop(session_id, "")
@@ -558,6 +657,7 @@ class CognitiveLayer:
             recalled_content_map=recalled_content_map,
             recalled_score_map=recalled_score_map,
             diagnostic_nudges=_diagnostic_nudges,
+            censor_injected_context=censor_injected,
         )
 
     async def post_turn(
@@ -729,6 +829,24 @@ class CognitiveLayer:
                     )
         except Exception:
             logger.debug("Censor check failed during post_turn")
+
+        # F031: Post-turn compliance check for censor-injected context
+        if turn_context.censor_injected_context:
+            compliance = _check_censor_compliance(
+                turn_context.censor_injected_context,
+                turn_result.response_text,
+            )
+            for censor_id, used in compliance.items():
+                if used:
+                    logger.info(
+                        "Censor compliance: agent referenced injected context (session=%s, censor=%s)",
+                        session_id, censor_id,
+                    )
+                else:
+                    logger.warning(
+                        "Censor compliance: agent did NOT reference injected context (session=%s, censor=%s)",
+                        session_id, censor_id,
+                    )
 
         # 5. Update session metadata for significance tracking (005.5)
         meta = self._session_metadata.setdefault(session_id, SessionMetadata())

@@ -56,6 +56,7 @@ nous/
 │   │   ├── facts.py            # Semantic memory
 │   │   ├── procedures.py       # Procedural memory
 │   │   ├── censors.py          # Guardrail censors
+│   │   ├── censor_actions.py   # F031: Censor action executor (read-only tools)
 │   │   ├── working_memory.py   # Short-term scratch space
 │   │   ├── search.py           # Full-text + vector search
 │   │   ├── subtasks.py         # Subtask CRUD operations
@@ -138,6 +139,7 @@ nous/
 | F024-3b | Self-Modifying Rubrics (outcome signals, dimension proposals, rubric evolution) | #196 |
 | F026 | Execution Integrity (execution ledger, action gating, claim verification, ghost planning detection) | #183 |
 | F030 | MMR Diversity Reranking (Maximal Marginal Relevance in recall_deep) | #205 |
+| F031 | Censor Middleware with Action Payloads (censors execute read-only tools, conditional unblock, update API) | #208 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 
 ## How to Work
@@ -320,6 +322,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | GET | `/episodes` | List recent episodes |
 | GET | `/facts?q=query` | Search facts |
 | GET | `/censors` | Active censors |
+| PUT | `/censors/{id}` | Update censor fields (trigger_action, action_instruction, unblock_pattern) |
 | GET | `/procedures` | List procedures |
 | GET | `/frames` | Available cognitive frames |
 | GET | `/calibration` | Calibration report |
