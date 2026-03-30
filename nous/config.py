@@ -141,6 +141,9 @@ class Settings(BaseSettings):
     brave_search_api_key: str = Field("", validation_alias="BRAVE_SEARCH_API_KEY")
     web_search_daily_limit: int = 100  # Max web searches per day
     web_fetch_max_chars: int = 10000  # Default max chars for web_fetch
+    tavily_api_key: str = Field("", validation_alias="TAVILY_API_KEY")
+    exa_api_key: str = Field("", validation_alias="EXA_API_KEY")
+    search_provider: str = "auto"  # auto, tavily, exa, brave
 
     # Tool execution
     tool_timeout: int = Field(
