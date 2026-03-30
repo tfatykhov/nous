@@ -5,7 +5,7 @@
  * side-effect classifications, and action gating results.
  */
 
-/* global Dashboard, escapeHtml */
+/* global Dashboard, Chart, escapeHtml */
 
 var _ledgerRefreshInterval = null;
 var _ledgerRefreshInFlight = false;
@@ -26,7 +26,6 @@ Dashboard.registerView('execution', async function (container) {
 });
 
 function ledgerFetch() {
-    // Abort any in-flight request before starting a new one
     if (_ledgerAbortController) {
         _ledgerAbortController.abort();
     }
@@ -48,12 +47,10 @@ function startAutoRefresh(container) {
             stopAutoRefresh();
             return;
         }
-        // Skip if a refresh is already in progress
         if (_ledgerRefreshInFlight) return;
         _ledgerRefreshInFlight = true;
         try {
             var data = await ledgerFetch();
-            // Preserve expanded state
             var expanded = {};
             container.querySelectorAll('.ledger-session.expanded').forEach(function (el) {
                 var sid = el.dataset.sessionId;
@@ -71,7 +68,7 @@ function startAutoRefresh(container) {
             });
             renderLedger(container, data, expanded, activeFilter, activeEffectFilter);
         } catch (err) {
-            // Silently skip refresh on error (including aborted requests)
+            // Silently skip (including aborted requests)
         } finally {
             _ledgerRefreshInFlight = false;
         }
@@ -83,12 +80,13 @@ function stopAutoRefresh() {
         clearInterval(_ledgerRefreshInterval);
         _ledgerRefreshInterval = null;
     }
-    // Abort any in-flight request when leaving the tab
     if (_ledgerAbortController) {
         _ledgerAbortController.abort();
         _ledgerAbortController = null;
     }
 }
+
+// ── Main render ─────────────────────────────────────────────────────
 
 function renderLedger(container, data, expandedState, filterState, effectFilterState) {
     expandedState = expandedState || {};
@@ -99,38 +97,61 @@ function renderLedger(container, data, expandedState, filterState, effectFilterS
     var modes = data.modes || {};
     var sessions = data.sessions || [];
 
-    // Aggregate totals across sessions
-    var totalActions = 0, totalBlocked = 0, totalErrors = 0, totalSessions = sessions.length;
+    // Aggregate totals
+    var totalActions = 0, totalBlocked = 0, totalErrors = 0, totalTimeouts = 0;
     sessions.forEach(function (s) {
         totalActions += s.total_actions || 0;
         totalBlocked += s.blocked_actions || 0;
         totalErrors += s.error_actions || 0;
+        totalTimeouts += s.timeout_actions || 0;
     });
 
     var html = '<div class="view-header">' +
         '<h1>Execution Ledger</h1>' +
-        '<p class="view-subtitle">F026 — Real-time tool execution tracking and action gating</p>' +
+        '<p class="view-subtitle">Real-time tool execution tracking and action gating</p>' +
         '</div>';
 
-    // Stat cards
-    html += '<div class="stat-grid">';
-    html += buildStatCard('Active Sessions', totalSessions, null, 'var(--muted)');
-    html += buildStatCard('Total Actions', totalActions, null, '#60a5fa');
-    html += buildIndicatorCard('Blocked', totalBlocked, totalBlocked > 0 ? 'bad' : 'good');
-    html += buildIndicatorCard('Errors', totalErrors, totalErrors > 0 ? 'warn' : 'good');
-    html += buildModeCard('Claim Verification', modes.claim_verification || 'off', !enabled.claim_verification);
-    html += buildModeCard('Action Gating', modes.action_gating || 'off', !enabled.action_gating);
+    // ── Status banner ──
+    var claimMode = modes.claim_verification || 'off';
+    var gateMode = modes.action_gating || 'off';
+    var bannerClass = 'ledger-status-banner';
+    if (!enabled.ledger) bannerClass += ' disabled';
+    else if (totalBlocked > 0) bannerClass += ' has-blocked';
+
+    html += '<div class="' + bannerClass + '">';
+    html += '<div class="ledger-banner-left">';
+    html += '<div class="ledger-banner-dot"></div>';
+    html += '<span class="ledger-banner-label">' + (enabled.ledger ? 'Ledger Active' : 'Ledger Disabled') + '</span>';
+    html += '</div>';
+    html += '<div class="ledger-banner-modes">';
+    html += renderModePill('Claim Verification', claimMode, !enabled.claim_verification);
+    html += renderModePill('Action Gating', gateMode, !enabled.action_gating);
+    html += '</div>';
     html += '</div>';
 
-    // Sessions list
+    // ── Stat cards ──
+    html += '<div class="stat-grid">';
+    html += buildLedgerStat('Active Sessions', sessions.length, 'var(--accent)');
+    html += buildLedgerStat('Total Actions', totalActions, '#60a5fa');
+    html += buildLedgerStatIndicator('Blocked', totalBlocked, totalBlocked > 0 ? 'bad' : 'good');
+    html += buildLedgerStatIndicator('Errors', totalErrors, totalErrors > 0 ? 'warn' : 'good');
+    html += buildLedgerStatIndicator('Timeouts', totalTimeouts, totalTimeouts > 0 ? 'warn' : 'good');
+    html += buildLedgerStat('Success Rate',
+        totalActions > 0 ? Math.round(((totalActions - totalBlocked - totalErrors - totalTimeouts) / totalActions) * 100) + '%' : '—',
+        'var(--green)');
+    html += '</div>';
+
+    // ── Sessions ──
     if (sessions.length === 0) {
-        html += '<div class="empty-state">' +
-            '<div class="empty-icon">&#x1D6B9;</div>' +
+        html += '<div class="ledger-empty">' +
+            '<div class="ledger-empty-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48">' +
+            '<path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>' +
+            '</svg></div>' +
             '<h3>No Active Sessions</h3>' +
-            '<p>Execution data will appear here when sessions are active. Data is auto-refreshed every 15 seconds.</p>' +
+            '<p>Execution data appears here when sessions are active.<br>Auto-refreshes every 15 seconds.</p>' +
             '</div>';
     } else {
-        html += '<div class="section-header"><h2>Sessions</h2></div>';
+        html += '<div class="section-header"><h2>Sessions (' + sessions.length + ')</h2></div>';
         html += '<div class="ledger-sessions">';
         sessions.forEach(function (session) {
             var isExpanded = expandedState[session.session_id] || false;
@@ -140,85 +161,77 @@ function renderLedger(container, data, expandedState, filterState, effectFilterS
     }
 
     container.innerHTML = html;
-
-    // Bind expand/collapse handlers
-    container.querySelectorAll('.ledger-session-header').forEach(function (header) {
-        header.addEventListener('click', function () {
-            var card = header.closest('.ledger-session');
-            card.classList.toggle('expanded');
-            var detail = card.querySelector('.ledger-session-detail');
-            if (detail) detail.style.display = card.classList.contains('expanded') ? 'block' : 'none';
-        });
-    });
-
-    // Bind status filter handlers
-    container.querySelectorAll('.filter-btn:not(.effect-filter)').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var bar = btn.closest('.ledger-filter-bar');
-            bar.querySelectorAll('.filter-btn:not(.effect-filter)').forEach(function (b) { b.classList.remove('active'); });
-            btn.classList.add('active');
-            var sessionCard = btn.closest('.ledger-session');
-            applyFilters(sessionCard);
-        });
-    });
-
-    // Bind effect filter handlers
-    container.querySelectorAll('.filter-btn.effect-filter').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var bar = btn.closest('.ledger-filter-bar');
-            bar.querySelectorAll('.filter-btn.effect-filter').forEach(function (b) { b.classList.remove('active'); });
-            btn.classList.add('active');
-            var sessionCard = btn.closest('.ledger-session');
-            applyFilters(sessionCard);
-        });
-    });
+    bindSessionHandlers(container);
 }
+
+// ── Session card ────────────────────────────────────────────────────
 
 function buildSessionCard(session, isExpanded, activeFilter, activeEffectFilter) {
     var sid = session.session_id;
-    var shortId = sid.length > 16 ? sid.slice(0, 16) + '\u2026' : sid;
+    var shortId = sid;  // Show full session ID — no truncation
+    var successCount = session.success_actions || 0;
 
     var html = '<div class="ledger-session' + (isExpanded ? ' expanded' : '') + '" data-session-id="' + escapeHtml(sid) + '">';
 
-    // Header
+    // ── Header ──
     html += '<div class="ledger-session-header">';
+    html += '<div class="ledger-header-top">';
     html += '<div class="ledger-session-id"><code>' + escapeHtml(shortId) + '</code></div>';
-    html += '<div class="ledger-session-meta">';
-    html += '<span class="ledger-badge badge-turn">Turn ' + (session.current_turn || 0) + '</span>';
-    html += '<span class="ledger-badge badge-actions">' + (session.total_actions || 0) + ' actions</span>';
+    html += '<div class="ledger-header-badges">';
+    html += '<span class="ledger-pill pill-turn">Turn ' + (session.current_turn || 0) + '</span>';
+    html += '<span class="ledger-pill pill-count">' + (session.total_actions || 0) + ' actions</span>';
     if (session.blocked_actions > 0) {
-        html += '<span class="ledger-badge badge-blocked">' + session.blocked_actions + ' blocked</span>';
+        html += '<span class="ledger-pill pill-blocked">' + session.blocked_actions + ' blocked</span>';
     }
     if (session.error_actions > 0) {
-        html += '<span class="ledger-badge badge-error">' + session.error_actions + ' errors</span>';
+        html += '<span class="ledger-pill pill-error">' + session.error_actions + ' error</span>';
     }
     if (session.actions_truncated) {
-        html += '<span class="ledger-badge badge-truncated">truncated</span>';
+        html += '<span class="ledger-pill pill-muted">truncated</span>';
     }
     html += '</div>';
-    html += '<div class="ledger-session-summary text-muted">' + escapeHtml(session.summary || '') + '</div>';
-    html += '<svg class="ledger-expand-icon" viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>';
-    html += '</div>';
+    html += '<svg class="ledger-chevron" viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>';
+    html += '</div>'; // header-top
 
-    // Detail (hidden unless expanded)
+    // Summary bar
+    html += '<div class="ledger-header-summary">';
+    html += '<span class="text-muted">' + escapeHtml(session.summary || 'No actions') + '</span>';
+
+    // Mini progress bar showing success/blocked/error ratio
+    if (session.total_actions > 0) {
+        var total = session.total_actions;
+        var pctSuccess = (successCount / total * 100).toFixed(1);
+        var pctBlocked = ((session.blocked_actions || 0) / total * 100).toFixed(1);
+        var pctError = ((session.error_actions || 0) / total * 100).toFixed(1);
+        html += '<div class="ledger-minibar">';
+        if (pctSuccess > 0) html += '<div class="minibar-segment minibar-success" style="width:' + pctSuccess + '%" title="' + successCount + ' success"></div>';
+        if (pctBlocked > 0) html += '<div class="minibar-segment minibar-blocked" style="width:' + pctBlocked + '%" title="' + session.blocked_actions + ' blocked"></div>';
+        if (pctError > 0) html += '<div class="minibar-segment minibar-error" style="width:' + pctError + '%" title="' + session.error_actions + ' error"></div>';
+        html += '</div>';
+    }
+    html += '</div>'; // header-summary
+    html += '</div>'; // header
+
+    // ── Detail ──
     html += '<div class="ledger-session-detail" style="display:' + (isExpanded ? 'block' : 'none') + '">';
 
     // Filter bar
     html += '<div class="ledger-filter-bar">';
-    var filters = ['all', 'success', 'blocked', 'error', 'timeout'];
-    filters.forEach(function (f) {
+    html += '<div class="ledger-filter-group">';
+    html += '<span class="ledger-filter-label">Status</span>';
+    ['all', 'success', 'blocked', 'error', 'timeout'].forEach(function (f) {
         var cls = f === activeFilter ? ' active' : '';
         html += '<button class="filter-btn' + cls + '" data-filter="' + f + '">' + f + '</button>';
     });
-
-    // Side-effect filter
-    html += '<span class="filter-separator">|</span>';
-    var sideEffects = ['all-effects', 'none', 'write', 'external', 'irreversible'];
-    sideEffects.forEach(function (f) {
-        var label = f === 'all-effects' ? 'all effects' : f;
+    html += '</div>';
+    html += '<div class="ledger-filter-group">';
+    html += '<span class="ledger-filter-label">Effect</span>';
+    ['all-effects', 'none', 'write', 'external', 'irreversible'].forEach(function (f) {
+        var label = f === 'all-effects' ? 'all' : f;
         var cls = f === (activeEffectFilter || 'all-effects') ? ' active' : '';
         html += '<button class="filter-btn effect-filter' + cls + '" data-effect-filter="' + f + '">' + label + '</button>';
     });
+    html += '</div>';
     html += '<span class="ledger-filter-count"></span>';
     html += '</div>';
 
@@ -234,62 +247,107 @@ function buildSessionCard(session, isExpanded, activeFilter, activeEffectFilter)
     var turnNums = Object.keys(turnGroups).map(Number).sort(function (a, b) { return a - b; });
 
     if (turnNums.length === 0) {
-        html += '<div class="text-muted" style="padding:12px">No actions recorded.</div>';
+        html += '<div class="ledger-no-actions">No actions recorded in this session.</div>';
     } else {
+        html += '<div class="ledger-timeline">';
         turnNums.forEach(function (turn) {
-            html += '<div class="ledger-turn-group">';
-            html += '<div class="ledger-turn-label">Turn ' + turn + '</div>';
-            turnGroups[turn].forEach(function (a) {
+            var turnActions = turnGroups[turn];
+            html += '<div class="ledger-turn">';
+            html += '<div class="ledger-turn-header">';
+            html += '<span class="ledger-turn-marker"></span>';
+            html += '<span class="ledger-turn-label">Turn ' + turn + '</span>';
+            html += '<span class="ledger-turn-count">' + turnActions.length + ' action' + (turnActions.length !== 1 ? 's' : '') + '</span>';
+            html += '</div>';
+            html += '<div class="ledger-turn-actions">';
+            turnActions.forEach(function (a) {
                 html += buildActionRow(a);
             });
             html += '</div>';
+            html += '</div>';
         });
+        html += '</div>';
     }
 
-    html += '</div>'; // session-detail
-    html += '</div>'; // session card
+    html += '</div>'; // detail
+    html += '</div>'; // session
 
     return html;
 }
 
+// ── Action row ──────────────────────────────────────────────────────
+
 function buildActionRow(action) {
     var statusClass = 'status-' + (action.status || 'success');
-    var effectClass = action.side_effect_type !== 'none' ? 'effect-' + action.side_effect_type : '';
 
     var html = '<div class="ledger-action ' + statusClass + '" data-status="' + escapeHtml(action.status || '') + '" data-effect="' + escapeHtml(action.side_effect_type || 'none') + '">';
 
-    // Tool name
-    html += '<span class="ledger-tool-name">' + escapeHtml(action.tool_name) + '</span>';
+    // Left: status dot + tool name
+    html += '<div class="action-left">';
+    html += '<span class="action-dot ' + statusClass + '"></span>';
+    html += '<span class="action-tool">' + escapeHtml(action.tool_name) + '</span>';
+    html += '</div>';
 
-    // Key args
+    // Center: key args
     var args = action.key_args || {};
     var argParts = Object.keys(args).map(function (k) {
-        return escapeHtml(k) + '=' + escapeHtml(Dashboard.truncate(args[k], 60));
+        return '<span class="arg-key">' + escapeHtml(k) + '</span><span class="arg-eq">=</span><span class="arg-val">' + escapeHtml(args[k]) + '</span>';
     });
     if (argParts.length > 0) {
-        html += '<span class="ledger-args text-muted">' + argParts.join(' ') + '</span>';
+        html += '<div class="action-args">' + argParts.join(' ') + '</div>';
     }
 
-    // Badges
-    html += '<span class="ledger-status-badge ' + statusClass + '">' + escapeHtml(action.status) + '</span>';
-
+    // Right: badges + timestamp
+    html += '<div class="action-right">';
     if (action.side_effect_type && action.side_effect_type !== 'none') {
-        html += '<span class="ledger-effect-badge ' + effectClass + '">' + escapeHtml(action.side_effect_type) + '</span>';
+        html += '<span class="action-effect-pill effect-' + action.side_effect_type + '">' + escapeHtml(action.side_effect_type) + '</span>';
     }
-
-    // Timestamp
+    html += '<span class="action-status-pill ' + statusClass + '">' + escapeHtml(action.status) + '</span>';
     if (action.timestamp) {
         var ts = new Date(action.timestamp);
-        html += '<span class="ledger-timestamp text-muted">' + ts.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '</span>';
+        html += '<span class="action-time">' + ts.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '</span>';
     }
+    html += '</div>';
 
-    // Result summary for non-success
+    // Error/blocked detail
     if (action.status !== 'success' && action.result_summary) {
-        html += '<div class="ledger-result-summary">' + escapeHtml(action.result_summary) + '</div>';
+        html += '<div class="action-detail">' + escapeHtml(action.result_summary) + '</div>';
     }
 
     html += '</div>';
     return html;
+}
+
+// ── Event binding ───────────────────────────────────────────────────
+
+function bindSessionHandlers(container) {
+    container.querySelectorAll('.ledger-session-header').forEach(function (header) {
+        header.addEventListener('click', function () {
+            var card = header.closest('.ledger-session');
+            card.classList.toggle('expanded');
+            var detail = card.querySelector('.ledger-session-detail');
+            if (detail) detail.style.display = card.classList.contains('expanded') ? 'block' : 'none';
+        });
+    });
+
+    container.querySelectorAll('.filter-btn:not(.effect-filter)').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var bar = btn.closest('.ledger-filter-bar');
+            bar.querySelectorAll('.filter-btn:not(.effect-filter)').forEach(function (b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            applyFilters(btn.closest('.ledger-session'));
+        });
+    });
+
+    container.querySelectorAll('.filter-btn.effect-filter').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+            e.stopPropagation();
+            var bar = btn.closest('.ledger-filter-bar');
+            bar.querySelectorAll('.filter-btn.effect-filter').forEach(function (b) { b.classList.remove('active'); });
+            btn.classList.add('active');
+            applyFilters(btn.closest('.ledger-session'));
+        });
+    });
 }
 
 function applyFilters(sessionCard) {
@@ -310,35 +368,31 @@ function applyFilters(sessionCard) {
     });
     var countEl = sessionCard.querySelector('.ledger-filter-count');
     if (countEl) {
-        countEl.textContent = shown < total ? 'Showing ' + shown + ' of ' + total + ' actions' : '';
+        countEl.textContent = shown < total ? 'Showing ' + shown + ' of ' + total : '';
     }
 }
 
-// Helper cards (matching overview.js patterns)
-function buildStatCard(label, value, delta, color) {
+// ── Helper components ───────────────────────────────────────────────
+
+function renderModePill(label, mode, disabled) {
+    if (disabled) {
+        return '<span class="ledger-mode-pill mode-off">' + escapeHtml(label) + ': off</span>';
+    }
+    var cls = mode === 'enforce' ? 'mode-enforce' : mode === 'warn' ? 'mode-warn' : 'mode-shadow';
+    return '<span class="ledger-mode-pill ' + cls + '">' + escapeHtml(label) + ': ' + escapeHtml(mode) + '</span>';
+}
+
+function buildLedgerStat(label, value, color) {
+    var displayVal = typeof value === 'number' ? Dashboard.formatNumber(value) : value;
     return '<div class="stat-card">' +
-        '<div class="stat-value" style="color:' + (color || 'inherit') + '">' + Dashboard.formatNumber(value) + '</div>' +
+        '<div class="stat-value" style="color:' + (color || 'var(--text)') + '">' + displayVal + '</div>' +
         '<div class="stat-label">' + escapeHtml(label) + '</div>' +
         '</div>';
 }
 
-function buildIndicatorCard(label, value, cls) {
+function buildLedgerStatIndicator(label, value, cls) {
     return '<div class="stat-card">' +
         '<div class="stat-value"><span class="stat-indicator ' + cls + '"></span>' + Dashboard.formatNumber(value) + '</div>' +
-        '<div class="stat-label">' + escapeHtml(label) + '</div>' +
-        '</div>';
-}
-
-function buildModeCard(label, mode, disabled) {
-    if (disabled) {
-        return '<div class="stat-card">' +
-            '<div class="stat-value" style="color:var(--muted)">off</div>' +
-            '<div class="stat-label">' + escapeHtml(label) + '</div>' +
-            '</div>';
-    }
-    var color = mode === 'enforce' ? 'var(--green)' : mode === 'warn' ? 'var(--yellow)' : 'var(--muted)';
-    return '<div class="stat-card">' +
-        '<div class="stat-value" style="color:' + color + '">' + escapeHtml(mode) + '</div>' +
         '<div class="stat-label">' + escapeHtml(label) + '</div>' +
         '</div>';
 }
