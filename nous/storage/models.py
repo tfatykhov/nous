@@ -552,6 +552,10 @@ class Censor(Base):
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    trigger_action: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    action_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unblock_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Relationships
     source_decision: Mapped["Decision | None"] = relationship(foreign_keys=[learned_from_decision])
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[learned_from_episode])

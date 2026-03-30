@@ -397,6 +397,9 @@ CREATE TABLE heart.censors (
     last_false_positive TIMESTAMPTZ,
     escalation_threshold INT DEFAULT 3,
     embedding vector(1536),
+    trigger_action JSONB,
+    action_instruction TEXT,
+    unblock_pattern TEXT,
     active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
