@@ -295,7 +295,8 @@ function buildIntegritySection(ei) {
     var claimMode = modes.claim_verification || 'off';
     var gateMode = modes.action_gating || 'off';
 
-    var html = '<div class="section-header"><h2>Execution Integrity</h2></div>';
+    var html = '<div class="section-header"><h2>Execution Integrity</h2>' +
+        '<a href="#/execution" style="font-size:0.85rem;color:var(--accent);text-decoration:none;margin-left:auto">View Details &rsaquo;</a></div>';
     html += '<div class="stat-grid">';
     html += buildStatCard('Active Sessions', ei.active_ledgers || 0, null, 'var(--muted)');
     html += buildStatCard('Actions Recorded', totalActions, null, '#60a5fa');

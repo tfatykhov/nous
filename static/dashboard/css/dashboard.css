@@ -1114,3 +1114,191 @@ body {
 .correlation-table td.corr-cell:hover {
     opacity: 0.8;
 }
+
+/* ── F032: Execution Ledger ───────────────────────────────── */
+
+.ledger-sessions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ledger-session {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.ledger-session-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    cursor: pointer;
+    transition: background var(--transition);
+}
+.ledger-session-header:hover {
+    background: var(--surface-hover);
+}
+
+.ledger-session-id code {
+    font-size: 0.85rem;
+    color: var(--accent);
+    background: var(--accent-glow);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.ledger-session-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.ledger-session-summary {
+    flex: 1;
+    font-size: 0.85rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ledger-expand-icon {
+    color: var(--muted);
+    transition: transform var(--transition);
+    flex-shrink: 0;
+}
+.ledger-session.expanded .ledger-expand-icon {
+    transform: rotate(180deg);
+}
+
+.ledger-badge {
+    font-size: 0.75rem;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.badge-turn { background: var(--border); color: var(--text); }
+.badge-actions { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+.badge-blocked { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+.badge-error { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+.badge-truncated { background: rgba(107, 107, 138, 0.15); color: var(--muted); }
+
+/* Session detail */
+.ledger-session-detail {
+    border-top: 1px solid var(--border);
+    padding: 12px 16px 16px;
+}
+
+/* Filter bar */
+.ledger-filter-bar {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.filter-btn {
+    background: var(--border);
+    border: none;
+    color: var(--muted);
+    padding: 4px 12px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all var(--transition);
+    text-transform: capitalize;
+}
+.filter-btn:hover { background: var(--surface-hover); color: var(--text); }
+.filter-btn.active { background: var(--accent-dim); color: #fff; }
+.filter-separator { color: var(--border); margin: 0 4px; }
+
+/* Turn groups */
+.ledger-turn-group {
+    margin-bottom: 8px;
+}
+.ledger-turn-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+}
+
+/* Action rows */
+.ledger-action {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    flex-wrap: wrap;
+}
+.ledger-action:hover { background: var(--surface-hover); }
+
+.ledger-tool-name {
+    font-weight: 600;
+    min-width: 100px;
+    color: var(--text);
+}
+
+.ledger-args {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.8rem;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Status badges */
+.ledger-status-badge {
+    font-size: 0.7rem;
+    padding: 1px 8px;
+    border-radius: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.ledger-status-badge.status-success { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+.ledger-status-badge.status-blocked { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+.ledger-status-badge.status-error   { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
+.ledger-status-badge.status-timeout { background: rgba(107, 107, 138, 0.15); color: var(--muted); }
+
+/* Side-effect badges */
+.ledger-effect-badge {
+    font-size: 0.7rem;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-weight: 500;
+}
+.ledger-effect-badge.effect-write       { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
+.ledger-effect-badge.effect-external    { background: rgba(251, 146, 60, 0.15); color: #fb923c; }
+.ledger-effect-badge.effect-irreversible { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+
+.ledger-timestamp {
+    font-size: 0.75rem;
+    white-space: nowrap;
+    margin-left: auto;
+}
+
+.ledger-result-summary {
+    width: 100%;
+    font-size: 0.8rem;
+    color: var(--muted);
+    padding: 4px 8px 2px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    word-break: break-word;
+}
+
+.ledger-filter-count {
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-left: 8px;
+}
