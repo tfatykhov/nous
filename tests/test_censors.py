@@ -554,3 +554,58 @@ def test_censor_match_includes_action_fields():
     assert match.trigger_action["tool"] == "recall"
     assert match.action_instruction == "Check memory first."
     assert match.unblock_pattern == r"admin@example\.com"
+
+
+# ---------------------------------------------------------------------------
+# 20. test_allowed_tools_are_read_only (F031)
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_tools_are_read_only():
+    """Only read-only tools are in the allow list."""
+    from nous.heart.censor_actions import ALLOWED_TOOLS
+
+    assert "recall" in ALLOWED_TOOLS
+    assert "recall_recent" in ALLOWED_TOOLS
+    assert "search_facts" in ALLOWED_TOOLS
+    assert "search_episodes" in ALLOWED_TOOLS
+    assert "search_procedures" in ALLOWED_TOOLS
+    assert "list_tasks" in ALLOWED_TOOLS
+    # Write tools must NOT be in the list
+    assert "learn_fact" not in ALLOWED_TOOLS
+    assert "add_censor" not in ALLOWED_TOOLS
+    assert "write_file" not in ALLOWED_TOOLS
+
+
+# ---------------------------------------------------------------------------
+# 21. test_execute_rejects_unknown_tool (F031)
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_rejects_unknown_tool(heart, session):
+    """Unknown tools are rejected, returning None."""
+    from nous.heart.censor_actions import CensorActionExecutor
+
+    executor = CensorActionExecutor(heart)
+    result = await executor.execute(
+        trigger_action={"tool": "write_file", "args": {"path": "/etc/passwd"}},
+        session=session,
+    )
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# 22. test_execute_rejects_malformed_action (F031)
+# ---------------------------------------------------------------------------
+
+
+async def test_execute_rejects_malformed_action(heart, session):
+    """Malformed trigger_action (missing tool key) returns None."""
+    from nous.heart.censor_actions import CensorActionExecutor
+
+    executor = CensorActionExecutor(heart)
+    result = await executor.execute(
+        trigger_action={"args": {"query": "test"}},
+        session=session,
+    )
+    assert result is None
