@@ -665,3 +665,177 @@ def test_check_censor_compliance_empty_injected():
     from nous.cognitive.layer import _check_censor_compliance
     result = _check_censor_compliance({}, "Some response")
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# F031 Task 6: Integration tests
+# ---------------------------------------------------------------------------
+
+
+async def test_censor_action_end_to_end(heart, session):
+    """Full flow: create censor with action -> check -> execute -> get results."""
+    from nous.heart.schemas import FactInput
+    await heart.learn_fact(
+        FactInput(content="Paris is the capital of France", category="geography", subject="France"),
+        session=session,
+    )
+
+    inp = CensorInput(
+        trigger_pattern="capital.*country|what.*capital",
+        reason="Verify geographic claims",
+        action="warn",
+        trigger_action={"tool": "recall", "args": {"query": "capital country geography", "limit": 3}},
+        action_instruction="Verify geographic claims against recalled facts.",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.trigger_action is not None
+
+    matches = await heart.check_censors("What is the capital of France?", session=session)
+    assert len(matches) >= 1
+    warn_match = [m for m in matches if m.action == "warn"]
+    assert len(warn_match) >= 1
+    assert warn_match[0].trigger_action is not None
+
+    from nous.heart.censor_actions import CensorActionExecutor
+    executor = CensorActionExecutor(heart)
+    result = await executor.execute(warn_match[0].trigger_action, session=session)
+    assert result is not None
+    assert "capital" in result.lower() or "france" in result.lower() or "paris" in result.lower()
+
+
+async def test_block_censor_with_action_enriches_reason(heart, session):
+    """Block censor with trigger_action enriches the block reason with evidence."""
+    from nous.heart.schemas import FactInput
+    await heart.learn_fact(
+        FactInput(content="Production database was accidentally deleted on 2025-12-01", category="incident", subject="production"),
+        session=session,
+    )
+
+    inp = CensorInput(
+        trigger_pattern="delete.*production|drop.*production",
+        reason="Destructive production operations are prohibited",
+        action="block",
+        trigger_action={"tool": "recall", "args": {"query": "production deletion incident", "limit": 3}},
+        action_instruction="Contact the infrastructure team for production changes.",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.action == "block"
+    assert detail.trigger_action is not None
+
+    matches = await heart.check_censors("Let's delete the production database", session=session)
+    block_matches = [m for m in matches if m.action == "block"]
+    assert len(block_matches) >= 1
+    assert block_matches[0].trigger_action is not None
+    assert block_matches[0].action_instruction == "Contact the infrastructure team for production changes."
+
+    from nous.heart.censor_actions import CensorActionExecutor
+    executor = CensorActionExecutor(heart)
+    result = await executor.execute(block_matches[0].trigger_action, session=session)
+    assert result is not None
+
+
+async def test_block_censor_conditional_unblock(heart, session):
+    """Block censor with unblock_pattern downgrades to warn when pattern matches action results."""
+    from nous.heart.schemas import FactInput
+    await heart.learn_fact(
+        FactInput(content="Allowed admin: admin@company.com, ops@company.com", category="access", subject="admin-list"),
+        session=session,
+    )
+
+    inp = CensorInput(
+        trigger_pattern="delete.*production",
+        reason="Production deletion requires admin access",
+        action="block",
+        trigger_action={"tool": "search_facts", "args": {"query": "allowed admin access", "limit": 5}},
+        unblock_pattern=r"admin@company\.com",
+        action_instruction="Contact infrastructure team if you need access.",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.unblock_pattern is not None
+
+    from nous.heart.censor_actions import CensorActionExecutor
+    import re
+    executor = CensorActionExecutor(heart)
+    matches = await heart.check_censors("delete production database", session=session)
+    block_match = [m for m in matches if m.trigger_pattern == "delete.*production"][0]
+
+    result = await executor.execute(block_match.trigger_action, session=session)
+    assert result is not None
+    assert re.search(block_match.unblock_pattern, result, re.IGNORECASE)
+
+
+async def test_block_censor_no_unblock_when_pattern_missing(heart, session):
+    """Block censor without unblock_pattern always blocks (no downgrade)."""
+    inp = CensorInput(
+        trigger_pattern="drop.*table",
+        reason="No dropping tables",
+        action="block",
+        trigger_action={"tool": "recall", "args": {"query": "table drops", "limit": 3}},
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.unblock_pattern is None
+
+    matches = await heart.check_censors("drop table users", session=session)
+    block_matches = [m for m in matches if m.action == "block"]
+    assert len(block_matches) >= 1
+    assert block_matches[0].unblock_pattern is None
+
+
+async def test_multiple_censor_actions_all_injected(heart, session):
+    """When multiple warn censors with trigger_action fire, all results are collected."""
+    from nous.heart.schemas import FactInput
+    await heart.learn_fact(
+        FactInput(content="Python is a programming language", category="tech", subject="Python"),
+        session=session,
+    )
+    await heart.learn_fact(
+        FactInput(content="Security best practices include input validation", category="security", subject="security"),
+        session=session,
+    )
+
+    inp1 = CensorInput(
+        trigger_pattern="python.*code",
+        reason="Check coding standards",
+        action="warn",
+        trigger_action={"tool": "recall", "args": {"query": "python programming", "limit": 3}},
+    )
+    inp2 = CensorInput(
+        trigger_pattern="python.*code",
+        reason="Check security",
+        action="warn",
+        trigger_action={"tool": "search_facts", "args": {"query": "security", "limit": 3}},
+    )
+    await heart.add_censor(inp1, session=session)
+    await heart.add_censor(inp2, session=session)
+
+    matches = await heart.check_censors("Write python code for login", session=session)
+    warn_matches = [m for m in matches if m.action == "warn" and m.trigger_action]
+    assert len(warn_matches) >= 2
+
+    from nous.heart.censor_actions import CensorActionExecutor
+    executor = CensorActionExecutor(heart)
+    results = {}
+    for m in warn_matches:
+        result = await executor.execute(m.trigger_action, session=session)
+        if result:
+            results[str(m.id)] = result
+    assert len(results) >= 2
+
+
+async def test_backward_compat_censor_no_action(heart, session):
+    """Censors without trigger_action work exactly as before."""
+    inp = CensorInput(
+        trigger_pattern="deploy.*friday",
+        reason="No Friday deploys",
+        action="warn",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.trigger_action is None
+    assert detail.action_instruction is None
+    assert detail.unblock_pattern is None
+
+    matches = await heart.check_censors("Let's deploy on Friday", session=session)
+    assert len(matches) >= 1
+    assert matches[0].trigger_action is None
+    assert matches[0].action_instruction is None
+    assert matches[0].unblock_pattern is None
