@@ -180,6 +180,7 @@ class TurnContext(BaseModel):
     recalled_content_map: dict[str, str] = Field(default_factory=dict)
     recalled_score_map: dict[str, float] = Field(default_factory=dict)
     diagnostic_nudges: str = ""  # F024: Critic diagnostic observations
+    censor_injected_context: dict[str, str] = Field(default_factory=dict)  # F031: censor_id -> action results
 
 
 class ToolResult(BaseModel):

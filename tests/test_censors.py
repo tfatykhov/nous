@@ -609,3 +609,29 @@ async def test_execute_rejects_malformed_action(heart, session):
         session=session,
     )
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# F031 Task 4: TurnContext schema tests
+# ---------------------------------------------------------------------------
+
+
+def test_turn_context_has_censor_injected_context():
+    """TurnContext schema includes censor_injected_context field."""
+    from nous.cognitive.schemas import TurnContext, FrameSelection
+    ctx = TurnContext(
+        system_prompt="test",
+        frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
+        censor_injected_context={"censor-id-1": "[Censor recall: 3 results]..."},
+    )
+    assert ctx.censor_injected_context == {"censor-id-1": "[Censor recall: 3 results]..."}
+
+
+def test_turn_context_censor_injected_context_default_empty():
+    """censor_injected_context defaults to empty dict."""
+    from nous.cognitive.schemas import TurnContext, FrameSelection
+    ctx = TurnContext(
+        system_prompt="test",
+        frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
+    )
+    assert ctx.censor_injected_context == {}
