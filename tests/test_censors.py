@@ -492,3 +492,65 @@ async def test_keyword_match_no_false_positive(heart, session):
         session=session,
     )
     assert not any(m.id == censor.id for m in matches)
+
+
+# ---------------------------------------------------------------------------
+# 17. test_censor_input_with_trigger_action (F031)
+# ---------------------------------------------------------------------------
+
+
+async def test_censor_input_with_trigger_action(heart, session):
+    """CensorInput accepts trigger_action and action_instruction."""
+    inp = CensorInput(
+        trigger_pattern="citing.*source",
+        reason="Verify citations",
+        action="warn",
+        trigger_action={"tool": "recall", "args": {"query": "citations", "limit": 5}},
+        action_instruction="Verify all citations against recalled sources.",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.trigger_action == {"tool": "recall", "args": {"query": "citations", "limit": 5}}
+    assert detail.action_instruction == "Verify all citations against recalled sources."
+
+
+# ---------------------------------------------------------------------------
+# 18. test_censor_input_without_trigger_action (F031)
+# ---------------------------------------------------------------------------
+
+
+async def test_censor_input_without_trigger_action(heart, session):
+    """Existing censors without trigger_action still work (backward compat)."""
+    inp = CensorInput(
+        trigger_pattern="never deploy on Friday",
+        reason="Weekend risk",
+    )
+    detail = await heart.add_censor(inp, session=session)
+    assert detail.trigger_action is None
+    assert detail.action_instruction is None
+    assert detail.unblock_pattern is None
+
+
+# ---------------------------------------------------------------------------
+# 19. test_censor_match_includes_action_fields (F031)
+# ---------------------------------------------------------------------------
+
+
+def test_censor_match_includes_action_fields():
+    """CensorMatch carries trigger_action and action_instruction."""
+    from uuid import uuid4
+
+    from nous.heart.schemas import CensorMatch
+
+    match = CensorMatch(
+        id=uuid4(),
+        trigger_pattern="test",
+        action="warn",
+        reason="test reason",
+        domain=None,
+        trigger_action={"tool": "recall", "args": {"query": "test"}},
+        action_instruction="Check memory first.",
+        unblock_pattern=r"admin@example\.com",
+    )
+    assert match.trigger_action["tool"] == "recall"
+    assert match.action_instruction == "Check memory first."
+    assert match.unblock_pattern == r"admin@example\.com"

@@ -99,6 +99,9 @@ class CensorManager:
             domain=input.domain,
             learned_from_decision=input.learned_from_decision,
             learned_from_episode=input.learned_from_episode,
+            trigger_action=input.trigger_action,
+            action_instruction=input.action_instruction,
+            unblock_pattern=input.unblock_pattern,
             created_by="manual",
             embedding=embedding,
         )
@@ -205,6 +208,9 @@ class CensorManager:
                     action=censor.action,
                     reason=censor.reason,
                     domain=censor.domain,
+                    trigger_action=censor.trigger_action,
+                    action_instruction=censor.action_instruction,
+                    unblock_pattern=censor.unblock_pattern,
                 )
             )
 
@@ -384,6 +390,9 @@ class CensorManager:
                 reason=c.reason,
                 domain=c.domain,
                 score=scores.get(c.id),
+                trigger_action=c.trigger_action,
+                action_instruction=c.action_instruction,
+                unblock_pattern=c.unblock_pattern,
             )
             for cid in ids
             if (c := censors.get(cid)) is not None
@@ -426,6 +435,9 @@ class CensorManager:
                             reason=censor.reason,
                             domain=censor.domain,
                             score=1.0,
+                            trigger_action=censor.trigger_action,
+                            action_instruction=censor.action_instruction,
+                            unblock_pattern=censor.unblock_pattern,
                         )
                     )
             except re.error:
@@ -621,4 +633,7 @@ class CensorManager:
             escalation_threshold=censor.escalation_threshold or 3,
             active=censor.active if censor.active is not None else True,
             created_at=censor.created_at,
+            trigger_action=censor.trigger_action,
+            action_instruction=censor.action_instruction,
+            unblock_pattern=censor.unblock_pattern,
         )
