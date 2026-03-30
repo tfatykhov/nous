@@ -187,6 +187,7 @@ class AgentRunner:
             user_id=user_id,
             user_display_name=user_display_name,
             skip_episode=skip_episode,
+            is_subtask=is_subtask,
         )
 
         # 3. Append user message

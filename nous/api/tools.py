@@ -1086,6 +1086,37 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     settings.subtask_max_timeout,
                 )
 
+            # F031: Check censors on subtask task text at creation time.
+            # Subtasks are non-interactive so censor checks are skipped during
+            # execution (pre_turn). We check here instead for immediate feedback.
+            try:
+                from nous.heart.censor_actions import CensorActionExecutor
+                matches = await heart.check_censors(task)
+                for match in matches:
+                    if match.action == "block":
+                        # F031: Check unblock condition before rejecting
+                        unblocked = False
+                        if match.trigger_action and match.unblock_pattern:
+                            executor = CensorActionExecutor(heart)
+                            action_result = await executor.execute(match.trigger_action)
+                            if action_result:
+                                import re
+                                try:
+                                    if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
+                                        unblocked = True
+                                except re.error:
+                                    pass
+                        if not unblocked:
+                            reason = match.reason or match.trigger_pattern
+                            msg = f"Subtask rejected by censor: {reason}"
+                            if match.action_instruction:
+                                msg += f"\n{match.action_instruction}"
+                            return {"content": [{"type": "text", "text": msg}]}
+                    elif match.action == "warn":
+                        logger.info("Censor WARN on subtask creation: %s", match.trigger_pattern)
+            except Exception:
+                logger.debug("Censor check failed during spawn_task, proceeding")
+
             subtask = await heart.subtasks.create(
                 task=task,
                 priority=priority,

@@ -230,6 +230,7 @@ class CognitiveLayer:
         user_id: str | None = None,
         user_display_name: str | None = None,
         skip_episode: bool = False,
+        is_subtask: bool = False,
     ) -> TurnContext:
         """SENSE -> FRAME -> RECALL -> DELIBERATE — prepare for LLM turn.
 
@@ -545,13 +546,13 @@ class CognitiveLayer:
             pass
 
         # Programmatic censor check on user input (#160 follow-up).
-        # This complements the prompt-based censors (soft) with actual
-        # pattern matching (hard). check_censors() increments
-        # activation_count as a side effect.
+        # Subtasks skip censor checks here — they are checked at creation
+        # time in spawn_task instead (non-interactive, no user to see blocks).
         censor_injected: dict[str, str] = {}
         censor_blocked = False
         censor_block_reason: str | None = None
-        try:
+        if not is_subtask:
+          try:
             matches = await self._heart.check_censors(user_input, session=session)
             for match in matches:
                 if match.action == "block":
@@ -628,7 +629,7 @@ class CognitiveLayer:
                                 "Censor action failed (session=%s, censor=%s)",
                                 session_id, match.id, exc_info=True,
                             )
-        except Exception:
+          except Exception:
             logger.debug("Censor check failed during pre_turn")
 
         # F031: Append censor-injected context to system prompt
