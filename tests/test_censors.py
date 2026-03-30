@@ -675,7 +675,7 @@ def test_check_censor_compliance_empty_injected():
 async def test_censor_action_end_to_end(heart, session):
     """Full flow: create censor with action -> check -> execute -> get results."""
     from nous.heart.schemas import FactInput
-    await heart.learn_fact(
+    await heart.learn(
         FactInput(content="Paris is the capital of France", category="geography", subject="France"),
         session=session,
     )
@@ -706,7 +706,7 @@ async def test_censor_action_end_to_end(heart, session):
 async def test_block_censor_with_action_enriches_reason(heart, session):
     """Block censor with trigger_action enriches the block reason with evidence."""
     from nous.heart.schemas import FactInput
-    await heart.learn_fact(
+    await heart.learn(
         FactInput(content="Production database was accidentally deleted on 2025-12-01", category="incident", subject="production"),
         session=session,
     )
@@ -737,7 +737,7 @@ async def test_block_censor_with_action_enriches_reason(heart, session):
 async def test_block_censor_conditional_unblock(heart, session):
     """Block censor with unblock_pattern downgrades to warn when pattern matches action results."""
     from nous.heart.schemas import FactInput
-    await heart.learn_fact(
+    await heart.learn(
         FactInput(content="Allowed admin: admin@company.com, ops@company.com", category="access", subject="admin-list"),
         session=session,
     )
@@ -784,11 +784,11 @@ async def test_block_censor_no_unblock_when_pattern_missing(heart, session):
 async def test_multiple_censor_actions_all_injected(heart, session):
     """When multiple warn censors with trigger_action fire, all results are collected."""
     from nous.heart.schemas import FactInput
-    await heart.learn_fact(
+    await heart.learn(
         FactInput(content="Python is a programming language", category="tech", subject="Python"),
         session=session,
     )
-    await heart.learn_fact(
+    await heart.learn(
         FactInput(content="Security best practices include input validation", category="security", subject="security"),
         session=session,
     )

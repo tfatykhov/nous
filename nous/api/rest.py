@@ -469,6 +469,19 @@ def create_app(
         if not update_fields:
             return JSONResponse({"error": "No fields to update"}, status_code=400)
 
+        # F031: Validate trigger_action structure if provided
+        ta = update_fields.get("trigger_action")
+        if ta is not None:
+            if not isinstance(ta, dict):
+                return JSONResponse({"error": "trigger_action must be a JSON object or null"}, status_code=400)
+            from nous.heart.censor_actions import ALLOWED_TOOLS
+            tool = ta.get("tool")
+            if not tool or tool not in ALLOWED_TOOLS:
+                return JSONResponse(
+                    {"error": f"trigger_action.tool must be one of: {', '.join(sorted(ALLOWED_TOOLS))}"},
+                    status_code=400,
+                )
+
         try:
             from uuid import UUID
             detail = await heart.update_censor(UUID(censor_id), **update_fields)
