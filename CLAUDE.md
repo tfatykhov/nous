@@ -383,6 +383,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `web_search` | all | Search via Brave API |
 | `web_fetch` | all | Fetch and extract web content |
 | `run_python` | conversation, question, debug, task | Execute Python with memory functions in scope |
+| `send_file` | task, conversation, debug | Send files to Telegram (images as photos, rest as documents) |
 
 ## Git Workflow
 

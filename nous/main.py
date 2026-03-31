@@ -330,6 +330,12 @@ async def create_components(settings: Settings) -> dict:
     )
     register_web_tools(dispatcher, settings, web_http, router=search_router)
 
+    # Issue #220: Register Telegram file delivery tool (gated on bot token)
+    if settings.telegram_bot_token:
+        from nous.api.telegram_tools import register_telegram_tools
+        register_telegram_tools(dispatcher, settings, web_http)
+        logger.info("Telegram file delivery tool registered (send_file)")
+
     # F020: Register cache_retrieve tool
     from nous.api.tools import register_cache_retrieve_tool
     register_cache_retrieve_tool(dispatcher, database.session_factory)
