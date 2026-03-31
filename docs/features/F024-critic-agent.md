@@ -749,7 +749,7 @@ Phase 0 starts with **Sonnet** as the Critic model, not Haiku. Rationale:
 - Main Agent still owns the conversation and talks to user
 
 **Success criteria:**
-- Critic produces valid DAGs for multi-step tasks >80% of the time
+- Critic produces **structurally valid** DAGs (pass `validate()`) >95% of the time; **semantically useful** decompositions >80% (human-reviewed sample)
 - Task Controller correctly schedules waves — parallel within, sequential between
 - Wave-scheduled execution outperforms monolithic single-turn on complex tasks (>60%, human judged)
 - Predecessor context preserves information from upstream nodes

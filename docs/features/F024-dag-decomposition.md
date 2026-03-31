@@ -400,6 +400,17 @@ class TaskDAG:
 ### TaskController
 
 ```python
+def _now_ms() -> int:
+    """Current time in milliseconds."""
+    import time
+    return int(time.time() * 1000)
+
+
+def _chunk(items: list, size: int) -> list[list]:
+    """Split a list into chunks of at most `size`."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
 class TaskController:
     """
     Stateful orchestrator for DAG execution.
@@ -445,6 +456,15 @@ class TaskController:
                 dag=self.dag,
                 status="validation_failed",
                 errors=issues,
+            )
+        
+        # Degenerate case: single-node DAG → skip orchestration overhead,
+        # fall through to normal single-advised execution
+        if len(self.dag.nodes) == 1:
+            return DAGExecutionResult(
+                dag=self.dag,
+                status="degenerate_single_node",
+                errors=[],
             )
         
         waves = self.dag.topological_waves()
@@ -569,7 +589,7 @@ class TaskController:
                 return subtask.result
             if subtask.status == "failed":
                 raise SubtaskFailedError(subtask.error)
-            await asyncio.sleep(1)  # Poll interval
+            await asyncio.sleep(1)  # Poll interval — TODO Phase 2: replace with asyncio.Event/callback for event-driven completion notification
         raise asyncio.TimeoutError(f"Subtask {subtask_id} timed out after {timeout_ms}ms")
     
     # ─── Quality Gate ────────────────────────────────────────────
@@ -744,6 +764,13 @@ Your task: Compare the CAID approach with F024 and draft specific amendment
 recommendations. Use the prerequisite outputs above as your source material.
 ```
 
+### Subtask Result Storage
+
+Node outputs are stored in full in `subtask.result` (TEXT column, no size limit). Summarization happens only at **injection time** — when predecessor context is built for successor prompts. This means:
+- The DB always has the complete output (useful for debugging and post-mortems)
+- Only the summarized version enters the successor's context window
+- If a node produces very large output (>10K tokens), the full result is preserved but the successor sees a focused summary
+
 ### Context Size Management
 
 1. **Summarization gate** — If a predecessor output exceeds 2000 tokens, summarize before injection (LLM call via Critic)
@@ -781,7 +808,7 @@ recommendations. Use the prerequisite outputs above as your source material.
    │
    ├─ 5e. Quality Gate: Critic evaluates Wave 1 outputs
    │       "Are these sufficient for Wave 2 successors?"
-   │       If no → stop with partial results
+   │       If no → stop with partial results (see Partial Result Assembly below)
    │
    ├─ 5f. Wave 2: create subtasks with predecessor context injected into instructions
    │       Workers pick up, execute, complete
@@ -795,6 +822,19 @@ recommendations. Use the prerequisite outputs above as your source material.
    │
 8. Main Agent assembles final response → User
 ```
+
+### Partial Result Assembly
+
+When a DAG produces partial results (quality gate failure, node failure, budget exceeded), the Main Agent receives:
+1. All **completed** node outputs (these are real, useful work)
+2. A **status summary** listing what failed and why
+3. The TaskController's `DAGPostMortem` object
+
+The Main Agent then:
+- Delivers whatever completed results are useful to the user
+- Transparently explains what couldn't be completed: _"I completed the research and analysis phases, but the comparison step couldn't run because the research output was insufficient. Here's what I found so far..."_
+- Does NOT fabricate results for failed/blocked nodes
+- May suggest the user retry with a more specific request
 
 ### Phase 1b Flow (competing, with transactions)
 
@@ -829,6 +869,20 @@ Wave 3: [Write report v1] [Write report v2]  ← 1b pattern (competing, transact
 
 ---
 
+### User Message During DAG Execution
+
+**Policy:** Queue and respond after DAG completes.
+
+If the user sends a new message while a DAG is executing:
+1. The message is queued (not processed immediately)
+2. The current DAG continues to completion (or partial result)
+3. After the DAG result is assembled and delivered, the queued message is processed as a new turn
+4. If the user message is clearly an **abort signal** ("stop", "cancel", "nevermind"), the TaskController cancels all pending/running nodes and returns partial results immediately
+
+**Rationale:** Processing a new message mid-DAG would require either (a) injecting it into running subtasks (complex, risky) or (b) running it in parallel with the DAG (confusing for the user). Queuing is simple, predictable, and matches how subtasks work today.
+
+---
+
 ## Hard Constraints
 
 ### Phase 1a Constraints
@@ -847,6 +901,79 @@ Wave 3: [Write report v1] [Write report v2]  ← 1b pattern (competing, transact
 11. **spawn/schedule blocked in competing instances.**
 12. **Transaction rollback must be clean.** No orphaned facts, no ghost decisions.
 13. **Competing instances are mutually isolated.** No cross-instance communication.
+
+---
+
+---
+
+## Observability & Logging
+
+The TaskController is a stateful async component — failures must be debuggable after the fact. All events are logged via standard Python logging (`nous.cognitive.task_controller`).
+
+### Required Log Events
+
+| Event | Level | Data | When |
+|---|---|---|---|
+| `dag.created` | INFO | `dag_id`, node count, wave count, original request (truncated) | DAG validated and accepted |
+| `dag.validation_failed` | WARNING | `dag_id`, list of issues | DAG rejected by `validate()` |
+| `wave.started` | INFO | `dag_id`, wave index, node IDs in wave | Wave execution begins |
+| `wave.completed` | INFO | `dag_id`, wave index, duration, tokens used, pass/fail per node | All nodes in wave resolved |
+| `node.spawned` | DEBUG | `dag_id`, node ID, subtask ID, frame, injected context size | Subtask created for node |
+| `node.completed` | INFO | `dag_id`, node ID, duration, tokens used, result size | Node subtask finished successfully |
+| `node.failed` | WARNING | `dag_id`, node ID, error message, retry count | Node subtask failed |
+| `node.blocked` | INFO | `dag_id`, node ID, blocked by (failed predecessor ID) | Failure propagated to dependent |
+| `node.timeout` | WARNING | `dag_id`, node ID, elapsed ms, timeout ms | Node exceeded timeout |
+| `quality_gate.passed` | INFO | `dag_id`, wave index, Critic rationale | Quality gate approved wave outputs |
+| `quality_gate.failed` | WARNING | `dag_id`, wave index, Critic rationale, action taken | Quality gate rejected wave outputs |
+| `budget.warning` | WARNING | `dag_id`, tokens consumed, token budget, percentage | Budget >80% consumed |
+| `budget.exceeded` | ERROR | `dag_id`, tokens consumed, token budget | Budget exceeded, execution stopped |
+| `dag.completed` | INFO | `dag_id`, total duration, total tokens, waves completed, nodes completed/failed/blocked | DAG execution finished |
+| `dag.partial` | WARNING | `dag_id`, completed nodes, failed nodes, blocked nodes, reason | DAG finished with partial results |
+
+### Structured Log Format
+
+All log entries include `dag_id` as a correlation key for filtering. Example:
+
+```python
+logger.info(
+    "dag.wave.completed",
+    extra={
+        "dag_id": self.dag.dag_id,
+        "wave_index": wave_idx,
+        "duration_ms": wave_duration,
+        "tokens_used": wave_tokens,
+        "nodes": {nid: node.status for nid in wave_node_ids},
+    }
+)
+```
+
+### Dashboard Integration
+
+The Memory Dashboard (F021) should display:
+- Active DAG executions with real-time progress (via `get_progress()`)
+- Historical DAG execution log — searchable by `dag_id`, date, status
+- Per-DAG node timeline visualization (which nodes ran when, how long, pass/fail)
+- Aggregate stats: avg nodes per DAG, avg waves, failure rate, quality gate rejection rate
+
+### Post-Mortem Support
+
+On DAG failure or partial result, the TaskController produces a `DAGPostMortem` object:
+
+```python
+@dataclass
+class DAGPostMortem:
+    dag_id: str
+    status: str  # "partial_result" | "budget_exceeded" | "validation_failed"
+    completed_nodes: list[str]
+    failed_nodes: list[str]  # with error messages
+    blocked_nodes: list[str]  # with which predecessor caused the block
+    quality_gate_results: list[dict]  # per-wave gate outcomes
+    total_tokens: int
+    total_duration_ms: int
+    recommendation: str  # "retry with simpler decomposition" | "increase budget" | etc.
+```
+
+This is stored alongside the DAG execution result and available for debugging.
 
 ---
 
@@ -925,7 +1052,7 @@ Wave 3: [Write report v1] [Write report v2]  ← 1b pattern (competing, transact
 ## Success Criteria
 
 ### Phase 1a
-1. Critic produces valid DAGs for multi-step tasks >80% of the time
+1. Critic produces **structurally valid** DAGs (pass `validate()` — no cycles, within depth/node/parallelism caps) for multi-step tasks >95% of the time. **Semantically useful** decompositions (correct dependencies, appropriate granularity) >80% of the time, measured by human review of a sample
 2. Task Controller correctly schedules waves — parallel within, sequential between
 3. Wave-scheduled execution produces better results than monolithic single-turn on complex tasks (human judged, >60%)
 4. Predecessor context injection preserves information from upstream nodes
