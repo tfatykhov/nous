@@ -108,7 +108,7 @@ async def create_components(settings: Settings) -> dict:
     critic = None
     if settings.critic_enabled:
         from nous.cognitive.critic import CriticAgent
-        critic = CriticAgent(settings)
+        critic = CriticAgent(settings, procedure_manager=heart.procedures)
         critic.set_api_client(api_client)
         logger.info("F024: CriticAgent wired (mode=%s, model=%s)",
                      settings.critic_mode, settings.critic_model)

@@ -1,6 +1,7 @@
 """Tests for F024 Critic Agent Phase 0."""
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from uuid import uuid4
 
 import pytest
 
@@ -12,10 +13,11 @@ from nous.cognitive.critic_schemas import (
 )
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
+from nous.heart.schemas import ProcedureSummary
 
 
 def _settings(**overrides):
-    return Settings(**overrides)
+    return Settings(_env_file=None, **overrides)
 
 
 def _frame(frame_id="conversation", confidence=0.5, method="default"):
@@ -368,3 +370,174 @@ class TestDiagnosticCritics:
         nudges = agent.format_nudges(results)
         assert "[Critic/repetition]" in nudges
         assert "[DIAGNOSTIC OBSERVATIONS]" in nudges
+
+
+# ---- Skill Catalog (Issue #216) ----
+
+
+class TestSkillCatalog:
+    """Tests for issue #216: skill catalog injection."""
+
+    @pytest.mark.asyncio
+    async def test_build_catalog_from_procedures(self):
+        """Catalog is built from active procedures with correct format."""
+        from nous.heart.procedures import ProcedureManager
+        agent = CriticAgent(_settings())
+        mock_pm = AsyncMock(spec=ProcedureManager)
+        mock_pm.list_all = AsyncMock(return_value=([
+            ProcedureSummary(id=uuid4(), name="code-review", domain="process",
+                           description="Review pull requests", activation_count=5,
+                           effectiveness=0.85),
+            ProcedureSummary(id=uuid4(), name="debug-strategy", domain="engineering",
+                           description="Systematic debugging approach", activation_count=3,
+                           effectiveness=None),
+        ], 2))
+        agent._procedure_manager = mock_pm
+        catalog, valid_names = await agent._build_skill_catalog()
+        assert "code-review" in catalog
+        assert "Review pull requests" in catalog
+        assert "(effectiveness: 85%)" in catalog
+        assert "debug-strategy" in catalog
+        assert valid_names == {"code-review", "debug-strategy"}
+
+    @pytest.mark.asyncio
+    async def test_catalog_no_procedure_manager(self):
+        """No procedure_manager returns safe default."""
+        agent = CriticAgent(_settings())
+        catalog, valid_names = await agent._build_skill_catalog()
+        assert catalog == "No skills registered."
+        assert valid_names == set()
+
+    @pytest.mark.asyncio
+    async def test_catalog_empty_procedures(self):
+        """Empty procedure list returns safe default."""
+        from nous.heart.procedures import ProcedureManager
+        agent = CriticAgent(_settings())
+        mock_pm = AsyncMock(spec=ProcedureManager)
+        mock_pm.list_all = AsyncMock(return_value=([], 0))
+        agent._procedure_manager = mock_pm
+        catalog, valid_names = await agent._build_skill_catalog()
+        assert catalog == "No skills registered."
+        assert valid_names == set()
+
+    @pytest.mark.asyncio
+    async def test_catalog_list_all_exception_degrades_gracefully(self):
+        """list_all failure returns safe default."""
+        from nous.heart.procedures import ProcedureManager
+        agent = CriticAgent(_settings())
+        mock_pm = AsyncMock(spec=ProcedureManager)
+        mock_pm.list_all = AsyncMock(side_effect=RuntimeError("DB error"))
+        agent._procedure_manager = mock_pm
+        catalog, valid_names = await agent._build_skill_catalog()
+        assert catalog == "No skills registered."
+        assert valid_names == set()
+
+    @pytest.mark.asyncio
+    async def test_catalog_escapes_curly_braces(self):
+        """Curly braces in descriptions are escaped for .format()."""
+        from nous.heart.procedures import ProcedureManager
+        agent = CriticAgent(_settings())
+        mock_pm = AsyncMock(spec=ProcedureManager)
+        mock_pm.list_all = AsyncMock(return_value=([
+            ProcedureSummary(id=uuid4(), name="template-skill", domain="general",
+                           description="Use {variable} syntax",
+                           activation_count=1, effectiveness=None),
+        ], 1))
+        agent._procedure_manager = mock_pm
+        catalog, valid_names = await agent._build_skill_catalog()
+        # Should not raise when used in .format()
+        test_template = "Skills:\n{skill_catalog}"
+        formatted = test_template.format(skill_catalog=catalog)
+        assert "{{variable}}" in catalog
+        assert "template-skill" in valid_names
+
+
+class TestSkillFiltering:
+    """Tests for hallucinated skill filtering."""
+
+    def test_hallucinated_skills_filtered(self):
+        agent = CriticAgent(_settings())
+        raw_json = json.dumps({
+            "complexity": "moderate", "routing": "single",
+            "frames": ["task"],
+            "skills": ["code-review", "hallucinated-skill", "debug-strategy"],
+            "rationale": "Task with skills",
+            "per_frame_instructions": {},
+        })
+        result = agent._parse_classification(
+            raw_json, _frame(), valid_skill_names={"code-review", "debug-strategy"},
+        )
+        assert result.skills == ["code-review", "debug-strategy"]
+
+    def test_no_valid_names_passes_all(self):
+        """When valid_skill_names is None (backward compat), all skills pass through."""
+        agent = CriticAgent(_settings())
+        raw_json = json.dumps({
+            "complexity": "moderate", "routing": "single",
+            "frames": ["task"],
+            "skills": ["anything", "goes"],
+            "rationale": "Test",
+            "per_frame_instructions": {},
+        })
+        result = agent._parse_classification(raw_json, _frame(), valid_skill_names=None)
+        assert result.skills == ["anything", "goes"]
+
+    def test_empty_valid_names_filters_everything(self):
+        """When catalog is empty (set()), all skills are filtered out."""
+        agent = CriticAgent(_settings())
+        raw_json = json.dumps({
+            "complexity": "moderate", "routing": "single",
+            "frames": ["task"],
+            "skills": ["hallucinated"],
+            "rationale": "Test",
+            "per_frame_instructions": {},
+        })
+        result = agent._parse_classification(raw_json, _frame(), valid_skill_names=set())
+        assert result.skills == []
+
+    @pytest.mark.asyncio
+    async def test_classify_injects_catalog_into_prompt(self):
+        """Full classify call includes skill catalog in prompt."""
+        from nous.heart.procedures import ProcedureManager
+        agent = CriticAgent(_settings())
+        mock_pm = AsyncMock(spec=ProcedureManager)
+        mock_pm.list_all = AsyncMock(return_value=([
+            ProcedureSummary(id=uuid4(), name="my-skill", domain="engineering",
+                           description="A real skill", activation_count=1,
+                           effectiveness=0.9),
+        ], 1))
+        agent._procedure_manager = mock_pm
+
+        mock_api = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.content = [{"type": "text", "text": json.dumps({
+            "complexity": "moderate", "routing": "single",
+            "frames": ["task"], "skills": ["my-skill"],
+            "rationale": "Needs skill", "per_frame_instructions": {},
+        })}]
+        mock_api.call = AsyncMock(return_value=mock_response)
+        agent.set_api_client(mock_api)
+
+        result = await agent.classify(
+            user_message="please help me review this complex code thoroughly",
+            heuristic_frame=_frame(),
+            available_frames=["task", "conversation"],
+        )
+        assert result.skills == ["my-skill"]
+
+    @pytest.mark.asyncio
+    async def test_passthrough_returns_empty_skills(self):
+        """Passthrough skips catalog and returns empty skills."""
+        from nous.heart.procedures import ProcedureManager
+        agent = CriticAgent(_settings())
+        mock_pm = AsyncMock(spec=ProcedureManager)
+        agent._procedure_manager = mock_pm
+
+        result = await agent.classify(
+            user_message="hi",
+            heuristic_frame=_frame(),
+            available_frames=["conversation"],
+        )
+        assert result.skills == []
+        # Verify list_all was NOT called (passthrough skips catalog)
+        mock_pm.list_all.assert_not_called()
