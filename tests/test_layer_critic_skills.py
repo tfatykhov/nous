@@ -1,13 +1,14 @@
-"""Tests for issue #216: Critic skill activation in CognitiveLayer.
+"""Tests for critic skill wiring in CognitiveLayer (issue #216 + #229).
 
-Tests exercise the exact activation logic from layer.py lines 377-396,
-using the same control flow and Heart facade methods.
+Tests exercise the activation logic from layer.py lines 377-396 (#216),
+and the critic_skills -> context.build() wiring (#229).
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 from nous.cognitive.critic_schemas import CriticResult, RoutingMode
+from nous.cognitive.schemas import BuildResult, FrameSelection
 
 
 async def _run_activation_logic(
@@ -169,3 +170,174 @@ class TestCriticSkillActivation:
             )
             activated = await _run_activation_logic(mode, critic_result, mock_heart)
             assert activated == [], f"Failed for mode={mode}"
+
+
+# --- Issue #229: critic_skills -> context.build() wiring tests ---
+
+
+def _frame(frame_id="conversation", confidence=0.5, method="default"):
+    return FrameSelection(
+        frame_id=frame_id,
+        frame_name=frame_id.title(),
+        confidence=confidence,
+        match_method=method,
+    )
+
+
+def _settings(**overrides):
+    from nous.config import Settings
+    return Settings(_env_file=None, **overrides)
+
+
+def _mock_layer(settings):
+    """Build a CognitiveLayer with fully mocked dependencies."""
+    from nous.cognitive.layer import CognitiveLayer
+
+    brain = MagicMock()
+    brain.db = MagicMock()
+    brain.embeddings = MagicMock()
+    heart = MagicMock()
+    heart.list_censors = AsyncMock(return_value=[])
+    heart.list_working_memory = AsyncMock(return_value=[])
+    heart.get_procedure_by_name = AsyncMock(return_value=None)
+    heart.activate_procedure = AsyncMock()
+    heart.active_episode = AsyncMock(return_value=None)
+    heart.start_episode = AsyncMock(return_value=MagicMock(id="ep1"))
+    heart.focus = AsyncMock()
+
+    layer = CognitiveLayer(
+        brain=brain, heart=heart, settings=settings,
+    )
+
+    # Mock context build
+    mock_build_result = BuildResult(system_prompt="test", sections=[], recalled_ids={})
+    layer._context = MagicMock()
+    layer._context.build = AsyncMock(return_value=mock_build_result)
+    layer._context._identity_prompt = "Test"
+
+    # Mock frames
+    mock_frame = _frame("task", 0.9, "pattern")
+    layer._frames = MagicMock()
+    layer._frames.select = AsyncMock(return_value=mock_frame)
+    layer._frames.list_frames = AsyncMock(return_value=[mock_frame])
+    layer._frames.get = AsyncMock(return_value=mock_frame)
+
+    # No event bus
+    layer._bus = None
+
+    return layer
+
+
+class TestCriticSkillsContextWiring:
+    """Issue #229: Verify critic_skills are wired to context.build()."""
+
+    @pytest.mark.asyncio
+    async def test_critic_skills_passed_in_advised_mode(self):
+        """In advised mode, critic_result.skills are passed to context.build()."""
+        settings = _settings(
+            critic_enabled=True,
+            critic_mode="advised",
+            critic_skill_injection="enabled",
+        )
+        layer = _mock_layer(settings)
+
+        mock_result = CriticResult(
+            routing=RoutingMode.SINGLE_ADVISED,
+            recommended_frame="task",
+            rationale="test",
+            skills=["skill-a", "skill-b"],
+        )
+        layer._critic = MagicMock()
+        layer._critic.classify = AsyncMock(return_value=mock_result)
+        layer._critic.run_diagnostics = MagicMock(return_value=[])
+
+        await layer.pre_turn(
+            agent_id="test",
+            session_id="s1",
+            user_input="please summarize this document for me now",
+            session=None,
+        )
+
+        layer._context.build.assert_called_once()
+        call_kwargs = layer._context.build.call_args.kwargs
+        assert "critic_skills" in call_kwargs
+        assert call_kwargs["critic_skills"] == ["skill-a", "skill-b"]
+
+    @pytest.mark.asyncio
+    async def test_critic_skills_empty_in_shadow_mode(self):
+        """In shadow mode, critic_skills should be empty (P1-1 gate)."""
+        settings = _settings(
+            critic_enabled=True,
+            critic_mode="shadow",
+            critic_skill_injection="enabled",
+        )
+        layer = _mock_layer(settings)
+
+        mock_result = CriticResult(
+            routing=RoutingMode.SINGLE_ADVISED,
+            recommended_frame="task",
+            rationale="test",
+            skills=["skill-a"],
+        )
+        layer._critic = MagicMock()
+        layer._critic.classify = AsyncMock(return_value=mock_result)
+        layer._critic.run_diagnostics = MagicMock(return_value=[])
+
+        await layer.pre_turn(
+            agent_id="test",
+            session_id="s1",
+            user_input="please summarize this document for me now",
+            session=None,
+        )
+
+        layer._context.build.assert_called_once()
+        call_kwargs = layer._context.build.call_args.kwargs
+        assert call_kwargs.get("critic_skills") == []
+
+    @pytest.mark.asyncio
+    async def test_critic_skills_empty_when_critic_disabled(self):
+        """When critic is disabled, critic_skills defaults to empty list."""
+        settings = _settings(critic_enabled=False)
+        layer = _mock_layer(settings)
+
+        await layer.pre_turn(
+            agent_id="test",
+            session_id="s1",
+            user_input="hi there how are you",
+            session=None,
+        )
+
+        layer._context.build.assert_called_once()
+        call_kwargs = layer._context.build.call_args.kwargs
+        assert call_kwargs.get("critic_skills") == []
+
+    @pytest.mark.asyncio
+    async def test_critic_skills_empty_when_no_skills_returned(self):
+        """In advised mode with empty skills from critic, list stays empty."""
+        settings = _settings(
+            critic_enabled=True,
+            critic_mode="advised",
+            critic_skill_injection="enabled",
+        )
+        layer = _mock_layer(settings)
+
+        mock_result = CriticResult(
+            routing=RoutingMode.SINGLE_ADVISED,
+            recommended_frame="task",
+            rationale="test",
+            skills=[],
+        )
+        layer._critic = MagicMock()
+        layer._critic.classify = AsyncMock(return_value=mock_result)
+        layer._critic.run_diagnostics = MagicMock(return_value=[])
+
+        await layer.pre_turn(
+            agent_id="test",
+            session_id="s1",
+            user_input="help me debug this issue",
+            session=None,
+        )
+
+        layer._context.build.assert_called_once()
+        call_kwargs = layer._context.build.call_args.kwargs
+        assert call_kwargs.get("critic_skills") == []

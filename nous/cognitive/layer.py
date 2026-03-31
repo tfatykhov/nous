@@ -307,6 +307,9 @@ class CognitiveLayer:
                 logger.warning("Frame selection failed, falling back to conversation")
                 frame = self._frames._default_selection()
 
+        # Issue #229: Initialize critic skills (populated only in advised mode)
+        _critic_skills: list[str] = []
+
         # F024: Track user messages for frustration detection
         if self._critic and self._settings.critic_enabled:
             user_msgs = self._session_user_messages.setdefault(session_id, [])
@@ -417,6 +420,11 @@ class CognitiveLayer:
                 except Exception:
                     pass  # non-critical
 
+            # Issue #229: Capture critic skills for context build (advised mode only)
+            if (self._settings.critic_mode == "advised"
+                    and critic_result.skills):
+                _critic_skills = critic_result.skills
+
         # 2b. CLASSIFY — extract intent signals and plan retrieval (005.1)
         signals = self._intent_classifier.classify(user_input, frame)
         plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
@@ -478,6 +486,7 @@ class CognitiveLayer:
                     usage_tracker=self._usage_tracker,
                     identity_override=_identity_override,
                     temporal_boost=_temporal_boost,  # 008.6
+                    critic_skills=_critic_skills,  # Issue #229
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)
