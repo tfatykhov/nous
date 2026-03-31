@@ -723,44 +723,81 @@ Phase 0 starts with **Sonnet** as the Critic model, not Haiku. Rationale:
 - Track diagnostic firing rate and appropriateness
 - If running dual-model: compare Haiku vs Sonnet classification accuracy
 
-### Phase 1: Parallel Spawn + Pick Winner
-**Goal:** Enable speculative parallel execution with winner selection.
-**Effort:** ~15-20 hours
-**Depends on:** Phase 0 validated, F015 §3.1 (error recovery) and §4.2 (per-frame tool limits) complete
-**Risk:** Medium — requires transaction infrastructure
+### Phase 1a: DAG Decomposition + Task Controller
+**Goal:** Enable structured multi-step task execution with dependency-aware scheduling.
+**Effort:** ~16 hours
+**Depends on:** Phase 0 validated ✅
+**Risk:** Low — additive on existing subtask infrastructure, no transaction system needed
+**Full spec:** See [F024-dag-decomposition.md](F024-dag-decomposition.md) (v3)
+
+**What changes:**
+- Critic produces dependency graphs (`TaskDAG`) for multi-step tasks
+- New `TaskController` component — stateful async orchestrator (NOT an LLM agent)
+- Wave-based execution: parallel within waves, sequential between waves
+- Predecessor context injection — upstream outputs fed into downstream prompts
+- Quality gates between waves — Critic evaluates outputs before proceeding
+- Failure propagation — failed nodes block their dependents
+- Budget tracking — token/cost caps across all nodes
+- Progress reporting — Main Agent can query DAG execution status
+- Subtask model gains 3 nullable fields: `dag_id`, `wave_number`, `predecessor_ids`
+- Main Agent assembles final response from all node outputs (same role as today)
+
+**What doesn't change:**
+- Existing subtask system — workers remain DAG-unaware, just dequeue and execute
+- No transactions — every DAG node produces real work that gets committed
+- No competing approaches — that's Phase 1b
+- Main Agent still owns the conversation and talks to user
+
+**Success criteria:**
+- Critic produces valid DAGs for multi-step tasks >80% of the time
+- Task Controller correctly schedules waves — parallel within, sequential between
+- Wave-scheduled execution outperforms monolithic single-turn on complex tasks (>60%, human judged)
+- Predecessor context preserves information from upstream nodes
+- Quality gates catch insufficient outputs before wasting downstream compute (>50%)
+- Total DAG execution latency < sum of all node latencies × 0.7 (parallelism speedup)
+- Existing standalone subtasks continue working unchanged (backward compatibility)
+
+### Phase 1b: Transactional Competing Execution
+**Goal:** Enable speculative parallel execution with winner selection and rollback.
+**Effort:** ~12 hours
+**Depends on:** Phase 1a stable in production
+**Risk:** Medium — requires transaction infrastructure and isolation guarantees
+**Full spec:** See [F024-dag-decomposition.md](F024-dag-decomposition.md) §Phase 1b
 
 **What changes:**
 - `CognitiveTransaction` class — journaled side effects with read-through
-- `TransactionInterceptor` — wraps tool execution in parallel mode, including read-through layer for pending facts/files
-- Critic can route to "parallel-select" — spawn 2-3 instances
-- Critic can route to "parallel-evaluate" — spawn K=3-5 instances with identical prompts for self-consistency evaluation (v3)
-- `SequentialStopper` — monitors incoming evaluation results, cancels remaining instances on early consensus (v3)
-- Each instance runs in isolated transaction
-- `recall_deep`/`recall_recent` access count updates suppressed in parallel mode
-- **`bash` blocked entirely** in parallel instances (v2: static write detection is unreliable)
+- `TransactionInterceptor` — wraps tool execution in competing mode
+- Critic can route to "parallel-select" (independent) — spawn 2-3 competing approaches
+- Critic can route to "parallel-evaluate" — spawn K=3-5 identical prompts for self-consistency (v3)
+- `SequentialStopper` — monitors incoming results, cancels on early consensus (v3)
+- Each competing instance runs in isolated transaction
+- `recall_deep`/`recall_recent` access count updates suppressed in competing mode
+- **`bash` blocked entirely** in competing instances
 - Critic evaluates outputs: selects winner (select mode) or computes agreement rate (evaluate mode — v3)
-- Winner's journal committed, losers rolled back. Evaluate mode: no side effects committed (evaluation only — v3)
-- Spawn/schedule tools blocked in parallel instances
+- Winner's journal committed, losers rolled back
+- Spawn/schedule tools blocked in competing instances
+- **Mixed DAG+competing patterns enabled:** DAG prerequisite nodes (1a) can feed into competing leaf nodes (1b)
 
 **What doesn't change:**
 - No merge capability yet (pick one winner only)
 - No cherry-picking side effects across instances
-- No bash access in parallel (revisit Phase 2)
+- No bash access in competing mode (revisit Phase 2)
+- Phase 1a DAG execution continues to work independently
 
 **Success criteria:**
 - Transaction isolation verified — no leaked side effects from discarded instances
-- Read-through works — instances can recall their own pending facts
-- Parallel route produces better responses than single-frame on >50% of complex tasks (human judged)
-- Total latency for parallel turns < 2× single turn (parallelism saves time vs serial)
-- Cost per parallel turn < 3× single turn
-- (v3) Parallel-Evaluate: agreement rate correlates with actual correctness (measured on tasks with known answers)
-- (v3) Sequential stopping fires on >30% of evaluate runs, saving cost without degrading agreement accuracy
-- (v3) Cross-model divergence detected on >10% of evaluate runs (validates the bias detection signal)
+- Read-through works — competing instances can recall their own pending facts
+- Competing route produces better responses than single-frame on >50% of suitable tasks (human judged)
+- Winner selection agrees with human preference >70% of the time
+- Total latency for competing turns < 2× single turn
+- Cost per competing turn < 3× single turn
+- (v3) Parallel-Evaluate: agreement rate correlates with actual correctness
+- (v3) Sequential stopping fires on >30% of evaluate runs
 
 **Key technical risks:**
-- Transaction interceptor must be invisible to instances (they shouldn't know they're buffered)
+- Transaction interceptor must be invisible to instances
 - Concurrent recall_deep calls may hit rate limits or DB contention
-- Subtask worker pool sizing — do we have enough workers for 3 parallel + background tasks?
+- Subtask worker pool sizing — enough workers for 3 competing + background tasks?
 - Read-through embedding search adds latency — keep pending fact count small
 
 ### Phase 2: Merge + Cherry-Pick
