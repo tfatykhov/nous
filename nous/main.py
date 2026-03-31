@@ -318,7 +318,17 @@ async def create_components(settings: Settings) -> dict:
         timeout=httpx.Timeout(connect=10, read=30, write=10, pool=10),
         limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
     )
-    register_web_tools(dispatcher, settings, web_http)
+    # F033: Multi-tier search router
+    from nous.api.search_providers import TavilyProvider, ExaProvider, BraveProvider
+    from nous.api.search_router import SearchRouter
+
+    search_router = SearchRouter(
+        tavily=TavilyProvider(api_key=settings.tavily_api_key),
+        exa=ExaProvider(api_key=settings.exa_api_key),
+        brave=BraveProvider(api_key=settings.brave_search_api_key),
+        mode=settings.search_provider,
+    )
+    register_web_tools(dispatcher, settings, web_http, router=search_router)
 
     # F020: Register cache_retrieve tool
     from nous.api.tools import register_cache_retrieve_tool

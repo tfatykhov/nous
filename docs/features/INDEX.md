@@ -28,6 +28,7 @@
 | F015 | [Subtask Hardening](F015-subtask-hardening.md) | ✅ Shipped | Timeout limits, concurrent limits, tool call limits, worker pool configuration |
 | F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | ✅ Shipped | Polymorphic graph edges, cross-type linking, contradiction bridge, density-gated spreading activation |
 | F030 | [MMR Diversity Reranking](F030-mmr-diversity-reranking.md) | ✅ Shipped | Maximal Marginal Relevance diversity re-ranking in recall_deep, configurable relevance/diversity weight |
+| F033 | Multi-Tier Search | ✅ Shipped | Tavily primary + Exa research + Brave fallback, query classification router |
 
 ### P0: Identity & Context
 | Feature | Name | Status | Description |

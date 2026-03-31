@@ -12,13 +12,16 @@ import logging
 import re
 import socket
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
 
 from nous.api.tools import ToolDispatcher
 from nous.config import Settings
+
+if TYPE_CHECKING:
+    from nous.api.search_router import SearchRouter
 
 logger = logging.getLogger(__name__)
 
@@ -117,19 +120,45 @@ async def _web_search(
     *,
     _settings: Settings,
     _http: httpx.AsyncClient,
+    _router: SearchRouter | None = None,
 ) -> dict[str, Any]:
-    """Search via Brave Search API."""
-    try:
-        # Check API key
-        if not _settings.brave_search_api_key:
-            return _mcp_response("Error: BRAVE_SEARCH_API_KEY not configured. Set this environment variable to enable web search.")
+    """Search via multi-tier search router (F033).
 
-        # Check rate limit
+    If a SearchRouter is provided, delegates to it with automatic
+    provider selection and fallback. Otherwise, falls back to direct
+    Brave Search API call (backward compatibility).
+    """
+    try:
+        # Check rate limit (applies regardless of provider)
         rate_error = _check_rate_limit(_settings)
         if rate_error:
             return _mcp_response(f"Rate limit: {rate_error}")
 
         count = min(count, 10)
+
+        # Route through multi-tier search if router available
+        if _router is not None:
+            try:
+                results, provider_name = await _router.search(
+                    query, count=count, http=_http, freshness=freshness,
+                )
+            except RuntimeError as e:
+                return _mcp_response(f"Search error: {e}")
+
+            lines = [f"Search results for: {query} [via {provider_name}]\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r.title}")
+                lines.append(f"   URL: {r.url}")
+                lines.append(f"   {r.snippet}\n")
+
+            return _mcp_response("\n".join(lines))
+
+        # Fallback: direct Brave (no router configured)
+        if not _settings.brave_search_api_key:
+            return _mcp_response(
+                "Error: No search provider configured. Set TAVILY_API_KEY, "
+                "EXA_API_KEY, or BRAVE_SEARCH_API_KEY."
+            )
 
         params: dict[str, Any] = {"q": query, "count": count}
         if freshness:
@@ -150,23 +179,25 @@ async def _web_search(
         )
 
         if response.status_code != 200:
-            return _mcp_response(f"Search failed (HTTP {response.status_code}). Check BRAVE_SEARCH_API_KEY if 401.")
+            return _mcp_response(
+                f"Search failed (HTTP {response.status_code}). "
+                "Check BRAVE_SEARCH_API_KEY if 401."
+            )
 
         data = response.json()
-        results = []
+        results_list = []
         for item in data.get("web", {}).get("results", [])[:count]:
-            results.append({
+            results_list.append({
                 "title": item.get("title", ""),
                 "url": item.get("url", ""),
                 "snippet": item.get("description", ""),
             })
 
-        if not results:
+        if not results_list:
             return _mcp_response(f"No results found for: {query}")
 
-        # Format as readable text for LLM
         lines = [f"Search results for: {query}\n"]
-        for i, r in enumerate(results, 1):
+        for i, r in enumerate(results_list, 1):
             lines.append(f"{i}. {r['title']}")
             lines.append(f"   URL: {r['url']}")
             lines.append(f"   {r['snippet']}\n")
@@ -332,14 +363,18 @@ def register_web_tools(
     dispatcher: ToolDispatcher,
     settings: Settings,
     http_client: httpx.AsyncClient,
+    router: SearchRouter | None = None,
 ) -> None:
     """Register web tools (web_search, web_fetch) with the dispatcher.
 
-    Creates closure wrappers that inject settings and httpx client.
-    Uses a SEPARATE httpx client from AgentRunner (no auth headers).
+    Creates closure wrappers that inject settings, httpx client, and
+    optional SearchRouter for multi-tier search (F033).
     """
     async def _search(query: str, count: int = 5, freshness: str | None = None) -> dict[str, Any]:
-        return await _web_search(query, count, freshness, _settings=settings, _http=http_client)
+        return await _web_search(
+            query, count, freshness,
+            _settings=settings, _http=http_client, _router=router,
+        )
 
     async def _fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
         return await _web_fetch(url, max_chars, _settings=settings, _http=http_client)

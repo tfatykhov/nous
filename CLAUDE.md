@@ -95,7 +95,9 @@ nous/
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration
 │       ├── builtin_tools.py    # bash, read_file, write_file
-│       ├── web_tools.py        # web_search, web_fetch
+│       ├── web_tools.py        # web_search, web_fetch (multi-tier routing)
+│       ├── search_providers.py # SearchProvider protocol + Tavily, Exa, Brave
+│       ├── search_router.py   # Query classification + cascading fallback
 │       ├── compaction.py       # History compaction engine
 │       ├── smart_compress.py   # Smart compression for tool results
 │       ├── tool_cache.py       # Tool result caching
@@ -140,6 +142,7 @@ nous/
 | F026 | Execution Integrity (execution ledger, action gating, claim verification, ghost planning detection) | #183 |
 | F030 | MMR Diversity Reranking (Maximal Marginal Relevance in recall_deep) | #205 |
 | F031 | Censor Middleware with Action Payloads (censors execute read-only tools, conditional unblock, update API) | #208 |
+| F033 | Multi-Tier Search Routing (Tavily primary, Exa research, Brave fallback, query classification) | — |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 
 ## How to Work
@@ -231,7 +234,10 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_MAX_TURNS` | `10` | Max tool loop iterations |
 | `NOUS_MCP_ENABLED` | `true` | Enable MCP server |
 | `NOUS_LOG_LEVEL` | `info` | Log level |
-| `BRAVE_SEARCH_API_KEY` | — | For web_search tool |
+| `BRAVE_SEARCH_API_KEY` | — | Brave Search API key (tertiary fallback) |
+| `TAVILY_API_KEY` | — | Tavily Search API key (primary search provider) |
+| `EXA_API_KEY` | — | Exa Search API key (deep research queries) |
+| `NOUS_SEARCH_PROVIDER` | `auto` | Search routing: auto, tavily, exa, brave |
 | `OPENAI_API_KEY` | — | For embeddings (text-embedding-3-small) |
 | `NOUS_EVENT_BUS_ENABLED` | `true` | Enable async event bus |
 | `NOUS_EPISODE_SUMMARY_ENABLED` | `true` | Enable episode summarization handler |
