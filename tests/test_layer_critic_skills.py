@@ -106,7 +106,7 @@ class TestCriticSkillActivation:
         activated = await _run_activation_logic("advised", critic_result, mock_heart)
 
         assert mock_heart.get_procedure_by_name.call_count == 2
-        mock_heart.activate_procedure.call_count == 1  # only for "known"
+        assert mock_heart.activate_procedure.call_count == 1  # only for "known"
         assert activated == [str(known_id)]
 
     @pytest.mark.asyncio
