@@ -216,6 +216,7 @@ class StreamingMessage:
         "read_file": ("\U0001f4c4", "Reading"),
         "write_file": ("\u270f\ufe0f", "Writing"),
         "run_python": ("\U0001f4bb", "Scripting"),
+        "send_file": ("\U0001f4ce", "Sending file"),
     }
 
     def __init__(self, bot: NousTelegramBot, chat_id: int):
