@@ -132,7 +132,8 @@ class GDrive:
 
     def search_files(self, name_contains: str, folder_id: str | None = None) -> list[dict[str, Any]]:
         """Search for files by name substring."""
-        query = f"name contains '{name_contains}'"
+        escaped = name_contains.replace("'", "\\'")
+        query = f"name contains '{escaped}'"
         return self.list_files(folder_id=folder_id, query=query)
 
     # ── Download ─────────────────────────────────────────────────────
