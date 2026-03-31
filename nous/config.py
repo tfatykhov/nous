@@ -299,6 +299,9 @@ class Settings(BaseSettings):
     critic_model: str = "claude-sonnet-4-6"
     critic_max_latency_ms: int = 5000
     critic_passthrough_max_words: int = 5
+    critic_skill_injection: Literal["enabled", "disabled", "log_only"] = "disabled"
+    critic_skill_slots: int = Field(default=2, ge=0)  # Reserved slots for Critic-recommended skills
+    embedding_skill_slots: int = Field(default=3, ge=0)  # Slots for embedding similarity search
 
     # F024 Phase 3b: Self-Modifying Rubrics
     rubric_enabled: bool = True
