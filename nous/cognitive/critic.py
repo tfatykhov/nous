@@ -18,6 +18,7 @@ from typing import Any
 from nous.cognitive.critic_schemas import CriticResult, DiagnosticResult, RoutingMode
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
+from nous.heart.procedures import ProcedureManager
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ analyze the user's message and decide how Nous should process it.
 AVAILABLE FRAMES:
 {available_frames}
 
+AVAILABLE SKILLS:
+{skill_catalog}
+
 USER MESSAGE:
 {user_message}
 
@@ -59,15 +63,16 @@ DECIDE:
 1. complexity: "simple" | "moderate" | "complex"
 2. routing: "single" (one frame, best choice)
 3. frames: list with exactly 1 frame name (the best choice for this message)
-4. skills: list of skill names to activate (empty if none relevant)
+4. skills: list of skill names from AVAILABLE SKILLS to activate (empty if none relevant, ONLY use names listed above)
 5. rationale: brief explanation of why this frame
 6. per_frame_instructions: {{}} (reserved for future phases)
 
 Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, procedure_manager: ProcedureManager | None = None) -> None:
         self._settings = settings
         self._api: Any = None
+        self._procedure_manager = procedure_manager
         # Known limitation: cooldowns are instance-level, not session-scoped.
         # In the current single-agent runtime this is acceptable. For multi-session
         # scenarios, scope to dict[str, dict[str, int]] keyed by session_id.
@@ -77,6 +82,32 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
     def set_api_client(self, client: Any) -> None:
         """Set the shared AnthropicClient for LLM calls."""
         self._api = client
+
+    async def _build_skill_catalog(self) -> tuple[str, set[str]]:
+        """Build compact skill catalog from registered procedures.
+
+        Returns (formatted_catalog_text, set_of_valid_names).
+        """
+        if self._procedure_manager is None:
+            return "No skills registered.", set()
+        try:
+            summaries, _total = await self._procedure_manager.list_all(
+                limit=50, active_only=True,
+            )
+            if not summaries:
+                return "No skills registered.", set()
+            valid_names: set[str] = set()
+            lines: list[str] = []
+            for s in summaries:
+                valid_names.add(s.name)
+                eff = f" (effectiveness: {s.effectiveness:.0%})" if s.effectiveness is not None else ""
+                desc = (s.description or "No description").replace("{", "{{").replace("}", "}}")
+                name_safe = s.name.replace("{", "{{").replace("}", "}}")
+                lines.append(f"- {name_safe} — {desc}{eff}")
+            return "\n".join(lines), valid_names
+        except Exception:
+            logger.warning("Failed to build skill catalog for Critic")
+            return "No skills registered.", set()
 
     # ------------------------------------------------------------------
     # Complexity Gate
@@ -153,8 +184,12 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
                 latency_ms=0,
             )
 
+        # Issue #216: Build skill catalog from registered procedures
+        skill_catalog, valid_skill_names = await self._build_skill_catalog()
+
         prompt = self._CLASSIFICATION_PROMPT.format(
             available_frames="\n".join(f"- {f}" for f in available_frames),
+            skill_catalog=skill_catalog,
             user_message=user_message,
         )
 
@@ -183,7 +218,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             else:
                 logger.info("F024 Critic LLM responded: %s", raw_text[:200])
 
-            parsed = self._parse_classification(raw_text, heuristic_frame)
+            parsed = self._parse_classification(raw_text, heuristic_frame, valid_skill_names=valid_skill_names)
             elapsed = int(time.time() * 1000) - start_ms
             parsed.heuristic_frame = heuristic_frame.frame_id
             parsed.latency_ms = elapsed
@@ -215,6 +250,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         self,
         raw_text: str,
         heuristic_frame: FrameSelection,
+        valid_skill_names: set[str] | None = None,
     ) -> CriticResult:
         """Parse LLM JSON response into CriticResult."""
         try:
@@ -229,12 +265,18 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             frames = data.get("frames", [])
             recommended = frames[0] if frames else heuristic_frame.frame_id
 
+            raw_skills = data.get("skills", [])
+            if valid_skill_names is not None:
+                skills = [s for s in raw_skills if s in valid_skill_names]
+            else:
+                skills = raw_skills
+
             return CriticResult(
                 routing=RoutingMode.SINGLE_ADVISED,
                 recommended_frame=recommended,
                 rationale=data.get("rationale", ""),
                 complexity=data.get("complexity", "moderate"),
-                skills=data.get("skills", []),
+                skills=skills,
             )
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.warning("CriticAgent: failed to parse JSON: %s", e)

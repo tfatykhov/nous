@@ -368,6 +368,32 @@ class CognitiveLayer:
                         "F024 Critic shadow agree: frame=%s, latency=%dms",
                         frame.frame_id, critic_result.latency_ms,
                     )
+                if critic_result.skills:
+                    logger.info(
+                        "F024 Critic shadow skills: %s",
+                        critic_result.skills,
+                    )
+
+            # F024/issue-216: Activate Critic-recommended skills
+            activated_skill_ids: list[str] = []
+            if (self._settings.critic_mode == "advised"
+                    and critic_result.skills):
+                for skill_name in critic_result.skills:
+                    try:
+                        proc = await self._heart.get_procedure_by_name(
+                            skill_name, session=session,
+                        )
+                        if proc:
+                            await self._heart.activate_procedure(
+                                proc.id, session=session,
+                            )
+                            activated_skill_ids.append(str(proc.id))
+                            logger.info(
+                                "F024 Critic activated skill: %s (id=%s)",
+                                skill_name, proc.id,
+                            )
+                    except Exception:
+                        logger.warning("F024 Critic skill activation failed: %s", skill_name)
 
             # Emit critic_classified event
             if self._bus:
@@ -384,6 +410,8 @@ class CognitiveLayer:
                             "latency_ms": critic_result.latency_ms,
                             "mode": self._settings.critic_mode,
                             "agreed": heuristic_frame.frame_id == critic_result.recommended_frame,
+                            "skills": critic_result.skills,
+                            "activated_skills": activated_skill_ids,
                         },
                     ))
                 except Exception:
