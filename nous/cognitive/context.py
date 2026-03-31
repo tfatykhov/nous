@@ -101,6 +101,7 @@ class ContextEngine:
         usage_tracker: UsageTracker | None = None,
         identity_override: str | None = None,
         temporal_boost: bool = False,  # 008.6
+        critic_skills: list[str] | None = None,
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -418,34 +419,99 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
 
-        # 7. Procedures
+        # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         if budget.procedures > 0 and "procedure" not in skip_types:
             try:
-                limit = _limits.get("procedure", DEFAULT_FETCH_LIMITS.get("procedure", 5))
+                injection_mode = self._settings.critic_skill_injection
+                critic_slot_count = self._settings.critic_skill_slots
+                embedding_slot_count = self._settings.embedding_skill_slots
+                total_slots = critic_slot_count + embedding_slot_count
+
+                # --- Track A: Critic-recommended skills ---
+                critic_procedures: list = []
+                critic_names: set[str] = set()
+
+                if critic_skills and injection_mode in ("enabled", "log_only"):
+                    # Deduplicate input (P1 review fix)
+                    unique_skills = list(dict.fromkeys(critic_skills))
+                    for skill_name in unique_skills[:critic_slot_count]:
+                        try:
+                            proc = await self._heart.get_procedure_by_name(
+                                skill_name, session=session,
+                            )
+                            if proc:
+                                critic_procedures.append(proc)
+                                critic_names.add(skill_name)
+                            else:
+                                logger.debug(
+                                    "Issue #229: Critic skill '%s' not found in DB, skipping",
+                                    skill_name,
+                                )
+                        except Exception:
+                            logger.warning(
+                                "Issue #229: Failed to fetch Critic skill '%s'",
+                                skill_name,
+                            )
+
+                    if injection_mode == "log_only":
+                        logger.info(
+                            "Issue #229 log_only: would inject Critic skills: %s",
+                            [getattr(p, "name", "") for p in critic_procedures],
+                        )
+                        critic_procedures = []
+                        critic_names = set()
+
+                # --- Track B: Embedding similarity search ---
+                unused_critic_slots = critic_slot_count - len(critic_procedures)
+                embedding_limit = embedding_slot_count + unused_critic_slots  # rollover
+
                 q_text = _query_texts.get("procedure", _default_query)
-                procedures = await self._heart.search_procedures(q_text, limit=limit, session=session)
-                if procedures:
-                    # F017: Staleness penalty (before boosts)
-                    procedures = self._apply_staleness_penalty(procedures)
-                    # F10: apply_frame_boost
-                    procedures = apply_frame_boost(procedures, frame.frame_id, _active_censor_names)
+                embedding_procedures = await self._heart.search_procedures(
+                    q_text, limit=embedding_limit, session=session,
+                )
 
-                    # Dedup + usage boost
-                    procedures = await self._apply_dedup(procedures, _conv_msgs, "name")
-                    procedures = self._apply_usage_boost(procedures, usage_tracker)
-                    # Adaptive relevance filter (min/max K + gap detection)
-                    procedures = self._apply_relevance_filter(procedures, "procedure")
+                if embedding_procedures:
+                    # Standard pipeline: staleness -> frame boost -> dedup -> usage boost -> relevance
+                    embedding_procedures = self._apply_staleness_penalty(embedding_procedures)
+                    embedding_procedures = apply_frame_boost(
+                        embedding_procedures, frame.frame_id, _active_censor_names,
+                    )
+                    embedding_procedures = await self._apply_dedup(
+                        embedding_procedures, _conv_msgs, "name",
+                    )
+                    embedding_procedures = self._apply_usage_boost(
+                        embedding_procedures, usage_tracker,
+                    )
+                    embedding_procedures = self._apply_relevance_filter(
+                        embedding_procedures, "procedure",
+                    )
 
-                    # F1: Collect recalled IDs AFTER filtering (P1-1 fix)
-                    for p in procedures:
+                    # Deduplicate: exclude Critic picks from embedding results
+                    if critic_names:
+                        embedding_procedures = [
+                            p for p in embedding_procedures
+                            if getattr(p, "name", "") not in critic_names
+                        ]
+
+                    embedding_procedures = embedding_procedures[:embedding_limit]
+
+                # --- Combine tracks ---
+                all_procedures = critic_procedures + (embedding_procedures or [])
+                all_procedures = all_procedures[:total_slots]
+
+                if all_procedures:
+                    for p in all_procedures:
                         mid = str(getattr(p, "id", ""))
                         if mid:
                             recalled_ids["procedure"].append(mid)
                             recalled_content_map[mid] = getattr(p, "name", "")
-                            recalled_score_map[mid] = getattr(p, "score", 0) or 0
+                            # ProcedureDetail (Critic track) has no .score — use 1.0 as priority
+                            recalled_score_map[mid] = getattr(p, "score", None) or 1.0
 
-                    proc_text = self._format_procedures(procedures)
-                    proc_text = self._truncate_to_budget(proc_text, self._scaled_budget(budget.procedures))
+                    proc_text = self._format_procedures(all_procedures)
+                    proc_text = self._truncate_to_budget(
+                        proc_text, self._scaled_budget(budget.procedures),
+                    )
                     sections.append(
                         ContextSection(
                             priority=7,
@@ -455,7 +521,7 @@ class ContextEngine:
                         )
                     )
             except Exception as e:
-                logger.warning("Heart.search_procedures failed during context build: %s", e)
+                logger.warning("Procedure context build failed: %s", e)
 
         # 7.5 Temporal awareness — always include recent episode titles (008.6)
         # Not gated by budget.episodes — this is a lightweight tier that shows
