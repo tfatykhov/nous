@@ -1,10 +1,10 @@
 # F024 Amendment — DAG Decomposition & Wave Scheduling
 
-> **Status:** Draft v1
+> **Status:** Draft v2
 > **Amends:** F024 Critic Agent v3 — Phase 1 (Parallel Spawn + Pick Winner)
 > **Priority:** P1
 > **Author:** Nous + Tim
-> **Date:** 2026-03-30
+> **Date:** 2026-03-31
 > **Research basis:** CAID (CMU, arXiv:2603.21489), DynTaskMAS (ICAPS 2025, arXiv:2503.07675v2), GAP (Tsinghua/CMU), DRAMA (arXiv:2508.04332), Atomix (arXiv:2503.18890), M1-Parallel (Microsoft ICML 2025, arXiv:2507.08944)
 
 ---
@@ -21,54 +21,115 @@ CAID demonstrated this empirically: missing `autodiff.py` as a dependency caused
 **Gap 2: Fire-and-forget spawning wastes early finishers.**
 When a subtask completes ahead of others, that information sits idle. No successor tasks are unblocked. No freed capacity is reallocated. DRAMA showed that event-driven reallocation yields **17% runtime improvement** and **13% resource reduction** over static scheduling.
 
+**Gap 3: No orchestration layer between Critic and execution.**
+The current architecture has the Critic producing a routing decision and the Main Agent executing it. For DAG-based execution, we need a **stateful controller** that tracks node states, manages wave progression, handles failures, and feeds results back to the Main Agent for final assembly. Without this, the DAG is just a data structure with no one to drive it.
+
 ---
 
-## Solution: DAG Decomposition Layer
+## Solution: Task Controller + DAG Decomposition Layer
 
-Add a **dependency analysis step** between Critic classification and instance spawning. The Critic already decomposes complex tasks — this amendment structures that decomposition as an explicit directed acyclic graph (DAG) with topological wave scheduling.
+Add a **Task Controller** component and a **dependency analysis step** between Critic classification and instance spawning. The Critic already decomposes complex tasks — this amendment structures that decomposition as an explicit directed acyclic graph (DAG) and introduces a dedicated controller to execute it.
 
-### Architecture Change
+---
 
-**Current F024 Phase 1 Flow:**
+## Component Architecture
+
+### Separation of Concerns
+
+The DAG execution flow involves four distinct roles, each with a clear boundary:
+
 ```
-User Message → Critic → spawn(A, B, C) simultaneously → evaluate → pick winner
-```
-
-**Amended Flow:**
-```
-User Message → Critic → DAG Builder → Wave Scheduler → spawn waves → evaluate → response
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │  Task DAG   │
-                    │  G = (V, E) │
-                    │             │
-                    │  A ──→ C    │
-                    │  B ──→ C    │
-                    │  A ∥ B      │   (A and B are parallel, C depends on both)
-                    └─────────────┘
-                           │
-                           ▼
-                    Wave 1: spawn(A, B) — parallel
-                    Wave 2: spawn(C) — after A,B complete
+┌──────────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌──────────────┐
+│    Critic     │───▶│  Task Controller  │───▶│  Subtask Workers │───▶│  Main Agent   │
+│  (Planner)   │    │  (Orchestrator)   │    │  (Executors)     │    │  (Assembler)  │
+└──────────────┘    └──────────────────┘    └──────────────────┘    └──────────────┘
+                                │                     │
+                                │   monitors/retries  │
+                                │◀────────────────────│
 ```
 
-### When DAG Applies vs. Doesn't
+**Critic (Planner)** — Produces the DAG. Evaluates outputs between waves.
+- Input: User message + conversation context
+- Output: `CriticResult` with `dependency_type` and `task_graph`
+- Does NOT execute anything
+- Does NOT talk to user
+- Invoked by Task Controller between waves for quality gates
 
-The DAG layer activates **only** when the Critic routes to `parallel-select` or `parallel-merge`. The existing routing modes map as follows:
+**Task Controller (Orchestrator)** — Drives DAG execution. Stateful, rule-based + Critic-delegated decisions.
+- Input: `TaskDAG` from Critic
+- Output: Ordered collection of node results
+- Manages node lifecycle: pending → queued → running → completed/failed/blocked
+- Schedules waves, enforces concurrency caps
+- Injects predecessor context into successor prompts
+- Handles failure propagation and (Phase 2) retries
+- Tracks cost/token budget across all nodes
+- Reports progress to Main Agent
+- **Is NOT an LLM agent** — it's a stateful async controller with decision points delegated to Critic
 
-| Routing Mode | DAG? | Why |
-|---|---|---|
-| Passthrough | No | No Critic, no spawning |
-| Single-Advised | No | Single instance, no dependencies possible |
-| Parallel-Select (independent) | No | Instances are alternative approaches to same problem — no dependencies |
-| Parallel-Select (phased) | **Yes** | Instances build on each other's outputs — has dependencies |
-| Parallel-Merge | **Yes** | Complementary subtasks often have shared prerequisites |
-| Parallel-Evaluate | No | Same prompt K times — inherently independent |
+**Subtask Workers (Executors)** — Individual Nous instances executing one node each.
+- Input: Node instructions + injected predecessor context
+- Output: Response text + transaction journal
+- Each runs in its own `CognitiveTransaction`
+- No awareness of the DAG — just sees its instructions and context
+- Existing `spawn_task` / `execute_in_transaction` machinery
 
-The Critic's decomposition now produces one additional field: `dependency_type`:
-- `"independent"` — existing behavior, all instances spawned simultaneously
-- `"phased"` — DAG decomposition, wave scheduling activated
+**Main Agent (Assembler)** — Owns the user conversation. Assembles final response.
+- Input: All completed node results from Task Controller
+- Output: User-facing response
+- Knows user's tone, preferences, conversation history
+- Synthesizes multi-node outputs into coherent reply
+- Same agent that handles non-DAG conversations today
+
+### What the Task Controller IS and IS NOT
+
+**IS:**
+- A stateful async orchestrator (event loop + state machine)
+- A rule engine for scheduling decisions (wave ordering, concurrency caps, failure propagation)
+- A delegation point (calls Critic for quality gates, calls workers for execution)
+- A budget tracker (tokens, cost, wall-clock time across all nodes)
+- A progress reporter (Main Agent can query: "how far along?")
+
+**IS NOT:**
+- An LLM agent (no model calls of its own — delegates to Critic for intelligence)
+- A response generator (never produces text for the user)
+- A decision maker for task decomposition (that's the Critic's job)
+- A replacement for the Main Agent (Main Agent still owns the conversation)
+
+### Task Controller State Machine
+
+Each DAG execution follows this lifecycle:
+
+```
+                    ┌─────────────────────────────────┐
+                    │         INITIALIZING             │
+                    │  Validate DAG, set up state      │
+                    └───────────────┬─────────────────┘
+                                    │
+                    ┌───────────────▼─────────────────┐
+                    │         EXECUTING                │
+                    │  Loop: schedule wave → await     │
+                    │  completion → quality gate →     │◀──┐
+                    │  inject context → next wave      │   │ (retry wave on
+                    └───────────────┬─────────────────┘   │  quality gate fail)
+                                    │                     │
+                            ┌───────┴───────┐             │
+                            │               │             │
+                    ┌───────▼──────┐  ┌─────▼──────┐     │
+                    │  ALL DONE    │  │  WAVE FAIL  │─────┘ (Phase 2 only)
+                    └───────┬──────┘  └─────┬──────┘
+                            │               │
+                    ┌───────▼──────┐  ┌─────▼──────┐
+                    │  ASSEMBLING  │  │  PARTIAL    │
+                    │  Pass to     │  │  RESULT     │
+                    │  Main Agent  │  │  Best-effort│
+                    └──────────────┘  └─────────────┘
+```
+
+Node-level states:
+```
+pending → queued → running → completed
+                           → failed → (dependents: blocked)
+```
 
 ---
 
@@ -91,11 +152,13 @@ class TaskNode:
     depends_on: list[str] = field(default_factory=list)   # Node IDs this depends on
     produces: str = ""               # What output this node creates (for successors)
     
-    # Runtime state (populated by scheduler)
-    status: str = "pending"          # "pending" | "queued" | "running" | "completed" | "failed"
+    # Runtime state (populated by Task Controller)
+    status: str = "pending"          # "pending" | "queued" | "running" | "completed" | "failed" | "blocked"
     transaction: Optional[CognitiveTransaction] = None
     result: Optional[str] = None     # Output text when completed
     duration_ms: int = 0
+    tokens_used: int = 0             # Token consumption for budget tracking
+    retry_count: int = 0             # Number of retries (Phase 2)
 ```
 
 ### TaskDAG
@@ -202,6 +265,270 @@ class TaskDAG:
         return ""
 ```
 
+### TaskController
+
+```python
+class TaskController:
+    """
+    Stateful orchestrator for DAG execution.
+    Drives wave scheduling, failure handling, quality gates, 
+    and budget tracking. Not an LLM agent — delegates intelligence
+    to Critic and execution to subtask workers.
+    """
+    
+    def __init__(
+        self,
+        dag: TaskDAG,
+        critic: CriticAgent,
+        max_parallel: int = 3,
+        token_budget: int = 100_000,
+        timeout_per_node_ms: int = 120_000,
+    ):
+        self.dag = dag
+        self.critic = critic
+        self.max_parallel = max_parallel
+        self.token_budget = token_budget
+        self.timeout_per_node_ms = timeout_per_node_ms
+        
+        # Runtime state
+        self.state: ControllerState = ControllerState.INITIALIZING
+        self.tokens_consumed: int = 0
+        self.start_time_ms: int = 0
+        self.wave_history: list[WaveResult] = []
+    
+    # ─── Lifecycle ──────────────────────────────────────────────
+    
+    async def execute(self) -> DAGExecutionResult:
+        """Main execution loop. Returns all node results."""
+        
+        # Phase: INITIALIZING
+        issues = self.dag.validate()
+        if issues:
+            return DAGExecutionResult(
+                dag=self.dag,
+                status="validation_failed",
+                errors=issues,
+            )
+        
+        waves = self.dag.topological_waves()
+        self.state = ControllerState.EXECUTING
+        self.start_time_ms = _now_ms()
+        
+        # Phase: EXECUTING — wave by wave
+        for wave_idx, wave_node_ids in enumerate(waves):
+            
+            # Budget check before starting wave
+            if self.tokens_consumed >= self.token_budget:
+                self.state = ControllerState.BUDGET_EXCEEDED
+                break
+            
+            # Execute wave (respecting max_parallel)
+            wave_result = await self._execute_wave(wave_node_ids, wave_idx)
+            self.wave_history.append(wave_result)
+            
+            # Quality gate between waves (Critic evaluates outputs)
+            if wave_idx < len(waves) - 1:  # Not the last wave
+                gate_passed = await self._quality_gate(wave_result, wave_idx)
+                if not gate_passed:
+                    # Phase 1: stop and return partial results
+                    # Phase 2: retry wave with adjusted prompts
+                    self.state = ControllerState.PARTIAL_RESULT
+                    break
+        
+        # Phase: ASSEMBLING — collect all results
+        if self.state == ControllerState.EXECUTING:
+            self.state = ControllerState.COMPLETED
+        
+        return DAGExecutionResult(
+            dag=self.dag,
+            status=self.state.value,
+            wave_history=self.wave_history,
+            tokens_consumed=self.tokens_consumed,
+            duration_ms=_now_ms() - self.start_time_ms,
+        )
+    
+    # ─── Wave Execution ─────────────────────────────────────────
+    
+    async def _execute_wave(
+        self, node_ids: list[str], wave_idx: int
+    ) -> WaveResult:
+        """Execute all nodes in a wave concurrently."""
+        
+        # Filter out blocked nodes
+        active_ids = [
+            nid for nid in node_ids 
+            if self.dag.nodes[nid].status != "blocked"
+        ]
+        
+        # Respect max_parallel: chunk if needed
+        sub_waves = _chunk(active_ids, self.max_parallel)
+        node_results = []
+        
+        for sub_wave in sub_waves:
+            tasks = []
+            for node_id in sub_wave:
+                node = self.dag.nodes[node_id]
+                
+                # Inject predecessor context
+                predecessor_context = self.dag.inject_predecessor_context(node_id)
+                augmented_instructions = predecessor_context + node.instructions
+                
+                node.status = "running"
+                task = self._spawn_worker(node, augmented_instructions)
+                tasks.append((node_id, task))
+            
+            # Await all in sub-wave
+            for node_id, task in tasks:
+                try:
+                    result = await asyncio.wait_for(
+                        task, 
+                        timeout=self.timeout_per_node_ms / 1000
+                    )
+                    node = self.dag.nodes[node_id]
+                    node.status = "completed"
+                    node.result = result.response_text
+                    node.duration_ms = result.duration_ms
+                    node.tokens_used = result.tokens_used
+                    node.transaction = result.transaction
+                    self.tokens_consumed += result.tokens_used
+                    node_results.append(NodeResult(
+                        node_id=node_id, status="completed", output=result
+                    ))
+                except (asyncio.TimeoutError, Exception) as e:
+                    node = self.dag.nodes[node_id]
+                    node.status = "failed"
+                    self._propagate_failure(node_id)
+                    node_results.append(NodeResult(
+                        node_id=node_id, status="failed", error=str(e)
+                    ))
+        
+        return WaveResult(
+            wave_index=wave_idx,
+            node_results=node_results,
+            tokens_used=sum(nr.output.tokens_used for nr in node_results if nr.output),
+        )
+    
+    # ─── Quality Gate ────────────────────────────────────────────
+    
+    async def _quality_gate(
+        self, wave_result: WaveResult, wave_idx: int
+    ) -> bool:
+        """
+        Ask Critic to evaluate wave outputs before proceeding.
+        Returns True if outputs are sufficient for successor nodes.
+        
+        Phase 1: binary pass/fail — fail means stop with partial results.
+        Phase 2: fail can trigger retry with adjusted prompts.
+        """
+        completed_outputs = {
+            nr.node_id: nr.output.response_text 
+            for nr in wave_result.node_results 
+            if nr.status == "completed"
+        }
+        
+        if not completed_outputs:
+            return False  # Entire wave failed
+        
+        # Get successor nodes that need these outputs
+        successors = set()
+        for node_id in completed_outputs:
+            for (src, dst) in self.dag.edges:
+                if src == node_id:
+                    successors.add(dst)
+        
+        if not successors:
+            return True  # No successors — this was the last wave
+        
+        # Ask Critic: are these outputs sufficient?
+        gate_result = await self.critic.evaluate_wave_quality(
+            wave_outputs=completed_outputs,
+            successor_requirements={
+                sid: self.dag.nodes[sid].description 
+                for sid in successors
+            },
+        )
+        
+        return gate_result.sufficient
+    
+    # ─── Failure Handling ────────────────────────────────────────
+    
+    def _propagate_failure(self, failed_node_id: str):
+        """Mark all transitive dependents of a failed node as blocked."""
+        dependents = [dst for (src, dst) in self.dag.edges if src == failed_node_id]
+        for dep_id in dependents:
+            node = self.dag.nodes[dep_id]
+            if node.status == "pending":  # Don't block already-completed nodes
+                node.status = "blocked"
+                self._propagate_failure(dep_id)
+    
+    # ─── Worker Spawning ─────────────────────────────────────────
+    
+    async def _spawn_worker(self, node: TaskNode, instructions: str):
+        """Spawn a single Nous instance for this node."""
+        transaction = CognitiveTransaction(
+            instance_id=node.id,
+            frame_type=node.frame_type,
+        )
+        return await execute_in_transaction(
+            frame=node.frame_type,
+            skills=node.skills,
+            instructions=instructions,
+            transaction=transaction,
+        )
+    
+    # ─── Status / Progress ───────────────────────────────────────
+    
+    def get_progress(self) -> dict:
+        """Return current execution progress for Main Agent queries."""
+        total = len(self.dag.nodes)
+        completed = sum(1 for n in self.dag.nodes.values() if n.status == "completed")
+        failed = sum(1 for n in self.dag.nodes.values() if n.status == "failed")
+        blocked = sum(1 for n in self.dag.nodes.values() if n.status == "blocked")
+        running = sum(1 for n in self.dag.nodes.values() if n.status == "running")
+        
+        return {
+            "state": self.state.value,
+            "total_nodes": total,
+            "completed": completed,
+            "running": running,
+            "failed": failed,
+            "blocked": blocked,
+            "pending": total - completed - failed - blocked - running,
+            "tokens_consumed": self.tokens_consumed,
+            "token_budget": self.token_budget,
+            "waves_completed": len(self.wave_history),
+            "total_waves": self.dag.total_waves,
+        }
+
+
+class ControllerState(Enum):
+    INITIALIZING = "initializing"
+    EXECUTING = "executing"
+    COMPLETED = "completed"
+    PARTIAL_RESULT = "partial_result"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    VALIDATION_FAILED = "validation_failed"
+```
+
+---
+
+## When DAG Applies vs. Doesn't
+
+The DAG layer activates **only** when the Critic routes to `parallel-select` or `parallel-merge` with `dependency_type: "phased"`. The existing routing modes map as follows:
+
+| Routing Mode | DAG? | Why |
+|---|---|---|
+| Passthrough | No | No Critic, no spawning |
+| Single-Advised | No | Single instance, no dependencies possible |
+| Parallel-Select (independent) | No | Instances are alternative approaches to same problem — no dependencies |
+| Parallel-Select (phased) | **Yes** | Instances build on each other's outputs — has dependencies |
+| Parallel-Merge | **Yes** | Complementary subtasks often have shared prerequisites |
+| Parallel-Evaluate | No | Same prompt K times — inherently independent |
+
+The Critic's decomposition now produces one additional field: `dependency_type`:
+- `"independent"` — existing behavior, all instances spawned simultaneously
+- `"phased"` — DAG decomposition, Task Controller activated
+
 ---
 
 ## Critic Prompt Amendment
@@ -251,119 +578,6 @@ User: "Research how CAID handles parallelism, compare with our F024, and draft a
 Wave 1: A ∥ B (parallel — independent research)
 Wave 2: C (sequential — needs A and B outputs)
 ```
-
----
-
-## Wave Scheduler
-
-### Core Logic
-
-```python
-class WaveScheduler:
-    """
-    Executes a TaskDAG in topological waves.
-    Nodes within each wave run in parallel.
-    Wave N+1 starts only after all Wave N nodes complete.
-    """
-    
-    def __init__(self, dag: TaskDAG, max_parallel: int = 3):
-        self.dag = dag
-        self.max_parallel = max_parallel  # F024 hard cap still applies per wave
-    
-    async def execute(self) -> DAGExecutionResult:
-        """Execute the full DAG, wave by wave."""
-        waves = self.dag.topological_waves()
-        all_results = []
-        
-        for wave_idx, wave_node_ids in enumerate(waves):
-            # Respect max_parallel: if wave has more nodes than cap,
-            # split into sub-waves (rare — max 6 nodes, max 3 parallel)
-            sub_waves = self._chunk(wave_node_ids, self.max_parallel)
-            
-            for sub_wave in sub_waves:
-                wave_results = await self._execute_wave(sub_wave, wave_idx)
-                all_results.extend(wave_results)
-                
-                # Check for failures — if a node fails, mark all dependents as blocked
-                for result in wave_results:
-                    if result.status == "failed":
-                        self._propagate_failure(result.node_id)
-        
-        return DAGExecutionResult(
-            dag=self.dag,
-            node_results=all_results,
-            total_waves=len(waves)
-        )
-    
-    async def _execute_wave(self, node_ids: list[str], wave_idx: int) -> list[NodeResult]:
-        """Execute all nodes in a wave concurrently."""
-        tasks = []
-        for node_id in node_ids:
-            node = self.dag.nodes[node_id]
-            if node.status == "blocked":
-                continue  # Skip nodes blocked by upstream failure
-            
-            # Inject predecessor outputs into this node's context
-            predecessor_context = self.dag.inject_predecessor_context(node_id)
-            augmented_instructions = predecessor_context + node.instructions
-            
-            node.status = "running"
-            task = self._spawn_instance(node, augmented_instructions)
-            tasks.append(task)
-        
-        # await all instances in this wave
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Process results
-        node_results = []
-        for node_id, result in zip(node_ids, results):
-            node = self.dag.nodes[node_id]
-            if isinstance(result, Exception):
-                node.status = "failed"
-                node_results.append(NodeResult(node_id=node_id, status="failed", error=str(result)))
-            else:
-                node.status = "completed"
-                node.result = result.response_text
-                node.duration_ms = result.duration_ms
-                node.transaction = result.transaction
-                node_results.append(NodeResult(node_id=node_id, status="completed", output=result))
-        
-        return node_results
-    
-    async def _spawn_instance(self, node: TaskNode, instructions: str):
-        """Spawn a single Nous instance for this node."""
-        # Uses existing F024 transactional execution infrastructure
-        transaction = CognitiveTransaction(
-            instance_id=node.id,
-            frame_type=node.frame_type,
-        )
-        return await execute_in_transaction(
-            frame=node.frame_type,
-            skills=node.skills,
-            instructions=instructions,
-            transaction=transaction,
-        )
-    
-    def _propagate_failure(self, failed_node_id: str):
-        """Mark all transitive dependents of a failed node as blocked."""
-        dependents = [dst for (src, dst) in self.dag.edges if src == failed_node_id]
-        for dep_id in dependents:
-            self.dag.nodes[dep_id].status = "blocked"
-            self._propagate_failure(dep_id)  # Recursive — propagate to their dependents
-    
-    @staticmethod
-    def _chunk(items: list, size: int) -> list[list]:
-        return [items[i:i+size] for i in range(0, len(items), size)]
-```
-
-### Failure Handling Strategy
-
-When a node fails in a wave:
-
-1. **Fail-fast propagation** — All dependents are marked `blocked` (they can't produce useful output without their prerequisite)
-2. **Independent nodes continue** — Other nodes in the same wave that don't depend on the failed node still complete normally
-3. **Partial DAG results** — The Critic evaluates whatever completed successfully. A 2-of-3 wave result may still produce a useful response
-4. **Retry option (Phase 2)** — Failed nodes can be retried once with a different prompt or model. Not in Phase 1 scope
 
 ---
 
@@ -469,6 +683,54 @@ class DAGTransactionManager:
 
 ---
 
+## Integration: End-to-End Flow
+
+Here is the complete flow showing how all components interact:
+
+```
+1. User sends complex message
+   │
+2. CognitiveLayer.process_turn() invokes Critic
+   │
+3. Critic classifies → routing: "parallel-merge", dependency_type: "phased"
+   Critic produces TaskDAG with nodes and edges
+   │
+4. CognitiveLayer instantiates TaskController(dag, critic)
+   │
+5. TaskController.execute() begins
+   │
+   ├─ 5a. Validate DAG (cycle detection, depth check, node count)
+   │
+   ├─ 5b. Compute topological waves
+   │
+   ├─ 5c. Wave 1: spawn workers for all Wave 1 nodes (parallel)
+   │       Each worker gets: node.instructions + predecessor_context (empty for Wave 1)
+   │       Each worker runs in its own CognitiveTransaction
+   │
+   ├─ 5d. Await Wave 1 completion
+   │       Failed nodes → propagate_failure to dependents
+   │
+   ├─ 5e. Quality Gate: Critic evaluates Wave 1 outputs
+   │       "Are these sufficient for Wave 2 successors?"
+   │       If no → stop with partial results (Phase 1) or retry (Phase 2)
+   │
+   ├─ 5f. Wave 2: spawn workers with predecessor context injected
+   │       ... repeat 5d-5e ...
+   │
+   ├─ 5g. Final wave completed → all results collected
+   │
+6. TaskController returns DAGExecutionResult to CognitiveLayer
+   │
+7. CognitiveLayer passes node results to Main Agent as context
+   │
+8. Main Agent assembles final response → User
+   │
+9. DAGTransactionManager commits prerequisite transactions,
+   commits selected leaf, rolls back non-selected leaves
+```
+
+---
+
 ## Hard Constraints (Amendment-Specific)
 
 1. **Max 6 nodes per DAG.** Prevents over-decomposition. (DynTaskMAS caps recursive decomposition at 3 reflection iterations; we cap total nodes.)
@@ -478,6 +740,7 @@ class DAGTransactionManager:
 5. **Predecessor context injection is the ONLY cross-wave communication.** No shared memory, no message passing, no file system artifacts. Strict prompt-injection interface.
 6. **DAG validation runs before execution.** Cycle detection, depth check, node count check. Invalid DAGs fall back to independent parallel execution.
 7. **Prerequisite node transactions commit on DAG success.** This is a policy difference from pure F024 Phase 1 (where only the winner commits). Justified: prerequisite outputs represent real work (research, analysis), not speculative alternatives.
+8. **Task Controller makes no LLM calls.** All intelligence is delegated to Critic (quality gates) or workers (execution). The controller is pure orchestration logic.
 
 ---
 
@@ -485,16 +748,16 @@ class DAGTransactionManager:
 
 ### Compatibility Matrix
 
-- **Passthrough** → No change. No Critic, no DAG.
+- **Passthrough** → No change. No Critic, no DAG, no Task Controller.
 - **Single-Advised** → No change. Single instance, no DAG needed.
 - **Parallel-Select (independent)** → No change. Existing behavior preserved. `dependency_type: "independent"`.
-- **Parallel-Select (phased)** → **NEW.** Critic produces DAG with `dependency_type: "phased"`. Wave scheduler executes. Critic evaluates leaf outputs.
+- **Parallel-Select (phased)** → **NEW.** Critic produces DAG. Task Controller drives execution. Critic evaluates leaf outputs.
 - **Parallel-Merge (phased)** → **NEW.** Same as above but Critic synthesizes leaf outputs instead of picking winner.
 - **Parallel-Evaluate** → No change. Same prompt K times — inherently independent, no dependencies.
 
 ### Backward Compatibility
 
-All existing F024 behavior is preserved. The DAG layer is **additive** — it only activates when the Critic explicitly produces `dependency_type: "phased"`. The default remains `"independent"`.
+All existing F024 behavior is preserved. The Task Controller and DAG layer are **additive** — they only activate when the Critic explicitly produces `dependency_type: "phased"`. The default remains `"independent"`.
 
 ---
 
@@ -504,17 +767,24 @@ All existing F024 behavior is preserved. The DAG layer is **additive** — it on
 - Mid-execution graph modifications: G(t+1) = U(G(t), Δ(t))
 - If a prerequisite reveals the task is simpler than expected, prune remaining nodes
 - If a prerequisite reveals new sub-problems, add nodes dynamically
-- Requires event-driven architecture changes
+- Requires Task Controller to support graph mutation during execution
 
 ### Completion-Triggered Unblocking (from DRAMA)
 - Instead of waiting for ALL Wave N to complete, unblock individual successors as soon as ALL of their specific predecessors complete
 - More efficient for unbalanced DAGs where one node finishes much faster
-- Requires per-node dependency tracking rather than wave-level batching
+- Task Controller tracks per-node readiness rather than wave-level batching
 
 ### Worker Reallocation (from DRAMA)
 - When a node completes early, freed capacity can be assigned to help other nodes
 - Requires DRAMA-style resource object abstraction for agents
+- Task Controller becomes a resource scheduler, not just a wave scheduler
 - Agent dropout recovery: if a node fails, another agent can take over its work
+
+### Retry with Adjusted Prompts
+- Quality gate fails → Task Controller asks Critic: "what should change?"
+- Critic produces adjusted instructions for retry
+- Task Controller re-spawns failed wave with new prompts
+- Max 1 retry per wave to prevent infinite loops
 
 ### Learned Decomposition (from GAP)
 - Train the Critic to produce better DAGs via SFT + RL
@@ -527,34 +797,41 @@ All existing F024 behavior is preserved. The DAG layer is **additive** — it on
 
 ### Files to Create
 
-- `nous/cognitive/dag.py` — `TaskNode`, `TaskDAG`, `DAGExecutionResult`, validation logic
-- `nous/cognitive/wave_scheduler.py` — `WaveScheduler`, wave execution, failure propagation
+- `nous/cognitive/task_dag.py` — `TaskNode`, `TaskDAG`, `DAGExecutionResult`, validation logic
+- `nous/cognitive/task_controller.py` — `TaskController`, `ControllerState`, wave execution, failure propagation, quality gates, budget tracking, progress reporting
 - `nous/cognitive/dag_transaction.py` — `DAGTransactionManager`, cross-wave commit policy
 
 ### Files to Modify
 
-- `nous/cognitive/critic.py` — Add `dependency_type` and `task_graph` to Critic output schema. Add DAG construction from Critic response. Route to WaveScheduler when `dependency_type == "phased"`.
+- `nous/cognitive/critic.py` — Add `dependency_type` and `task_graph` to Critic output schema. Add DAG construction from Critic response. Add `evaluate_wave_quality()` method for quality gates.
 - `nous/cognitive/critic_schemas.py` — Add `TaskGraphSchema`, `DependencyType` enum
+- `nous/cognitive/layer.py` — Integrate Task Controller: when Critic returns `dependency_type: "phased"`, instantiate TaskController, execute DAG, pass results to Main Agent for assembly
 - `nous/cognitive/transaction.py` — Add `hold_open()` method for prerequisite nodes (defer commit/rollback)
 
 ### Estimated Effort
 
-- DAG data structures + validation: ~3 hours
-- Wave scheduler: ~4 hours
+- TaskDAG data structures + validation: ~3 hours
+- TaskController core (state machine, wave loop, failure propagation): ~5 hours
+- Quality gate integration with Critic: ~2 hours
 - Predecessor context injection + summarization: ~3 hours
 - Critic prompt amendment + schema: ~2 hours
 - DAG transaction manager: ~3 hours
+- CognitiveLayer integration: ~2 hours
 - Integration tests: ~4 hours
-- **Total: ~19 hours** (within Phase 1's existing 15-20h estimate — absorbs into it)
+- **Total: ~24 hours**
 
 ### Success Criteria
 
 1. Critic produces valid DAGs for multi-step tasks >80% of the time (no cycles, reasonable decomposition)
-2. Wave-scheduled execution produces better results than independent parallel on phased tasks (human judged, >60%)
-3. Predecessor context injection preserves information from upstream nodes (no hallucination of prerequisites)
-4. DAG validation catches all malformed graphs before execution
-5. Prerequisite node facts are committed, non-selected leaf facts are rolled back (transaction integrity)
-6. Total DAG execution latency < sum of all node latencies × 0.7 (parallelism provides meaningful speedup)
+2. Task Controller correctly schedules waves — parallel within, sequential between
+3. Wave-scheduled execution produces better results than independent parallel on phased tasks (human judged, >60%)
+4. Predecessor context injection preserves information from upstream nodes (no hallucination of prerequisites)
+5. DAG validation catches all malformed graphs before execution
+6. Prerequisite node facts are committed, non-selected leaf facts are rolled back (transaction integrity)
+7. Total DAG execution latency < sum of all node latencies × 0.7 (parallelism provides meaningful speedup)
+8. Quality gates catch insufficient outputs before wasting downstream compute (>50% of preventable failures caught)
+9. Task Controller token budget enforcement prevents runaway cost
+10. Progress reporting accurately reflects real-time DAG state
 
 ---
 
