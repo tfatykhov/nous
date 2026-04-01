@@ -86,6 +86,27 @@ Return ONLY valid JSON:
   "confidence": <0.0-1.0>
 }}"""
 
+_CONTRADICTION_RESOLUTION_PROMPT = """Two facts exist in memory about the same subject. Determine the correct action:
+
+Fact A (stored {date_a}): {content_a}
+Fact B (stored {date_b}): {content_b}
+
+Actions:
+- SUPERSEDE_A: Fact B is the current/correct version, retire Fact A
+- SUPERSEDE_B: Fact A is the current/correct version, retire Fact B
+- MERGE: Both contain partial truth, merge into single fact
+- KEEP_BOTH: Genuinely different information, both valid
+- REMOVE_A: Fact A is wrong/stale, remove it
+- REMOVE_B: Fact B is wrong/stale, remove it
+
+Return ONLY valid JSON:
+{{
+  "action": "<ACTION>",
+  "confidence": <0.0 to 1.0>,
+  "reason": "<brief explanation>",
+  "merged_content": "<only if action is MERGE>"
+}}"""
+
 
 class SleepHandler:
     """Runs reflection and maintenance during idle periods.
@@ -171,6 +192,11 @@ class SleepHandler:
                 success = await self._phase_reflect(sleep_stats)
                 if success:
                     phases_completed.append("reflect")
+
+            if not self._interrupted:
+                success = await self._phase_resolve_contradictions(sleep_stats)
+                if success:
+                    phases_completed.append("resolve_contradictions")
 
             if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
@@ -477,6 +503,121 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("UPDATES prefix handling failed", exc_info=True)
+            return False
+
+    async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
+        """Phase 4.5: Find and resolve contradictory facts (F031)."""
+        if not self._llm:
+            return True
+        try:
+            candidates = await self._heart.find_contradiction_candidates(limit=10)
+            if not candidates:
+                logger.debug("No contradiction candidates found")
+                return True
+
+            sleep_stats["contradictions_found"] = len(candidates)
+            sleep_stats["contradictions_resolved"] = 0
+
+            for pair in candidates:
+                if self._interrupted:
+                    break
+
+                prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
+                    date_a=str(pair["date1"])[:10],
+                    date_b=str(pair["date2"])[:10],
+                    content_a=pair["content1"][:500],
+                    content_b=pair["content2"][:500],
+                )
+
+                text = await call_background_llm(
+                    self._llm,
+                    model=self._settings.background_model,
+                    system_prompt="You are a memory management system resolving contradictory facts.",
+                    user_message=prompt,
+                    max_tokens=300,
+                )
+
+                if not text:
+                    continue
+
+                try:
+                    resolution = parse_llm_json(text)
+                except Exception:
+                    logger.warning("Failed to parse contradiction resolution response")
+                    continue
+
+                if not isinstance(resolution, dict):
+                    continue
+
+                action = str(resolution.get("action", "")).upper().strip()
+                confidence = float(resolution.get("confidence", 0.0))
+                fact1_id = pair["fact1_id"]
+                fact2_id = pair["fact2_id"]
+
+                # Skip low-confidence actions (review fix: treat as KEEP_BOTH)
+                if confidence < 0.7 and action != "KEEP_BOTH":
+                    logger.debug(
+                        "Resolution confidence %.2f below threshold for %s, treating as KEEP_BOTH",
+                        confidence, action,
+                    )
+                    action = "KEEP_BOTH"
+
+                try:
+                    if action == "SUPERSEDE_A":
+                        # Deactivate the loser — winner (fact2) already exists and is active
+                        await self._heart.deactivate_fact(fact1_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                    elif action == "SUPERSEDE_B":
+                        await self._heart.deactivate_fact(fact2_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                    elif action == "MERGE":
+                        merged = resolution.get("merged_content", "")
+                        if merged:
+                            try:
+                                await self._heart.learn(FactInput(
+                                    subject=pair.get("subject", None),
+                                    content=merged,
+                                    source="contradiction_resolution",
+                                    confidence=0.8,
+                                    category=pair.get("category", None),
+                                ))
+                                await self._heart.deactivate_fact(fact1_id)
+                                await self._heart.deactivate_fact(fact2_id)
+                                sleep_stats["contradictions_resolved"] += 1
+                                sleep_stats["facts_created"] += 1
+                            except Exception:
+                                logger.warning(
+                                    "MERGE partially failed for %s/%s",
+                                    fact1_id, fact2_id, exc_info=True,
+                                )
+                    elif action == "REMOVE_A":
+                        await self._heart.deactivate_fact(fact1_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                    elif action == "REMOVE_B":
+                        await self._heart.deactivate_fact(fact2_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                    elif action == "KEEP_BOTH":
+                        logger.debug(
+                            "Keeping both facts %s and %s: %s",
+                            fact1_id, fact2_id, resolution.get("reason", ""),
+                        )
+                    else:
+                        logger.warning("Unknown resolution action: %s", action)
+                except Exception:
+                    logger.warning(
+                        "Failed to execute resolution %s for %s/%s",
+                        action, fact1_id, fact2_id, exc_info=True,
+                    )
+
+            logger.info(
+                "Contradiction resolution: %d found, %d resolved",
+                sleep_stats.get("contradictions_found", 0),
+                sleep_stats.get("contradictions_resolved", 0),
+            )
+            return True
+
+        except Exception:
+            logger.warning("Contradiction resolution phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:

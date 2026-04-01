@@ -342,3 +342,335 @@ class TestOrientContext:
 
         heart.supersede_fact.assert_not_called()
         heart.learn.assert_called()  # Learned as new fact instead
+
+
+# ===========================================================================
+# Task 3: Contradiction resolution phase
+# ===========================================================================
+
+class TestContradictionResolution:
+    """Phase 4.5: resolve accumulated contradictions during sleep."""
+
+    @pytest.mark.asyncio
+    async def test_supersede_a_deactivates_loser(self):
+        """SUPERSEDE_A should deactivate fact1, leaving fact2 untouched."""
+        fact1_id = uuid4()
+        fact2_id = uuid4()
+
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": fact1_id,
+            "fact2_id": fact2_id,
+            "content1": "Tim's timezone is EST",
+            "content2": "Tim's timezone is PST",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.88,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "SUPERSEDE_A",
+            "confidence": 0.9,
+            "reason": "Fact B is newer",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+        assert result is True
+        heart.deactivate_fact.assert_called_once_with(fact1_id)
+        assert sleep_stats["contradictions_found"] == 1
+        assert sleep_stats["contradictions_resolved"] == 1
+
+    @pytest.mark.asyncio
+    async def test_supersede_b_deactivates_loser(self):
+        """SUPERSEDE_B should deactivate fact2."""
+        fact1_id = uuid4()
+        fact2_id = uuid4()
+
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": fact1_id,
+            "fact2_id": fact2_id,
+            "content1": "Correct info",
+            "content2": "Outdated info",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.85,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "SUPERSEDE_B",
+            "confidence": 0.85,
+            "reason": "Fact A is correct",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        heart.deactivate_fact.assert_called_once_with(fact2_id)
+
+    @pytest.mark.asyncio
+    async def test_merge_creates_new_deactivates_both(self):
+        """MERGE should learn merged fact and deactivate both originals."""
+        fact1_id = uuid4()
+        fact2_id = uuid4()
+
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": fact1_id,
+            "fact2_id": fact2_id,
+            "content1": "Tim uses EST",
+            "content2": "Tim's hours are 9-5",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.82,
+        }])
+        heart.learn = AsyncMock(return_value=MagicMock())
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "MERGE",
+            "confidence": 0.85,
+            "reason": "Complementary timezone info",
+            "merged_content": "Tim works in EST timezone, hours 9-5",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+
+        heart.learn.assert_called_once()
+        assert heart.deactivate_fact.call_count == 2
+        assert sleep_stats["facts_created"] == 1
+
+    @pytest.mark.asyncio
+    async def test_keep_both_takes_no_action(self):
+        """KEEP_BOTH should not modify any facts."""
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": uuid4(),
+            "fact2_id": uuid4(),
+            "content1": "Python is a language",
+            "content2": "Python is for data science",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.80,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.learn = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "KEEP_BOTH",
+            "confidence": 0.95,
+            "reason": "Different information",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+
+        heart.deactivate_fact.assert_not_called()
+        heart.learn.assert_not_called()
+        assert sleep_stats["contradictions_found"] == 1
+        assert sleep_stats.get("contradictions_resolved", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_remove_a_deactivates_fact(self):
+        """REMOVE_A should deactivate fact1."""
+        fact1_id = uuid4()
+
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": fact1_id,
+            "fact2_id": uuid4(),
+            "content1": "Wrong fact",
+            "content2": "Correct fact",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.85,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "REMOVE_A",
+            "confidence": 0.9,
+            "reason": "Fact A is stale",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        heart.deactivate_fact.assert_called_once_with(fact1_id)
+
+    @pytest.mark.asyncio
+    async def test_low_confidence_treated_as_keep_both(self):
+        """Resolution with confidence < 0.7 should be treated as KEEP_BOTH."""
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": uuid4(),
+            "fact2_id": uuid4(),
+            "content1": "A",
+            "content2": "B",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.85,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        llm_response = json.dumps({
+            "action": "SUPERSEDE_A",
+            "confidence": 0.5,
+            "reason": "Not sure",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        heart.deactivate_fact.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_true_no_candidates(self):
+        """Phase returns True when no candidates found."""
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[])
+        heart.search_facts = AsyncMock(return_value=[])
+
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart)
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_returns_true_no_llm(self):
+        """Phase returns True when no LLM client."""
+        handler, _, _, _, _ = _make_sleep_handler(llm_client=None)
+        handler._llm = None
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_respects_interrupted(self):
+        """Phase stops processing when interrupted."""
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[
+            {"fact1_id": uuid4(), "fact2_id": uuid4(), "content1": "A", "content2": "B",
+             "date1": "2026-03-01", "date2": "2026-03-15", "similarity": 0.85},
+        ])
+        heart.search_facts = AsyncMock(return_value=[])
+
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart)
+        handler._interrupted = True
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+        assert result is True
+        assert sleep_stats.get("contradictions_resolved", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_exception(self):
+        """Phase returns False on exception."""
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(side_effect=RuntimeError("db error"))
+
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart)
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_action_normalization(self):
+        """Action string should be normalized (uppercase, stripped)."""
+        fact1_id = uuid4()
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": fact1_id,
+            "fact2_id": uuid4(),
+            "content1": "A",
+            "content2": "B",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.85,
+        }])
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        # Lowercase action with whitespace
+        llm_response = json.dumps({
+            "action": " supersede_a ",
+            "confidence": 0.9,
+            "reason": "test",
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        heart.deactivate_fact.assert_called_once_with(fact1_id)
+
+
+# ===========================================================================
+# Task 3b: Sleep cycle integration
+# ===========================================================================
+
+class TestSleepCycleWithF031:
+    """Full sleep cycle includes F031 phases."""
+
+    @pytest.mark.asyncio
+    async def test_resolve_contradictions_in_phase_ordering(self):
+        """resolve_contradictions should appear in phases_completed."""
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        brain.list_decisions = AsyncMock(return_value=([], 0))
+        heart.list_episodes = AsyncMock(return_value=[])
+        heart.find_contradiction_candidates = AsyncMock(return_value=[])
+        heart.search_facts = AsyncMock(return_value=[])
+
+        event = _make_event("sleep_started")
+        await handler._run_sleep(event)
+
+        emit_calls = [c for c in bus.emit.call_args_list if c[0][0].type == "sleep_completed"]
+        assert len(emit_calls) == 1
+        phases = emit_calls[0][0][0].data["phases_completed"]
+        assert "resolve_contradictions" in phases
+
+    @pytest.mark.asyncio
+    async def test_resolve_after_reflect_before_generalize(self):
+        """Phase ordering: reflect -> resolve_contradictions -> generalize."""
+        ep1 = MagicMock()
+        ep1.summary = "Test episode for ordering"
+
+        handler, brain, heart, bus, _ = _make_sleep_handler(
+            llm_client=_mock_llm_client(json.dumps({
+                "patterns": [], "lessons": [], "connections": [], "gaps": [],
+                "summary": "Test", "facts": [],
+            }))
+        )
+        brain.list_decisions = AsyncMock(return_value=([], 0))
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_contradiction_candidates = AsyncMock(return_value=[])
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        event = _make_event("sleep_started")
+        await handler._run_sleep(event)
+
+        emit_calls = [c for c in bus.emit.call_args_list if c[0][0].type == "sleep_completed"]
+        phases = emit_calls[0][0][0].data["phases_completed"]
+        if "reflect" in phases and "resolve_contradictions" in phases:
+            assert phases.index("resolve_contradictions") > phases.index("reflect")
+        if "resolve_contradictions" in phases and "generalize" in phases:
+            assert phases.index("resolve_contradictions") < phases.index("generalize")
