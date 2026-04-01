@@ -1078,7 +1078,7 @@ class FactManager:
     ) -> list[dict]:
         """Find active fact pairs with same subject and high embedding similarity.
 
-        Returns dicts with: fact1_id, fact2_id, content1, content2, date1, date2, similarity.
+        Returns dicts with: fact1_id, fact2_id, content1, content2, date1, date2, subject, category, similarity.
         These are contradiction candidates that slipped past write-time detection.
         Uses similarity range 0.75-0.95 (below 0.75 is unrelated, above 0.95 is near-dupe).
         """
@@ -1096,6 +1096,7 @@ class FactManager:
             SELECT f1.id AS fact1_id, f2.id AS fact2_id,
                    f1.content AS content1, f2.content AS content2,
                    f1.created_at AS date1, f2.created_at AS date2,
+                   f1.subject AS subject, f1.category AS category,
                    1 - (f1.embedding <=> f2.embedding) AS similarity
             FROM heart.facts f1
             JOIN heart.facts f2 ON f1.agent_id = f2.agent_id
@@ -1122,6 +1123,8 @@ class FactManager:
                 "content2": row.content2,
                 "date1": row.date1,
                 "date2": row.date2,
+                "subject": row.subject,
+                "category": row.category,
                 "similarity": float(row.similarity),
             }
             for row in result.all()
