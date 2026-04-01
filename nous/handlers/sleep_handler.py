@@ -44,7 +44,7 @@ episode summaries from the past 24 hours and identify:
 
 Episodes:
 {episodes}
-
+{orient_context}
 Return ONLY valid JSON:
 {{
   "patterns": ["<pattern 1>", "<pattern 2>"],
@@ -248,11 +248,10 @@ class SleepHandler:
             return False
 
     async def _phase_reflect(self, sleep_stats: dict) -> bool:
-        """Phase 4: Cross-session reflection on recent activity."""
+        """Phase 4: Cross-session reflection on recent activity with orient context."""
         if not self._llm:
             return True
         try:
-            # Use list_recent instead of search_episodes("") — proper method
             recent = await self._heart.list_episodes(limit=10)
             if not recent or len(recent) < 2:
                 logger.debug("Not enough recent episodes for reflection")
@@ -264,7 +263,13 @@ class SleepHandler:
             if not episodes_text:
                 return True
 
-            prompt = _REFLECTION_PROMPT.format(episodes=episodes_text)
+            # F031: Orient — gather existing facts related to episode topics
+            orient_context = await self._build_orient_context(episodes_text)
+
+            prompt = _REFLECTION_PROMPT.format(
+                episodes=episodes_text,
+                orient_context=orient_context,
+            )
 
             text = await call_background_llm(
                 self._llm,
@@ -284,7 +289,6 @@ class SleepHandler:
                     "treating as facts array. Raw response (%d chars):\n%s",
                     len(reflection), len(text), text,
                 )
-                # Treat the list as a bare facts array
                 reflection = {"facts": reflection}
             elif not isinstance(reflection, dict):
                 logger.warning(
@@ -301,8 +305,19 @@ class SleepHandler:
                 if self._interrupted:
                     break
                 if isinstance(fact, dict) and fact.get("content"):
+                    subject = fact.get("subject", "reflection")
+
+                    # F031: UPDATES prefix — supersede existing fact (case-insensitive)
+                    if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
+                        updated = await self._handle_updates_prefix(
+                            subject, fact, sleep_stats
+                        )
+                        if updated:
+                            stored += 1
+                        continue
+
                     result = await self._heart.learn(FactInput(
-                        subject=fact.get("subject", "reflection"),
+                        subject=subject,
                         content=fact["content"],
                         source="sleep_reflection",
                         confidence=0.8,
@@ -356,6 +371,112 @@ class SleepHandler:
 
         except Exception:
             logger.warning("Reflection phase failed", exc_info=True)
+            return False
+
+    async def _build_orient_context(self, episodes_text: str) -> str:
+        """F031: Build orient context by searching for existing facts related to episodes.
+
+        Uses truncated episode summaries as search queries for better semantic matching.
+        """
+        # Use episode summaries as search queries (max 5, truncated to 100 chars)
+        queries = []
+        for line in episodes_text.split("\n"):
+            line = line.strip().lstrip("- ").strip()
+            if line and len(line) > 10:
+                queries.append(line[:100])
+            if len(queries) >= 5:
+                break
+
+        if not queries:
+            return ""
+
+        existing_facts: dict = {}  # id -> fact, dedup by ID
+        for query in queries:
+            try:
+                results = await self._heart.search_facts(query, limit=5)
+                for f in results:
+                    existing_facts[f.id] = f
+            except Exception:
+                logger.debug("Orient search failed for query: %s", query[:50])
+
+        if not existing_facts:
+            return ""
+
+        # Format as orient context (max 20 facts)
+        facts_list = list(existing_facts.values())[:20]
+        facts_text = "\n".join(
+            f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list
+        )
+        return (
+            f"\nEXISTING KNOWLEDGE (do NOT re-extract these — only extract genuinely NEW information):\n"
+            f"{facts_text}\n\n"
+            f"If you discover information that UPDATES or CONTRADICTS an existing fact above,\n"
+            f'include it with a note: "UPDATES: <existing fact content>" in the fact\'s subject field.\n'
+        )
+
+    async def _handle_updates_prefix(
+        self, subject: str, fact: dict, sleep_stats: dict
+    ) -> bool:
+        """F031: Handle UPDATES: prefix — find and supersede the referenced fact.
+
+        Case-insensitive prefix detection. Requires similarity >0.80 to prevent
+        wrong-fact supersession (review fix from devil's advocate P0-1).
+        """
+        referenced_content = subject[len("UPDATES:"):].strip()
+        if not referenced_content:
+            return False
+
+        try:
+            results = await self._heart.search_facts(referenced_content, limit=3)
+            if not results:
+                logger.debug("UPDATES: no matching fact found for '%s'", referenced_content[:50])
+                # Fall back to learning as new fact
+                result = await self._heart.learn(FactInput(
+                    subject=referenced_content,
+                    content=fact["content"],
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category=fact.get("category", "concept"),
+                ))
+                if not isinstance(result, FactRejected):
+                    sleep_stats["facts_created"] += 1
+                    return True
+                return False
+
+            # Check similarity threshold before superseding (review fix P0-1)
+            best_match = results[0]
+            if hasattr(best_match, 'score') and best_match.score is not None and best_match.score < 0.80:
+                logger.debug(
+                    "UPDATES: best match score %.2f below threshold 0.80, learning as new fact",
+                    best_match.score,
+                )
+                result = await self._heart.learn(FactInput(
+                    subject=referenced_content,
+                    content=fact["content"],
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category=fact.get("category", "concept"),
+                ))
+                if not isinstance(result, FactRejected):
+                    sleep_stats["facts_created"] += 1
+                    return True
+                return False
+
+            await self._heart.supersede_fact(
+                best_match.id,
+                FactInput(
+                    subject=best_match.subject or referenced_content,
+                    content=fact["content"],
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category=fact.get("category", best_match.category or "concept"),
+                ),
+            )
+            sleep_stats["facts_created"] += 1
+            logger.info("F031 orient: superseded fact %s with updated content", best_match.id)
+            return True
+        except Exception:
+            logger.warning("UPDATES prefix handling failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:

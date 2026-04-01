@@ -127,3 +127,218 @@ class TestFindContradictionCandidates:
         heart.find_contradiction_candidates = AsyncMock(return_value=[])
         result = await heart.find_contradiction_candidates(limit=10)
         assert result == []
+
+
+# ===========================================================================
+# Task 2: Orient context in sleep reflection
+# ===========================================================================
+
+class TestOrientContext:
+    """Sleep reflection injects existing facts into the prompt."""
+
+    @pytest.mark.asyncio
+    async def test_search_facts_called_for_orient_context(self):
+        """Reflection should search for existing facts based on episode content."""
+        ep1 = MagicMock()
+        ep1.summary = "Discussed Tim's preference for Celsius temperature display"
+        ep2 = MagicMock()
+        ep2.summary = "Worked on the database migration for PostgreSQL upgrade"
+
+        heart = AsyncMock()
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        llm_response = json.dumps({
+            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "summary": "Productive day",
+            "facts": [{"subject": "test", "content": "test fact", "category": "concept"}],
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_reflect(sleep_stats)
+
+        assert heart.search_facts.call_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_existing_facts_injected_into_prompt(self):
+        """The LLM prompt should contain existing facts as orient context."""
+        ep1 = MagicMock()
+        ep1.summary = "Discussed temperature preferences"
+
+        existing_fact = MagicMock()
+        existing_fact.id = uuid4()
+        existing_fact.content = "Tim prefers Celsius for temperature"
+        existing_fact.category = "preference"
+
+        heart = AsyncMock()
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
+        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        captured_payloads = []
+        async def capture_call(payload):
+            captured_payloads.append(payload)
+            response = MagicMock()
+            response.content = [{"type": "text", "text": json.dumps({
+                "patterns": [], "lessons": [], "connections": [], "gaps": [],
+                "summary": "Day summary", "facts": [],
+            })}]
+            return response
+
+        llm_client = AsyncMock()
+        llm_client.call = capture_call
+
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=llm_client)
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_reflect(sleep_stats)
+
+        assert len(captured_payloads) >= 1
+        user_text = captured_payloads[0]["messages"][0]["content"][0]["text"]
+        assert "Tim prefers Celsius" in user_text
+        assert "EXISTING KNOWLEDGE" in user_text
+
+    @pytest.mark.asyncio
+    async def test_no_orient_context_when_no_existing_facts(self):
+        """When search_facts returns nothing, prompt should not have EXISTING KNOWLEDGE."""
+        ep1 = MagicMock()
+        ep1.summary = "Discussed completely novel topic"
+
+        heart = AsyncMock()
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        captured_payloads = []
+        async def capture_call(payload):
+            captured_payloads.append(payload)
+            response = MagicMock()
+            response.content = [{"type": "text", "text": json.dumps({
+                "patterns": [], "lessons": [], "connections": [], "gaps": [],
+                "summary": "Novel day", "facts": [],
+            })}]
+            return response
+
+        llm_client = AsyncMock()
+        llm_client.call = capture_call
+
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=llm_client)
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_reflect(sleep_stats)
+
+        assert len(captured_payloads) >= 1
+        user_text = captured_payloads[0]["messages"][0]["content"][0]["text"]
+        assert "EXISTING KNOWLEDGE" not in user_text
+
+    @pytest.mark.asyncio
+    async def test_updates_prefix_triggers_supersession(self):
+        """When LLM returns 'UPDATES: ...' subject, supersede_fact is called."""
+        ep1 = MagicMock()
+        ep1.summary = "Tim changed timezone preference"
+
+        existing_fact = MagicMock()
+        existing_fact.id = uuid4()
+        existing_fact.content = "Tim's timezone is EST"
+        existing_fact.category = "person"
+        existing_fact.subject = "Tim timezone"
+        existing_fact.score = 0.95  # Above threshold
+
+        heart = AsyncMock()
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
+        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.supersede_fact = AsyncMock(return_value=MagicMock())
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        llm_response = json.dumps({
+            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "summary": "Timezone update",
+            "facts": [{
+                "subject": "UPDATES: Tim's timezone is EST",
+                "content": "Tim's timezone is PST",
+                "category": "person",
+            }],
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_reflect(sleep_stats)
+
+        heart.supersede_fact.assert_called_once()
+        call_args = heart.supersede_fact.call_args
+        assert call_args[0][0] == existing_fact.id
+
+    @pytest.mark.asyncio
+    async def test_updates_prefix_case_insensitive(self):
+        """UPDATES prefix should work regardless of case."""
+        ep1 = MagicMock()
+        ep1.summary = "Test episode"
+
+        existing_fact = MagicMock()
+        existing_fact.id = uuid4()
+        existing_fact.content = "Old fact"
+        existing_fact.category = "concept"
+        existing_fact.subject = "test"
+        existing_fact.score = 0.90
+
+        heart = AsyncMock()
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
+        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.supersede_fact = AsyncMock(return_value=MagicMock())
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        llm_response = json.dumps({
+            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "summary": "Test",
+            "facts": [{
+                "subject": "updates: Old fact",
+                "content": "New fact content",
+                "category": "concept",
+            }],
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_reflect(sleep_stats)
+
+        heart.supersede_fact.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_updates_below_threshold_learns_as_new(self):
+        """When UPDATES match score is below 0.80, learn as new fact instead."""
+        ep1 = MagicMock()
+        ep1.summary = "Test episode"
+
+        low_match = MagicMock()
+        low_match.id = uuid4()
+        low_match.content = "Barely related fact"
+        low_match.category = "concept"
+        low_match.subject = "something"
+        low_match.score = 0.50  # Below threshold
+
+        heart = AsyncMock()
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
+        heart.search_facts = AsyncMock(return_value=[low_match])
+        heart.supersede_fact = AsyncMock()
+        heart.learn = AsyncMock(return_value=MagicMock())
+
+        llm_response = json.dumps({
+            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "summary": "Test",
+            "facts": [{
+                "subject": "UPDATES: Barely related fact",
+                "content": "New fact content",
+                "category": "concept",
+            }],
+        })
+        handler, _, _, bus, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_reflect(sleep_stats)
+
+        heart.supersede_fact.assert_not_called()
+        heart.learn.assert_called()  # Learned as new fact instead
