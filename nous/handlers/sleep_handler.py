@@ -426,10 +426,12 @@ class SleepHandler:
                 logger.debug("Orient search failed for query: %s", query[:50])
 
         if not existing_facts:
+            logger.info("F031 orient: no existing facts found for %d queries", len(queries))
             return ""
 
         # Format as orient context (max 20 facts)
         facts_list = list(existing_facts.values())[:20]
+        logger.info("F031 orient: injecting %d existing facts from %d queries", len(facts_list), len(queries))
         facts_text = "\n".join(
             f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list
         )
@@ -556,8 +558,8 @@ class SleepHandler:
 
                 # Skip low-confidence actions (review fix: treat as KEEP_BOTH)
                 if confidence < 0.7 and action != "KEEP_BOTH":
-                    logger.debug(
-                        "Resolution confidence %.2f below threshold for %s, treating as KEEP_BOTH",
+                    logger.info(
+                        "F031 resolve: confidence %.2f below 0.7 for %s, downgrading to KEEP_BOTH",
                         confidence, action,
                     )
                     action = "KEEP_BOTH"
@@ -567,9 +569,17 @@ class SleepHandler:
                         # Deactivate the loser — winner (fact2) already exists and is active
                         await self._heart.deactivate_fact(fact1_id)
                         sleep_stats["contradictions_resolved"] += 1
+                        logger.info(
+                            "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
+                            action, fact1_id, fact2_id, confidence,
+                        )
                     elif action == "SUPERSEDE_B":
                         await self._heart.deactivate_fact(fact2_id)
                         sleep_stats["contradictions_resolved"] += 1
+                        logger.info(
+                            "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
+                            action, fact2_id, fact1_id, confidence,
+                        )
                     elif action == "MERGE":
                         merged = resolution.get("merged_content", "")
                         if merged:
@@ -585,6 +595,10 @@ class SleepHandler:
                                 await self._heart.deactivate_fact(fact2_id)
                                 sleep_stats["contradictions_resolved"] += 1
                                 sleep_stats["facts_created"] += 1
+                                logger.info(
+                                    "F031 resolve: MERGE — combined %s + %s into new fact (%.2f confidence)",
+                                    fact1_id, fact2_id, confidence,
+                                )
                             except Exception:
                                 logger.warning(
                                     "MERGE partially failed for %s/%s",
@@ -593,12 +607,14 @@ class SleepHandler:
                     elif action == "REMOVE_A":
                         await self._heart.deactivate_fact(fact1_id)
                         sleep_stats["contradictions_resolved"] += 1
+                        logger.info("F031 resolve: REMOVE_A — deactivated %s (%.2f confidence)", fact1_id, confidence)
                     elif action == "REMOVE_B":
                         await self._heart.deactivate_fact(fact2_id)
                         sleep_stats["contradictions_resolved"] += 1
+                        logger.info("F031 resolve: REMOVE_B — deactivated %s (%.2f confidence)", fact2_id, confidence)
                     elif action == "KEEP_BOTH":
-                        logger.debug(
-                            "Keeping both facts %s and %s: %s",
+                        logger.info(
+                            "F031 resolve: KEEP_BOTH — %s and %s: %s",
                             fact1_id, fact2_id, resolution.get("reason", ""),
                         )
                     else:
