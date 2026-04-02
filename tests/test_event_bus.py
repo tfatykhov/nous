@@ -1278,7 +1278,7 @@ class TestSleepHandler:
             ],
         }
         llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(reflection_json)}]
+            content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
         ))
 
         await handler._phase_reflect({"facts_created": 0, "procedures_created": 0, "censors_retired": 0})
