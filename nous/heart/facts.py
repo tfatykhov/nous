@@ -1066,3 +1066,66 @@ class FactManager:
             tags=fact.tags or [],
             created_at=fact.created_at,
         )
+
+    # ------------------------------------------------------------------
+    # find_contradiction_candidates() — F031
+    # ------------------------------------------------------------------
+
+    async def find_contradiction_candidates(
+        self,
+        limit: int = 10,
+        session: AsyncSession | None = None,
+    ) -> list[dict]:
+        """Find active fact pairs with same subject and high embedding similarity.
+
+        Returns dicts with: fact1_id, fact2_id, content1, content2, date1, date2, subject, category, similarity.
+        These are contradiction candidates that slipped past write-time detection.
+        Uses similarity range 0.75-0.95 (below 0.75 is unrelated, above 0.95 is near-dupe).
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._find_contradiction_candidates(limit, session)
+        return await self._find_contradiction_candidates(limit, session)
+
+    async def _find_contradiction_candidates(
+        self,
+        limit: int,
+        session: AsyncSession,
+    ) -> list[dict]:
+        sql = text("""
+            SELECT f1.id AS fact1_id, f2.id AS fact2_id,
+                   f1.content AS content1, f2.content AS content2,
+                   f1.created_at AS date1, f2.created_at AS date2,
+                   f1.subject AS subject, f1.category AS category,
+                   1 - (f1.embedding <=> f2.embedding) AS similarity
+            FROM heart.facts f1
+            JOIN heart.facts f2 ON f1.agent_id = f2.agent_id
+              AND f1.id < f2.id
+              AND f2.active = true
+              AND f2.embedding IS NOT NULL
+              AND f2.subject IS NOT NULL
+              AND LOWER(f1.subject) = LOWER(f2.subject)
+              AND 1 - (f1.embedding <=> f2.embedding) > 0.75
+              AND 1 - (f1.embedding <=> f2.embedding) < 0.95
+            WHERE f1.agent_id = :agent_id
+              AND f1.active = true
+              AND f1.embedding IS NOT NULL
+              AND f1.subject IS NOT NULL
+            ORDER BY similarity DESC
+            LIMIT :limit
+        """)
+        result = await session.execute(sql, {"agent_id": self.agent_id, "limit": limit})
+        return [
+            {
+                "fact1_id": row.fact1_id,
+                "fact2_id": row.fact2_id,
+                "content1": row.content1,
+                "content2": row.content2,
+                "date1": row.date1,
+                "date2": row.date2,
+                "subject": row.subject,
+                "category": row.category,
+                "similarity": float(row.similarity),
+            }
+            for row in result.all()
+        ]

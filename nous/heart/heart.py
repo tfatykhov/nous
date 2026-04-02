@@ -366,6 +366,14 @@ class Heart:
         """Soft-delete a fact."""
         await self.facts.deactivate(fact_id, session)
 
+    async def find_contradiction_candidates(
+        self,
+        limit: int = 10,
+        session: AsyncSession | None = None,
+    ) -> list[dict]:
+        """F031: Find active fact pairs with same subject and high similarity."""
+        return await self.facts.find_contradiction_candidates(limit=limit, session=session)
+
     # ==================================================================
     # Procedures
     # ==================================================================

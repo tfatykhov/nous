@@ -44,7 +44,7 @@ episode summaries from the past 24 hours and identify:
 
 Episodes:
 {episodes}
-
+{orient_context}
 Return ONLY valid JSON:
 {{
   "patterns": ["<pattern 1>", "<pattern 2>"],
@@ -84,6 +84,27 @@ Return ONLY valid JSON:
   "subject": "<who/what>",
   "content": "<generalized fact>",
   "confidence": <0.0-1.0>
+}}"""
+
+_CONTRADICTION_RESOLUTION_PROMPT = """Two facts exist in memory about the same subject. Determine the correct action:
+
+Fact A (stored {date_a}): {content_a}
+Fact B (stored {date_b}): {content_b}
+
+Actions:
+- SUPERSEDE_A: Fact B is the current/correct version, retire Fact A
+- SUPERSEDE_B: Fact A is the current/correct version, retire Fact B
+- MERGE: Both contain partial truth, merge into single fact
+- KEEP_BOTH: Genuinely different information, both valid
+- REMOVE_A: Fact A is wrong/stale, remove it
+- REMOVE_B: Fact B is wrong/stale, remove it
+
+Return ONLY valid JSON:
+{{
+  "action": "<ACTION>",
+  "confidence": <0.0 to 1.0>,
+  "reason": "<brief explanation>",
+  "merged_content": "<only if action is MERGE>"
 }}"""
 
 
@@ -173,6 +194,11 @@ class SleepHandler:
                     phases_completed.append("reflect")
 
             if not self._interrupted:
+                success = await self._phase_resolve_contradictions(sleep_stats)
+                if success:
+                    phases_completed.append("resolve_contradictions")
+
+            if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
                 if success:
                     phases_completed.append("generalize")
@@ -248,11 +274,10 @@ class SleepHandler:
             return False
 
     async def _phase_reflect(self, sleep_stats: dict) -> bool:
-        """Phase 4: Cross-session reflection on recent activity."""
+        """Phase 4: Cross-session reflection on recent activity with orient context."""
         if not self._llm:
             return True
         try:
-            # Use list_recent instead of search_episodes("") — proper method
             recent = await self._heart.list_episodes(limit=10)
             if not recent or len(recent) < 2:
                 logger.debug("Not enough recent episodes for reflection")
@@ -264,7 +289,13 @@ class SleepHandler:
             if not episodes_text:
                 return True
 
-            prompt = _REFLECTION_PROMPT.format(episodes=episodes_text)
+            # F031: Orient — gather existing facts related to episode topics
+            orient_context = await self._build_orient_context(episodes_text)
+
+            prompt = _REFLECTION_PROMPT.format(
+                episodes=episodes_text,
+                orient_context=orient_context,
+            )
 
             text = await call_background_llm(
                 self._llm,
@@ -284,7 +315,6 @@ class SleepHandler:
                     "treating as facts array. Raw response (%d chars):\n%s",
                     len(reflection), len(text), text,
                 )
-                # Treat the list as a bare facts array
                 reflection = {"facts": reflection}
             elif not isinstance(reflection, dict):
                 logger.warning(
@@ -301,8 +331,19 @@ class SleepHandler:
                 if self._interrupted:
                     break
                 if isinstance(fact, dict) and fact.get("content"):
+                    subject = fact.get("subject", "reflection")
+
+                    # F031: UPDATES prefix — supersede existing fact (case-insensitive)
+                    if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
+                        updated = await self._handle_updates_prefix(
+                            subject, fact, sleep_stats
+                        )
+                        if updated:
+                            stored += 1
+                        continue
+
                     result = await self._heart.learn(FactInput(
-                        subject=fact.get("subject", "reflection"),
+                        subject=subject,
                         content=fact["content"],
                         source="sleep_reflection",
                         confidence=0.8,
@@ -356,6 +397,243 @@ class SleepHandler:
 
         except Exception:
             logger.warning("Reflection phase failed", exc_info=True)
+            return False
+
+    async def _build_orient_context(self, episodes_text: str) -> str:
+        """F031: Build orient context by searching for existing facts related to episodes.
+
+        Uses truncated episode summaries as search queries for better semantic matching.
+        """
+        # Use episode summaries as search queries (max 5, truncated to 100 chars)
+        queries = []
+        for line in episodes_text.split("\n"):
+            line = line.strip().lstrip("- ").strip()
+            if line and len(line) > 10:
+                queries.append(line[:100])
+            if len(queries) >= 5:
+                break
+
+        if not queries:
+            return ""
+
+        existing_facts: dict = {}  # id -> fact, dedup by ID
+        for query in queries:
+            try:
+                results = await self._heart.search_facts(query, limit=5)
+                for f in results:
+                    existing_facts[f.id] = f
+            except Exception:
+                logger.debug("Orient search failed for query: %s", query[:50])
+
+        if not existing_facts:
+            logger.info("F031 orient: no existing facts found for %d queries", len(queries))
+            return ""
+
+        # Format as orient context (max 20 facts)
+        facts_list = list(existing_facts.values())[:20]
+        logger.info("F031 orient: injecting %d existing facts from %d queries", len(facts_list), len(queries))
+        facts_text = "\n".join(
+            f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list
+        )
+        return (
+            f"\nEXISTING KNOWLEDGE (do NOT re-extract these — only extract genuinely NEW information):\n"
+            f"{facts_text}\n\n"
+            f"If you discover information that UPDATES or CONTRADICTS an existing fact above,\n"
+            f'include it with a note: "UPDATES: <existing fact content>" in the fact\'s subject field.\n'
+        )
+
+    async def _handle_updates_prefix(
+        self, subject: str, fact: dict, sleep_stats: dict
+    ) -> bool:
+        """F031: Handle UPDATES: prefix — find and supersede the referenced fact.
+
+        Case-insensitive prefix detection. Requires similarity >0.80 to prevent
+        wrong-fact supersession (review fix from devil's advocate P0-1).
+        """
+        referenced_content = subject[len("UPDATES:"):].strip()
+        if not referenced_content:
+            return False
+
+        try:
+            results = await self._heart.search_facts(referenced_content, limit=3)
+            if not results:
+                logger.debug("UPDATES: no matching fact found for '%s'", referenced_content[:50])
+                # Fall back to learning as new fact
+                result = await self._heart.learn(FactInput(
+                    subject=referenced_content,
+                    content=fact["content"],
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category=fact.get("category", "concept"),
+                ))
+                if not isinstance(result, FactRejected):
+                    sleep_stats["facts_created"] += 1
+                    return True
+                return False
+
+            # Check similarity threshold before superseding (review fix P0-1)
+            best_match = results[0]
+            if hasattr(best_match, 'score') and best_match.score is not None and best_match.score < 0.80:
+                logger.debug(
+                    "UPDATES: best match score %.2f below threshold 0.80, learning as new fact",
+                    best_match.score,
+                )
+                result = await self._heart.learn(FactInput(
+                    subject=referenced_content,
+                    content=fact["content"],
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category=fact.get("category", "concept"),
+                ))
+                if not isinstance(result, FactRejected):
+                    sleep_stats["facts_created"] += 1
+                    return True
+                return False
+
+            await self._heart.supersede_fact(
+                best_match.id,
+                FactInput(
+                    subject=best_match.subject or referenced_content,
+                    content=fact["content"],
+                    source="sleep_reflection",
+                    confidence=0.8,
+                    category=fact.get("category", best_match.category or "concept"),
+                ),
+            )
+            sleep_stats["facts_created"] += 1
+            logger.info("F031 orient: superseded fact %s with updated content", best_match.id)
+            return True
+        except Exception:
+            logger.warning("UPDATES prefix handling failed", exc_info=True)
+            return False
+
+    async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
+        """Phase 4.5: Find and resolve contradictory facts (F031)."""
+        if not self._llm:
+            return True
+        try:
+            candidates = await self._heart.find_contradiction_candidates(limit=10)
+            if not candidates:
+                logger.debug("No contradiction candidates found")
+                return True
+
+            sleep_stats["contradictions_found"] = len(candidates)
+            sleep_stats["contradictions_resolved"] = 0
+
+            for pair in candidates:
+                if self._interrupted:
+                    break
+
+                prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
+                    date_a=str(pair["date1"])[:10],
+                    date_b=str(pair["date2"])[:10],
+                    content_a=pair["content1"][:500],
+                    content_b=pair["content2"][:500],
+                )
+
+                text = await call_background_llm(
+                    self._llm,
+                    model=self._settings.background_model,
+                    system_prompt="You are a memory management system resolving contradictory facts.",
+                    user_message=prompt,
+                    max_tokens=300,
+                )
+
+                if not text:
+                    continue
+
+                try:
+                    resolution = parse_llm_json(text)
+                except Exception:
+                    logger.warning("Failed to parse contradiction resolution response")
+                    continue
+
+                if not isinstance(resolution, dict):
+                    continue
+
+                action = str(resolution.get("action", "")).upper().strip()
+                confidence = float(resolution.get("confidence", 0.0))
+                fact1_id = pair["fact1_id"]
+                fact2_id = pair["fact2_id"]
+
+                # Skip low-confidence actions (review fix: treat as KEEP_BOTH)
+                if confidence < 0.7 and action != "KEEP_BOTH":
+                    logger.info(
+                        "F031 resolve: confidence %.2f below 0.7 for %s, downgrading to KEEP_BOTH",
+                        confidence, action,
+                    )
+                    action = "KEEP_BOTH"
+
+                try:
+                    if action == "SUPERSEDE_A":
+                        # Deactivate the loser — winner (fact2) already exists and is active
+                        await self._heart.deactivate_fact(fact1_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                        logger.info(
+                            "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
+                            action, fact1_id, fact2_id, confidence,
+                        )
+                    elif action == "SUPERSEDE_B":
+                        await self._heart.deactivate_fact(fact2_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                        logger.info(
+                            "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
+                            action, fact2_id, fact1_id, confidence,
+                        )
+                    elif action == "MERGE":
+                        merged = resolution.get("merged_content", "")
+                        if merged:
+                            try:
+                                await self._heart.learn(FactInput(
+                                    subject=pair.get("subject", None),
+                                    content=merged,
+                                    source="contradiction_resolution",
+                                    confidence=0.8,
+                                    category=pair.get("category", None),
+                                ))
+                                await self._heart.deactivate_fact(fact1_id)
+                                await self._heart.deactivate_fact(fact2_id)
+                                sleep_stats["contradictions_resolved"] += 1
+                                sleep_stats["facts_created"] += 1
+                                logger.info(
+                                    "F031 resolve: MERGE — combined %s + %s into new fact (%.2f confidence)",
+                                    fact1_id, fact2_id, confidence,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "MERGE partially failed for %s/%s",
+                                    fact1_id, fact2_id, exc_info=True,
+                                )
+                    elif action == "REMOVE_A":
+                        await self._heart.deactivate_fact(fact1_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                        logger.info("F031 resolve: REMOVE_A — deactivated %s (%.2f confidence)", fact1_id, confidence)
+                    elif action == "REMOVE_B":
+                        await self._heart.deactivate_fact(fact2_id)
+                        sleep_stats["contradictions_resolved"] += 1
+                        logger.info("F031 resolve: REMOVE_B — deactivated %s (%.2f confidence)", fact2_id, confidence)
+                    elif action == "KEEP_BOTH":
+                        logger.info(
+                            "F031 resolve: KEEP_BOTH — %s and %s: %s",
+                            fact1_id, fact2_id, resolution.get("reason", ""),
+                        )
+                    else:
+                        logger.warning("Unknown resolution action: %s", action)
+                except Exception:
+                    logger.warning(
+                        "Failed to execute resolution %s for %s/%s",
+                        action, fact1_id, fact2_id, exc_info=True,
+                    )
+
+            logger.info(
+                "Contradiction resolution: %d found, %d resolved",
+                sleep_stats.get("contradictions_found", 0),
+                sleep_stats.get("contradictions_resolved", 0),
+            )
+            return True
+
+        except Exception:
+            logger.warning("Contradiction resolution phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:
