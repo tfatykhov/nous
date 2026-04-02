@@ -153,6 +153,8 @@ _CONTRADICTION_RESOLUTION_SCHEMA: dict[str, Any] = {
         },
         "confidence": {
             "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
             "description": "Confidence in this resolution (0.0 to 1.0)",
         },
         "reason": {
