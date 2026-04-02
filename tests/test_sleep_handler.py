@@ -267,6 +267,7 @@ class TestSleepStats:
         heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
         # learn returns a mock (not FactRejected) — counts as stored
         heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
 
         reflection_json = {
             "patterns": [], "lessons": [], "connections": [], "gaps": [],
@@ -277,7 +278,7 @@ class TestSleepStats:
             ],
         }
         llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(reflection_json)}]
+            content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
         ))
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -315,13 +316,14 @@ class TestSleepStats:
         ep2.summary = "Episode 2"
         heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
         heart.learn = AsyncMock(return_value=MagicMock())
+        heart.search_facts = AsyncMock(return_value=[])
         reflection_json = {
             "patterns": [], "lessons": [], "connections": [], "gaps": [],
             "summary": "Reflection",
             "facts": [{"subject": "x", "content": "y", "category": "concept"}],
         }
         llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(reflection_json)}]
+            content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
         ))
 
         # Generalize: will create 2 procedures
