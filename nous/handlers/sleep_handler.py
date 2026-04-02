@@ -28,7 +28,7 @@ from typing import Any
 from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import LLMClient, call_background_llm, call_background_llm_structured, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm_structured
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -140,13 +140,32 @@ Actions:
 - REMOVE_A: Fact A is wrong/stale, remove it
 - REMOVE_B: Fact B is wrong/stale, remove it
 
-Return ONLY valid JSON:
-{{
-  "action": "<ACTION>",
-  "confidence": <0.0 to 1.0>,
-  "reason": "<brief explanation>",
-  "merged_content": "<only if action is MERGE>"
-}}"""
+Use the resolve_contradiction tool to return your analysis."""
+
+# Tool-use structured output schema for contradiction resolution (Issue #233)
+_CONTRADICTION_RESOLUTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["SUPERSEDE_A", "SUPERSEDE_B", "MERGE", "KEEP_BOTH", "REMOVE_A", "REMOVE_B"],
+            "description": "Resolution action to take",
+        },
+        "confidence": {
+            "type": "number",
+            "description": "Confidence in this resolution (0.0 to 1.0)",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Brief explanation for the resolution",
+        },
+        "merged_content": {
+            "type": "string",
+            "description": "Merged fact content (only required if action is MERGE)",
+        },
+    },
+    "required": ["action", "confidence", "reason"],
+}
 
 
 class SleepHandler:
@@ -563,24 +582,18 @@ class SleepHandler:
                     content_b=pair["content2"][:500],
                 )
 
-                text = await call_background_llm(
-                    self._llm,
+                resolution = await call_background_llm_structured(
+                    client=self._llm,
                     model=self._settings.background_model,
                     system_prompt="You are a memory management system resolving contradictory facts.",
                     user_message=prompt,
+                    tool_name="resolve_contradiction",
+                    tool_description="Resolve a contradiction between two facts in memory.",
+                    output_schema=_CONTRADICTION_RESOLUTION_SCHEMA,
                     max_tokens=300,
                 )
 
-                if not text:
-                    continue
-
-                try:
-                    resolution = parse_llm_json(text)
-                except Exception:
-                    logger.warning("Failed to parse contradiction resolution response")
-                    continue
-
-                if not isinstance(resolution, dict):
+                if not resolution:
                     continue
 
                 action = str(resolution.get("action", "")).upper().strip()
