@@ -1163,6 +1163,54 @@ def create_app(
             logger.error("Dashboard ledger error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F034: Heartbeat dashboard ---
+
+    async def dashboard_heartbeat(request: Request) -> JSONResponse:
+        """GET /dashboard/heartbeat - Heartbeat overview for dashboard."""
+        try:
+            _ = heartbeat_runner.registry  # trigger proxy resolution
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+
+        try:
+            hours = max(1, min(int(request.query_params.get("hours", "24")), 168))
+        except ValueError:
+            return JSONResponse({"error": "hours must be an integer"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_heartbeat_dashboard_data
+
+            async with database.session() as session:
+                data = await get_heartbeat_dashboard_data(
+                    session, settings.agent_id, hours=hours,
+                )
+
+            # Merge in-memory state from heartbeat_runner
+            budget_used = heartbeat_runner.tokens_used_today
+            budget_limit = settings.heartbeat_daily_token_budget
+            data["status"] = {
+                "enabled": settings.heartbeat_enabled,
+                "is_running": heartbeat_runner.is_running,
+                "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
+                "tick_interval": settings.heartbeat_tick_interval,
+            }
+            data["checks"] = heartbeat_runner.registry.get_status()
+            data["budget"] = {
+                "used": budget_used,
+                "limit": budget_limit,
+                "percentage": round(budget_used / budget_limit * 100, 1) if budget_limit > 0 else 0,
+            }
+            data["quiet_hours"] = {
+                "start": settings.heartbeat_quiet_start,
+                "end": settings.heartbeat_quiet_end,
+                "active": heartbeat_runner.is_quiet,
+            }
+
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard heartbeat error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -1507,6 +1555,8 @@ def create_app(
         Route("/dashboard/admission", dashboard_admission),
         # F032: Execution ledger dashboard
         Route("/dashboard/ledger", dashboard_ledger),
+        # F034: Heartbeat dashboard
+        Route("/dashboard/heartbeat", dashboard_heartbeat),
     ]
 
     # Static dashboard mount — only add if directory exists (avoids crash during tests)

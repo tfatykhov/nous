@@ -10,6 +10,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from collections import Counter, defaultdict
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1322,4 +1324,124 @@ async def get_rubric_dashboard_data(
         },
         "weight_history": weight_history,
         "config": config,
+    }
+
+
+# ── F034: Heartbeat dashboard data (GET /dashboard/heartbeat) ──────────
+
+
+async def get_heartbeat_dashboard_data(
+    session: AsyncSession, agent_id: str, hours: int = 24
+) -> dict:
+    """Return heartbeat tick history, cognitive sessions, and findings aggregates."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    seven_days_ago = now - timedelta(days=7)
+
+    # Recent heartbeat_tick events (last N hours, limit 100)
+    result = await session.execute(
+        text("""
+            SELECT event_type AS type, created_at, data
+            FROM nous_system.events
+            WHERE agent_id = :agent_id AND event_type = 'heartbeat_tick'
+              AND created_at >= :since
+            ORDER BY created_at DESC LIMIT 100
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    tick_rows = result.fetchall()
+
+    recent_ticks = []
+    for row in tick_rows:
+        recent_ticks.append({
+            "created_at": row.created_at.isoformat(),
+            "data": row.data,
+        })
+
+    # Recent heartbeat_triage events (cognitive sessions)
+    result = await session.execute(
+        text("""
+            SELECT event_type AS type, created_at, data
+            FROM nous_system.events
+            WHERE agent_id = :agent_id AND event_type = 'heartbeat_triage'
+              AND created_at >= :since
+            ORDER BY created_at DESC LIMIT 20
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    triage_rows = result.fetchall()
+
+    cognitive_sessions = []
+    for row in triage_rows:
+        d = row.data or {}
+        cognitive_sessions.append({
+            "timestamp": row.created_at.isoformat(),
+            "session_id": d.get("session_id"),
+            "findings_count": d.get("findings_count", 0),
+            "tokens_used": d.get("tokens_used", 0),
+            "response_summary": d.get("response_summary", ""),
+        })
+
+    # Aggregate findings from tick events
+    total_findings = 0
+    merged_by_source: Counter[str] = Counter()
+    merged_by_urgency: Counter[str] = Counter()
+    all_findings_flat: list[dict] = []
+
+    for row in tick_rows:
+        d = row.data or {}
+        total_findings += d.get("findings_count", 0)
+
+        # Merge by_source / by_urgency dicts
+        for src, cnt in (d.get("by_source") or {}).items():
+            merged_by_source[src] += cnt
+        for urg, cnt in (d.get("by_urgency") or {}).items():
+            merged_by_urgency[urg] += cnt
+
+        # Flatten individual findings for timeline
+        for f in d.get("findings") or []:
+            all_findings_flat.append({
+                "source": f.get("source"),
+                "summary": f.get("summary"),
+                "urgency": f.get("urgency"),
+                "check_name": f.get("check_name"),
+                "timestamp": row.created_at.isoformat(),
+            })
+
+    # Cap timeline to most recent 50
+    findings_timeline = all_findings_flat[:50]
+
+    findings_summary = {
+        "total": total_findings,
+        "by_source": dict(merged_by_source),
+        "by_urgency": dict(merged_by_urgency),
+    }
+
+    # Findings by day (last 7 days) — aggregate by_urgency from tick events
+    daily_urgency: dict[str, Counter[str]] = defaultdict(Counter)
+    daily_counts: dict[str, int] = defaultdict(int)
+    for row in tick_rows:
+        d = row.data or {}
+        day_key = row.created_at.date().isoformat()
+        daily_counts[day_key] += d.get("findings_count", 0)
+        for urg, cnt in (d.get("by_urgency") or {}).items():
+            daily_urgency[day_key][urg] += cnt
+
+    # Build 7-day array with zero-fills
+    findings_by_day = []
+    for i in range(7):
+        day = (seven_days_ago.date() + timedelta(days=i)).isoformat()
+        urg = daily_urgency.get(day, Counter())
+        findings_by_day.append({
+            "date": day,
+            "findings_count": daily_counts.get(day, 0),
+            "by_urgency": {"high": urg.get("high", 0), "normal": urg.get("normal", 0), "low": urg.get("low", 0)},
+        })
+
+    return {
+        "recent_ticks": recent_ticks,
+        "cognitive_sessions": cognitive_sessions,
+        "totals": findings_summary,
+        "findings_by_day": findings_by_day,
+        "findings_timeline": findings_timeline,
     }
