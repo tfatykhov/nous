@@ -201,8 +201,8 @@ function renderHeartbeat(container, data) {
 
     // ── Charts ──
     html += '<div class="chart-grid">';
-    html += '<div class="chart-card"><h3>Token Budget</h3><div class="chart-container" style="position:relative">' +
-        '<div class="budget-gauge-wrap"><canvas id="chart-hb-budget"></canvas>' +
+    html += '<div class="chart-card"><h3>Token Budget</h3><div class="chart-container" style="position:relative;max-height:220px">' +
+        '<div class="budget-gauge-wrap" style="max-width:200px;margin:0 auto"><canvas id="chart-hb-budget"></canvas>' +
         '<div class="budget-gauge-center"><div class="budget-gauge-value">' + Dashboard.formatNumber(budget.used || 0) + '</div>' +
         '<div class="budget-gauge-label">of ' + Dashboard.formatNumber(budget.limit || 0) + '</div></div>' +
         '</div></div></div>';
@@ -323,6 +323,8 @@ function createHbBudgetChart(budget) {
             }]
         },
         options: {
+            responsive: true,
+            maintainAspectRatio: true,
             cutout: '75%',
             plugins: {
                 legend: { display: false }
