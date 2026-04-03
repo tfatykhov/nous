@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import imaplib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from nous.brain import Brain
 from nous.config import Settings
@@ -273,3 +273,64 @@ class EmailCheck(BaseCheck):
         if any(w in lower for w in ["important", "action required", "deadline"]):
             return "normal"
         return "low"
+
+
+class DriveCheck(BaseCheck):
+    """Check Google Drive for recently modified files.
+
+    Uses the existing GDrive integration (nous.integrations.gdrive).
+    Synchronous Google API calls are wrapped in asyncio.to_thread().
+    """
+
+    name = "drive"
+    timeout = 30
+
+    def __init__(self, settings: Settings) -> None:
+        super().__init__()
+        self.interval = settings.heartbeat_drive_interval
+        self._last_check_time: datetime | None = None
+
+        # Lazy-init GDrive to avoid crashing if creds are missing
+        self._gdrive = None
+
+    def _ensure_gdrive(self):
+        if self._gdrive is None:
+            from nous.integrations.gdrive import GDrive
+            self._gdrive = GDrive()
+
+    async def run(self) -> CheckResult:
+        try:
+            self._ensure_gdrive()
+        except Exception:
+            logger.warning("DriveCheck: GDrive init failed", exc_info=True)
+            raise
+
+        cutoff = self._last_check_time or (datetime.now(UTC) - timedelta(hours=1))
+        self._last_check_time = datetime.now(UTC)
+
+        # Query Drive for files modified since cutoff
+        cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
+        query = f"modifiedTime > '{cutoff_str}' and trashed = false"
+
+        try:
+            files = await asyncio.to_thread(
+                self._gdrive.list_files, query=query
+            )
+        except Exception:
+            logger.warning("DriveCheck: list_files failed", exc_info=True)
+            raise
+
+        findings: list[Finding] = []
+        for f in files:
+            findings.append(Finding(
+                source="drive",
+                summary=f"Modified: {f.get('name', '?')} ({f.get('mimeType', '?')})",
+                urgency="low",
+                needs_action=False,
+                raw_data=f,
+            ))
+
+        return CheckResult(
+            has_updates=bool(findings),
+            findings=findings,
+        )

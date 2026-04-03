@@ -321,6 +321,8 @@ class Settings(BaseSettings):
     heartbeat_email_enabled: bool = False  # disabled by default — needs IMAP creds
     heartbeat_email_interval: int = 180
     heartbeat_email_imap_host: str = "imap.gmail.com"
+    heartbeat_drive_enabled: bool = True
+    heartbeat_drive_interval: int = 600  # every 10 minutes
     heartbeat_health_interval: int = 3600
     heartbeat_self_initiated_interval: int = 1800
 

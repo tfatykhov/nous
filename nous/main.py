@@ -388,7 +388,9 @@ async def create_components(settings: Settings) -> dict:
         try:
             from nous.heartbeat.runner import HeartbeatRunner
             from nous.heartbeat.registry import CheckRegistry
-            from nous.heartbeat.checks import HealthCheck, SelfInitiatedCheck, EmailCheck
+            from nous.heartbeat.checks import (
+                HealthCheck, SelfInitiatedCheck, EmailCheck, DriveCheck,
+            )
 
             registry = CheckRegistry()
             registry.register(HealthCheck(heart, brain, settings), permanent=True)
@@ -396,6 +398,9 @@ async def create_components(settings: Settings) -> dict:
 
             if settings.heartbeat_email_enabled and settings.email_user:
                 registry.register(EmailCheck(settings))
+
+            if settings.heartbeat_drive_enabled and settings.google_service_account_json:
+                registry.register(DriveCheck(settings))
 
             heartbeat_runner = HeartbeatRunner(
                 settings=settings, registry=registry, runner=runner,
