@@ -382,6 +382,29 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("TaskScheduler not available yet")
 
+    # F034: Heartbeat proactive monitoring
+    heartbeat_runner = None
+    if settings.heartbeat_enabled:
+        try:
+            from nous.heartbeat.runner import HeartbeatRunner
+            from nous.heartbeat.registry import CheckRegistry
+            from nous.heartbeat.checks import HealthCheck, SelfInitiatedCheck, EmailCheck
+
+            registry = CheckRegistry()
+            registry.register(HealthCheck(heart, brain, settings), permanent=True)
+            registry.register(SelfInitiatedCheck(heart, brain, settings), permanent=True)
+
+            if settings.heartbeat_email_enabled and settings.email_user:
+                registry.register(EmailCheck(settings))
+
+            heartbeat_runner = HeartbeatRunner(
+                settings=settings, registry=registry, runner=runner,
+                brain=brain, heart=heart, bus=bus, http_client=handler_http,
+            )
+            await heartbeat_runner.start()
+        except ImportError:
+            logger.debug("Heartbeat not available yet")
+
     return {
         "database": database,
         "brain": brain,
@@ -402,12 +425,18 @@ async def create_components(settings: Settings) -> dict:
         "sleep_handler": sleep_handler,
         "rubric_manager": rubric_manager,
         "rubric_evolver": rubric_evolver if bus else None,
+        "heartbeat_runner": heartbeat_runner,
     }
 
 
 async def shutdown_components(components: dict) -> None:
     """Graceful shutdown in reverse order."""
     logger.info("Shutting down Nous...")
+
+    # F034: Stop heartbeat before other components
+    heartbeat_runner = components.get("heartbeat_runner")
+    if heartbeat_runner:
+        await heartbeat_runner.stop()
 
     # 011.1: Stop subtask pool and task scheduler first
     subtask_pool = components.get("subtask_pool")
@@ -514,6 +543,7 @@ def build_app(settings: Settings) -> Starlette:
         sleep_handler=_lazy_component(components, "sleep_handler"),
         rubric_manager=_lazy_component(components, "rubric_manager"),
         rubric_evolver=_lazy_component(components, "rubric_evolver"),
+        heartbeat_runner=_lazy_component(components, "heartbeat_runner"),
     )
 
     if settings.mcp_enabled:

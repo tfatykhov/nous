@@ -332,6 +332,47 @@ class ProcedureManager:
         return summaries, total
 
     # ------------------------------------------------------------------
+    # get_low_effectiveness() — F034: Heartbeat health check
+    # ------------------------------------------------------------------
+
+    async def get_low_effectiveness(
+        self, threshold: float = 0.5, session: AsyncSession | None = None,
+    ) -> list[ProcedureSummary]:
+        """Return active procedures with effectiveness below threshold.
+
+        Only includes procedures that have been activated at least once
+        (i.e. have success + failure > 0).
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_low_effectiveness(threshold, session)
+        return await self._get_low_effectiveness(threshold, session)
+
+    async def _get_low_effectiveness(
+        self, threshold: float, session: AsyncSession,
+    ) -> list[ProcedureSummary]:
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == True)  # noqa: E712
+        )
+        procedures = list(result.scalars().all())
+
+        low: list[ProcedureSummary] = []
+        for p in procedures:
+            eff = self._compute_effectiveness(p)
+            if eff is not None and eff < threshold:
+                low.append(ProcedureSummary(
+                    id=p.id,
+                    name=p.name,
+                    domain=p.domain,
+                    description=p.description,
+                    activation_count=p.activation_count or 0,
+                    effectiveness=eff,
+                ))
+        return low
+
+    # ------------------------------------------------------------------
     # retire()
     # ------------------------------------------------------------------
 
