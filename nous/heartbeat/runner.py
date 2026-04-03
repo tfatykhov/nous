@@ -118,6 +118,12 @@ class HeartbeatRunner:
         if not due_checks:
             return []
 
+        logger.info(
+            "Heartbeat tick: running %d check(s) — %s",
+            len(due_checks),
+            ", ".join(c.name for c in due_checks),
+        )
+
         all_findings: list[Finding] = []
 
         for check in due_checks:
@@ -143,6 +149,11 @@ class HeartbeatRunner:
         self._last_tick = now
 
         if all_findings:
+            logger.info(
+                "Heartbeat found %d finding(s): %s",
+                len(all_findings),
+                "; ".join(f"[{f.urgency}] {f.summary[:60]}" for f in all_findings),
+            )
             await self._triage(all_findings)
 
             # Emit event for audit trail
@@ -182,6 +193,12 @@ class HeartbeatRunner:
         actionable = [f for f in findings if f.needs_action]
         if actionable and self._has_budget():
             await self._cognitive_triage(actionable)
+        elif actionable and not self._has_budget():
+            logger.warning(
+                "Heartbeat budget exhausted (%d/%d tokens) — %d actionable finding(s) not triaged",
+                self._tokens_used_today, self._settings.heartbeat_daily_token_budget,
+                len(actionable),
+            )
 
     async def _cognitive_triage(self, findings: list[Finding]) -> HeartbeatResult:
         """Open a cognitive session to process findings."""
