@@ -200,6 +200,12 @@ class EmailCheck(BaseCheck):
             logger.warning("EmailCheck: IMAP fetch failed", exc_info=True)
             raise
 
+        new_count = sum(1 for mid, _, _ in messages if mid not in self._seen_ids)
+        logger.info(
+            "EmailCheck: fetched %d unseen, %d new (seen cache: %d)",
+            len(messages), new_count, len(self._seen_ids),
+        )
+
         findings: list[Finding] = []
         for msg_id, subject, sender in messages:
             if msg_id in self._seen_ids:
@@ -207,6 +213,7 @@ class EmailCheck(BaseCheck):
             self._seen_ids[msg_id] = datetime.now(UTC)
 
             urgency = self._classify_urgency(subject, sender)
+            logger.info("EmailCheck: new email [%s] from %s — %s", urgency, sender, subject[:60])
             findings.append(Finding(
                 source="email",
                 summary=f"New email from {sender}: {subject[:80]}",
