@@ -980,6 +980,29 @@ class FactManager:
         return summaries, total
 
     # ------------------------------------------------------------------
+    # count_stale() — F034: Heartbeat health check
+    # ------------------------------------------------------------------
+
+    async def count_stale(self, older_than_days: int = 30, session: AsyncSession | None = None) -> int:
+        """Count active facts not updated in N days."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._count_stale(older_than_days, session)
+        return await self._count_stale(older_than_days, session)
+
+    async def _count_stale(self, older_than_days: int, session: AsyncSession) -> int:
+        from datetime import timedelta
+        cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+        result = await session.execute(
+            select(func.count())
+            .select_from(Fact)
+            .where(Fact.agent_id == self.agent_id)
+            .where(Fact.active == True)  # noqa: E712
+            .where(Fact.updated_at < cutoff)
+        )
+        return result.scalar() or 0
+
+    # ------------------------------------------------------------------
     # get_current() — P3-5: recursive CTE
     # ------------------------------------------------------------------
 

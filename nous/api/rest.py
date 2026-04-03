@@ -71,6 +71,7 @@ def create_app(
     sleep_handler: Any | None = None,
     rubric_manager: Any | None = None,
     rubric_evolver: Any | None = None,
+    heartbeat_runner: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1341,6 +1342,115 @@ def create_app(
             return JSONResponse({"status": "rolled_back", "new_version": result.version})
         return JSONResponse({"error": "Target version not found"}, status_code=404)
 
+    # ------------------------------------------------------------------
+    # Heartbeat (F034)
+    # ------------------------------------------------------------------
+
+    async def heartbeat_status(request: Request) -> JSONResponse:
+        """GET /heartbeat/status — check statuses, budget, last run."""
+        try:
+            _ = heartbeat_runner.registry
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+
+        return JSONResponse({
+            "checks": heartbeat_runner.registry.get_status(),
+            "tokens_used_today": heartbeat_runner.tokens_used_today,
+            "daily_budget": settings.heartbeat_daily_token_budget,
+            "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
+        })
+
+    async def heartbeat_trigger(request: Request) -> JSONResponse:
+        """POST /heartbeat/trigger — force immediate tick."""
+        try:
+            _ = heartbeat_runner.registry
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+
+        findings = await heartbeat_runner.trigger_tick()
+        return JSONResponse({
+            "status": "triggered",
+            "findings_count": len(findings),
+            "findings": [{"source": f.source, "summary": f.summary, "urgency": f.urgency} for f in findings],
+        })
+
+    async def heartbeat_config(request: Request) -> JSONResponse:
+        """PUT /heartbeat/config — update intervals, quiet hours, budget at runtime."""
+        try:
+            _ = heartbeat_runner.registry
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+
+        updated = []
+        # Map of config field -> check name (for propagating interval changes)
+        interval_to_check = {
+            "heartbeat_health_interval": "health",
+            "heartbeat_self_initiated_interval": "self_initiated",
+        }
+
+        for field_name in ("heartbeat_tick_interval", "heartbeat_quiet_start",
+                           "heartbeat_quiet_end", "heartbeat_daily_token_budget",
+                           "heartbeat_health_interval", "heartbeat_self_initiated_interval"):
+            short = field_name.replace("heartbeat_", "")
+            if short in body:
+                val = body[short]
+                if isinstance(val, int) and val >= 0:
+                    object.__setattr__(settings, field_name, val)
+                    updated.append(short)
+                    # Propagate interval changes to running checks
+                    check_name = interval_to_check.get(field_name)
+                    if check_name:
+                        check = heartbeat_runner.registry.get_check(check_name)
+                        if check:
+                            check.interval = val
+
+        return JSONResponse({"status": "updated", "fields": updated})
+
+    async def heartbeat_check_trigger(request: Request) -> JSONResponse:
+        """POST /heartbeat/check/{name}/trigger — force specific check."""
+        try:
+            _ = heartbeat_runner.registry
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+
+        name = request.path_params["name"]
+        check = heartbeat_runner.registry.get_check(name)
+        if check is None:
+            return JSONResponse({"error": f"Check '{name}' not found"}, status_code=404)
+
+        try:
+            result = await heartbeat_runner.trigger_check(name)
+            return JSONResponse({
+                "status": "triggered",
+                "has_updates": result.has_updates if result else False,
+                "findings": [
+                    {"source": f.source, "summary": f.summary, "urgency": f.urgency}
+                    for f in (result.findings if result else [])
+                ],
+            })
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def heartbeat_check_reset(request: Request) -> JSONResponse:
+        """POST /heartbeat/check/{name}/reset — reset circuit breaker."""
+        try:
+            _ = heartbeat_runner.registry
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+
+        name = request.path_params["name"]
+        check = heartbeat_runner.registry.get_check(name)
+        if check is None:
+            return JSONResponse({"error": f"Check '{name}' not found"}, status_code=404)
+
+        check.reset_circuit_breaker()
+        return JSONResponse({"status": "reset", "check": name})
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1367,6 +1477,12 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        # F034: Heartbeat endpoints
+        Route("/heartbeat/status", heartbeat_status),
+        Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
+        Route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
+        Route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
+        Route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
         Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),

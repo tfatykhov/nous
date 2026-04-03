@@ -303,6 +303,27 @@ class Settings(BaseSettings):
     critic_skill_slots: int = Field(default=2, ge=0)  # Reserved slots for Critic-recommended skills
     embedding_skill_slots: int = Field(default=3, ge=0)  # Slots for embedding similarity search
 
+    # Email / integration credentials (used by heartbeat EmailCheck, other integrations)
+    email: str = ""  # Nous agent email address
+    email_user: str = ""  # IMAP login user
+    email_password: str = ""  # IMAP login password
+    tim_chat_id: str = ""  # Tim's Telegram chat ID
+    emerson_hook_url: str = ""  # Emerson presence hook URL
+    emerson_hook_token: str = ""  # Emerson presence hook token
+    google_service_account_json: str = Field("", validation_alias="GOOGLE_SERVICE_ACCOUNT_JSON")
+
+    # F034: Heartbeat
+    heartbeat_enabled: bool = True
+    heartbeat_tick_interval: int = 30
+    heartbeat_quiet_start: int = 23
+    heartbeat_quiet_end: int = 8
+    heartbeat_daily_token_budget: int = 50_000
+    heartbeat_email_enabled: bool = False  # disabled by default — needs IMAP creds
+    heartbeat_email_interval: int = 180
+    heartbeat_email_imap_host: str = "imap.gmail.com"
+    heartbeat_health_interval: int = 3600
+    heartbeat_self_initiated_interval: int = 1800
+
     # F024 Phase 3b: Self-Modifying Rubrics
     rubric_enabled: bool = True
     rubric_outcome_detection_enabled: bool = True
