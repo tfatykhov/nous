@@ -844,3 +844,162 @@ class TestEmailCheck:
         # Second should be low urgency
         low_findings = [f for f in result.findings if f.urgency == "low"]
         assert len(low_findings) == 1
+
+
+# -----------------------------------------------------------------------
+# Dashboard-specific tests (event enrichment + public properties)
+# -----------------------------------------------------------------------
+
+
+class _CustomFindingsCheck(BaseCheck):
+    """Check that returns custom findings for event enrichment tests."""
+
+    name = "custom"
+    interval = 60
+
+    def __init__(self, findings_list):
+        super().__init__()
+        self._findings = findings_list
+
+    async def run(self) -> CheckResult:
+        return CheckResult(has_updates=bool(self._findings), findings=self._findings)
+
+
+class _EmptyCheck(BaseCheck):
+    """Check that returns no findings."""
+
+    name = "empty"
+    interval = 60
+
+    async def run(self) -> CheckResult:
+        return CheckResult()
+
+
+class TestHeartbeatEventEnrichment:
+    """Tests for enriched heartbeat_tick and heartbeat_triage events."""
+
+    @pytest.mark.asyncio
+    async def test_tick_event_includes_findings_array(self):
+        """heartbeat_tick event data includes per-finding details."""
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        registry = CheckRegistry()
+        registry.register(_CustomFindingsCheck([
+            Finding(source="brain", summary="3 decisions pending", urgency="normal", needs_action=True),
+            Finding(source="facts", summary="10 stale facts", urgency="low", needs_action=False),
+        ]))
+
+        bus = AsyncMock()
+        bus.emit = AsyncMock()
+
+        runner = HeartbeatRunner(
+            settings=settings, registry=registry, runner=AsyncMock(),
+            brain=AsyncMock(), heart=AsyncMock(), bus=bus, http_client=AsyncMock(),
+        )
+
+        await runner._tick()
+
+        tick_calls = [c for c in bus.emit.call_args_list if c.args[0].type == "heartbeat_tick"]
+        assert len(tick_calls) == 1
+
+        event_data = tick_calls[0].args[0].data
+        assert "findings" in event_data
+        assert len(event_data["findings"]) == 2
+        assert event_data["findings"][0]["source"] == "brain"
+        assert event_data["findings"][1]["urgency"] == "low"
+        assert event_data["by_source"] == {"brain": 1, "facts": 1}
+        assert event_data["by_urgency"] == {"normal": 1, "low": 1}
+
+    @pytest.mark.asyncio
+    async def test_tick_event_not_emitted_when_no_findings(self):
+        """No heartbeat_tick event when checks produce no findings."""
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        registry = CheckRegistry()
+        registry.register(_EmptyCheck())
+
+        bus = AsyncMock()
+        bus.emit = AsyncMock()
+
+        runner = HeartbeatRunner(
+            settings=settings, registry=registry, runner=AsyncMock(),
+            brain=AsyncMock(), heart=AsyncMock(), bus=bus, http_client=AsyncMock(),
+        )
+
+        await runner._tick()
+        tick_calls = [c for c in bus.emit.call_args_list if c.args[0].type == "heartbeat_tick"]
+        assert len(tick_calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_triage_event_emitted_after_cognitive_session(self):
+        """heartbeat_triage event emitted with session details."""
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        registry = CheckRegistry()
+
+        bus = AsyncMock()
+        bus.emit = AsyncMock()
+
+        runner_mock = AsyncMock()
+        runner_mock.run_turn = AsyncMock(return_value=("Response text", None, {"input_tokens": 100, "output_tokens": 50}))
+        runner_mock.end_conversation = AsyncMock()
+
+        runner = HeartbeatRunner(
+            settings=settings, registry=registry, runner=runner_mock,
+            brain=AsyncMock(), heart=AsyncMock(), bus=bus, http_client=AsyncMock(),
+        )
+
+        findings = [
+            Finding(source="health", summary="test finding", urgency="normal", needs_action=True),
+        ]
+        await runner._cognitive_triage(findings)
+
+        triage_calls = [c for c in bus.emit.call_args_list if c.args[0].type == "heartbeat_triage"]
+        assert len(triage_calls) == 1
+
+        event_data = triage_calls[0].args[0].data
+        assert "session_id" in event_data
+        assert event_data["session_id"].startswith("heartbeat-")
+        assert event_data["findings_count"] == 1
+        assert event_data["tokens_used"] == 150
+        assert "Response text" in event_data["response_summary"]
+
+
+class TestHeartbeatPublicProperties:
+    """Tests for HeartbeatRunner public properties used by dashboard."""
+
+    def test_is_running_default_false(self):
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        runner = HeartbeatRunner(
+            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
+            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+        )
+        assert runner.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_is_running_true_after_start(self):
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        runner = HeartbeatRunner(
+            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
+            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+        )
+        await runner.start()
+        assert runner.is_running is True
+        await runner.stop()
+
+    def test_tokens_used_today(self):
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        runner = HeartbeatRunner(
+            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
+            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+        )
+        assert runner.tokens_used_today == 0

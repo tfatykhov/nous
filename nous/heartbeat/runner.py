@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from datetime import UTC, date, datetime
 from uuid import uuid4
 
@@ -165,6 +166,17 @@ class HeartbeatRunner:
                         "findings_count": len(all_findings),
                         "checks_run": len(due_checks),
                         "tokens_used_today": self._tokens_used_today,
+                        "findings": [
+                            {
+                                "source": f.source,
+                                "summary": f.summary,
+                                "urgency": f.urgency,
+                                "check_name": f.check_name,
+                            }
+                            for f in all_findings
+                        ],
+                        "by_source": dict(Counter(f.source for f in all_findings)),
+                        "by_urgency": dict(Counter(f.urgency for f in all_findings)),
                     },
                 ))
 
@@ -229,6 +241,18 @@ class HeartbeatRunner:
                 result.tokens_used, self._tokens_used_today,
                 self._settings.heartbeat_daily_token_budget,
             )
+
+            if self._bus:
+                await self._bus.emit(Event(
+                    type="heartbeat_triage",
+                    agent_id=self._settings.agent_id,
+                    data={
+                        "session_id": session_id,
+                        "findings_count": len(findings),
+                        "tokens_used": result.tokens_used,
+                        "response_summary": result.response[:200],
+                    },
+                ))
         except Exception:
             logger.exception("Heartbeat cognitive triage failed")
 
@@ -331,6 +355,14 @@ class HeartbeatRunner:
     # ------------------------------------------------------------------
     # Public API (for REST endpoints)
     # ------------------------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def is_quiet(self) -> bool:
+        return self._in_quiet_hours()
 
     @property
     def registry(self) -> CheckRegistry:

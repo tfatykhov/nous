@@ -18,6 +18,7 @@
     --decision-color: #a78bfa;
     --procedure-color: #fb923c;
     --censor-color: #f87171;
+    --heartbeat-color: #22d3ee;
 
     --sidebar-width: 220px;
     --sidebar-collapsed: 56px;
@@ -1528,3 +1529,40 @@ body {
     background: rgba(248, 113, 113, 0.03);
     border-radius: 0 4px 4px 0;
 }
+
+/* ── F034: Heartbeat Dashboard ──────────────────────────────── */
+
+/* Status banner */
+.heartbeat-banner { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--surface); border:1px solid var(--border); border-radius:8px; margin-bottom:20px; }
+.heartbeat-banner-dot { width:10px; height:10px; border-radius:50%; background:var(--green); flex-shrink:0; box-shadow:0 0 8px var(--green); animation:ledger-pulse 2s ease-in-out infinite; }
+.heartbeat-banner-dot.inactive { background:var(--muted); box-shadow:none; animation:none; }
+.heartbeat-banner-dot.warning { background:var(--yellow); box-shadow:0 0 8px var(--yellow); }
+.heartbeat-banner-label { font-weight:600; color:var(--text); }
+.heartbeat-banner-pills { display:flex; gap:8px; margin-left:auto; }
+.heartbeat-pill { padding:3px 10px; border-radius:12px; font-size:0.78rem; background:rgba(255,255,255,0.06); color:var(--muted); }
+.heartbeat-pill.ok { color:var(--green); }
+.heartbeat-pill.warn { color:var(--yellow); }
+.heartbeat-pill.bad { color:var(--red); }
+
+/* Check status rows */
+.check-row { display:flex; align-items:center; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); }
+.check-row:last-child { border-bottom:none; }
+.check-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.check-dot.good { background:var(--green); }
+.check-dot.warn { background:var(--yellow); }
+.check-dot.bad { background:var(--red); }
+.check-name { font-weight:500; min-width:120px; }
+.check-detail { color:var(--muted); font-size:0.85rem; }
+
+/* Findings urgency timeline dots */
+.finding-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.finding-dot.high { background:#f87171; }
+.finding-dot.normal { background:#fbbf24; }
+.finding-dot.low { background:var(--muted); }
+.finding-source { font-size:0.75rem; padding:1px 6px; border-radius:4px; background:rgba(255,255,255,0.06); color:var(--muted); }
+
+/* Budget gauge center text */
+.budget-gauge-wrap { position:relative; }
+.budget-gauge-center { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; }
+.budget-gauge-value { font-size:1.4rem; font-weight:700; color:var(--text); }
+.budget-gauge-label { font-size:0.75rem; color:var(--muted); }
