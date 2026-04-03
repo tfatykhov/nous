@@ -128,7 +128,7 @@ function renderHeartbeat(container, data) {
     var budget = data.budget || {};
     var quietHours = data.quiet_hours || {};
     var totals = data.totals || {};
-    var findings = data.findings || [];
+    var findings = data.findings_timeline || [];
     var cogSessions = data.cognitive_sessions || [];
     var findingsByDay = data.findings_by_day || [];
     var enabled = status.enabled !== false;
@@ -192,7 +192,7 @@ function renderHeartbeat(container, data) {
     // ── Stat Cards ──
     html += '<div class="stat-grid">';
     html += hbBuildStatCard('Total Runs', Dashboard.formatNumber(status.run_count || totals.tick_count || 0), '', 'var(--heartbeat-color)');
-    html += hbBuildStatCard('Findings 24h', Dashboard.formatNumber(totals.findings_24h || 0), '', 'var(--yellow)');
+    html += hbBuildStatCard('Findings 24h', Dashboard.formatNumber(totals.total || 0), '', 'var(--yellow)');
     html += hbBuildStatCard('Cognitive Sessions', Dashboard.formatNumber(cogSessions.length), '', 'var(--accent)');
     html += hbBuildStatCard('Checks Active', activeChecks + ' / ' + totalChecks, '', 'var(--green)');
     var breakerColor = trippedBreakers > 0 ? 'var(--red)' : 'var(--muted)';
