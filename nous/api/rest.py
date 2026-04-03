@@ -1194,7 +1194,8 @@ def create_app(
                 "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
                 "tick_interval": settings.heartbeat_tick_interval,
             }
-            data["checks"] = heartbeat_runner.registry.get_status()
+            checks_dict = heartbeat_runner.registry.get_status()
+            data["checks"] = [{"name": k, **v} for k, v in checks_dict.items()]
             data["budget"] = {
                 "used": budget_used,
                 "limit": budget_limit,
