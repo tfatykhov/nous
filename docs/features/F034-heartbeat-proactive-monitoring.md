@@ -1,9 +1,9 @@
 # F034: Heartbeat — Proactive Monitoring & Autonomous Execution
 
-**Status:** Draft v2
+**Status:** Draft v2.1
 **Author:** Emerson (spec v1), Tim (architecture review), Nous (KAIROS analysis + v2 enhancements)
 **Created:** 2026-03-31
-**Updated:** 2026-04-03
+**Updated:** 2026-04-03 (v2.1 — Codex review fixes)
 **Dependencies:** F026 (Execution Ledger), F031 (Censor Middleware), F033 (Multi-Tier Search)
 
 ---
@@ -180,26 +180,50 @@ class HeartbeatRunner:
                 if not self.config.heartbeat_enabled:
                     await asyncio.sleep(self.tick_interval)
                     continue
-                    
-                if not self._in_quiet_hours() or self._has_urgent_override():
+
+                # Reset daily budget BEFORE tick so first post-midnight
+                # tick uses the fresh budget (fixes P2 stale-budget bug)
+                self._maybe_reset_budget()
+
+                in_quiet = self._in_quiet_hours()
+                if not in_quiet:
+                    # Normal hours: run all due checks
                     await self._tick()
-                    self.run_count += 1
-                    self.last_run = datetime.now(UTC)
-                    
-                    # Reset daily budget at midnight
-                    self._maybe_reset_budget()
-                    
+                elif self._has_urgent_override():
+                    # Quiet hours + urgent override: run ONLY urgent checks
+                    # (fixes P1 — previously ran all due checks when any
+                    # urgent check triggered the override)
+                    await self._tick(urgent_only=True)
+                else:
+                    # Quiet hours, nothing urgent — skip
+                    await asyncio.sleep(self.tick_interval)
+                    continue
+
+                self.run_count += 1
+                self.last_run = datetime.now(UTC)
+
             except Exception as e:
                 logger.error(f"Heartbeat tick failed: {e}", exc_info=True)
                 # Never crash the loop — log and continue
                 
             await asyncio.sleep(self.tick_interval)
 
-    async def _tick(self):
-        """Run all due checks, triage findings."""
+    async def _tick(self, urgent_only: bool = False):
+        """Run due checks, triage findings.
+        
+        Args:
+            urgent_only: When True (quiet-hours override), only run checks
+                         with urgent_override=True. Prevents non-urgent checks
+                         from firing during quiet hours just because an urgent
+                         check was due.
+        """
         findings: list[Finding] = []
         
-        for check in self.registry.get_due_checks():
+        due_checks = self.registry.get_due_checks()
+        if urgent_only:
+            due_checks = [c for c in due_checks if c.urgent_override]
+        
+        for check in due_checks:
             try:
                 result = await asyncio.wait_for(
                     check.run(),
@@ -280,8 +304,7 @@ class HeartbeatRunner:
             f"Review and take appropriate action."
         )
         
-        tokens_before = self.tokens_used_today
-        await self.runner.process_heartbeat_message(
+        result = await self.runner.process_heartbeat_message(
             message,
             metadata={
                 "source": "heartbeat",
@@ -290,7 +313,21 @@ class HeartbeatRunner:
             },
         )
         
-        # Track tokens (runner should report usage)
+        # Update token budget from session usage (fixes P1 — previously
+        # tokens_used_today was never incremented, making budget cap useless)
+        tokens_consumed = getattr(result, "tokens_used", 0)
+        if tokens_consumed:
+            self.tokens_used_today += tokens_consumed
+        else:
+            # Fallback: estimate ~500 tokens per finding if runner
+            # doesn't report exact usage (defensive until Runner
+            # exposes token tracking on heartbeat sessions)
+            self.tokens_used_today += len(findings) * 500
+            logger.debug(
+                "Heartbeat token estimate: +%d (no exact count from runner)",
+                len(findings) * 500,
+            )
+        
         self.cognitive_sessions_opened += 1
 
     async def _detect_missed_checks(self):
@@ -848,7 +885,12 @@ async def process_heartbeat_message(
                 output_text=response,
                 metadata=metadata,
             )
-        return response
+        # Return result with token usage so HeartbeatRunner can
+        # update its daily budget counter
+        return HeartbeatResult(
+            response=response,
+            tokens_used=session.total_tokens,
+        )
     finally:
         await self.end_session(session.id)
 ```
