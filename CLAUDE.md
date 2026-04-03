@@ -85,12 +85,17 @@ nous/
 │   ├── skills/                 # Skill discovery system (F011)
 │   │   ├── parser.py           # SkillParser + SkillManifest
 │   │   └── bootstrap.py        # One-time local skill registration
+│   ├── heartbeat/              # Proactive monitoring (F034)
+│   │   ├── runner.py           # HeartbeatRunner tick loop + triage
+│   │   ├── registry.py         # CheckRegistry + BaseCheck ABC
+│   │   ├── checks.py           # HealthCheck, SelfInitiatedCheck, EmailCheck
+│   │   └── schemas.py          # Finding, CheckResult, HeartbeatResult
 │   ├── identity/               # Agent identity system (F018)
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
 │   └── api/                    # External interfaces
-│       ├── rest.py             # Starlette REST API (42 endpoints)
+│       ├── rest.py             # Starlette REST API (47 endpoints)
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration
@@ -102,7 +107,7 @@ nous/
 │       ├── smart_compress.py   # Smart compression for tool results
 │       ├── tool_cache.py       # Tool result caching
 │       └── models.py           # API request/response models
-├── tests/                      # 1690+ tests across 90 files
+├── tests/                      # 1750+ tests across 91 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)
     ├── features/               # High-level feature specs (F001-F030)
@@ -143,6 +148,7 @@ nous/
 | F030 | MMR Diversity Reranking (Maximal Marginal Relevance in recall_deep) | #205 |
 | F031 | Censor Middleware with Action Payloads (censors execute read-only tools, conditional unblock, update API) | #208 |
 | F033 | Multi-Tier Search Routing (Tavily primary, Exa research, Brave fallback, query classification) | — |
+| F034 | Heartbeat Proactive Monitoring (tick loop, health/email/self-initiated checks, triage, Telegram) | #236 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 
 ## How to Work
@@ -315,6 +321,16 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RUBRIC_MAX_DIMENSIONS` | `7` | Ceiling for dimension count |
 | `NOUS_RUBRIC_MAX_VERSIONS_PER_WEEK` | `1` | Rate limit on rubric evolution |
 | `NOUS_RUBRIC_OUTCOME_MODEL` | `claude-haiku-4-5-20251001` | Model for outcome classification |
+| `NOUS_HEARTBEAT_ENABLED` | `true` | Enable heartbeat proactive monitoring |
+| `NOUS_HEARTBEAT_TICK_INTERVAL` | `30` | Seconds between heartbeat tick loop iterations |
+| `NOUS_HEARTBEAT_QUIET_START` | `23` | Quiet hours start (hour, user timezone) |
+| `NOUS_HEARTBEAT_QUIET_END` | `8` | Quiet hours end (hour, user timezone) |
+| `NOUS_HEARTBEAT_DAILY_TOKEN_BUDGET` | `50000` | Max tokens/day for heartbeat cognitive sessions |
+| `NOUS_HEARTBEAT_EMAIL_ENABLED` | `false` | Enable email check (needs IMAP credentials) |
+| `NOUS_HEARTBEAT_EMAIL_INTERVAL` | `180` | Seconds between email checks |
+| `NOUS_HEARTBEAT_EMAIL_IMAP_HOST` | `imap.gmail.com` | IMAP server host |
+| `NOUS_HEARTBEAT_HEALTH_INTERVAL` | `3600` | Seconds between health checks |
+| `NOUS_HEARTBEAT_SELF_INITIATED_INTERVAL` | `1800` | Seconds between self-initiated checks |
 
 ### REST Endpoints
 
@@ -363,6 +379,11 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | GET | `/dashboard/rubric` | Rubric dashboard data |
 | GET | `/dashboard/admission` | Admission control dashboard |
 | GET | `/dashboard/admission/rejected` | Rejected admission entries |
+| GET | `/heartbeat/status` | Heartbeat status, checks, budget |
+| POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
+| PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |
+| POST | `/heartbeat/check/{name}/trigger` | Force a specific check to run |
+| POST | `/heartbeat/check/{name}/reset` | Reset circuit breaker for a failed check |
 
 ### Agent Tools
 
