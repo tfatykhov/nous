@@ -218,7 +218,7 @@ class EmailCheck(BaseCheck):
                 source="email",
                 summary=f"New email from {sender}: {subject[:80]}",
                 urgency=urgency,
-                needs_action=urgency != "low",
+                needs_action=True,
                 raw_data={"message_id": msg_id, "subject": subject, "sender": sender},
             ))
 
@@ -233,7 +233,7 @@ class EmailCheck(BaseCheck):
         mail = imaplib.IMAP4_SSL(self._host)
         try:
             mail.login(self._user, self._password)
-            mail.select("INBOX", readonly=True)
+            mail.select("INBOX")
             _status, data = mail.search(None, "UNSEEN")
             if not data or not data[0]:
                 return messages
@@ -273,13 +273,11 @@ class EmailCheck(BaseCheck):
 
     @staticmethod
     def _classify_urgency(subject: str, sender: str) -> str:
-        """Simple rule-based urgency classification."""
+        """Rule-based urgency classification. All emails are at least normal."""
         lower = subject.lower()
         if any(w in lower for w in ["urgent", "critical", "emergency", "asap"]):
             return "high"
-        if any(w in lower for w in ["important", "action required", "deadline"]):
-            return "normal"
-        return "low"
+        return "normal"
 
 
 class DriveCheck(BaseCheck):

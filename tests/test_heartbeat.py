@@ -783,10 +783,10 @@ class TestEmailCheck:
         assert EmailCheck._classify_urgency("Action required: sign form", "bob@co.com") == "normal"
         assert EmailCheck._classify_urgency("Deadline approaching", "eve@co.com") == "normal"
 
-    def test_classify_urgency_low(self):
-        """56. Generic subject yields low urgency."""
-        assert EmailCheck._classify_urgency("Weekly newsletter", "news@co.com") == "low"
-        assert EmailCheck._classify_urgency("Meeting notes", "team@co.com") == "low"
+    def test_classify_urgency_normal_default(self):
+        """56. Generic subject yields normal urgency (no low tier)."""
+        assert EmailCheck._classify_urgency("Weekly newsletter", "news@co.com") == "normal"
+        assert EmailCheck._classify_urgency("Meeting notes", "team@co.com") == "normal"
 
     @pytest.mark.asyncio
     async def test_deduplicates_seen_ids(self):
@@ -841,9 +841,9 @@ class TestEmailCheck:
         assert len(urgent_findings) == 1
         assert "deploy broken" in urgent_findings[0].summary
 
-        # Second should be low urgency
-        low_findings = [f for f in result.findings if f.urgency == "low"]
-        assert len(low_findings) == 1
+        # Second should be normal urgency (no low tier)
+        normal_findings = [f for f in result.findings if f.urgency == "normal"]
+        assert len(normal_findings) == 1
 
 
 # -----------------------------------------------------------------------
