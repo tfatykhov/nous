@@ -28,7 +28,7 @@ from typing import Any
 from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import LLMClient, call_background_llm, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm_structured
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -45,21 +45,7 @@ episode summaries from the past 24 hours and identify:
 Episodes:
 {episodes}
 {orient_context}
-Return ONLY valid JSON:
-{{
-  "patterns": ["<pattern 1>", "<pattern 2>"],
-  "lessons": ["<lesson 1>", "<lesson 2>"],
-  "connections": ["<connection 1>"],
-  "gaps": ["<gap 1>"],
-  "summary": "<2-3 sentence reflection on the day>",
-  "facts": [
-    {{
-      "subject": "<who/what the fact is about>",
-      "content": "<the fact, stated clearly>",
-      "category": "<preference|person|rule|technical|concept|tool>"
-    }}
-  ]
-}}
+Use the store_reflection tool to return your analysis.
 
 Categories for facts:
 - "preference" — User preferences (formats, units, style)
@@ -86,6 +72,61 @@ Return ONLY valid JSON:
   "confidence": <0.0-1.0>
 }}"""
 
+# Tool-use structured output schema for sleep reflection (Issue #233)
+_REFLECTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "patterns": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Recurring behavioral or workflow patterns observed across sessions",
+        },
+        "lessons": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Concrete lessons learned from failures or successes",
+        },
+        "connections": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Cross-session connections between seemingly separate topics",
+        },
+        "gaps": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Knowledge or implementation gaps identified",
+        },
+        "summary": {
+            "type": "string",
+            "description": "One-paragraph summary of the day's trajectory",
+        },
+        "facts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "Fact subject line, prefix with UPDATES: if superseding an existing fact",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Detailed fact content",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["technical", "preference", "person", "tool", "concept", "rule"],
+                        "description": "Fact category",
+                    },
+                },
+                "required": ["subject", "content", "category"],
+            },
+            "description": "Structured facts to store in memory (max 5)",
+        },
+    },
+    "required": ["patterns", "lessons", "connections", "gaps", "summary", "facts"],
+}
+
 _CONTRADICTION_RESOLUTION_PROMPT = """Two facts exist in memory about the same subject. Determine the correct action:
 
 Fact A (stored {date_a}): {content_a}
@@ -99,13 +140,34 @@ Actions:
 - REMOVE_A: Fact A is wrong/stale, remove it
 - REMOVE_B: Fact B is wrong/stale, remove it
 
-Return ONLY valid JSON:
-{{
-  "action": "<ACTION>",
-  "confidence": <0.0 to 1.0>,
-  "reason": "<brief explanation>",
-  "merged_content": "<only if action is MERGE>"
-}}"""
+Use the resolve_contradiction tool to return your analysis."""
+
+# Tool-use structured output schema for contradiction resolution (Issue #233)
+_CONTRADICTION_RESOLUTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["SUPERSEDE_A", "SUPERSEDE_B", "MERGE", "KEEP_BOTH", "REMOVE_A", "REMOVE_B"],
+            "description": "Resolution action to take",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence in this resolution (0.0 to 1.0)",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Brief explanation for the resolution",
+        },
+        "merged_content": {
+            "type": "string",
+            "description": "Merged fact content (only required if action is MERGE)",
+        },
+    },
+    "required": ["action", "confidence", "reason"],
+}
 
 
 class SleepHandler:
@@ -297,31 +359,18 @@ class SleepHandler:
                 orient_context=orient_context,
             )
 
-            text = await call_background_llm(
-                self._llm,
+            reflection = await call_background_llm_structured(
+                client=self._llm,
                 model=self._settings.background_model,
                 system_prompt="You are an AI agent reflecting on your recent activity.",
                 user_message=prompt,
+                tool_name="store_reflection",
+                tool_description="Store the structured sleep reflection output. Call this with all reflection results.",
+                output_schema=_REFLECTION_SCHEMA,
                 max_tokens=1500,
             )
 
-            if not text:
-                return True
-
-            reflection = parse_llm_json(text)
-            if isinstance(reflection, list):
-                logger.warning(
-                    "Reflection LLM returned list instead of dict (len=%d), "
-                    "treating as facts array. Raw response (%d chars):\n%s",
-                    len(reflection), len(text), text,
-                )
-                reflection = {"facts": reflection}
-            elif not isinstance(reflection, dict):
-                logger.warning(
-                    "Reflection LLM returned %s instead of dict, skipping. "
-                    "Raw response (%d chars):\n%s",
-                    type(reflection).__name__, len(text), text,
-                )
+            if not reflection:
                 return True
 
             # Store structured facts from LLM (preferred path)
@@ -387,10 +436,14 @@ class SleepHandler:
                     stored += 1
                     sleep_stats["facts_created"] += 1
 
-            logger.info(
+            # Issue #233 fix: 0 stored from non-empty reflection is anomalous
+            patterns = reflection.get("patterns", [])
+            lessons = reflection.get("lessons", [])
+            log_fn = logger.warning if stored == 0 and (patterns or lessons or structured_facts) else logger.info
+            log_fn(
                 "Reflection complete: %d patterns, %d lessons, %d facts stored",
-                len(reflection.get("patterns", [])),
-                len(reflection.get("lessons", [])),
+                len(patterns),
+                len(lessons),
                 stored,
             )
             return True
@@ -531,24 +584,18 @@ class SleepHandler:
                     content_b=pair["content2"][:500],
                 )
 
-                text = await call_background_llm(
-                    self._llm,
+                resolution = await call_background_llm_structured(
+                    client=self._llm,
                     model=self._settings.background_model,
                     system_prompt="You are a memory management system resolving contradictory facts.",
                     user_message=prompt,
+                    tool_name="resolve_contradiction",
+                    tool_description="Resolve a contradiction between two facts in memory.",
+                    output_schema=_CONTRADICTION_RESOLUTION_SCHEMA,
                     max_tokens=300,
                 )
 
-                if not text:
-                    continue
-
-                try:
-                    resolution = parse_llm_json(text)
-                except Exception:
-                    logger.warning("Failed to parse contradiction resolution response")
-                    continue
-
-                if not isinstance(resolution, dict):
+                if not resolution:
                     continue
 
                 action = str(resolution.get("action", "")).upper().strip()

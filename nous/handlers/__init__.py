@@ -83,6 +83,74 @@ async def call_background_llm(
         return None
 
 
+async def call_background_llm_structured(
+    client: LLMClient,
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    tool_name: str,
+    tool_description: str,
+    output_schema: dict[str, Any],
+    max_tokens: int = 1500,
+) -> dict[str, Any] | None:
+    """Call LLM using tool_use trick for guaranteed structured JSON output.
+
+    Defines a fake tool whose input_schema matches the desired output schema,
+    then forces the model to "call" it via tool_choice. The API enforces valid
+    JSON matching the schema at generation time — no post-hoc parsing needed.
+
+    Returns the structured dict, or None on failure.
+    """
+    payload: dict[str, Any] = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": [
+            {
+                "type": "text",
+                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_message,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ],
+        "tools": [
+            {
+                "name": tool_name,
+                "description": tool_description,
+                "input_schema": output_schema,
+            }
+        ],
+        "tool_choice": {"type": "tool", "name": tool_name},
+    }
+
+    try:
+        response = await client.call(payload)
+        # Extract tool_use block — guaranteed by tool_choice
+        for block in response.content:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                return block["input"]
+        logger.warning("No tool_use block in structured LLM response")
+        return None
+    except Exception as e:
+        logger.warning("Structured background LLM call failed: %s", e)
+        return None
+
+
 def _extract_braces(text: str, opener: str, closer: str) -> str | None:
     """Extract the first balanced {…} or […] from text, respecting JSON strings.
 

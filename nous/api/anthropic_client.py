@@ -314,7 +314,12 @@ class HttpxAnthropicClient:
             self._http = None
 
     async def call(self, payload: dict[str, Any]) -> ApiResponse:
-        """Call Anthropic Messages API with retry and exponential backoff."""
+        """Call Anthropic Messages API with retry and exponential backoff.
+
+        The full payload dict is passed through to the API by design —
+        this includes tools, tool_choice, and any other API parameters
+        the caller sets.
+        """
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
 
@@ -650,6 +655,8 @@ class SdkAnthropicClient:
         }
         if payload.get("tools"):
             kwargs["tools"] = payload["tools"]
+        if payload.get("tool_choice"):
+            kwargs["tool_choice"] = payload["tool_choice"]
         if payload.get("stream"):
             kwargs["stream"] = True
         if payload.get("thinking"):
