@@ -773,20 +773,19 @@ class TestEmailCheck:
 
     def test_classify_urgency_high(self):
         """54. Urgent keywords in subject yield high urgency."""
-        assert EmailCheck._classify_urgency("URGENT: server down", "alice@co.com") == "high"
-        assert EmailCheck._classify_urgency("Critical failure", "bob@co.com") == "high"
-        assert EmailCheck._classify_urgency("ASAP fix needed", "eve@co.com") == "high"
+        assert EmailCheck._keyword_classify("URGENT: server down", "alice@co.com") == "high"
+        assert EmailCheck._keyword_classify("Critical failure", "bob@co.com") == "high"
+        assert EmailCheck._keyword_classify("ASAP fix needed", "eve@co.com") == "high"
 
     def test_classify_urgency_normal(self):
         """55. Important/action keywords yield normal urgency."""
-        assert EmailCheck._classify_urgency("Important update", "alice@co.com") == "normal"
-        assert EmailCheck._classify_urgency("Action required: sign form", "bob@co.com") == "normal"
-        assert EmailCheck._classify_urgency("Deadline approaching", "eve@co.com") == "normal"
+        assert EmailCheck._keyword_classify("Important update", "alice@co.com") == "normal"
+        assert EmailCheck._keyword_classify("Action required: sign form", "bob@co.com") == "normal"
+        assert EmailCheck._keyword_classify("Deadline approaching", "eve@co.com") == "normal"
 
     def test_classify_urgency_normal_default(self):
-        """56. Generic subject yields normal urgency (no low tier)."""
-        assert EmailCheck._classify_urgency("Weekly newsletter", "news@co.com") == "normal"
-        assert EmailCheck._classify_urgency("Meeting notes", "team@co.com") == "normal"
+        """56. Generic subject yields normal urgency (newsletter now low)."""
+        assert EmailCheck._keyword_classify("Meeting notes", "team@co.com") == "normal"
 
     @pytest.mark.asyncio
     async def test_deduplicates_seen_ids(self):

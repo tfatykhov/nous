@@ -326,6 +326,21 @@ class Settings(BaseSettings):
     heartbeat_health_interval: int = 3600
     heartbeat_self_initiated_interval: int = 1800
 
+    # F034.1: Finding lifecycle
+    heartbeat_escalation_low_to_normal_hours: int = 72
+    heartbeat_escalation_normal_to_high_hours: int = 24
+    heartbeat_escalation_high_realert_hours: int = 12
+    heartbeat_escalation_accumulation_threshold: int = 5
+    heartbeat_digest_hour_utc: int = 9
+    heartbeat_suppression_ttl_hours: int = 24
+
+    # F034.3: Self-tuning
+    heartbeat_tuning_enabled: bool = False  # off by default until stable
+    heartbeat_tuning_interval_hours: int = 168  # weekly
+    heartbeat_tuning_min_samples: int = 10
+    heartbeat_tuning_learning_rate: float = 0.1
+    heartbeat_tuning_rollback_threshold: float = 0.2
+
     # F024 Phase 3b: Self-Modifying Rubrics
     rubric_enabled: bool = True
     rubric_outcome_detection_enabled: bool = True

@@ -190,10 +190,16 @@ function renderHeartbeat(container, data) {
     }
 
     // ── Stat Cards ──
+    // Tracked findings count from FindingStore
+    var lifecycleData = data.finding_lifecycle;
+    var trackedTotal = lifecycleData ? (lifecycleData.stats || {}).total || 0 : 0;
+    var trackedByState = lifecycleData ? (lifecycleData.stats || {}).by_state || {} : {};
+    var trackedActive = (trackedByState['new'] || 0) + (trackedByState['acknowledged'] || 0);
+
     html += '<div class="stat-grid">';
     html += hbBuildStatCard('Total Runs', Dashboard.formatNumber(status.run_count || totals.tick_count || 0), '', 'var(--heartbeat-color)');
     html += hbBuildStatCard('Findings 24h', Dashboard.formatNumber(totals.total || 0), '', 'var(--yellow)');
-    html += hbBuildStatCard('Cognitive Sessions', Dashboard.formatNumber(cogSessions.length), '', 'var(--accent)');
+    html += hbBuildStatCard('Tracked Active', Dashboard.formatNumber(trackedActive), trackedTotal + ' total', 'var(--accent)');
     html += hbBuildStatCard('Checks Active', activeChecks + ' / ' + totalChecks, '', 'var(--green)');
     var breakerColor = trippedBreakers > 0 ? 'var(--red)' : 'var(--muted)';
     html += hbBuildStatCard('Circuit Breakers', String(trippedBreakers), trippedBreakers > 0 ? 'tripped' : 'none', breakerColor);
@@ -233,6 +239,94 @@ function renderHeartbeat(container, data) {
         html += '<p class="text-muted" style="font-size:12px;padding:12px 0">No checks configured</p>';
     }
     html += '</div>';
+
+    // ── Finding Lifecycle (F034.1) ──
+    var lifecycle = data.finding_lifecycle;
+    if (lifecycle) {
+        var lcStats = lifecycle.stats || {};
+        var byState = lcStats.by_state || {};
+        var lcFindings = lifecycle.findings || [];
+        var escalationPolicy = lifecycle.escalation_policy || {};
+
+        html += '<div class="chart-card mb-24"><h3>Finding Lifecycle</h3>';
+
+        // State summary pills
+        html += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">';
+        var stateColors = { new: '#22d3ee', acknowledged: '#fbbf24', resolved: '#4ade80', suppressed: '#6b6b8a' };
+        ['new', 'acknowledged', 'resolved', 'suppressed'].forEach(function (st) {
+            var cnt = byState[st] || 0;
+            html += '<span class="heartbeat-pill" style="border-color:' + (stateColors[st] || '#6b6b8a') + '">' +
+                escapeHtml(st) + ': ' + cnt + '</span>';
+        });
+        html += '<span class="heartbeat-pill" style="opacity:0.6">total: ' + (lcStats.total || 0) + '</span>';
+        html += '</div>';
+
+        // Tracked findings table (only show non-resolved, limit to 15)
+        var activeFindings = lcFindings.filter(function (f) { return f.state !== 'resolved'; }).slice(0, 15);
+        if (activeFindings.length > 0) {
+            html += '<div style="font-size:13px">';
+            html += '<div class="check-row" style="font-weight:600;opacity:0.7;font-size:11px;text-transform:uppercase;letter-spacing:0.5px">';
+            html += '<div style="flex:0 0 90px">State</div>';
+            html += '<div style="flex:0 0 80px">Check</div>';
+            html += '<div style="flex:1">Summary</div>';
+            html += '<div style="flex:0 0 60px;text-align:right">Seen</div>';
+            html += '<div style="flex:0 0 80px;text-align:right">Age</div>';
+            html += '</div>';
+            activeFindings.forEach(function (f) {
+                var stateColor = stateColors[f.state] || '#6b6b8a';
+                var escalatedBadge = f.escalated ? ' <span style="color:#f87171;font-size:10px" title="Escalated">&#x26A0;</span>' : '';
+                html += '<div class="check-row" style="padding:6px 0">';
+                html += '<div style="flex:0 0 90px"><span style="color:' + stateColor + '">' + escapeHtml(f.state) + '</span>' + escalatedBadge + '</div>';
+                html += '<div style="flex:0 0 80px;font-size:11px;color:var(--muted)">' + escapeHtml(f.check_name || '') + '</div>';
+                html += '<div style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escapeHtml(f.summary || '') + '">' + escapeHtml((f.summary || '').slice(0, 80)) + '</div>';
+                html += '<div style="flex:0 0 60px;text-align:right">' + (f.seen_count || 1) + '</div>';
+                html += '<div style="flex:0 0 80px;text-align:right">' + hbHumanizeAgo(f.first_seen) + '</div>';
+                html += '</div>';
+            });
+            html += '</div>';
+            if (lcFindings.filter(function (f) { return f.state !== 'resolved'; }).length > 15) {
+                html += '<p class="text-muted" style="font-size:11px;padding:4px 0">... and ' +
+                    (lcFindings.filter(function (f) { return f.state !== 'resolved'; }).length - 15) + ' more</p>';
+            }
+        } else {
+            html += '<div class="empty-state" style="padding:16px"><p>No active findings tracked</p></div>';
+        }
+
+        // Escalation policy (compact)
+        html += '<div style="margin-top:12px;font-size:11px;color:var(--muted)">';
+        html += 'Escalation: low&#x2192;normal ' + (escalationPolicy.low_to_normal_hours || 72) + 'h, ';
+        html += 'normal&#x2192;high ' + (escalationPolicy.normal_to_high_hours || 24) + 'h, ';
+        html += 'high re-alert ' + (escalationPolicy.high_realert_hours || 12) + 'h, ';
+        html += 'accumulation threshold ' + (escalationPolicy.accumulation_threshold || 5);
+        html += '</div>';
+
+        html += '</div>';
+    }
+
+    // ── Tuning Status (F034.3) ──
+    var tuning = data.tuning;
+    if (tuning) {
+        html += '<div class="chart-card mb-24"><h3>Self-Tuning</h3>';
+        if (!tuning.enabled) {
+            html += '<div class="empty-state" style="padding:16px"><p>Tuning disabled (set NOUS_HEARTBEAT_TUNING_ENABLED=true)</p></div>';
+        } else if (tuning.last_report) {
+            var tr = tuning.last_report;
+            html += '<div style="font-size:13px">';
+            html += '<div style="display:flex;gap:16px;margin-bottom:8px">';
+            html += '<span>Last run: <strong>' + hbHumanizeAgo(tr.timestamp) + '</strong></span>';
+            html += '<span>Adjustments: <strong>' + tr.adjustments + '</strong></span>';
+            if (tr.skipped_checks && tr.skipped_checks.length > 0) {
+                html += '<span class="text-muted">Skipped: ' + escapeHtml(tr.skipped_checks.join(', ')) + '</span>';
+            }
+            html += '</div>';
+            html += '<pre style="font-size:11px;background:rgba(255,255,255,0.03);padding:12px;border-radius:6px;overflow-x:auto;white-space:pre-wrap">' +
+                escapeHtml(tr.summary || 'No changes') + '</pre>';
+            html += '</div>';
+        } else {
+            html += '<div class="empty-state" style="padding:16px"><p>No tuning runs yet</p></div>';
+        }
+        html += '</div>';
+    }
 
     // ── Two columns: Findings Timeline + Cognitive Sessions ──
     html += '<div style="display:grid;grid-template-columns:1fr 360px;gap:24px;align-items:start">';

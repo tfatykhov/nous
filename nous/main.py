@@ -386,25 +386,39 @@ async def create_components(settings: Settings) -> dict:
     heartbeat_runner = None
     if settings.heartbeat_enabled:
         try:
+            from nous.heartbeat.finding_store import FindingStore
             from nous.heartbeat.runner import HeartbeatRunner
             from nous.heartbeat.registry import CheckRegistry
+            from nous.heartbeat.schemas import EscalationConfig
             from nous.heartbeat.checks import (
                 HealthCheck, SelfInitiatedCheck, EmailCheck, DriveCheck,
             )
 
+            escalation_config = EscalationConfig(
+                low_to_normal_hours=settings.heartbeat_escalation_low_to_normal_hours,
+                normal_to_high_hours=settings.heartbeat_escalation_normal_to_high_hours,
+                high_realert_hours=settings.heartbeat_escalation_high_realert_hours,
+                accumulation_threshold=settings.heartbeat_escalation_accumulation_threshold,
+            )
+            finding_store = FindingStore(escalation_config=escalation_config)
+
             registry = CheckRegistry()
             registry.register(HealthCheck(heart, brain, settings), permanent=True)
-            registry.register(SelfInitiatedCheck(heart, brain, settings), permanent=True)
+            registry.register(
+                SelfInitiatedCheck(heart, brain, settings, embeddings=embedding_provider),
+                permanent=True,
+            )
 
             if settings.heartbeat_email_enabled and settings.email_user:
                 registry.register(EmailCheck(settings))
 
             if settings.heartbeat_drive_enabled and settings.google_service_account_json:
-                registry.register(DriveCheck(settings))
+                registry.register(DriveCheck(settings, heart=heart))
 
             heartbeat_runner = HeartbeatRunner(
                 settings=settings, registry=registry, runner=runner,
                 brain=brain, heart=heart, bus=bus, http_client=handler_http,
+                finding_store=finding_store,
             )
             await heartbeat_runner.start()
         except ImportError:

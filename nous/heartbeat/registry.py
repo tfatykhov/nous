@@ -10,7 +10,7 @@ import logging
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 
-from nous.heartbeat.schemas import CheckResult
+from nous.heartbeat.schemas import CheckResult, TunableParam
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class BaseCheck(ABC):
         self.last_run: datetime | None = None
         self.consecutive_failures: int = 0
         self.max_failures: int = 3
+        self._params: dict[str, TunableParam] = {}  # F034.3: tunable params
 
     def is_due(self, now: datetime | None = None) -> bool:
         """Check if this check is due to run."""
@@ -59,6 +60,34 @@ class BaseCheck(ABC):
     def reset_circuit_breaker(self) -> None:
         """Manually reset the circuit breaker."""
         self.consecutive_failures = 0
+
+    def tunable_params(self) -> dict[str, TunableParam]:
+        """Return tunable parameters. Override in subclasses to define params."""
+        return self._params
+
+    def get_param(self, name: str) -> TunableParam | None:
+        """Get a tunable parameter (returns full TunableParam, not just value)."""
+        return self._params.get(name)
+
+    def get_param_value(self, name: str) -> float:
+        """Get parameter value as float. Returns 0 if not found."""
+        p = self._params.get(name)
+        return p.value if p else 0
+
+    def set_param(self, name: str, value: float) -> bool:
+        """Set a tunable parameter value (within bounds). Returns False if pinned or not found."""
+        if name not in self._params:
+            return False
+        p = self._params[name]
+        if p.pinned:
+            return False
+        clamped = max(p.min_val, min(p.max_val, value))
+        self._params[name] = TunableParam(
+            name=p.name, value=clamped,
+            min_val=p.min_val, max_val=p.max_val,
+            step=p.step, pinned=p.pinned,
+        )
+        return True
 
     @abstractmethod
     async def run(self) -> CheckResult:
@@ -98,6 +127,10 @@ class CheckRegistry:
     def get_check(self, name: str) -> BaseCheck | None:
         """Get a check by name."""
         return self._checks.get(name)
+
+    def all_checks(self) -> list[BaseCheck]:
+        """Return all registered checks."""
+        return list(self._checks.values())
 
     def get_status(self) -> dict:
         """Get status of all registered checks."""
