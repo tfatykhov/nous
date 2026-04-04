@@ -289,6 +289,7 @@ class HeartbeatRunner:
             findings = routed_findings
 
         if not findings:
+            logger.debug("Heartbeat triage: all findings suppressed by FindingStore")
             return
 
         # Sort: high first, then normal, then low
@@ -306,6 +307,10 @@ class HeartbeatRunner:
 
         # Normal+ findings: cognitive triage if budget allows
         actionable = [f for f in findings if f.needs_action]
+        logger.info(
+            "Heartbeat triage: %d routed, %d actionable, budget=%s",
+            len(findings), len(actionable), "ok" if self._has_budget() else "exhausted",
+        )
         if actionable and self._has_budget():
             await self._cognitive_triage(actionable)
         elif actionable and not self._has_budget():
