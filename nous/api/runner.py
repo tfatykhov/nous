@@ -137,6 +137,23 @@ class AgentRunner:
             self._api = create_client(self._settings)
             await self._api.start()
 
+    def fork(self, api_client: "AnthropicClient") -> "AgentRunner":
+        """Create a sibling runner sharing cognitive layer and dispatcher.
+
+        The forked runner uses its own API client (isolated connection pool)
+        but shares the cognitive layer and tool dispatcher with the parent.
+        Useful for background tasks like heartbeat that shouldn't contend
+        with the main runner's httpx pool.
+
+        The caller owns the api_client lifecycle — fork() does not close it.
+        """
+        forked = AgentRunner(self._cognitive, self._brain, self._heart, self._settings)
+        forked._api = api_client
+        forked._api_shared = True  # caller owns lifecycle
+        if self._dispatcher is not None:
+            forked._dispatcher = self._dispatcher
+        return forked
+
     async def close(self) -> None:
         """Clean up API client (skip if shared — caller manages lifecycle)."""
         if self._api and not self._api_shared:
