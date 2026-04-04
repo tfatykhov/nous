@@ -842,20 +842,33 @@ class AgentRunner:
             response_text = "I encountered an error processing your request."
             conversation.messages.append(Message(role="assistant", content=response_text))
             _caught_exc = e
+        except asyncio.CancelledError:
+            # Client disconnect — treat as clean exit, still run cleanup
+            logger.info("Stream cancelled (client disconnect) for session %s", session_id)
+            error = "cancelled"
+            _caught_exc = None
         else:
             _caught_exc = None
 
             # F026: Post-response claim verification (streaming: warn+inject only)
             self._verify_claims(session_id, response_text, all_tool_results, ledger)
         finally:
-            # ALWAYS call post_turn (review P1: guaranteed cleanup)
+            # ALWAYS call post_turn (review P1: guaranteed cleanup).
+            # Shield from cancellation to prevent DB connection pool leaks —
+            # CancelledError during post_turn's DB ops leaves sessions checked
+            # out but never returned to the pool.
             turn_result = TurnResult(
                 response_text=response_text,
                 tool_results=all_tool_results,
                 error=error,
                 thinking_blocks=all_thinking_blocks,
             )
-            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+            try:
+                await asyncio.shield(
+                    self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                )
+            except (asyncio.CancelledError, Exception):
+                logger.warning("post_turn cleanup interrupted for session %s", session_id)
             self._check_safety_net(turn_context, all_tool_results)
             conversation.turn_contexts.append(turn_context)
 

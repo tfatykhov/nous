@@ -138,11 +138,12 @@ def create_app(
         user_display_name = body.get("user_display_name")
 
         async def event_generator():
+            stream = runner.stream_chat(
+                session_id, message, platform=platform,
+                user_id=user_id, user_display_name=user_display_name,
+            )
             try:
-                async for event in runner.stream_chat(
-                    session_id, message, platform=platform,
-                    user_id=user_id, user_display_name=user_display_name,
-                ):
+                async for event in stream:
                     event_data: dict[str, Any] = {
                         "type": event.type,
                         "text": event.text,
@@ -157,6 +158,10 @@ def create_app(
                 logger.error("Stream error: %s", e)
                 error_data = json.dumps({"type": "error", "text": str(e)})
                 yield f"data: {error_data}\n\n"
+            finally:
+                # Ensure stream_chat generator is closed on client disconnect
+                # so its finally block (post_turn cleanup) runs deterministically.
+                await stream.aclose()
 
         return StreamingResponse(
             event_generator(),
