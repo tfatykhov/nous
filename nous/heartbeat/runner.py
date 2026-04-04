@@ -201,7 +201,10 @@ class HeartbeatRunner:
                 len(all_findings),
                 "; ".join(f"[{f.urgency}] {f.summary[:60]}" for f in all_findings),
             )
-            await self._triage(all_findings)
+            try:
+                await self._triage(all_findings)
+            except Exception:
+                logger.exception("Heartbeat triage crashed")
 
             # Emit event for audit trail
             if self._bus:
