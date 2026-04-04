@@ -1,7 +1,10 @@
-"""Heartbeat runner — background tick loop with triage (F034).
+"""Heartbeat runner — background tick loop with triage (F034 + F034.1).
 
 Follows the TaskScheduler start/stop pattern: creates an asyncio.Task
 that runs a periodic loop, checking due checks and triaging findings.
+
+F034.1 adds FindingStore integration for dedup, escalation, daily digest,
+and outcome tracking.
 """
 
 from __future__ import annotations
@@ -19,8 +22,10 @@ from nous.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import CheckRegistry
-from nous.heartbeat.schemas import CheckResult, Finding, HeartbeatResult
+from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
+from nous.heartbeat.tuner import HeartbeatTuner
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,7 @@ class HeartbeatRunner:
         heart: Heart,
         bus: EventBus | None,
         http_client: httpx.AsyncClient | None,
+        finding_store: FindingStore | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -50,12 +56,17 @@ class HeartbeatRunner:
         self._heart = heart
         self._bus = bus
         self._http = http_client
+        self._finding_store = finding_store
 
         self._task: asyncio.Task | None = None
         self._running = False
         self._tokens_used_today: int = 0
         self._budget_date: date = date.today()
         self._last_tick: datetime | None = None
+        self._last_digest_date: date | None = None
+        self._last_prune: datetime | None = None
+        self._tuner: HeartbeatTuner = HeartbeatTuner()
+        self._last_tune: datetime | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -102,6 +113,12 @@ class HeartbeatRunner:
                     await self._tick(urgent_only=True)
                 else:
                     await self._tick()
+
+                # F034.1: Daily digest at UTC hour 9
+                await self._maybe_send_digest()
+
+                # F034.1: Periodic prune + sweep (every 24h)
+                await self._maybe_prune_and_sweep()
 
             except asyncio.CancelledError:
                 break
@@ -187,7 +204,61 @@ class HeartbeatRunner:
     # ------------------------------------------------------------------
 
     async def _triage(self, findings: list[Finding]) -> None:
-        """Sort findings by urgency and dispatch appropriately."""
+        """Sort findings by urgency and dispatch appropriately.
+
+        F034.1: When FindingStore is present, each finding is routed through
+        the store's state machine first. SUPPRESS -> skip, ESCALATE -> upgrade
+        urgency to high, TRIAGE -> proceed normally.
+        """
+        # F034.1: Route through FindingStore if available
+        if self._finding_store is not None:
+            routed_findings: list[Finding] = []
+            time_escalated_checks: set[str] = set()
+
+            for f in findings:
+                action = self._finding_store.ingest(f)
+                fp = f.fingerprint()
+
+                if action == FindingAction.SUPPRESS:
+                    logger.debug("F034.1: Suppressed finding %s: %s", fp, f.summary[:60])
+                    continue
+                elif action == FindingAction.ESCALATE:
+                    logger.info("F034.1: Escalating finding %s: %s", fp, f.summary[:60])
+                    f.urgency = "high"
+                    time_escalated_checks.add(f.check_name)
+                    routed_findings.append(f)
+                else:  # TRIAGE
+                    routed_findings.append(f)
+
+                # Acknowledge after routing to triage/escalate
+                self._finding_store.acknowledge(fp)
+
+            # F034.1: Accumulation escalation per check_name
+            # (mutually exclusive with time-based escalation within a tick)
+            check_names_seen = {f.check_name for f in findings}
+            for check_name in check_names_seen:
+                if check_name in time_escalated_checks:
+                    continue  # already time-escalated, skip accumulation
+                if self._finding_store.check_accumulation_escalation(check_name):
+                    logger.info(
+                        "F034.1: Accumulation escalation for check '%s'", check_name,
+                    )
+                    # Send accumulation alert via Telegram
+                    ack_items = [
+                        t for t in self._finding_store.get_digest_items()
+                        if t.finding.check_name == check_name
+                    ]
+                    if ack_items:
+                        lines = [f"[Heartbeat] Accumulation alert: {check_name} ({len(ack_items)} findings)"]
+                        for item in ack_items[:10]:  # cap at 10 in message
+                            lines.append(f"- {item.finding.summary[:80]}")
+                        await self._send_telegram("\n".join(lines))
+
+            findings = routed_findings
+
+        if not findings:
+            return
+
         # Sort: high first, then normal, then low
         urgency_order = {"high": 0, "normal": 1, "low": 2}
         findings.sort(key=lambda f: urgency_order.get(f.urgency, 1))
@@ -263,6 +334,73 @@ class HeartbeatRunner:
             pass
 
         return result
+
+    # ------------------------------------------------------------------
+    # F034.1: Daily digest + maintenance
+    # ------------------------------------------------------------------
+
+    async def _maybe_send_digest(self) -> None:
+        """Send daily digest at UTC hour 9 if FindingStore has acknowledged items."""
+        if self._finding_store is None:
+            return
+
+        now = datetime.now(UTC)
+        today = now.date()
+
+        if now.hour == 9 and self._last_digest_date != today:
+            self._last_digest_date = today
+            await self._daily_digest()
+
+    async def _daily_digest(self) -> None:
+        """Collect acknowledged findings and send grouped Telegram digest."""
+        if self._finding_store is None:
+            return
+
+        items = self._finding_store.get_digest_items()
+        if not items:
+            return
+
+        # Group by check_name
+        by_check: dict[str, list] = {}
+        for item in items:
+            by_check.setdefault(item.finding.check_name, []).append(item)
+
+        lines = [f"[Heartbeat] Daily digest ({len(items)} tracked findings):"]
+        for check_name, check_items in sorted(by_check.items()):
+            lines.append(f"\n{check_name} ({len(check_items)}):")
+            for item in check_items[:5]:  # cap per check
+                # Mark items near escalation with arrow
+                near_escalation = ""
+                if item.first_seen is not None:
+                    age_h = (datetime.now(UTC) - item.first_seen).total_seconds() / 3600
+                    urgency = item.finding.urgency
+                    threshold = {"low": 72, "normal": 24, "high": 12}.get(urgency, 24)
+                    if age_h >= threshold * 0.75:
+                        near_escalation = " \u2b06\ufe0f"
+                lines.append(
+                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]}"
+                    f" (x{item.seen_count}){near_escalation}"
+                )
+            if len(check_items) > 5:
+                lines.append(f"  ... and {len(check_items) - 5} more")
+
+        await self._send_telegram("\n".join(lines))
+        logger.info("F034.1: Sent daily digest with %d findings", len(items))
+
+    async def _maybe_prune_and_sweep(self) -> None:
+        """Run prune + sweep every 24 hours."""
+        if self._finding_store is None:
+            return
+
+        now = datetime.now(UTC)
+        if self._last_prune is not None and (now - self._last_prune).total_seconds() < 86400:
+            return
+
+        self._last_prune = now
+        pruned = self._finding_store.prune()
+        swept = self._finding_store.sweep_weak_negatives()
+        if pruned or swept:
+            logger.info("F034.1: Pruned %d resolved, swept %d weak_negative findings", pruned, swept)
 
     # ------------------------------------------------------------------
     # Telegram notifications
@@ -367,6 +505,14 @@ class HeartbeatRunner:
     @property
     def registry(self) -> CheckRegistry:
         return self._registry
+
+    @property
+    def finding_store(self) -> FindingStore | None:
+        return self._finding_store
+
+    @property
+    def tuner(self) -> HeartbeatTuner:
+        return self._tuner
 
     @property
     def tokens_used_today(self) -> int:

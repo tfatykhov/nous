@@ -1500,6 +1500,139 @@ def create_app(
         check.reset_circuit_breaker()
         return JSONResponse({"status": "reset", "check": name})
 
+    # ------------------------------------------------------------------
+    # Heartbeat Finding Lifecycle (F034.1)
+    # ------------------------------------------------------------------
+
+    async def heartbeat_findings(request: Request) -> JSONResponse:
+        """GET /heartbeat/findings — All tracked findings with state/age."""
+        try:
+            _ = heartbeat_runner.registry  # trigger proxy
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not available"}, status_code=503)
+        store = heartbeat_runner.finding_store
+        if store is None:
+            return JSONResponse({"findings": [], "stats": {}})
+        return JSONResponse({"findings": store.to_list(), "stats": store.stats()})
+
+    async def heartbeat_findings_acknowledge(request: Request) -> JSONResponse:
+        """POST /heartbeat/findings/{fingerprint}/acknowledge"""
+        fp = request.path_params["fingerprint"]
+        store = heartbeat_runner.finding_store
+        if store is None:
+            return JSONResponse({"error": "Finding store not available"}, status_code=503)
+        ok = store.acknowledge(fp)
+        if not ok:
+            return JSONResponse({"error": "Finding not found"}, status_code=404)
+        return JSONResponse({"acknowledged": fp})
+
+    async def heartbeat_findings_resolve(request: Request) -> JSONResponse:
+        """POST /heartbeat/findings/{fingerprint}/resolve"""
+        from nous.heartbeat.schemas import OutcomeSignal
+
+        fp = request.path_params["fingerprint"]
+        store = heartbeat_runner.finding_store
+        if store is None:
+            return JSONResponse({"error": "Finding store not available"}, status_code=503)
+        ok = store.resolve(fp)
+        if not ok:
+            return JSONResponse({"error": "Finding not found"}, status_code=404)
+        # Record positive outcome (user cared enough to resolve)
+        store.record_outcome(fp, OutcomeSignal.POSITIVE)
+        return JSONResponse({"resolved": fp})
+
+    async def heartbeat_findings_dismiss(request: Request) -> JSONResponse:
+        """POST /heartbeat/findings/{fingerprint}/dismiss"""
+        fp = request.path_params["fingerprint"]
+        store = heartbeat_runner.finding_store
+        if store is None:
+            return JSONResponse({"error": "Finding store not available"}, status_code=503)
+        ok = store.dismiss(fp)
+        if not ok:
+            return JSONResponse({"error": "Finding not found"}, status_code=404)
+        return JSONResponse({"dismissed": fp})
+
+    async def heartbeat_escalation_policy(request: Request) -> JSONResponse:
+        """PUT /heartbeat/escalation-policy — Update escalation thresholds."""
+        store = heartbeat_runner.finding_store
+        if store is None:
+            return JSONResponse({"error": "Finding store not available"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        cfg = store._escalation
+        minimums = {
+            "low_to_normal_hours": 1,
+            "normal_to_high_hours": 1,
+            "high_realert_hours": 1,
+            "accumulation_threshold": 2,
+        }
+        for field_name, min_val in minimums.items():
+            if field_name in body:
+                val = int(body[field_name])
+                if val < min_val:
+                    return JSONResponse(
+                        {"error": f"{field_name} must be >= {min_val}"}, status_code=400,
+                    )
+                setattr(cfg, field_name, val)
+        return JSONResponse({
+            "low_to_normal_hours": cfg.low_to_normal_hours,
+            "normal_to_high_hours": cfg.normal_to_high_hours,
+            "high_realert_hours": cfg.high_realert_hours,
+            "accumulation_threshold": cfg.accumulation_threshold,
+        })
+
+    # ------------------------------------------------------------------
+    # Heartbeat Tuning (F034.3)
+    # ------------------------------------------------------------------
+
+    async def heartbeat_tuning_report(request: Request) -> JSONResponse:
+        """GET /heartbeat/tuning-report — Latest tuning report."""
+        try:
+            _ = heartbeat_runner.registry
+        except Exception:
+            return JSONResponse({"error": "Heartbeat not available"}, status_code=503)
+        tuner = heartbeat_runner.tuner
+        report = tuner.last_report
+        report_data = None
+        if report is not None:
+            report_data = {
+                "adjustments": [
+                    {
+                        "check_name": a.check_name,
+                        "param_name": a.param_name,
+                        "old_value": a.old_value,
+                        "new_value": a.new_value,
+                        "direction": a.direction,
+                        "sample_count": a.sample_count,
+                    }
+                    for a in report.adjustments
+                ],
+                "skipped_checks": report.skipped_checks,
+                "timestamp": report.timestamp.isoformat() if report.timestamp else None,
+                "report_text": tuner.generate_report_text(report),
+            }
+        return JSONResponse({
+            "report": report_data,
+            "tuning_enabled": settings.heartbeat_tuning_enabled,
+        })
+
+    async def heartbeat_tune(request: Request) -> JSONResponse:
+        """POST /heartbeat/tune — Force tuning pass."""
+        if not settings.heartbeat_tuning_enabled:
+            return JSONResponse({"error": "Tuning not enabled"}, status_code=400)
+        store = heartbeat_runner.finding_store
+        if store is None:
+            return JSONResponse({"error": "Finding store not available"}, status_code=503)
+        tuner = heartbeat_runner.tuner
+        report = await tuner.tune(store, heartbeat_runner.registry)
+        return JSONResponse({
+            "adjustments": len(report.adjustments),
+            "skipped": report.skipped_checks,
+            "report_text": tuner.generate_report_text(report),
+        })
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1530,6 +1663,16 @@ def create_app(
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
         Route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
+        # F034.1: Finding lifecycle endpoints
+        Route("/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]),
+        Route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
+        Route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
+        Route("/heartbeat/findings", heartbeat_findings),
+        Route("/heartbeat/escalation-policy", heartbeat_escalation_policy, methods=["PUT"]),
+        # F034.3: Tuning endpoints
+        Route("/heartbeat/tuning-report", heartbeat_tuning_report),
+        Route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
+        # F034: Check-level endpoints
         Route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
         Route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
         Route("/sleep/trigger", trigger_sleep, methods=["POST"]),

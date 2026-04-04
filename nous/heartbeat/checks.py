@@ -1,8 +1,9 @@
-"""Built-in heartbeat checks (F034).
+"""Built-in heartbeat checks (F034 + F034.2).
 
 HealthCheck — system health indicators (stale facts, unreviewed decisions, etc.)
-SelfInitiatedCheck — pending actions, due schedules
-EmailCheck — optional IMAP email polling
+SelfInitiatedCheck — pending actions, due schedules, promise tracking, temporal awareness
+EmailCheck — optional IMAP email polling with LLM classification + sender reputation
+DriveCheck — Google Drive monitoring with significance scoring + cross-reference
 """
 
 from __future__ import annotations
@@ -10,15 +11,23 @@ from __future__ import annotations
 import asyncio
 import imaplib
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from nous.brain import Brain
+from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
 from nous.heart import Heart
 from nous.heartbeat.registry import BaseCheck
-from nous.heartbeat.schemas import CheckResult, Finding
+from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# HealthCheck
+# ------------------------------------------------------------------
 
 
 class HealthCheck(BaseCheck):
@@ -26,6 +35,8 @@ class HealthCheck(BaseCheck):
 
     Checks for unreviewed decisions, high-false-positive censors,
     stale facts, and low-effectiveness procedures.
+
+    F034.2: Uses tunable parameters for thresholds.
     """
 
     name = "health"
@@ -36,17 +47,25 @@ class HealthCheck(BaseCheck):
         self._heart = heart
         self._brain = brain
         self.interval = settings.heartbeat_health_interval
+        self._params = {
+            "stale_decision_days": TunableParam("stale_decision_days", 7, 3, 30, 1),
+            "stale_fact_days": TunableParam("stale_fact_days", 30, 7, 90, 5),
+            "low_effectiveness_threshold": TunableParam("low_effectiveness_threshold", 0.5, 0.3, 0.8, 0.05),
+            "max_findings_per_run": TunableParam("max_findings_per_run", 10, 3, 25, 1),
+        }
 
     async def run(self) -> CheckResult:
         findings: list[Finding] = []
+        max_findings = int(self.get_param_value("max_findings_per_run"))
 
         # 1. Unreviewed decisions
         try:
-            unreviewed = await self._brain.get_unreviewed(max_age_days=7)
-            if unreviewed:
+            stale_days = int(self.get_param_value("stale_decision_days"))
+            unreviewed = await self._brain.get_unreviewed(max_age_days=stale_days)
+            if unreviewed and len(findings) < max_findings:
                 findings.append(Finding(
                     source="brain",
-                    summary=f"{len(unreviewed)} decisions pending review (oldest 7 days)",
+                    summary=f"{len(unreviewed)} decisions pending review (oldest {stale_days} days)",
                     urgency="normal",
                     needs_action=True,
                     raw_data={"count": len(unreviewed)},
@@ -58,7 +77,7 @@ class HealthCheck(BaseCheck):
         try:
             censors = await self._heart.censors.list_active()
             high_fp = [c for c in censors if (c.false_positive_count or 0) > 5]
-            if high_fp:
+            if high_fp and len(findings) < max_findings:
                 findings.append(Finding(
                     source="censors",
                     summary=f"{len(high_fp)} censors with high false-positive counts",
@@ -71,11 +90,12 @@ class HealthCheck(BaseCheck):
 
         # 3. Stale facts
         try:
-            stale_count = await self._heart.facts.count_stale(older_than_days=30)
-            if stale_count > 10:
+            stale_fact_days = int(self.get_param_value("stale_fact_days"))
+            stale_count = await self._heart.facts.count_stale(older_than_days=stale_fact_days)
+            if stale_count > 10 and len(findings) < max_findings:
                 findings.append(Finding(
                     source="facts",
-                    summary=f"{stale_count} facts not accessed in 30+ days",
+                    summary=f"{stale_count} facts not accessed in {stale_fact_days}+ days",
                     urgency="low",
                     needs_action=False,
                     raw_data={"count": stale_count},
@@ -85,11 +105,12 @@ class HealthCheck(BaseCheck):
 
         # 4. Low-effectiveness procedures
         try:
-            low_procs = await self._heart.procedures.get_low_effectiveness(threshold=0.5)
-            if low_procs:
+            threshold = self.get_param_value("low_effectiveness_threshold")
+            low_procs = await self._heart.procedures.get_low_effectiveness(threshold=threshold)
+            if low_procs and len(findings) < max_findings:
                 findings.append(Finding(
                     source="procedures",
-                    summary=f"{len(low_procs)} procedures below 50% effectiveness",
+                    summary=f"{len(low_procs)} procedures below {threshold:.0%} effectiveness",
                     urgency="normal",
                     needs_action=True,
                     raw_data={"procedure_ids": [str(p.id) for p in low_procs]},
@@ -97,64 +118,312 @@ class HealthCheck(BaseCheck):
         except Exception:
             logger.debug("HealthCheck: get_low_effectiveness failed", exc_info=True)
 
+        # Enforce max_findings limit
+        findings = findings[:max_findings]
+
         return CheckResult(
             has_updates=bool(findings),
             findings=findings,
         )
 
 
+# ------------------------------------------------------------------
+# SelfInitiatedCheck
+# ------------------------------------------------------------------
+
+PENDING_PROTOTYPES = [
+    "I need to follow up on this",
+    "This task is waiting for completion",
+    "Tim asked me to do this and I haven't yet",
+    "This should be revisited soon",
+    "Action required but not yet taken",
+]
+
+
 class SelfInitiatedCheck(BaseCheck):
     """Check for pending actions and due schedules (permanent).
 
-    Searches facts for follow-up markers and checks schedules
-    that are overdue.
+    F034.2: Uses embedding-based search, promise tracking, and temporal
+    awareness with graceful degradation to keyword search.
     """
 
     name = "self_initiated"
     timeout = 20
 
-    def __init__(self, heart: Heart, brain: Brain, settings: Settings) -> None:
+    def __init__(
+        self,
+        heart: Heart,
+        brain: Brain,
+        settings: Settings,
+        embeddings: EmbeddingProvider | None = None,
+    ) -> None:
         super().__init__()
         self._heart = heart
         self._brain = brain
         self.interval = settings.heartbeat_self_initiated_interval
+        self._embeddings = embeddings
+        self._prototype_cache: list[list[float]] | None = None
+        self._params = {
+            "similarity_threshold": TunableParam("similarity_threshold", 0.75, 0.6, 0.9, 0.02),
+            "lookback_days": TunableParam("lookback_days", 14, 3, 30, 1),
+            "max_pending_items": TunableParam("max_pending_items", 5, 2, 15, 1),
+        }
+
+    async def _ensure_prototypes(self) -> list[list[float]]:
+        """Embed prototype strings on first call, cache result."""
+        if self._prototype_cache is not None:
+            return self._prototype_cache
+        if self._embeddings is None:
+            return []
+        try:
+            self._prototype_cache = await self._embeddings.embed_batch(PENDING_PROTOTYPES)
+        except Exception:
+            logger.debug("SelfInitiatedCheck: prototype embedding failed", exc_info=True)
+            self._prototype_cache = []
+        return self._prototype_cache
+
+    async def _embedding_search(self) -> list[Finding]:
+        """Search recent facts using cosine similarity against pending prototypes."""
+        if self._embeddings is None:
+            return []
+
+        prototypes = await self._ensure_prototypes()
+        if not prototypes:
+            return []
+
+        findings: list[Finding] = []
+        threshold = self.get_param_value("similarity_threshold")
+        lookback_days = int(self.get_param_value("lookback_days"))
+        max_items = int(self.get_param_value("max_pending_items"))
+
+        # Search facts using each prototype query
+        seen_fact_ids: set[str] = set()
+        for i, proto_text in enumerate(PENDING_PROTOTYPES):
+            if len(findings) >= max_items:
+                break
+            try:
+                results = await self._heart.facts.search(
+                    proto_text,
+                    limit=5,
+                )
+                for fact in results:
+                    fid = str(fact.id)
+                    if fid in seen_fact_ids:
+                        continue
+                    seen_fact_ids.add(fid)
+
+                    # Check recency using fact score as proxy (hybrid search)
+                    # and content relevance via _looks_like_pending
+                    score = getattr(fact, "score", 0.0) or 0.0
+                    if score >= threshold or self._looks_like_pending(fact.content):
+                        findings.append(Finding(
+                            source="facts",
+                            summary=f"Pending action: {fact.content[:100]}",
+                            urgency="normal",
+                            needs_action=True,
+                            raw_data={"fact_id": fid, "detection": "embedding"},
+                        ))
+                        if len(findings) >= max_items:
+                            break
+            except Exception:
+                logger.debug("SelfInitiatedCheck: embedding search failed for prototype %d", i, exc_info=True)
+
+        return findings
+
+    async def _promise_scan(self) -> list[Finding]:
+        """Search recent episode summaries for unresolved commitments."""
+        findings: list[Finding] = []
+        max_items = int(self.get_param_value("max_pending_items"))
+
+        promise_queries = [
+            "I'll look into",
+            "let me research",
+            "I'll draft",
+            "unfinished commitment",
+            "ongoing task not completed",
+        ]
+
+        seen_episode_ids: set[str] = set()
+        for query in promise_queries:
+            if len(findings) >= max_items:
+                break
+            try:
+                episodes = await self._heart.search_episodes(query, limit=3)
+                for ep in episodes:
+                    eid = str(ep.id)
+                    if eid in seen_episode_ids:
+                        continue
+                    seen_episode_ids.add(eid)
+
+                    # Check if episode is ongoing or old enough to be stale
+                    is_ongoing = getattr(ep, "outcome", None) == "ongoing"
+                    started = getattr(ep, "started_at", None)
+                    is_stale = False
+                    if started:
+                        age_hours = (datetime.now(UTC) - started).total_seconds() / 3600
+                        is_stale = age_hours > 48
+
+                    if is_ongoing or is_stale:
+                        summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
+                        findings.append(Finding(
+                            source="episodes",
+                            summary=f"Unresolved commitment: {summary_text[:100]}",
+                            urgency="normal",
+                            needs_action=True,
+                            raw_data={
+                                "episode_id": eid,
+                                "detection": "promise_scan",
+                                "outcome": getattr(ep, "outcome", None),
+                            },
+                        ))
+                        if len(findings) >= max_items:
+                            break
+            except Exception:
+                logger.debug("SelfInitiatedCheck: promise scan failed for '%s'", query, exc_info=True)
+
+        return findings
+
+    async def _temporal_scan(self) -> list[Finding]:
+        """Parse explicit temporal markers from facts for approaching deadlines."""
+        findings: list[Finding] = []
+
+        try:
+            from dateutil import parser as dateutil_parser  # type: ignore[import-untyped]
+        except ImportError:
+            logger.debug("SelfInitiatedCheck: dateutil not available, skipping temporal scan")
+            return findings
+
+        max_items = int(self.get_param_value("max_pending_items"))
+        lookback_days = int(self.get_param_value("lookback_days"))
+
+        # Search for facts with temporal language
+        temporal_queries = ["by Friday", "next week", "deadline", "due date", "end of week", "before Monday"]
+        now = datetime.now(UTC)
+        upcoming_window = timedelta(days=3)  # Surface items due within 3 days
+
+        seen_fact_ids: set[str] = set()
+        for query in temporal_queries:
+            if len(findings) >= max_items:
+                break
+            try:
+                results = await self._heart.facts.search(query, limit=3)
+                for fact in results:
+                    fid = str(fact.id)
+                    if fid in seen_fact_ids:
+                        continue
+                    seen_fact_ids.add(fid)
+
+                    # Try to extract a date from the fact content
+                    parsed_date = self._try_parse_date(dateutil_parser, fact.content)
+                    if parsed_date is not None:
+                        delta = parsed_date - now
+                        if timedelta(0) <= delta <= upcoming_window:
+                            findings.append(Finding(
+                                source="facts",
+                                summary=f"Approaching deadline: {fact.content[:100]}",
+                                urgency="high" if delta.days <= 1 else "normal",
+                                needs_action=True,
+                                raw_data={
+                                    "fact_id": fid,
+                                    "detection": "temporal",
+                                    "parsed_date": parsed_date.isoformat(),
+                                },
+                            ))
+                            if len(findings) >= max_items:
+                                break
+            except Exception:
+                logger.debug("SelfInitiatedCheck: temporal scan failed for '%s'", query, exc_info=True)
+
+        return findings
+
+    @staticmethod
+    def _try_parse_date(dateutil_parser: Any, text: str) -> datetime | None:
+        """Try to extract a date from text using dateutil fuzzy parsing."""
+        try:
+            parsed, _ = dateutil_parser.parse(text, fuzzy_with_tokens=True)
+            # Only return if it's in the future
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            if parsed > datetime.now(UTC):
+                return parsed
+        except (ValueError, OverflowError, TypeError):
+            pass
+        return None
 
     async def run(self) -> CheckResult:
         findings: list[Finding] = []
+        max_items = int(self.get_param_value("max_pending_items"))
 
-        # 1. Search for pending action facts
-        try:
-            pending_facts = await self._heart.facts.search(
-                "follow-up pending action TODO",
-                category="rule",
-                limit=5,
-            )
-            for fact in pending_facts:
-                if self._looks_like_pending(fact.content):
+        # 1. Try embedding-based search first (if embeddings available)
+        if self._embeddings is not None:
+            try:
+                embedding_findings = await self._embedding_search()
+                findings.extend(embedding_findings)
+            except Exception:
+                logger.debug("SelfInitiatedCheck: embedding search failed, falling back", exc_info=True)
+
+        # 2. Fall back to / supplement with keyword-based search
+        if len(findings) < max_items:
+            try:
+                pending_facts = await self._heart.facts.search(
+                    "follow-up pending action TODO",
+                    category="rule",
+                    limit=5,
+                )
+                seen_ids = {f.raw_data.get("fact_id") for f in findings}
+                for fact in pending_facts:
+                    if len(findings) >= max_items:
+                        break
+                    fid = str(fact.id)
+                    if fid in seen_ids:
+                        continue
+                    if self._looks_like_pending(fact.content):
+                        findings.append(Finding(
+                            source="facts",
+                            summary=f"Pending action: {fact.content[:100]}",
+                            urgency="normal",
+                            needs_action=True,
+                            raw_data={"fact_id": fid, "detection": "keyword"},
+                        ))
+            except Exception:
+                logger.debug("SelfInitiatedCheck: keyword fact search failed", exc_info=True)
+
+        # 3. Promise tracking
+        if len(findings) < max_items:
+            try:
+                promise_findings = await self._promise_scan()
+                remaining = max_items - len(findings)
+                findings.extend(promise_findings[:remaining])
+            except Exception:
+                logger.debug("SelfInitiatedCheck: promise scan failed", exc_info=True)
+
+        # 4. Temporal awareness
+        if len(findings) < max_items:
+            try:
+                temporal_findings = await self._temporal_scan()
+                remaining = max_items - len(findings)
+                findings.extend(temporal_findings[:remaining])
+            except Exception:
+                logger.debug("SelfInitiatedCheck: temporal scan failed", exc_info=True)
+
+        # 5. Due schedules
+        if len(findings) < max_items:
+            try:
+                now = datetime.now(UTC)
+                due_schedules = await self._heart.schedules.get_due(now)
+                if due_schedules:
                     findings.append(Finding(
-                        source="facts",
-                        summary=f"Pending action: {fact.content[:100]}",
+                        source="schedules",
+                        summary=f"{len(due_schedules)} schedule(s) past due",
                         urgency="normal",
                         needs_action=True,
-                        raw_data={"fact_id": str(fact.id)},
+                        raw_data={"count": len(due_schedules)},
                     ))
-        except Exception:
-            logger.debug("SelfInitiatedCheck: fact search failed", exc_info=True)
+            except Exception:
+                logger.debug("SelfInitiatedCheck: get_due failed", exc_info=True)
 
-        # 2. Due schedules
-        try:
-            now = datetime.now(UTC)
-            due_schedules = await self._heart.schedules.get_due(now)
-            if due_schedules:
-                findings.append(Finding(
-                    source="schedules",
-                    summary=f"{len(due_schedules)} schedule(s) past due",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"count": len(due_schedules)},
-                ))
-        except Exception:
-            logger.debug("SelfInitiatedCheck: get_due failed", exc_info=True)
+        # Enforce max limit
+        findings = findings[:max_items]
 
         return CheckResult(
             has_updates=bool(findings),
@@ -169,24 +438,46 @@ class SelfInitiatedCheck(BaseCheck):
         return any(m in lower for m in markers)
 
 
+# ------------------------------------------------------------------
+# EmailCheck
+# ------------------------------------------------------------------
+
+
 class EmailCheck(BaseCheck):
     """Optional IMAP email polling check.
 
-    Uses imaplib in asyncio.to_thread() to avoid blocking.
-    Tracks seen message IDs with 24h pruning.
+    F034.2: Tiered classification (sender reputation -> LLM -> keywords),
+    budget-aware LLM calls, sender reputation learning.
     """
 
     name = "email"
     timeout = 30
     urgent_override = True  # runs even during quiet hours
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        llm_callable: Callable[..., Any] | None = None,
+        budget_check: Callable[[], bool] | None = None,
+    ) -> None:
         super().__init__()
         self.interval = settings.heartbeat_email_interval
         self._host = settings.heartbeat_email_imap_host
         self._user = settings.email_user
         self._password = settings.email_password
         self._seen_ids: dict[str, datetime] = {}
+
+        # F034.2: LLM classification support
+        self._llm_callable = llm_callable
+        self._budget_check = budget_check
+
+        # F034.2: Sender reputation (sender -> list of past classifications, max 10)
+        self._sender_reputation: dict[str, list[tuple[str, datetime]]] = {}
+
+        self._params = {
+            "sender_reputation_weight": TunableParam("sender_reputation_weight", 0.5, 0.0, 1.0, 0.05),
+            "llm_classification_budget": TunableParam("llm_classification_budget", 500, 200, 2000, 50),
+        }
 
     async def run(self) -> CheckResult:
         if not self._user or not self._password:
@@ -212,7 +503,7 @@ class EmailCheck(BaseCheck):
                 continue
             self._seen_ids[msg_id] = datetime.now(UTC)
 
-            urgency = self._classify_urgency(subject, sender)
+            urgency = await self._classify_email(subject, sender)
             logger.info("EmailCheck: new email [%s] from %s — %s", urgency, sender, subject[:60])
             findings.append(Finding(
                 source="email",
@@ -226,6 +517,105 @@ class EmailCheck(BaseCheck):
             has_updates=bool(findings),
             findings=findings,
         )
+
+    async def _classify_email(self, subject: str, sender: str, body_preview: str = "") -> str:
+        """Tiered email classification: reputation -> LLM -> keywords.
+
+        Returns urgency string: "high", "normal", or "low".
+        """
+        # Tier 0: Sender reputation (if enough history)
+        rep = self._get_sender_reputation(sender)
+        if rep is not None:
+            return rep
+
+        # Tier 1: LLM classification (if available and budget allows)
+        if self._llm_callable and (self._budget_check is None or self._budget_check()):
+            try:
+                result = await self._llm_classify(subject, sender, body_preview)
+                self._update_reputation(sender, result)
+                return result
+            except Exception:
+                logger.debug("LLM email classification failed, falling back to keywords")
+
+        # Tier 2: Keyword heuristics (always available)
+        result = self._keyword_classify(subject, sender)
+        self._update_reputation(sender, result)
+        return result
+
+    def _get_sender_reputation(self, sender: str) -> str | None:
+        """Check if we have enough reputation data for this sender.
+
+        Returns the dominant classification if 5+ consistent entries,
+        None otherwise (indicating LLM/keyword fallback needed).
+        """
+        entries = self._sender_reputation.get(sender, [])
+        if len(entries) < 5:
+            return None
+
+        # Count classifications
+        counts: dict[str, int] = {}
+        for classification, _ in entries:
+            counts[classification] = counts.get(classification, 0) + 1
+
+        # If dominant classification is >60% of entries, use it
+        total = len(entries)
+        for classification, count in counts.items():
+            if count / total >= 0.6:
+                return classification
+
+        return None
+
+    def _update_reputation(self, sender: str, classification: str) -> None:
+        """Update sender reputation with a new classification."""
+        now = datetime.now(UTC)
+        if sender not in self._sender_reputation:
+            self._sender_reputation[sender] = []
+
+        entries = self._sender_reputation[sender]
+
+        # 30-day decay: remove old entries
+        cutoff = now - timedelta(days=30)
+        entries[:] = [(c, t) for c, t in entries if t > cutoff]
+
+        # Add new entry, cap at 10
+        entries.append((classification, now))
+        if len(entries) > 10:
+            entries[:] = entries[-10:]
+
+    async def _llm_classify(self, subject: str, sender: str, body_preview: str = "") -> str:
+        """Use LLM for email classification. Returns urgency string."""
+        prompt = (
+            "Classify this email. Reply with ONE word: urgent, actionable, informational, spam.\n"
+            f"From: {sender}\n"
+            f"Subject: {subject}\n"
+            f"Preview: {body_preview[:200]}"
+        )
+
+        response = await self._llm_callable(prompt)  # type: ignore[misc]
+        response_lower = response.strip().lower()
+
+        # Map LLM response to urgency
+        if "urgent" in response_lower:
+            return "high"
+        elif "actionable" in response_lower:
+            return "normal"
+        elif "spam" in response_lower:
+            return "low"
+        elif "informational" in response_lower:
+            return "low"
+        else:
+            # Unknown response, default to normal
+            return "normal"
+
+    @staticmethod
+    def _keyword_classify(subject: str, sender: str) -> str:
+        """Rule-based urgency classification. All emails are at least normal."""
+        lower = subject.lower()
+        if any(w in lower for w in ["urgent", "critical", "emergency", "asap"]):
+            return "high"
+        if any(w in lower for w in ["newsletter", "unsubscribe", "digest", "weekly update"]):
+            return "low"
+        return "normal"
 
     def _fetch_unseen(self) -> list[tuple[str, str, str]]:
         """Synchronous IMAP fetch — runs in thread."""
@@ -271,34 +661,44 @@ class EmailCheck(BaseCheck):
             if (now - v).total_seconds() < 86400
         }
 
-    @staticmethod
-    def _classify_urgency(subject: str, sender: str) -> str:
-        """Rule-based urgency classification. All emails are at least normal."""
-        lower = subject.lower()
-        if any(w in lower for w in ["urgent", "critical", "emergency", "asap"]):
-            return "high"
-        return "normal"
+
+# ------------------------------------------------------------------
+# DriveCheck
+# ------------------------------------------------------------------
+
+# Default folder-to-project mapping (empty, user configures via config/REST)
+DEFAULT_FOLDER_MAP: dict[str, str] = {}
 
 
 class DriveCheck(BaseCheck):
     """Check Google Drive for recently modified files.
 
-    Uses the existing GDrive integration (nous.integrations.gdrive).
-    Synchronous Google API calls are wrapped in asyncio.to_thread().
+    F034.2: Adds significance scoring, folder mapping, and
+    conversation cross-reference via Heart episodes.
     """
 
     name = "drive"
     timeout = 30
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        heart: Heart | None = None,
+    ) -> None:
         super().__init__()
         self.interval = settings.heartbeat_drive_interval
         self._last_check_time: datetime | None = None
+        self._heart = heart
 
         # Lazy-init GDrive to avoid crashing if creds are missing
         self._gdrive = None
 
-    def _ensure_gdrive(self):
+        self._params = {
+            "significance_threshold": TunableParam("significance_threshold", 1.0, 0.0, 2.0, 0.5),
+            "cross_reference_lookback_hours": TunableParam("cross_reference_lookback_hours", 48, 6, 168, 6),
+        }
+
+    def _ensure_gdrive(self) -> None:
         if self._gdrive is None:
             from nous.integrations.gdrive import GDrive
             self._gdrive = GDrive()
@@ -325,17 +725,92 @@ class DriveCheck(BaseCheck):
             logger.warning("DriveCheck: list_files failed", exc_info=True)
             raise
 
+        sig_threshold = self.get_param_value("significance_threshold")
+
         findings: list[Finding] = []
         for f in files:
+            significance = self._score_significance(f)
+            sig_value = {"low": 0.0, "normal": 1.0, "high": 2.0}.get(significance, 1.0)
+
+            # Skip files below significance threshold
+            if sig_value < sig_threshold:
+                continue
+
+            file_name = f.get("name", "?")
+            mime_type = f.get("mimeType", "?")
+
+            # Build summary with context
+            summary = f"Modified: {file_name} ({mime_type})"
+
+            # Cross-reference with recent conversations
+            context = await self._contextualize(file_name)
+            if context:
+                summary = f"{summary} — {context}"
+
+            # Map urgency from significance
+            urgency: str = "low"
+            if significance == "high":
+                urgency = "normal"
+            elif significance == "normal":
+                urgency = "low"
+
             findings.append(Finding(
                 source="drive",
-                summary=f"Modified: {f.get('name', '?')} ({f.get('mimeType', '?')})",
-                urgency="low",
-                needs_action=False,
-                raw_data=f,
+                summary=summary,
+                urgency=urgency,
+                needs_action=significance == "high",
+                raw_data={**f, "significance": significance},
             ))
 
         return CheckResult(
             has_updates=bool(findings),
             findings=findings,
         )
+
+    @staticmethod
+    def _score_significance(file_data: dict) -> str:
+        """Score file modification significance based on metadata.
+
+        Returns "low", "normal", or "high".
+        """
+        mime_type = file_data.get("mimeType", "")
+
+        # New files shared by someone else are high significance
+        sharing_user = file_data.get("sharingUser")
+        if sharing_user:
+            return "high"
+
+        # Google Docs/Sheets/Slides edits are normally significant
+        if mime_type.startswith("application/vnd.google-apps."):
+            # Check if recently created (might be auto-save)
+            created = file_data.get("createdTime", "")
+            modified = file_data.get("modifiedTime", "")
+            if created and modified and created != modified:
+                return "normal"
+            return "low"  # Same-day creation, likely auto-save
+
+        # Images and PDFs are normally significant
+        if mime_type.startswith("image/") or mime_type == "application/pdf":
+            return "normal"
+
+        # Everything else is low
+        return "low"
+
+    async def _contextualize(self, file_name: str) -> str | None:
+        """Search recent conversations for references to this file."""
+        if self._heart is None:
+            return None
+
+        try:
+            episodes = await self._heart.search_episodes(file_name, limit=3)
+            if episodes:
+                ep = episodes[0]
+                score = getattr(ep, "score", 0.0) or 0.0
+                if score > 0.7:
+                    summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
+                    if summary_text:
+                        return f"Related to recent conversation: {summary_text[:100]}"
+        except Exception:
+            logger.debug("DriveCheck: contextualize failed for '%s'", file_name, exc_info=True)
+
+        return None
