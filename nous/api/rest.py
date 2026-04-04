@@ -73,6 +73,7 @@ def create_app(
     rubric_evolver: Any | None = None,
     heartbeat_runner: Any | None = None,
     session_monitor: Any | None = None,
+    context_logger: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1793,6 +1794,76 @@ def create_app(
                   for r in rows]
         return JSONResponse({"events": events, "hours": hours, "count": len(events)})
 
+    # ------------------------------------------------------------------
+    # F035.4: Context visibility endpoints
+    # ------------------------------------------------------------------
+
+    async def context_log_list(request: Request) -> JSONResponse:
+        session_id = request.query_params.get("session_id")
+        limit = int(request.query_params.get("limit", "20"))
+        if not context_logger:
+            return JSONResponse({"entries": []})
+        entries = context_logger.get_recent(session_id=session_id, limit=limit)
+        return JSONResponse({"entries": [e.to_dict() for e in entries]})
+
+    async def context_log_detail(request: Request) -> JSONResponse:
+        entry_id = request.path_params["id"]
+        if not context_logger:
+            return JSONResponse({"error": "Not enabled"}, status_code=404)
+        entry = context_logger.get_entry(entry_id)
+        if not entry:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse(entry.to_dict())
+
+    async def context_log_payload(request: Request) -> JSONResponse:
+        entry_id = request.path_params["id"]
+        if not context_logger:
+            return JSONResponse({"error": "Not enabled"}, status_code=404)
+        payload = context_logger.get_payload(entry_id)
+        if not payload:
+            return JSONResponse({"error": "Not captured"}, status_code=404)
+        return JSONResponse(payload)
+
+    async def context_log_sections(request: Request) -> JSONResponse:
+        entry_id = request.path_params["id"]
+        if not context_logger:
+            return JSONResponse({"error": "Not enabled"}, status_code=404)
+        entry = context_logger.get_entry(entry_id)
+        if not entry:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse({
+            "sections": entry.token_breakdown,
+            "total_tokens_est": entry.total_tokens_est,
+            "sections_present": entry.sections_present,
+        })
+
+    async def context_diff(request: Request) -> JSONResponse:
+        a_id = request.query_params.get("a")
+        b_id = request.query_params.get("b")
+        if not context_logger or not a_id or not b_id:
+            return JSONResponse({"error": "Missing parameters"}, status_code=400)
+        a = context_logger.get_entry(a_id)
+        b = context_logger.get_entry(b_id)
+        if not a or not b:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        token_delta = {}
+        for s in set(a.token_breakdown) | set(b.token_breakdown):
+            d = b.token_breakdown.get(s, 0) - a.token_breakdown.get(s, 0)
+            if d != 0:
+                token_delta[s] = d
+        return JSONResponse({
+            "a": a_id, "b": b_id,
+            "token_delta": {
+                "total": b.total_tokens_est - a.total_tokens_est,
+                "by_section": token_delta,
+            },
+            "sections_added": [s for s in b.sections_present if s not in a.sections_present],
+            "sections_removed": [s for s in a.sections_present if s not in b.sections_present],
+            "tools_added": [t for t in b.tool_names if t not in a.tool_names],
+            "tools_removed": [t for t in a.tool_names if t not in b.tool_names],
+            "messages_delta": b.messages_count - a.messages_count,
+        })
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1868,6 +1939,12 @@ def create_app(
         Route("/dashboard/ledger", dashboard_ledger),
         # F034: Heartbeat dashboard
         Route("/dashboard/heartbeat", dashboard_heartbeat),
+        # F035.4: Context visibility
+        Route("/context/log", context_log_list, methods=["GET"]),
+        Route("/context/log/{id}", context_log_detail, methods=["GET"]),
+        Route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
+        Route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
+        Route("/context/diff", context_diff, methods=["GET"]),
     ]
 
     # Static dashboard mount — only add if directory exists (avoids crash during tests)

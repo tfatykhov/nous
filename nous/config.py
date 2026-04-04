@@ -347,6 +347,13 @@ class Settings(BaseSettings):
     heartbeat_tuning_learning_rate: float = 0.1
     heartbeat_tuning_rollback_threshold: float = 0.2
 
+    # F035.4: Context visibility
+    context_log_enabled: bool = True
+    context_log_full_payload: bool = False
+    context_log_ring_size: int = 10
+    context_log_max_total: int = 50
+    context_log_retention_days: int = 30
+
     # F024 Phase 3b: Self-Modifying Rubrics
     rubric_enabled: bool = True
     rubric_outcome_detection_enabled: bool = True

@@ -245,6 +245,39 @@ def format_trace_summary(trace_data: dict) -> str:
     return "\n".join(lines)
 
 
+def format_context_summary(entry_data: dict) -> str:
+    """F035.4: Format context log entry for Telegram."""
+    total = entry_data.get("total_tokens_est", 0)
+    actual = entry_data.get("input_tokens_actual")
+    utilization = entry_data.get("utilization_pct", 0)
+    duration = entry_data.get("duration_ms")
+    lines = [
+        f"<b>Last API Call (Turn {entry_data.get('turn_number', '?')})</b>",
+        f"  Model: {entry_data.get('model', '?')}",
+        f"  Frame: {entry_data.get('frame_id', '?')}",
+    ]
+    token_str = f"  Tokens: ~{total:,} est"
+    if actual:
+        token_str += f" / {actual:,} actual"
+    token_str += f" ({utilization:.1f}% of window)"
+    lines.append(token_str)
+    if duration:
+        lines.append(f"  Duration: {duration / 1000:.1f}s")
+    breakdown = entry_data.get("token_breakdown", {})
+    if breakdown:
+        lines.extend(["", "  Token Breakdown:"])
+        for name, tokens in sorted(breakdown.items(), key=lambda x: x[1], reverse=True)[:5]:
+            pct = (tokens / total * 100) if total else 0
+            lines.append(f"  - {name}: {tokens:,} ({pct:.0f}%)")
+    facts = entry_data.get("loaded_facts", 0)
+    decisions = entry_data.get("loaded_decisions", 0)
+    procedures = entry_data.get("loaded_procedures", 0)
+    if facts or decisions or procedures:
+        lines.append(f"\n  Memory: {facts} facts, {procedures} procedures, {decisions} decisions")
+    lines.append(f"  Tools: {entry_data.get('tools_count', 0)}")
+    return "\n".join(lines)
+
+
 class StreamingMessage:
     """Manages progressive message editing for Telegram streaming."""
 
