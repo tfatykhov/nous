@@ -5,7 +5,8 @@ from __future__ import annotations
 import inspect
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -143,3 +144,73 @@ class TestUserProfileBudgetScaling:
         """Verify context.py applies _scaled_budget to user_profile."""
         source = inspect.getsource(ContextEngine.build)
         assert "_scaled_budget(budget.user_profile)" in source
+
+
+# ---------------------------------------------------------------------------
+# P2-E: Source Text Passthrough for Admission Grounding
+# ---------------------------------------------------------------------------
+
+
+class TestSourceTextPassthrough:
+    """P2-E: Fact admission should ground against transcript, not summary."""
+
+    def test_fact_input_has_source_text_field(self):
+        from nous.heart.schemas import FactInput
+        inp = FactInput(
+            content="Tim uses Python",
+            subject="Tim",
+            source_text="User: I mainly use Python\n\nAssistant: Got it.",
+        )
+        assert inp.source_text == "User: I mainly use Python\n\nAssistant: Got it."
+
+    def test_fact_input_source_text_defaults_none(self):
+        from nous.heart.schemas import FactInput
+        inp = FactInput(content="test", subject="test")
+        assert inp.source_text is None
+
+    @pytest.mark.asyncio
+    async def test_get_source_text_prefers_source_text_field(self):
+        from nous.heart.facts import FactManager
+        manager = FactManager.__new__(FactManager)
+
+        inp = MagicMock()
+        inp.source_text = "the original transcript text"
+        inp.source_episode_id = None
+
+        session = AsyncMock()
+        result = await manager._get_source_text(inp, session)
+        assert result == "the original transcript text"
+        session.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_source_text_falls_back_to_episode_summary(self):
+        from nous.heart.facts import FactManager
+
+        manager = FactManager.__new__(FactManager)
+
+        inp = MagicMock()
+        inp.source_text = None
+        inp.source_episode_id = uuid4()
+
+        mock_episode = MagicMock()
+        mock_episode.summary = "episode summary text"
+
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=mock_episode)
+
+        result = await manager._get_source_text(inp, session)
+        assert result == "episode summary text"
+
+    @pytest.mark.asyncio
+    async def test_get_source_text_returns_none_when_nothing_available(self):
+        from nous.heart.facts import FactManager
+
+        manager = FactManager.__new__(FactManager)
+
+        inp = MagicMock()
+        inp.source_text = None
+        inp.source_episode_id = None
+
+        session = AsyncMock()
+        result = await manager._get_source_text(inp, session)
+        assert result is None
