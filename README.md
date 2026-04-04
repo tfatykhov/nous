@@ -321,12 +321,12 @@ All core architecture is implemented and running:
 | Brain (F001) | ✅ Shipped | Decision recording, deliberation traces, calibration, guardrails, graph |
 | Heart (F002) | ✅ Shipped | Episodes, facts, procedures, censors, working memory |
 | Cognitive Layer (F003) | ✅ Shipped | Frame selection, recall, deliberation, monitoring, reflection |
-| Runtime (F004) | ✅ Shipped | REST API (23 endpoints), MCP server, Telegram bot |
+| Runtime (F004) | ✅ Shipped | REST API (57 endpoints), MCP server (5 tools), Telegram bot |
 | Context Engine (F005) | ✅ Shipped | Tiered context (always-on identity + search thresholds), token budgets, dedup |
-| Event Bus (F006) | ✅ Shipped | In-process async bus with automated handlers |
+| Event Bus (F006) | ✅ Shipped | In-process async bus with 13 automated handlers |
 | Memory Improvements (F010) | ✅ Shipped | Episode summaries, fact extraction, user tagging |
 | Context Quality (006.2) | ✅ Shipped | Fact supersession, episode dedup, abandoned filtering |
-| Sleep Consolidation (F007) | ✅ Shipped | 5-phase biological sleep cycle: memory decay, consolidation, pattern extraction, optimization, integrity checks |
+| Sleep Consolidation | ✅ Shipped | 5-phase biological sleep cycle: memory decay, consolidation, pattern extraction, optimization, integrity checks |
 | Extended Thinking (007) | ✅ Shipped | Adaptive thinking, interleaved reasoning, thinking indicators |
 | Context Recall (007.2-007.5) | ✅ Shipped | Topic-aware recall, informational detection, relevance thresholds |
 | Agent Identity (008/F018) | ✅ Shipped | DB-backed identity, initiation protocol, tiered context, REST API |
@@ -346,9 +346,16 @@ All core architecture is implemented and running:
 | Self-Modifying Rubrics (F024-3b) | ✅ Shipped | Outcome signals, dimension proposals, approval flow, rubric evolution, dashboard tab |
 | Execution Integrity (F026) | ✅ Shipped | Execution ledger, tiered action gating, claim verification, ghost planning detection |
 | MMR Diversity (F030) | ✅ Shipped | Maximal Marginal Relevance re-ranking in recall_deep |
+| Censor Middleware (F031) | ✅ Shipped | Censors execute read-only tools, conditional unblock, action payloads, update API |
+| Execution Ledger Dashboard (F032) | ✅ Shipped | Per-action visibility, status filtering, timeline view, side-effect classification |
+| Multi-Tier Search (F033) | ✅ Shipped | Tavily primary + Exa research + Brave fallback, query classification router |
+| Heartbeat Monitoring (F034) | ✅ Shipped | Proactive tick loop, health/email/self-initiated checks, triage, Telegram alerts |
+| Finding Lifecycle (F034.1) | ✅ Shipped | Fingerprint dedup, state machine (new→ack→resolved), escalation, daily digest |
+| Intelligent Checks (F034.2) | ✅ Shipped | Embedding search, LLM email classification, tunable parameters |
+| Self-Tuning Heartbeat (F034.3) | ✅ Shipped | Outcome-driven parameter adjustment, cross-cycle rollback, pinned params |
 | Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
 
-**Stats:** ~61,000 lines of Python (30K production + 31K tests) · 1,690+ tests · 27 Postgres tables · 42 REST endpoints · Docker deployment
+**Stats:** ~72,000 lines of Python (35K production + 37K tests) · 2,000+ tests across 106 files · 27 Postgres tables · 57 REST endpoints · 19 agent tools · Docker deployment
 
 See [Feature Index](docs/features/INDEX.md) for the full breakdown.
 

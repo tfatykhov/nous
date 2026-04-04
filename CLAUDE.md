@@ -120,7 +120,7 @@ nous/
 
 | Spec | Component | PR |
 |------|-----------|----|
-| 001 | Postgres scaffold (19 base + 4 migration tables, 3 schemas) | #1 |
+| 001 | Postgres scaffold (24 base tables + 19 migrations, 3 schemas) | #1 |
 | 002 | Brain module (decisions, deliberation, calibration, guardrails) | #2 |
 | 003 | Heart module (episodes, facts, procedures, censors, working memory) | #3 |
 | 003.1 | Heart enhancements (contradiction detection, domain compaction) | #6 |
@@ -147,6 +147,7 @@ nous/
 | F026 | Execution Integrity (execution ledger, action gating, claim verification, ghost planning detection) | #183 |
 | F030 | MMR Diversity Reranking (Maximal Marginal Relevance in recall_deep) | #205 |
 | F031 | Censor Middleware with Action Payloads (censors execute read-only tools, conditional unblock, update API) | #208 |
+| F032 | Execution Ledger Dashboard (per-action visibility, status filtering, side-effect classification) | — |
 | F033 | Multi-Tier Search Routing (Tavily primary, Exa research, Brave fallback, query classification) | — |
 | F034 | Heartbeat Proactive Monitoring (tick loop, health/email/self-initiated checks, triage, Telegram) | #236 |
 | F034.1 | Finding Lifecycle (fingerprint dedup, state machine, escalation, daily digest, outcome signals) | #241 |
@@ -393,6 +394,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | GET | `/dashboard/rubric` | Rubric dashboard data |
 | GET | `/dashboard/admission` | Admission control dashboard |
 | GET | `/dashboard/admission/rejected` | Rejected admission entries |
+| GET | `/dashboard/ledger` | Execution ledger dashboard data |
+| GET | `/dashboard/heartbeat` | Heartbeat dashboard data |
 | GET | `/heartbeat/status` | Heartbeat status, checks, budget |
 | POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
 | PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |
@@ -425,7 +428,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `schedule_task` | conversation, debug | Schedule a recurring/one-shot task |
 | `list_tasks` | conversation, question, decision, debug | List subtasks and schedules |
 | `cancel_task` | conversation, question, decision, debug | Cancel a subtask or schedule |
-| `web_search` | all | Search via Brave API |
+| `web_search` | all | Search via multi-tier routing (Tavily/Exa/Brave) |
 | `web_fetch` | all | Fetch and extract web content |
 | `run_python` | conversation, question, debug, task | Execute Python with memory functions in scope |
 | `send_file` | task, conversation, debug | Send files to Telegram (images as photos, rest as documents) |
