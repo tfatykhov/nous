@@ -1207,6 +1207,35 @@ def create_app(
                 "active": heartbeat_runner.is_quiet,
             }
 
+            # F034.1: Finding lifecycle stats
+            store = heartbeat_runner.finding_store
+            if store is not None:
+                data["finding_lifecycle"] = {
+                    "stats": store.stats(),
+                    "findings": store.to_list(),
+                    "escalation_policy": {
+                        "low_to_normal_hours": store._escalation.low_to_normal_hours,
+                        "normal_to_high_hours": store._escalation.normal_to_high_hours,
+                        "high_realert_hours": store._escalation.high_realert_hours,
+                        "accumulation_threshold": store._escalation.accumulation_threshold,
+                    },
+                }
+            else:
+                data["finding_lifecycle"] = None
+
+            # F034.3: Tuning status
+            tuner = heartbeat_runner.tuner
+            last_report = tuner.last_report
+            data["tuning"] = {
+                "enabled": settings.heartbeat_tuning_enabled,
+                "last_report": {
+                    "adjustments": len(last_report.adjustments),
+                    "skipped_checks": last_report.skipped_checks,
+                    "timestamp": last_report.timestamp.isoformat() if last_report.timestamp else None,
+                    "summary": tuner.generate_report_text(last_report),
+                } if last_report else None,
+            }
+
             return JSONResponse(data)
         except Exception as e:
             logger.error("Dashboard heartbeat error: %s", e)
