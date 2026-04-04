@@ -91,6 +91,7 @@ class FactInput(BaseModel):
     contradiction_of: UUID | None = None  # P1-4: for direct insertion cases
     tags: list[str] = []
     source_timestamp: datetime | None = None  # F023: when the source info was produced
+    source_text: str | None = None  # F025 P2-E: original transcript for admission grounding (not persisted)
 
 
 class ContradictionWarning(BaseModel):

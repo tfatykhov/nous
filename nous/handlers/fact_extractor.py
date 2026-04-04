@@ -88,12 +88,15 @@ class FactExtractor:
         if not summary:
             return
 
+        # F025 P2-E: Extract transcript for fact grounding
+        transcript = event.data.get("transcript")
+
         try:
             # 008.4: Use pre-extracted candidate_facts if available
             candidate_facts = event.data.get("candidate_facts", [])
             if candidate_facts:
                 await self._store_candidate_facts(
-                    candidate_facts, event.data.get("episode_id", "?")
+                    candidate_facts, event.data.get("episode_id", "?"), transcript=transcript
                 )
                 return
 
@@ -112,11 +115,11 @@ class FactExtractor:
                 # Dedup: check if similar fact exists
                 content = fact.get("content", "")
                 existing = await self._heart.search_facts(content, limit=1)
-                # P0-7 fix: use .score not .similarity, threshold 0.85 for hybrid search
-                # Raised from 0.65 -> 0.85 (#45): 0.65 was too aggressive, blocking
-                # updated facts. heart.learn() has its own dedup (>0.95 cosine) and
+                # P0-7 fix: use .score not .similarity for hybrid search
+                # F025 P2-D: threshold now configurable (default 0.92, raised from 0.85).
+                # heart.learn() has its own dedup (>0.95 cosine) and
                 # subject-based supersession (same subject + >0.80 cosine).
-                if existing and existing[0].score is not None and existing[0].score > 0.85:
+                if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
                     logger.debug("Skipping duplicate fact: %s", content[:50])
                     continue
 
@@ -127,6 +130,7 @@ class FactExtractor:
                     source="fact_extractor",
                     confidence=confidence,
                     category=fact.get("category"),
+                    source_text=transcript,  # F025 P2-E
                 )
                 result = await self._heart.learn(fact_input)
                 if isinstance(result, FactRejected):
@@ -144,7 +148,7 @@ class FactExtractor:
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))
 
-    async def _store_candidate_facts(self, candidates: list[str | dict], episode_id: str) -> None:
+    async def _store_candidate_facts(self, candidates: list[str | dict], episode_id: str, transcript: str | None = None) -> None:
         """008.4: Store pre-extracted candidate facts directly, with dedup.
 
         Accepts both structured dicts (with subject/category/content) and
@@ -167,7 +171,7 @@ class FactExtractor:
 
             # Dedup against existing facts
             existing = await self._heart.search_facts(content, limit=1)
-            if existing and existing[0].score is not None and existing[0].score > 0.85:
+            if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
                 logger.debug("Skipping duplicate candidate fact: %s", content[:50])
                 continue
 
@@ -177,6 +181,7 @@ class FactExtractor:
                 category=category,
                 source="episode_summarizer",
                 confidence=0.8,  # Default confidence for LLM-extracted candidates
+                source_text=transcript,  # F025 P2-E
             )
             result = await self._heart.learn(fact_input)
             if isinstance(result, FactRejected):

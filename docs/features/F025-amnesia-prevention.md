@@ -3,7 +3,7 @@
 **Author:** Nous (self-diagnosed) + Tim  
 **Date:** 2026-03-23  
 **Updated:** 2026-04-04  
-**Status:** Phase 1 Complete, Phase 2–3 Open  
+**Status:** ✅ All Phases Complete
 **Priority:** High  
 **Relates to:** F023 (Admission Protocol), F030 (MMR Diversity), Context Assembly, Fact Extraction
 
@@ -21,13 +21,13 @@ The result: Nous forgets conversations, loses context mid-session, and fails to 
 
 | RC | Description | Status | Notes |
 |----|-------------|--------|-------|
-| RC-1 | Staleness penalty | ❌ Open | Still applied to all 4 types, half-life=20d |
+| RC-1 | Staleness penalty | ✅ Fixed | Person category added to exemptions (P2-A) |
 | RC-2 | Tiny retrieval limits | ✅ Fixed | Limits raised to 15/8/5/8, caps at 12/7/5/6 |
 | RC-3 | Naive diversity grouping | ✅ Fixed | Full string grouping. max_per_subject=2 (not 3) |
-| RC-4 | User Profile budget too small | ❌ Open | Still 200 tokens, NOT scaled by `_scaled_budget()` |
-| RC-5 | Transcript truncation | ❌ Open | Still 8000 chars |
-| RC-6 | Fact extractor dedup too aggressive | ❌ Open | Still 0.85 threshold |
-| RC-7 | Admission grounding against summary | ❌ Open | Returns `episode.summary`, no transcript stored |
+| RC-4 | User Profile budget too small | ✅ Fixed | Now scaled via `_scaled_budget()` (P2-B) |
+| RC-5 | Transcript truncation | ✅ Fixed | Configurable, raised to 16000 (P2-C) |
+| RC-6 | Fact extractor dedup too aggressive | ✅ Fixed | Configurable, raised to 0.92 (P2-D) |
+| RC-7 | Admission grounding against summary | ✅ Fixed | source_text passthrough + transcript persistence (P2-E, P3-C) |
 
 ---
 
@@ -139,58 +139,42 @@ This means ROUGE-L grounding (in `admission.py` L155) compares facts against the
 - ~~MMR diversity reranking~~ → Done (F030, NOUS_MMR_ENABLED=true)
 - ~~Activate admission control~~ → Done (F023, shadow_mode=false)
 
-### Phase 2 — Remaining High-Impact Fixes (5 items)
+### Phase 2 — High-Impact Fixes ✅ COMPLETE
 
-**P2-A: Disable staleness penalty for facts (RC-1, partial)**
-- Target: `context.py` — skip staleness for fact type only
-- Rationale: Decisions and episodes have natural temporal relevance. Facts don't — "Tim lives in Silver Spring" is equally true at day 1 and day 100
-- Alternative: Make staleness per-type configurable (`NOUS_STALENESS_TYPES=decision,episode,procedure`)
-- Risk: Low
-- Effort: ~20 lines
+**P2-A: Add person to staleness exemptions (RC-1)** ✅
+- Added `"person"` to category exemption set in `_apply_staleness_penalty`
+- Review fix: type-level exemption rejected (tool facts go stale); category-level is more surgical
 
-**P2-B: Scale user_profile budget (RC-4)**
-- Target: `context.py` L249 — wrap in `_scaled_budget()`
-- One-line fix: `self._truncate_to_budget(profile_text, self._scaled_budget(budget.user_profile))`
-- Effect: 200 → 500 tokens at 700K context window
-- Risk: None
-- Effort: 1 line + test
+**P2-B: Scale user_profile budget (RC-4)** ✅
+- Wrapped `budget.user_profile` through `_scaled_budget()` — 200→500 tokens at 700K window
 
-**P2-C: Raise transcript truncation limit (RC-5)**
-- Target: `episode_summarizer.py` L205 — raise `max_chars` default from 8000 → 16000
-- Also make configurable: `NOUS_TRANSCRIPT_MAX_CHARS=16000`
-- Cost impact: ~2× tokens per summarization call (~$0.01 more per episode)
-- Risk: Low
-- Effort: ~10 lines
+**P2-C: Configurable transcript truncation (RC-5)** ✅
+- New config: `NOUS_TRANSCRIPT_MAX_CHARS=16000` (raised from 8000)
+- Method default updated to match
 
-**P2-D: Relax fact extractor dedup (RC-6)**
-- Target: `fact_extractor.py` L119, L170 — raise from 0.85 → 0.92
-- Also make configurable: `NOUS_FACT_DEDUP_THRESHOLD=0.92`
-- Safety net: `facts.py` supersession at 0.95 catches true duplicates at storage layer
-- Risk: Medium (monitor duplicate rate for 48h after deploy)
-- Effort: ~5 lines + config
+**P2-D: Configurable fact dedup threshold (RC-6)** ✅
+- New config: `NOUS_FACT_DEDUP_THRESHOLD=0.92` (raised from 0.85)
+- Both LLM extraction and candidate facts paths use config
 
-**P2-E: Fix _get_source_text docstring and evaluate transcript passthrough (RC-7)**
-- Immediate: Fix misleading docstring (references episode.content which doesn't exist)
-- Investigate: Can we pass transcript text through fact extraction pipeline to admission without persisting it?
-- If yes: Thread `source_text` parameter through `fact_extractor` → `facts.learn()` → `admission.score()`
-- Risk: Medium (plumbing change across 3 files)
-- Effort: ~40 lines
+**P2-E: Source text passthrough (RC-7)** ✅
+- Added `source_text` field to `FactInput` (not persisted)
+- Transcript threaded: episode_summarizer → fact_extractor → FactInput → admission
+- `_get_source_text` priority: source_text > transcript > summary
 
-### Phase 3 — Structural Improvements (Future)
+### Phase 3 — Structural Improvements ✅ COMPLETE
 
-**P3-A: Per-type staleness configuration**
-- Full implementation of type-specific staleness enable/disable
-- `NOUS_STALENESS_TYPES=decision,episode` (facts and procedures exempt)
+**P3-B: Chunked summarization for long episodes** ✅
+- `_chunk_transcript`: splits at turn boundaries within limit
+- `_summarize_single`: extracted LLM call for per-chunk summarization
+- `_merge_summaries`: first title, last outcome, union topics, capped lists
+- All 7 structured summary fields preserved
 
-**P3-B: Chunked summarization for long episodes**
-- Split transcripts >16K into chunks, summarize each, merge
-- Higher quality than single-pass truncation
-- Depends on: P2-C deployed and cost baseline established
-
-**P3-C: Transcript persistence on Episode model**
-- Add `transcript` column to Episode table (nullable Text)
-- Populate during episode close
-- Enables RC-7 full fix and future features (search within conversations)
+**P3-C: Transcript persistence on Episode model** ✅
+- Migration 025: nullable TEXT column on `heart.episodes`
+- ORM model updated, `init.sql` updated for fresh deploys
+- `episodes.end()` accepts and persists transcript
+- `layer.py`: transcript computed before `end_episode` (was after — reviewer fix)
+- `_get_source_text` priority: source_text > episode.transcript > episode.summary
 - Depends on: Storage migration, disk budget analysis
 
 ---

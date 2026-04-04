@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     staleness_penalty_enabled: bool = True
     staleness_half_life_days: int = 30
 
+    # F025 P2-C: Transcript truncation limit for episode summarization
+    transcript_max_chars: int = 16000
+
+    # F025 P2-D: Fact extractor dedup threshold (raised from 0.85)
+    fact_dedup_threshold: float = 0.92
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000

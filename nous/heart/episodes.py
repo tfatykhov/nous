@@ -201,15 +201,16 @@ class EpisodeManager:
         outcome: str,
         lessons_learned: list[str] | None = None,
         surprise_level: float | None = None,
+        transcript: str | None = None,  # F025 P3-C
         session: AsyncSession | None = None,
     ) -> EpisodeDetail:
         """Close an episode with outcome and lessons."""
         if session is None:
             async with self.db.session() as session:
-                result = await self._end(episode_id, outcome, lessons_learned, surprise_level, session)
+                result = await self._end(episode_id, outcome, lessons_learned, surprise_level, transcript, session)
                 await session.commit()
                 return result
-        return await self._end(episode_id, outcome, lessons_learned, surprise_level, session)
+        return await self._end(episode_id, outcome, lessons_learned, surprise_level, transcript, session)
 
     async def _end(
         self,
@@ -217,6 +218,7 @@ class EpisodeManager:
         outcome: str,
         lessons_learned: list[str] | None,
         surprise_level: float | None,
+        transcript: str | None,  # F025 P3-C
         session: AsyncSession,
     ) -> EpisodeDetail:
         episode = await self._get_episode_orm(episode_id, session)
@@ -230,6 +232,10 @@ class EpisodeManager:
         episode.lessons_learned = lessons_learned
         episode.surprise_level = surprise_level
         episode.active = False  # 008.3: Mark episode as inactive on close
+
+        # F025 P3-C: Persist transcript
+        if transcript:
+            episode.transcript = transcript
 
         # P3-7: Regenerate embedding incorporating outcome + lessons
         if self.embeddings:

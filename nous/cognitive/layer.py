@@ -1331,6 +1331,9 @@ class CognitiveLayer:
         episode_id = self._active_episodes.pop(session_id, None)
         meta = self._session_metadata.pop(session_id, None)
 
+        # F025 P3-C: Compute transcript before end_episode so it can be persisted
+        transcript_text = "\n\n".join(meta.transcript) if meta else ""
+
         if episode_id:
             try:
                 # Discard trivial episodes: single turn, no tools, short content
@@ -1353,6 +1356,7 @@ class CognitiveLayer:
                         UUID(episode_id),
                         outcome="success",
                         lessons_learned=lessons,
+                        transcript=transcript_text or None,  # F025 P3-C
                         session=session,
                     )
             except Exception:
@@ -1395,7 +1399,7 @@ class CognitiveLayer:
         self._session_user_messages.pop(session_id, None)
 
         # 4. Emit session_ended event — 006: bus.emit with backward compat
-        transcript_text = "\n\n".join(meta.transcript) if meta else ""
+        # transcript_text already computed above for end_episode (F025 P3-C)
         event_data = {
             "session_id": session_id,
             "episode_id": episode_id,

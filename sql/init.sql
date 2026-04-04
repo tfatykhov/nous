@@ -273,6 +273,7 @@ CREATE TABLE heart.episodes (
     encoded_censors JSONB,
     compression_tier VARCHAR(20) DEFAULT 'raw',
     structured_summary JSONB,
+    transcript TEXT,
     user_id VARCHAR(100),
     user_display_name VARCHAR(100),
     created_at TIMESTAMPTZ DEFAULT NOW()

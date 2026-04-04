@@ -485,16 +485,26 @@ class FactManager:
         fact_input: FactInput,
         session: AsyncSession,
     ) -> str | None:
-        """Retrieve original source text for ROUGE-L grounding check.
+        """Retrieve source text for ROUGE-L grounding check.
 
-        Fetches episode.content by PK if source_episode_id present.
-        Episode content includes tool call outputs (web_search, bash, etc.).
+        Priority: FactInput.source_text > Episode.transcript > Episode.summary.
+        F025 P2-E: source_text passthrough avoids grounding against lossy summary.
         """
+        # F025 P2-E: Use passed-through transcript if available
+        if fact_input.source_text:
+            return fact_input.source_text
+
         if not fact_input.source_episode_id:
             return None
 
         episode = await session.get(Episode, fact_input.source_episode_id)
-        if episode and episode.summary:
+        if not episode:
+            return None
+
+        # F025 P3-C: Prefer persisted transcript over lossy summary
+        if episode.transcript:
+            return episode.transcript
+        if episode.summary:
             return episode.summary
 
         return None

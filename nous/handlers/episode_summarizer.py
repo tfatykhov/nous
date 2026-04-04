@@ -136,6 +136,7 @@ class EpisodeSummarizer:
                     "episode_id": episode_id,
                     "summary": summary,
                     "candidate_facts": summary.get("candidate_facts", []),
+                    "transcript": transcript,  # F025 P2-E: pass for fact grounding
                 },
             ))
 
@@ -175,13 +176,40 @@ class EpisodeSummarizer:
             logger.exception("Failed to summarize episode %s", episode_id)
 
     async def _generate_summary(self, transcript: str, decision_context: str = "") -> dict[str, Any] | None:
-        """Call LLM to generate structured summary."""
+        """Generate structured summary from transcript using LLM.
+
+        F025 P3-B: For transcripts exceeding the limit, split into chunks,
+        summarize each independently, then merge results.
+        """
         if not self._llm:
             logger.warning("No LLM client for episode summarizer")
             return None
 
-        transcript = self._truncate_transcript(transcript)
+        max_chars = self._settings.transcript_max_chars
+        chunks = self._chunk_transcript(transcript, max_chars=max_chars)
 
+        if len(chunks) == 1:
+            # Single chunk: truncate and summarize directly (original path)
+            truncated = self._truncate_transcript(chunks[0], max_chars=max_chars)
+            return await self._summarize_single(truncated, decision_context)
+
+        # Multi-chunk: summarize each chunk, then merge
+        chunk_summaries = []
+        for chunk in chunks:
+            truncated = self._truncate_transcript(chunk, max_chars=max_chars)
+            summary = await self._summarize_single(truncated, decision_context)
+            if summary:
+                chunk_summaries.append(summary)
+
+        if not chunk_summaries:
+            return None
+        if len(chunk_summaries) == 1:
+            return chunk_summaries[0]
+
+        return self._merge_summaries(chunk_summaries)
+
+    async def _summarize_single(self, transcript: str, decision_context: str) -> dict[str, Any] | None:
+        """Summarize a single transcript chunk via LLM."""
         prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
 
         text = await call_background_llm(
@@ -202,7 +230,64 @@ class EpisodeSummarizer:
             logger.warning("Summary generation failed: %s", e)
             return None
 
-    def _truncate_transcript(self, transcript: str, max_chars: int = 8000) -> str:
+    def _chunk_transcript(self, transcript: str, max_chars: int = 16000) -> list[str]:
+        """F025 P3-B: Split long transcript into chunks at turn boundaries.
+
+        Returns a list of chunks, each within max_chars. Splits on
+        double-newline turn boundaries to preserve turn integrity.
+        Short transcripts return as a single-element list.
+        """
+        if len(transcript) <= max_chars:
+            return [transcript]
+
+        turns = transcript.split("\n\n")
+        chunks: list[str] = []
+        current_turns: list[str] = []
+        current_len = 0
+
+        for turn in turns:
+            turn_len = len(turn) + 2  # +2 for \n\n separator
+            if current_len + turn_len > max_chars and current_turns:
+                chunks.append("\n\n".join(current_turns))
+                current_turns = []
+                current_len = 0
+            current_turns.append(turn)
+            current_len += turn_len
+
+        if current_turns:
+            chunks.append("\n\n".join(current_turns))
+
+        return chunks
+
+    def _merge_summaries(self, summaries: list[dict]) -> dict:
+        """F025 P3-B: Merge multiple chunk summaries into one.
+
+        Uses first chunk's title, last chunk's outcome (most informed),
+        and unions all other list fields.
+        """
+        merged_summary_parts = []
+        merged_key_points: list[str] = []
+        merged_candidate_facts: list = []
+        merged_topics: set[str] = set()
+
+        for s in summaries:
+            if s.get("summary"):
+                merged_summary_parts.append(s["summary"])
+            merged_key_points.extend(s.get("key_points", []))
+            merged_candidate_facts.extend(s.get("candidate_facts", []))
+            merged_topics.update(s.get("topics", []))
+
+        return {
+            "title": summaries[0].get("title", "Multi-part episode"),
+            "summary": " ".join(merged_summary_parts),
+            "key_points": merged_key_points[:10],
+            "candidate_facts": merged_candidate_facts[:5],
+            "outcome": summaries[-1].get("outcome", "informational"),
+            "outcome_rationale": summaries[-1].get("outcome_rationale", ""),
+            "topics": sorted(merged_topics),
+        }
+
+    def _truncate_transcript(self, transcript: str, max_chars: int = 16000) -> str:
         """008.4: Truncate transcript preserving high-value turns.
 
         Scores turns by information density: decision language and user turns
