@@ -26,6 +26,7 @@
 | F011 | [Skill Discovery](F011-skill-discovery.md) | ✅ Shipped | `learn_skill` tool acquires skills from URL/marketplace/local — registered as procedures, auto-surface in RECALL |
 | F012 | [K-Line Learning](F012-kline-learning.md) | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery. 3 pathways: sleep-cycle clustering + real-time monitor recovery |
 | F015 | [Subtask Hardening](F015-subtask-hardening.md) | ✅ Shipped | Timeout limits, concurrent limits, tool call limits, worker pool configuration |
+| F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | ✅ Shipped | SmartCompress (ingestion-time statistical compression) + ReversibleCache (Postgres-backed tool result caching) + `cache_retrieve` tool |
 | F022 | [Graph-Augmented Recall](F022-graph-augmented-recall.md) | ✅ Shipped | Polymorphic graph edges, cross-type linking, contradiction bridge, density-gated spreading activation |
 | F030 | [MMR Diversity Reranking](F030-mmr-diversity-reranking.md) | ✅ Shipped | Maximal Marginal Relevance diversity re-ranking in recall_deep, configurable relevance/diversity weight |
 | F031 | Censor Middleware | ✅ Shipped | Censors execute read-only tools, conditional unblock, action payloads, censor update API |
@@ -77,7 +78,7 @@ All shipped implementation specs with PR references:
 | 009.1-009.4 | Memory Lifecycle Implementation | 📦 Shelved | — system too young (53 facts, 86 episodes at time of assessment) |
 | 008.6 | Temporal Recall | ✅ Shipped | — dual-path retrieval: time-based + semantic. Fixes cross-domain recall gap |
 | 009.5 | Decision Quality Gate | ✅ Shipped | #92 — 3-layer filter: source filtering, dedup window, quality gate. Fixes 43% noise rate |
-| 010.1 | Health Dashboard (F007 Phase 1) | 📋 Specced | — enrich GET /status |
+| 010.1 | Health Dashboard (F007 Phase 1) | ✅ Shipped | — implemented as part of F021 dashboard (/dashboard/health endpoint) |
 | — | Streaming Keepalive + Tool Timeout | ✅ Shipped | #73 — keepalive during Anthropic wait, `NOUS_TOOL_TIMEOUT` |
 | — | Typing Indicator Fix | ✅ Shipped | — continuous typing via background task |
 | — | Topic Persistence Spike | ✅ Shipped | #75 — `_resolve_focus_text()` follow-up detection |
@@ -92,25 +93,29 @@ All shipped implementation specs with PR references:
 | 011.1 | Subtasks & Scheduling | ✅ Shipped | #85 — F009: subtask queue, worker pool, scheduling, time parser, 4 tools, 6 endpoints |
 | 011.2 | Subtask Result Delivery | ✅ Shipped | — subtask results auto-injected into parent session context, skip_episode for workers, delivered tracking |
 | 014.1 | Context Quality Engine (F016+F017) | ✅ Shipped | #122 — 4-tier pruning, relevance floor, staleness penalty, model-aware thresholds, usage tracking, pre-prune extraction |
+| 014.2 | Tool Output Intelligence (F020) | ✅ Shipped | #124 — SmartCompress ingestion-time compression + ReversibleCache Postgres-backed tool result storage |
 | 015 | Graph-Augmented Recall (F022) | ✅ Shipped | — polymorphic edges, 1-hop expansion, cross-type linking, contradiction bridge, spreading activation |
 | F011 | Skill Discovery v2 | ✅ Shipped | — learn_skill tool, SkillParser, bootstrap, FRAME_TOOLS wiring |
 | F012 | K-Line Learning | ✅ Shipped | #134 — auto-create procedures from decision clusters, episode lessons, error recovery |
+| F021 | Memory Dashboard | ✅ Shipped | #159 — SPA with overview, browser, graph, calibration, activity, health panels |
+| F021.1 | Admission Dashboard | ✅ Shipped | #165 — admission analytics, scoring breakdown, histogram, rejected facts browser, threshold simulator |
 | F024 | Critic Agent Phase 0 | ✅ Shipped | #192 — smart frame selector, LLM classification, 6 diagnostic critics |
 | F024-3b | Self-Modifying Rubrics | ✅ Shipped | #196 — outcome signals, dimension proposals, rubric evolution, dashboard |
-| F026 | Execution Integrity | ✅ Shipped | #183 — execution ledger, action gating, claim verification |
+| F026 | Execution Integrity | ✅ Shipped | #183 — execution ledger, tiered action gating, claim verification |
 | F030 | MMR Diversity Reranking | ✅ Shipped | #205 — Maximal Marginal Relevance in recall_deep |
 | F031 | Censor Middleware | ✅ Shipped | #208 — censor action payloads, read-only tool execution, conditional unblock |
+| F031-b | Consolidation Orient & Resolve | ✅ Shipped | #232 — orient context injection in sleep reflection, contradiction resolution, fact supersession |
 | F032 | Execution Ledger Dashboard | ✅ Shipped | — per-action visibility, status filtering, side-effect classification |
 | F033 | Multi-Tier Search Routing | ✅ Shipped | — Tavily + Exa + Brave, query classification router |
 | F034 | Heartbeat Monitoring | ✅ Shipped | #236 — tick loop, health/email/self-initiated checks, triage |
 | F034.1 | Finding Lifecycle | ✅ Shipped | #241 — fingerprint dedup, state machine, escalation, daily digest |
 | F034.2 | Intelligent Checks | ✅ Shipped | #241 — embedding search, LLM email classification, tunable params |
 | F034.3 | Self-Tuning Heartbeat | ✅ Shipped | #241 — outcome-driven adjustment, cross-cycle rollback, pinned params |
+| F034.4 | Heartbeat Completions | 📋 Proposed | #242 — consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email dedup migration |
 | 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
 | 011.2 | Multimodal File Support | 📋 Draft | — image/document processing across input channels |
 | 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred to F024) |
 | 012.2 | Subtask Enhancements Light | 📋 Specced | — replaces 012.1 with lighter subtask improvements |
-| 014.2 | Tool Output Intelligence | 📋 Specced | — SmartCompress + ReversibleCache for tool results |
 
 ### P1: Cognitive Enhancement
 | Feature | Name | Status | Description |
@@ -121,6 +126,12 @@ All shipped implementation specs with PR references:
 | F026 | [Execution Integrity](F026-execution-integrity.md) | ✅ Shipped | Execution ledger, tiered action gating (read/write/external/irreversible), claim verification, ghost planning detection |
 | F032 | [Execution Ledger Dashboard](F032-execution-ledger-dashboard.md) | ✅ Shipped | Per-action visibility, status filtering, timeline view, side-effect classification |
 
+### P1: Observability & Dashboard
+| Feature | Name | Status | Description |
+|---------|------|--------|-------------|
+| F021 | [Memory Dashboard](F021-memory-dashboard.md) | ✅ Shipped | Full SPA — overview, memory browser, graph visualization, calibration, activity timeline, health metrics |
+| F021.1 | [Admission Dashboard](F021-admission-dashboard.md) | ✅ Shipped | Admission analytics panel — shadow mode visibility, scoring breakdown, histogram, rejected facts browser, threshold simulator |
+
 ### P1: Proactive Autonomy
 | Feature | Name | Status | Description |
 |---------|------|--------|-------------|
@@ -128,6 +139,13 @@ All shipped implementation specs with PR references:
 | F034.1 | [Finding Lifecycle](F034.1-finding-lifecycle.md) | ✅ Shipped | Fingerprint dedup, state machine (new→ack→resolved), escalation, daily digest, outcome signals |
 | F034.2 | [Intelligent Checks](F034.2-intelligent-checks.md) | ✅ Shipped | Embedding search, LLM email classification, drive significance, tunable params |
 | F034.3 | [Self-Tuning Heartbeat](F034.3-self-tuning-heartbeat.md) | ✅ Shipped | Outcome-driven parameter adjustment, cross-cycle rollback, pinned params |
+| F034.4 | [Heartbeat Completions](F034.4-heartbeat-completions.md) | 📋 Proposed | Consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email→FindingStore migration, rollback threshold fix |
+
+### P1: Memory Quality
+| Feature | Name | Status | Description |
+|---------|------|--------|-------------|
+| F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | ✅ Shipped | SmartCompress (ingestion-time statistical compression) + ReversibleCache (Postgres-backed tool result caching) + `cache_retrieve` tool |
+| F031-b | [Consolidation Orient & Resolve](F031-consolidation-orient-resolve.md) | ✅ Shipped | Orient context injection in sleep reflection — checks existing facts before extracting. Contradiction resolution phase with fact supersession |
 
 ### Phase 2 — Quality (next to build)
 
@@ -135,12 +153,9 @@ All shipped implementation specs with PR references:
 |---------|------|----------|-------------|
 | #38 | _is_informational() Phase 2 | P1 | Partially addressed by PR #76 (delete instead of abandon). Further tuning possible. |
 | #52 | Topic-Aware Recall v2 | P1 | Spike merged (#75). Full 008.2 spec exists if spike proves insufficient. |
-| F021 | [Memory Dashboard](F021-memory-dashboard.md) | P1 | Memory browser, graph visualization, health metrics, calibration inspection |
 | F025 | [Amnesia Prevention](F025-amnesia-prevention.md) | P1 | 7 root causes identified (over-filtered retrieval, tiny limits, naive grouping). Partial mitigations in context.py. |
 | F027 | [Supersession Detection](F027-supersession-detection.md) | Partial | Basic subject-based supersession shipped. Missing: retrieval-time suppression, periodic conflict scanning, LLM conflict classification. |
-| F031-b | [Consolidation Orient & Resolve](F031-consolidation-orient-resolve.md) | P1 | Blind extraction → semantic near-duplicates. Orient phase checks existing facts before extracting. |
 | F033-b | [Subtask Completion Validation](F033-subtask-completion-validation.md) | P1 | Prevent false "completed" status — validation gates before marking subtasks done. |
-| 010.1 | Health Dashboard | P1 | Enrich GET /status with episode outcome breakdown, fact health, decision stats. |
 
 ### Phase 3 — Growth
 
@@ -157,21 +172,21 @@ All shipped implementation specs with PR references:
 | F013 | Frame Splitting | Parallel cognitive frames via sub-agents |
 | F014 | Model Router | LLM portability via proxy layer |
 | F019 | [Nous Website](F019-nous-website.md) | Developer-first open-source framework site (mem-brain.ai) |
-| F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | SmartCompress (ingestion-time statistical compression) + ReversibleCache (CCR-style cache for web_search/web_fetch) |
 | F024.1 | [DAG Decomposition](F024-dag-decomposition.md) | Phase 1a/1b: task decomposition + competing execution for critic agent |
 | F028 | [Context Demand Paging](F028-context-demand-paging.md) | OS-inspired 4-level memory hierarchy with retrieval handles and demand loading |
 | F029 | [Trajectory Learning](F029-trajectory-learning.md) | Post-execution tip extraction from failure traces and optimization patterns |
 
 ## Stats
 
-- **Total source:** ~35,000 lines of production Python + ~37,000 lines of tests (~72K total)
-- **Test count:** 2,000+ tests across 106 test files
+- **Total source:** ~35,200 lines of production Python + ~36,800 lines of tests (~72K total)
+- **Test count:** 2,006 tests across 106 test files
 - **Database:** 27 tables across 3 schemas (brain, heart, nous_system), 19 migrations
-- **Tools:** 19 agent tools (record_decision, recall_deep, recall_recent, learn_fact, learn_skill, get_procedure, create_censor, cache_retrieve, spawn_task, schedule_task, list_tasks, cancel_task, run_python, bash, read_file, write_file, web_search, web_fetch, send_file)
+- **Tools:** 21 agent tools (record_decision, recall_deep, recall_recent, learn_fact, learn_skill, get_procedure, create_censor, cache_retrieve, spawn_task, schedule_task, list_tasks, cancel_task, run_python, bash, read_file, write_file, web_search, web_fetch, send_file, store_identity, complete_initiation)
 - **Endpoints:** 57 REST endpoints + 5 MCP tools + Telegram bot
 - **Event handlers:** 13 automated handlers (decision review, episode summary, fact extraction, knowledge extraction, fact graph linking, outcome detection, procedure learning, rubric evolution, session monitoring, sleep/reflection, subtask workers, task scheduling, time parsing)
-- **Feature specs:** 39 feature docs + 19 research notes
+- **Feature specs:** 41 feature docs + 19 research notes
 - **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors
+- **Modules:** 85 Python modules across 10 packages (api, brain, cognitive, handlers, heart, heartbeat, identity, integrations, skills, storage)
 
 ## Research Notes
 
@@ -195,6 +210,7 @@ All shipped implementation specs with PR references:
 | [015](../research/015-deep-thinking-ratio.md) | DTR | Measuring real reasoning effort, not token count |
 | [016](../research/016-agent-memory-synthesis.md) | Agent Memory Synthesis | 9 papers on LLM agent memory (2025-2026) — retrieval, consolidation, generalization |
 | [017](../research/017-agent-memory-march2026.md) | Agent Memory Update | March 2026 field update — latest memory research |
+| [018](../research/memristor-actor-critic-simulation-spec.md) | Memristor Actor-Critic | Analogue memristor actor-critic simulation spec (Lammie et al. 2025) |
 
 ## Architecture Summary
 
@@ -205,7 +221,7 @@ All shipped implementation specs with PR references:
 | Schema | Tables | Purpose |
 |--------|--------|---------|
 | `brain` (8) | decisions, decision_tags, decision_reasons, decision_bridge, thoughts, graph_edges, guardrails, calibration_snapshots | Decision intelligence |
-| `heart` (13) | episodes, episode_decisions, episode_procedures, facts, procedures, censors, working_memory, conversation_state, subtasks, schedules, outcome_signals, rubric_versions, tool_cache | Memory system |
+| `heart` (13) | episodes, episode_decisions, episode_procedures, facts, procedures, rubric_versions, outcome_signals, censors, working_memory, conversation_state, subtasks, schedules, tool_cache | Memory system |
 | `nous_system` (6) | agents, agent_identity, config, events, frames, schema_migrations | System infrastructure |
 
 Migrations (006→024): event bus, agent identity, conversation state, decision review, subtasks/schedules, subtask delivery, frame typing, tool cache, notification defaults, schedule frames, polymorphic graph edges, admission control, dashboard indexes, admission scores, episode compaction, config table, rubric/outcome signals, procedure search, censor action payloads.
