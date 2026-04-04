@@ -285,22 +285,80 @@ function renderObservability(container, data) {
     // Token breakdown chart (last call)
     html += '<div class="chart-card"><h3>Context Token Breakdown (Last Call)</h3><div class="chart-container"><canvas id="chart-obs-tokens"></canvas></div></div>';
 
-    // Recent API calls table
+    // Recent API calls table (clickable to expand)
     html += '<div class="chart-card"><h3>Recent API Calls</h3>';
     if (ctxLog.length > 0) {
-        ctxLog.forEach(function (entry) {
+        ctxLog.forEach(function (entry, idx) {
             var total = entry.total_tokens_est || 0;
             var actual = entry.input_tokens_actual;
             var tokenStr = '~' + obsFormatNumber(total);
             if (actual) tokenStr += ' / ' + obsFormatNumber(actual) + ' actual';
 
-            html += '<div class="obs-ctx-row">';
-            html += '<div style="min-width:50px;font-weight:600;color:#38bdf8">T' + (entry.turn_number || '?') + '</div>';
+            html += '<div class="obs-ctx-row" style="cursor:pointer" data-obs-ctx-idx="' + idx + '">';
+            html += '<div style="min-width:50px;font-weight:600;color:#38bdf8">T' + escapeHtml(String(entry.turn_number || '?')) + '</div>';
             html += '<div style="min-width:80px;color:var(--muted)">' + escapeHtml(entry.frame_id || '') + '</div>';
             html += '<div style="flex:1">' + tokenStr + ' (' + (entry.utilization_pct || 0).toFixed(1) + '%)</div>';
             html += '<div style="min-width:60px;text-align:right;color:var(--muted)">' + (entry.tools_count || 0) + ' tools</div>';
             html += '<div style="min-width:60px;text-align:right;color:var(--muted)">' + obsHumanizeAgo(entry.timestamp) + '</div>';
             html += '</div>';
+
+            // Expandable detail panel (hidden by default)
+            html += '<div class="obs-ctx-detail" id="obs-ctx-detail-' + idx + '" style="display:none">';
+
+            // Token breakdown bar
+            var breakdown = entry.token_breakdown || {};
+            var sections = Object.keys(breakdown).sort(function (a, b) { return breakdown[b] - breakdown[a]; });
+            if (sections.length > 0) {
+                html += '<div style="margin-bottom:12px"><div style="font-size:11px;font-weight:600;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.5px">Token Breakdown</div>';
+                var sectionColors = { messages: '#60a5fa', tools_definition: '#a78bfa', identity: '#34d399', working_memory: '#fb923c', execution_ledger: '#f87171', relevant_facts: '#fbbf24', related_decisions: '#22d3ee', frame_instructions: '#c084fc', user_profile: '#38bdf8', censors: '#f472b6' };
+                sections.forEach(function (s) {
+                    var tokens = breakdown[s];
+                    var pct = total > 0 ? (tokens / total * 100) : 0;
+                    var color = sectionColors[s] || '#6b6b8a';
+                    html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px;font-size:12px">';
+                    html += '<div style="min-width:120px;color:var(--muted)">' + escapeHtml(s) + '</div>';
+                    html += '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="width:' + pct.toFixed(1) + '%;height:100%;background:' + color + ';border-radius:3px"></div></div>';
+                    html += '<div style="min-width:80px;text-align:right;color:var(--text)">' + obsFormatNumber(tokens) + ' <span style="color:var(--muted)">(' + pct.toFixed(0) + '%)</span></div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // Metadata grid
+            html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;font-size:12px">';
+            html += '<div><span style="color:var(--muted)">Model:</span> ' + escapeHtml(entry.model || '?') + '</div>';
+            html += '<div><span style="color:var(--muted)">Call type:</span> ' + escapeHtml(entry.call_type || '?') + '</div>';
+            html += '<div><span style="color:var(--muted)">Window:</span> ' + obsFormatNumber(entry.context_window_size || 0) + '</div>';
+            html += '<div><span style="color:var(--muted)">Messages:</span> ' + (entry.messages_count || 0) + '</div>';
+            html += '<div><span style="color:var(--muted)">Facts:</span> ' + (entry.loaded_facts || 0) + '</div>';
+            html += '<div><span style="color:var(--muted)">Decisions:</span> ' + (entry.loaded_decisions || 0) + '</div>';
+            if (entry.output_tokens) {
+                html += '<div><span style="color:var(--muted)">Output:</span> ' + obsFormatNumber(entry.output_tokens) + ' tokens</div>';
+            }
+            if (entry.duration_ms) {
+                html += '<div><span style="color:var(--muted)">Duration:</span> ' + (entry.duration_ms / 1000).toFixed(1) + 's</div>';
+            }
+            if (entry.cache_read) {
+                html += '<div><span style="color:var(--muted)">Cache read:</span> ' + obsFormatNumber(entry.cache_read) + '</div>';
+            }
+            if (entry.stop_reason) {
+                html += '<div><span style="color:var(--muted)">Stop:</span> ' + escapeHtml(entry.stop_reason) + '</div>';
+            }
+            html += '</div>';
+
+            // Sections present
+            var sectionsList = entry.sections_present || [];
+            if (sectionsList.length > 0) {
+                html += '<div style="margin-top:8px;font-size:11px;color:var(--muted)">Sections: ' + sectionsList.map(function (s) { return escapeHtml(s); }).join(', ') + '</div>';
+            }
+
+            // Tools list
+            var toolNames = entry.tool_names || [];
+            if (toolNames.length > 0) {
+                html += '<div style="margin-top:4px;font-size:11px;color:var(--muted)">Tools: ' + toolNames.map(function (t) { return escapeHtml(t); }).join(', ') + '</div>';
+            }
+
+            html += '</div>'; // obs-ctx-detail
         });
     } else {
         html += '<div class="empty-state" style="padding:20px"><p>No API calls logged yet</p></div>';
@@ -311,6 +369,19 @@ function renderObservability(container, data) {
     html += '</div>'; // obs-section
 
     container.innerHTML = html;
+
+    // ── Click handlers for expandable context rows ──
+    container.querySelectorAll('.obs-ctx-row[data-obs-ctx-idx]').forEach(function (row) {
+        row.addEventListener('click', function () {
+            var idx = this.dataset.obsCtxIdx;
+            var detail = document.getElementById('obs-ctx-detail-' + idx);
+            if (detail) {
+                var isHidden = detail.style.display === 'none';
+                detail.style.display = isHidden ? 'block' : 'none';
+                this.style.background = isHidden ? 'var(--surface-hover)' : '';
+            }
+        });
+    });
 
     // ── Render Charts ──
     renderObsCharts(data);

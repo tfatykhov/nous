@@ -1643,6 +1643,14 @@ body {
     font-size: 13px;
 }
 .obs-ctx-row:last-child { border-bottom: none; }
+.obs-ctx-row:hover { background: var(--surface-hover); }
+
+.obs-ctx-detail {
+    padding: 12px 0 16px 0;
+    border-bottom: 1px solid var(--border);
+    animation: obs-fade-in 0.15s ease;
+}
+@keyframes obs-fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 .obs-handler-row {
     display: flex;

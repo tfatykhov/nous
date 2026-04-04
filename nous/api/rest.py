@@ -1366,9 +1366,9 @@ def create_app(
             logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
             result["drift_trends"] = {}
 
-        # 6. Context log (last 5 calls)
+        # 6. Context log (last 10 calls)
         if context_logger is not None:
-            entries = context_logger.get_recent(limit=5)
+            entries = context_logger.get_recent(limit=10)
             result["context_log"] = [e.to_dict() for e in entries]
         else:
             result["context_log"] = []
