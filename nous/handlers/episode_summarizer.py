@@ -180,7 +180,7 @@ class EpisodeSummarizer:
             logger.warning("No LLM client for episode summarizer")
             return None
 
-        transcript = self._truncate_transcript(transcript)
+        transcript = self._truncate_transcript(transcript, max_chars=self._settings.transcript_max_chars)
 
         prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
 
@@ -202,7 +202,7 @@ class EpisodeSummarizer:
             logger.warning("Summary generation failed: %s", e)
             return None
 
-    def _truncate_transcript(self, transcript: str, max_chars: int = 8000) -> str:
+    def _truncate_transcript(self, transcript: str, max_chars: int = 16000) -> str:
         """008.4: Truncate transcript preserving high-value turns.
 
         Scores turns by information density: decision language and user turns
