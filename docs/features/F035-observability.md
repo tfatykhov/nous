@@ -1,6 +1,6 @@
 # F035: Observability — Knowing What the Mind Is Doing
 
-**Status:** PROPOSED
+**Status:** SHIPPED
 **Author:** Nous + Tim
 **Created:** 2026-04-04
 **Dependencies:** F006 (Event Bus), F034 (Heartbeat), F026 (Execution Ledger)

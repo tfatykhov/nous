@@ -1873,8 +1873,8 @@ def create_app(
             from sqlalchemy import text
             result = await session.execute(text(
                 "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
-                "ORDER BY timestamp DESC LIMIT 1"
-            ))
+                "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+            ), {"aid": settings.agent_id})
             row = result.fetchone()
         if not row:
             return JSONResponse({"snapshot": None})
@@ -1890,8 +1890,8 @@ def create_app(
             cutoff = datetime.now(UTC) - timedelta(hours=hours)
             result = await session.execute(text(
                 "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                "WHERE timestamp > :cutoff ORDER BY timestamp"
-            ), {"cutoff": cutoff})
+                "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+            ), {"aid": settings.agent_id, "cutoff": cutoff})
             rows = result.fetchall()
         points = []
         values = []
@@ -1915,8 +1915,8 @@ def create_app(
             cutoff = datetime.now(UTC) - timedelta(hours=hours)
             result = await session.execute(text(
                 "SELECT timestamp, anomalies FROM nous_system.behavior_snapshots "
-                "WHERE anomalies != '[]'::jsonb AND timestamp > :cutoff ORDER BY timestamp DESC"
-            ), {"cutoff": cutoff})
+                "WHERE agent_id = :aid AND anomalies != '[]'::jsonb AND timestamp > :cutoff ORDER BY timestamp DESC"
+            ), {"aid": settings.agent_id, "cutoff": cutoff})
             rows = result.fetchall()
         anomalies = []
         for row in rows:
@@ -1931,8 +1931,8 @@ def create_app(
             from sqlalchemy import text
             result = await session.execute(text(
                 "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
-                "ORDER BY timestamp DESC LIMIT 1"
-            ))
+                "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+            ), {"aid": settings.agent_id})
             row = result.fetchone()
         if not row:
             return JSONResponse({"report": "No snapshots yet.", "anomalies": []})

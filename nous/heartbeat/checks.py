@@ -842,6 +842,7 @@ class BehaviorDriftCheck(BaseCheck):
         from nous.observability.drift import DriftDetector
         self._detector = DriftDetector()
         self._last_snapshot: Any = None  # BehaviorSnapshot
+        self._last_anomalies: list[dict] = []  # Serialized anomalies for DB persistence
         self.interval = getattr(settings, 'drift_detection_interval', 3600)
 
     async def run(self) -> CheckResult:
@@ -849,10 +850,16 @@ class BehaviorDriftCheck(BaseCheck):
         findings: list[Finding] = []
         try:
             snapshot = await self._capture_snapshot()
-            await self._store_snapshot(snapshot)
             baseline = await self._load_baseline(hours=168)
+            self._last_anomalies = []
             if baseline:
                 anomalies = self._detector.detect(snapshot, baseline)
+                self._last_anomalies = [
+                    {"metric": a.metric, "current": a.current, "mean": a.mean,
+                     "stddev": a.stddev, "z_score": a.z_score, "direction": a.direction,
+                     "severity": a.severity}
+                    for a in anomalies
+                ]
                 for a in anomalies:
                     findings.append(Finding(
                         source="drift",
@@ -861,6 +868,7 @@ class BehaviorDriftCheck(BaseCheck):
                         needs_action=a.severity == "alert",
                         raw_data={"metric": a.metric, "current": a.current, "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score},
                     ))
+            await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
         except Exception:
             logger.exception("BehaviorDriftCheck failed")
@@ -914,9 +922,11 @@ class BehaviorDriftCheck(BaseCheck):
             async with self._db.session() as session:
                 from sqlalchemy import text
                 await session.execute(text(
-                    "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics) "
-                    "VALUES (:aid, :ts, :metrics)"
-                ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp, "metrics": json.dumps(snapshot.to_metrics_dict())})
+                    "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
+                    "VALUES (:aid, :ts, :metrics, :anomalies)"
+                ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp,
+                    "metrics": json.dumps(snapshot.to_metrics_dict()),
+                    "anomalies": json.dumps(self._last_anomalies)})
                 await session.commit()
         except Exception:
             logger.debug("Snapshot store failed", exc_info=True)
@@ -933,8 +943,8 @@ class BehaviorDriftCheck(BaseCheck):
                 cutoff = now - timedelta(hours=hours)
                 result = await session.execute(text(
                     "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                    "WHERE timestamp > :cutoff ORDER BY timestamp"
-                ), {"cutoff": cutoff})
+                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                ), {"aid": self._settings.agent_id, "cutoff": cutoff})
                 rows = result.fetchall()
             snapshots = []
             for row in rows:

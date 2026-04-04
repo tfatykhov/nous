@@ -1001,6 +1001,18 @@ class AgentRunner:
                 model_override=model_override,
             )
 
+            # F035.4: Update context log with response metadata
+            if self._context_logger and self._last_context_entry_id and api_response.usage:
+                self._context_logger.update_response(
+                    entry_id=self._last_context_entry_id,
+                    input_tokens=api_response.usage.get("input_tokens"),
+                    output_tokens=api_response.usage.get("output_tokens"),
+                    cache_creation=api_response.usage.get("cache_creation_input_tokens"),
+                    cache_read=api_response.usage.get("cache_read_input_tokens"),
+                    stop_reason=api_response.stop_reason,
+                )
+                self._last_context_entry_id = None  # Consumed
+
             # Accumulate usage + calibrate token estimator
             if api_response.usage:
                 total_usage["input_tokens"] += api_response.usage.get("input_tokens", 0)
