@@ -31,6 +31,7 @@
 | F030 | [MMR Diversity Reranking](F030-mmr-diversity-reranking.md) | ✅ Shipped | Maximal Marginal Relevance diversity re-ranking in recall_deep, configurable relevance/diversity weight |
 | F031 | Censor Middleware | ✅ Shipped | Censors execute read-only tools, conditional unblock, action payloads, censor update API |
 | F033 | Multi-Tier Search Routing | ✅ Shipped | Tavily primary + Exa research + Brave fallback, query classification router |
+| F025 | [Amnesia Prevention](F025-amnesia-prevention.md) | ✅ Shipped | Staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence |
 
 ### P0: Identity & Context
 | Feature | Name | Status | Description |

@@ -154,6 +154,7 @@ nous/
 | F034.2 | Intelligent Checks (embedding search, LLM email classification, drive significance, tunable params) | #241 |
 | F034.3 | Self-Tuning Heartbeat (outcome-driven adjustment, cross-cycle rollback, pinned params) | #241 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
+| F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
 
 ## How to Work
 
@@ -289,7 +290,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
 | `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame budget defaults (e.g. `{"total": 12000, "decisions": 3000}`) |
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
-| `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
+| `NOUS_STALENESS_HALF_LIFE_DAYS` | `30` | Half-life in days for staleness decay |
+| `NOUS_TRANSCRIPT_MAX_CHARS` | `16000` | Max chars for episode transcript truncation before summarization |
+| `NOUS_FACT_DEDUP_THRESHOLD` | `0.92` | Hybrid search score threshold for fact extractor dedup |
 | `NOUS_RRF_K` | `60` | RRF smoothing constant for hybrid search rank fusion |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
