@@ -465,6 +465,16 @@ async def create_components(settings: Settings) -> dict:
             if settings.heartbeat_drive_enabled and settings.google_service_account_json:
                 registry.register(DriveCheck(settings, heart=heart))
 
+            # F035.3: Behavioral drift detection
+            if settings.drift_detection_enabled and bus is not None:
+                from nous.heartbeat.checks import BehaviorDriftCheck
+                drift_check = BehaviorDriftCheck(
+                    heart=heart, brain=brain, settings=settings,
+                    bus_stats=bus.stats, db=database,
+                )
+                registry.register(drift_check)
+                logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
+
             # Create dedicated API client for heartbeat (isolated connection pool)
             heartbeat_api_client = create_client(settings)
             await heartbeat_api_client.start()

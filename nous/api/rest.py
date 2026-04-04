@@ -1864,6 +1864,89 @@ def create_app(
             "messages_delta": b.messages_count - a.messages_count,
         })
 
+    # ------------------------------------------------------------------
+    # F035.3: Behavioral drift detection endpoints
+    # ------------------------------------------------------------------
+
+    async def behavior_snapshot_latest(request: Request) -> JSONResponse:
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text(
+                "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ))
+            row = result.fetchone()
+        if not row:
+            return JSONResponse({"snapshot": None})
+        return JSONResponse({"snapshot": {"timestamp": row.timestamp.isoformat(), "metrics": row.metrics, "anomalies": row.anomalies or []}})
+
+    async def behavior_trends(request: Request) -> JSONResponse:
+        from datetime import UTC, datetime, timedelta
+        import statistics as st
+        metric = request.query_params.get("metric", "fact_count_delta")
+        hours = int(request.query_params.get("hours", "168"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            cutoff = datetime.now(UTC) - timedelta(hours=hours)
+            result = await session.execute(text(
+                "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                "WHERE timestamp > :cutoff ORDER BY timestamp"
+            ), {"cutoff": cutoff})
+            rows = result.fetchall()
+        points = []
+        values = []
+        for row in rows:
+            metrics = row.metrics if isinstance(row.metrics, dict) else {}
+            val = metrics.get(metric, 0)
+            points.append({"timestamp": row.timestamp.isoformat(), "value": val})
+            values.append(float(val))
+        stats = {}
+        if values:
+            stats = {"mean": round(st.mean(values), 2), "min": min(values), "max": max(values)}
+            if len(values) > 1:
+                stats["stddev"] = round(st.stdev(values), 2)
+        return JSONResponse({"metric": metric, "hours": hours, "points": points, "stats": stats})
+
+    async def behavior_anomalies(request: Request) -> JSONResponse:
+        from datetime import UTC, datetime, timedelta
+        hours = int(request.query_params.get("hours", "168"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            cutoff = datetime.now(UTC) - timedelta(hours=hours)
+            result = await session.execute(text(
+                "SELECT timestamp, anomalies FROM nous_system.behavior_snapshots "
+                "WHERE anomalies != '[]'::jsonb AND timestamp > :cutoff ORDER BY timestamp DESC"
+            ), {"cutoff": cutoff})
+            rows = result.fetchall()
+        anomalies = []
+        for row in rows:
+            for a in (row.anomalies or []):
+                a["timestamp"] = row.timestamp.isoformat()
+                anomalies.append(a)
+        return JSONResponse({"anomalies": anomalies, "hours": hours})
+
+    async def behavior_drift_report(request: Request) -> JSONResponse:
+        """GET /behavior/drift-report - Human-readable drift summary."""
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text(
+                "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ))
+            row = result.fetchone()
+        if not row:
+            return JSONResponse({"report": "No snapshots yet.", "anomalies": []})
+        anomalies = row.anomalies or []
+        metrics = row.metrics if isinstance(row.metrics, dict) else {}
+        if not anomalies:
+            report = f"System behavior is within normal parameters. Last snapshot: {row.timestamp.isoformat()}"
+        else:
+            lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
+            for a in anomalies:
+                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+            report = "\n".join(lines)
+        return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1945,6 +2028,11 @@ def create_app(
         Route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
         Route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
         Route("/context/diff", context_diff, methods=["GET"]),
+        # F035.3: Behavioral drift detection
+        Route("/behavior/snapshot/latest", behavior_snapshot_latest, methods=["GET"]),
+        Route("/behavior/trends", behavior_trends, methods=["GET"]),
+        Route("/behavior/anomalies", behavior_anomalies, methods=["GET"]),
+        Route("/behavior/drift-report", behavior_drift_report, methods=["GET"]),
     ]
 
     # Static dashboard mount — only add if directory exists (avoids crash during tests)
