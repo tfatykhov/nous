@@ -292,8 +292,11 @@ class SleepHandler:
                 data={
                     "phases_completed": phases_completed,
                     "interrupted": self._interrupted,
+                    "modifies": "memory",
                     **sleep_stats,
                 },
+                trace_id=event.trace_id,       # F035.2: inherit from parent
+                caused_by=event.event_id,      # F035.2: point to parent
             ))
             logger.info(
                 "Sleep completed: %s (interrupted=%s)",

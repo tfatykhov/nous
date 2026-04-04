@@ -16,6 +16,7 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,10 @@ class Event:
     data: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # F035.2: Causal chain fields
+    event_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    trace_id: str | None = None       # root cause identifier (shared across chain)
+    caused_by: str | None = None      # event_id of the direct parent event
 
 
 @dataclass

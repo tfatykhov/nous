@@ -284,6 +284,7 @@ class Heart:
                     "content": result.content,
                     "category": result.category,
                     "subject": result.subject,
+                    "modifies": "memory",
                 },
             ))
 

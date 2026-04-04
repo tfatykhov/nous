@@ -80,7 +80,11 @@ async def create_components(settings: Settings) -> dict:
         # 007.4: Pass event.session_id to populate ORM column
         async def persist_to_db(event: Event) -> None:
             data = {**event.data}
-            await brain.emit_event(event.type, data, session_id=event.session_id)
+            await brain.emit_event(
+                event.type, data, session_id=event.session_id,
+                event_id=event.event_id, trace_id=event.trace_id,
+                caused_by=event.caused_by,
+            )
 
         bus.set_db_persister(persist_to_db)
 

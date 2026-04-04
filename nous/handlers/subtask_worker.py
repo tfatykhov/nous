@@ -197,6 +197,8 @@ class SubtaskWorkerPool:
             agent_id=self._settings.agent_id,
             session_id=f"subtask-{subtask.id.hex[:8]}",
             data=data,
+            trace_id=getattr(subtask, "_trace_id", None),       # F035.2: propagate if set
+            caused_by=getattr(subtask, "_caused_by", None),     # F035.2: propagate if set
         ))
 
     # ------------------------------------------------------------------

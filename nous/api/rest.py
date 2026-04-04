@@ -1700,6 +1700,99 @@ def create_app(
             "source": "memory", "count": len(events),
         })
 
+    # ------------------------------------------------------------------
+    # F035.2: Causal chain tracing endpoints
+    # ------------------------------------------------------------------
+
+    async def events_trace(request: Request) -> JSONResponse:
+        """GET /events/trace/{trace_id} — All events in a causal chain."""
+        trace_id = request.path_params["trace_id"]
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text("""
+                SELECT event_id, event_type, session_id, data, created_at, trace_id, caused_by
+                FROM nous_system.events
+                WHERE trace_id = :tid
+                ORDER BY created_at ASC
+            """), {"tid": trace_id})
+            rows = result.fetchall()
+
+        events = []
+        for r in rows:
+            events.append({
+                "event_id": r.event_id,
+                "type": r.event_type,
+                "session_id": r.session_id,
+                "data": r.data if isinstance(r.data, dict) else {},
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "trace_id": r.trace_id,
+                "caused_by": r.caused_by,
+            })
+
+        root_event = next((e for e in events if not e["caused_by"]), None)
+        return JSONResponse({
+            "trace_id": trace_id,
+            "root_event": root_event["type"] if root_event else None,
+            "depth": len(events),
+            "events": events,
+            "duration_ms": None,  # Could compute from first/last timestamps
+        })
+
+    async def events_recent_traces(request: Request) -> JSONResponse:
+        """GET /events/recent-traces — Recent trace roots with stats."""
+        limit = int(request.query_params.get("limit", "20"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text("""
+                WITH trace_stats AS (
+                    SELECT trace_id,
+                           COUNT(*) AS event_count,
+                           BOOL_OR(data->>'modifies' IS NOT NULL) AS has_modifications
+                    FROM nous_system.events
+                    WHERE trace_id IS NOT NULL
+                    GROUP BY trace_id
+                ),
+                roots AS (
+                    SELECT event_id, event_type, trace_id, created_at
+                    FROM nous_system.events
+                    WHERE trace_id IS NOT NULL AND caused_by IS NULL
+                )
+                SELECT r.trace_id, r.event_type AS root_type, r.created_at,
+                       ts.event_count, ts.has_modifications
+                FROM roots r
+                JOIN trace_stats ts ON ts.trace_id = r.trace_id
+                ORDER BY r.created_at DESC
+                LIMIT :lim
+            """), {"lim": limit})
+            rows = result.fetchall()
+
+        traces = [{"trace_id": r.trace_id, "root_type": r.root_type,
+                   "timestamp": r.created_at.isoformat() if r.created_at else None,
+                   "event_count": r.event_count, "has_modifications": bool(r.has_modifications)}
+                  for r in rows]
+        return JSONResponse({"traces": traces})
+
+    async def events_modifications(request: Request) -> JSONResponse:
+        """GET /events/modifications — Events that modify state."""
+        hours = int(request.query_params.get("hours", "24"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text("""
+                SELECT event_id, event_type, session_id, data, created_at, trace_id, caused_by
+                FROM nous_system.events
+                WHERE data->>'modifies' IS NOT NULL
+                  AND created_at > NOW() - INTERVAL '1 hour' * :hours
+                ORDER BY created_at DESC
+            """), {"hours": hours})
+            rows = result.fetchall()
+
+        events = [{"event_id": r.event_id, "type": r.event_type, "session_id": r.session_id,
+                   "modifies": (r.data or {}).get("modifies"),
+                   "timestamp": r.created_at.isoformat() if r.created_at else None,
+                   "trace_id": r.trace_id}
+                  for r in rows]
+        return JSONResponse({"events": events, "hours": hours, "count": len(events)})
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1729,6 +1822,10 @@ def create_app(
         # F035.1: Event bus observability
         Route("/events/stats", events_stats),
         Route("/events/recent", events_recent),
+        # F035.2: Causal chain tracing
+        Route("/events/trace/{trace_id}", events_trace, methods=["GET"]),
+        Route("/events/recent-traces", events_recent_traces, methods=["GET"]),
+        Route("/events/modifications", events_modifications, methods=["GET"]),
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),

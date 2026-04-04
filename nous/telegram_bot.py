@@ -227,6 +227,24 @@ def format_event_bus_status(stats: dict) -> str:
     return "\n".join(lines)
 
 
+def format_trace_summary(trace_data: dict) -> str:
+    """F035.2: Format a causal chain for Telegram."""
+    events = trace_data.get("events", [])
+    if not events:
+        return "No events found for this trace."
+    lines = [f"<b>Trace: {trace_data.get('trace_id', '?')}</b>",
+             f"Root: {trace_data.get('root_event', '?')}",
+             f"Depth: {trace_data.get('depth', 0)} events"]
+    if trace_data.get("duration_ms"):
+        lines.append(f"Duration: {trace_data['duration_ms']:.0f}ms")
+    lines.append("")
+    for e in events:
+        indent = "  " if e.get("caused_by") else ""
+        mod = " [MOD]" if e.get("data", {}).get("modifies") else ""
+        lines.append(f"{indent}{e.get('type', '?')}{mod}")
+    return "\n".join(lines)
+
+
 class StreamingMessage:
     """Manages progressive message editing for Telegram streaming."""
 

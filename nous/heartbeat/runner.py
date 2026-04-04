@@ -205,7 +205,7 @@ class HeartbeatRunner:
 
             # Emit event for audit trail
             if self._bus:
-                await self._bus.emit(Event(
+                tick_event = Event(
                     type="heartbeat_tick",
                     agent_id=self._settings.agent_id,
                     data={
@@ -224,7 +224,10 @@ class HeartbeatRunner:
                         "by_source": dict(Counter(f.source for f in all_findings)),
                         "by_urgency": dict(Counter(f.urgency for f in all_findings)),
                     },
-                ))
+                )
+                tick_event.trace_id = tick_event.event_id  # Root event
+                self._current_tick_event = tick_event
+                await self._bus.emit(tick_event)
 
         return all_findings
 
@@ -361,6 +364,7 @@ class HeartbeatRunner:
             )
 
             if self._bus:
+                _parent = getattr(self, "_current_tick_event", None)
                 await self._bus.emit(Event(
                     type="heartbeat_triage",
                     agent_id=self._settings.agent_id,
@@ -370,6 +374,8 @@ class HeartbeatRunner:
                         "tokens_used": result.tokens_used,
                         "response_summary": result.response[:200],
                     },
+                    trace_id=_parent.trace_id if _parent else None,
+                    caused_by=_parent.event_id if _parent else None,
                 ))
         except Exception:
             logger.exception("Heartbeat cognitive triage failed")

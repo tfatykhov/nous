@@ -117,6 +117,8 @@ class OutcomeDetector:
                     "episode_id": episode_id,
                     "signals": signals,
                 },
+                trace_id=event.trace_id,       # F035.2: inherit from parent
+                caused_by=event.event_id,      # F035.2: point to parent
             ))
 
         except Exception:
