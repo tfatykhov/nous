@@ -415,10 +415,16 @@ async def create_components(settings: Settings) -> dict:
             if settings.heartbeat_drive_enabled and settings.google_service_account_json:
                 registry.register(DriveCheck(settings, heart=heart))
 
+            # Create dedicated API client for heartbeat (isolated connection pool)
+            heartbeat_api_client = create_client(settings)
+            await heartbeat_api_client.start()
+            logger.info("F034: Heartbeat API client created (isolated from main runner)")
+
             heartbeat_runner = HeartbeatRunner(
                 settings=settings, registry=registry, runner=runner,
                 brain=brain, heart=heart, bus=bus, http_client=handler_http,
                 finding_store=finding_store,
+                api_client=heartbeat_api_client,
             )
             await heartbeat_runner.start()
         except ImportError:

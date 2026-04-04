@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import httpx
 
+from nous.api.anthropic_client import AnthropicClient
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.config import Settings
@@ -48,6 +49,7 @@ class HeartbeatRunner:
         bus: EventBus | None,
         http_client: httpx.AsyncClient | None,
         finding_store: FindingStore | None = None,
+        api_client: AnthropicClient | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -57,6 +59,8 @@ class HeartbeatRunner:
         self._bus = bus
         self._http = http_client
         self._finding_store = finding_store
+        self._api_client = api_client
+        self._dedicated_runner: AgentRunner | None = None
 
         self._task: asyncio.Task | None = None
         self._running = False
@@ -75,6 +79,12 @@ class HeartbeatRunner:
     async def start(self) -> None:
         """Start the heartbeat loop."""
         self._running = True
+
+        # Create dedicated runner with isolated API client for triage
+        if self._api_client is not None:
+            self._dedicated_runner = self._runner.fork(self._api_client)
+            logger.info("F034: Heartbeat using dedicated API client (isolated connection pool)")
+
         await self._detect_missed_checks()
         self._task = asyncio.create_task(self._loop(), name="heartbeat-runner")
         logger.info(
@@ -95,6 +105,23 @@ class HeartbeatRunner:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+        # Clean up dedicated runner and its API client
+        if self._dedicated_runner is not None:
+            try:
+                await self._dedicated_runner.close()
+            except Exception:
+                logger.warning("F034: Error closing dedicated runner", exc_info=True)
+            finally:
+                self._dedicated_runner = None
+        if self._api_client is not None:
+            try:
+                await self._api_client.close()
+            except Exception:
+                logger.warning("F034: Error closing heartbeat API client", exc_info=True)
+            finally:
+                self._api_client = None
+
         logger.info("F034: Heartbeat stopped")
 
     # ------------------------------------------------------------------
@@ -283,6 +310,23 @@ class HeartbeatRunner:
                 len(actionable),
             )
 
+    def _get_triage_runner(self) -> AgentRunner:
+        """Return the runner to use for cognitive triage.
+
+        If a dedicated api_client was provided and the dedicated runner was
+        initialized in start(), returns it. Otherwise falls back to the
+        shared runner with a warning if api_client was set but start()
+        didn't complete.
+        """
+        if self._api_client is not None:
+            if self._dedicated_runner is not None:
+                return self._dedicated_runner
+            logger.warning(
+                "F034: api_client provided but dedicated runner not initialized "
+                "(was start() called?); falling back to shared runner"
+            )
+        return self._runner
+
     async def _cognitive_triage(self, findings: list[Finding]) -> HeartbeatResult:
         """Open a cognitive session to process findings."""
         result = HeartbeatResult()
@@ -295,9 +339,10 @@ class HeartbeatRunner:
         message = "\n".join(lines)
 
         session_id = f"heartbeat-{uuid4().hex[:8]}"
+        triage_runner = self._get_triage_runner()
 
         try:
-            response_text, _context, usage = await self._runner.run_turn(
+            response_text, _context, usage = await triage_runner.run_turn(
                 session_id, message,
                 platform="heartbeat",
                 skip_episode=True,
@@ -329,7 +374,7 @@ class HeartbeatRunner:
 
         # End the session
         try:
-            await self._runner.end_conversation(session_id)
+            await triage_runner.end_conversation(session_id)
         except Exception:
             pass
 
