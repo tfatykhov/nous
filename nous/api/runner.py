@@ -168,6 +168,8 @@ class AgentRunner:
         forked._api_shared = True  # caller owns lifecycle
         if self._dispatcher is not None:
             forked._dispatcher = self._dispatcher
+        # Share execution ledgers so heartbeat/subtask sessions appear in dashboard
+        forked._ledgers = self._ledgers
         # F035.4: Context logger NOT propagated to forks — heartbeat triage
         # uses a dedicated API client on a separate connection pool, and the
         # context logger's async DB writer can contend with triage DB sessions.
