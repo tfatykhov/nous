@@ -241,7 +241,7 @@ class AgentRunner:
 
         # F035.4: Store current context for context logger
         self._current_session_id = session_id
-        self._current_turn_number = turn_context.turn_count
+        self._current_turn_number = (len(conversation.messages) + 1) // 2
         self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
         self._current_call_type = "subtask" if is_subtask else "chat"
 
@@ -593,7 +593,7 @@ class AgentRunner:
 
         # F035.4: Store current context for context logger
         self._current_session_id = session_id
-        self._current_turn_number = turn_context.turn_count
+        self._current_turn_number = (len(conversation.messages) + 1) // 2
         self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
         self._current_call_type = "chat"
 
