@@ -149,6 +149,9 @@ nous/
 | F031 | Censor Middleware with Action Payloads (censors execute read-only tools, conditional unblock, update API) | #208 |
 | F033 | Multi-Tier Search Routing (Tavily primary, Exa research, Brave fallback, query classification) | — |
 | F034 | Heartbeat Proactive Monitoring (tick loop, health/email/self-initiated checks, triage, Telegram) | #236 |
+| F034.1 | Finding Lifecycle (fingerprint dedup, state machine, escalation, daily digest, outcome signals) | #241 |
+| F034.2 | Intelligent Checks (embedding search, LLM email classification, drive significance, tunable params) | #241 |
+| F034.3 | Self-Tuning Heartbeat (outcome-driven adjustment, cross-cycle rollback, pinned params) | #241 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 
 ## How to Work
@@ -331,6 +334,17 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_HEARTBEAT_EMAIL_IMAP_HOST` | `imap.gmail.com` | IMAP server host |
 | `NOUS_HEARTBEAT_HEALTH_INTERVAL` | `3600` | Seconds between health checks |
 | `NOUS_HEARTBEAT_SELF_INITIATED_INTERVAL` | `1800` | Seconds between self-initiated checks |
+| `NOUS_HEARTBEAT_ESCALATION_LOW_TO_NORMAL_HOURS` | `72` | Hours before low→normal finding escalation |
+| `NOUS_HEARTBEAT_ESCALATION_NORMAL_TO_HIGH_HOURS` | `24` | Hours before normal→high finding escalation |
+| `NOUS_HEARTBEAT_ESCALATION_HIGH_REALERT_HOURS` | `12` | Hours between high-urgency re-alerts |
+| `NOUS_HEARTBEAT_ESCALATION_ACCUMULATION_THRESHOLD` | `5` | Acknowledged findings count to trigger collection escalation |
+| `NOUS_HEARTBEAT_DIGEST_HOUR_UTC` | `9` | UTC hour for daily digest Telegram message |
+| `NOUS_HEARTBEAT_SUPPRESSION_TTL_HOURS` | `24` | TTL for suppressed finding state |
+| `NOUS_HEARTBEAT_TUNING_ENABLED` | `false` | Enable heartbeat self-tuning (F034.3) |
+| `NOUS_HEARTBEAT_TUNING_INTERVAL_HOURS` | `168` | Hours between tuning passes (weekly) |
+| `NOUS_HEARTBEAT_TUNING_MIN_SAMPLES` | `10` | Minimum outcome signals before adjusting params |
+| `NOUS_HEARTBEAT_TUNING_LEARNING_RATE` | `0.1` | Max parameter change per cycle (fraction of range) |
+| `NOUS_HEARTBEAT_TUNING_ROLLBACK_THRESHOLD` | `0.2` | Negative rate increase that triggers auto-rollback |
 
 ### REST Endpoints
 
@@ -384,6 +398,13 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |
 | POST | `/heartbeat/check/{name}/trigger` | Force a specific check to run |
 | POST | `/heartbeat/check/{name}/reset` | Reset circuit breaker for a failed check |
+| GET | `/heartbeat/findings` | All tracked findings with state/age |
+| POST | `/heartbeat/findings/{fingerprint}/acknowledge` | Acknowledge a finding |
+| POST | `/heartbeat/findings/{fingerprint}/resolve` | Resolve a finding |
+| POST | `/heartbeat/findings/{fingerprint}/dismiss` | Dismiss a finding (strong negative) |
+| PUT | `/heartbeat/escalation-policy` | Update escalation thresholds |
+| GET | `/heartbeat/tuning-report` | Latest tuning report |
+| POST | `/heartbeat/tune` | Force a tuning pass |
 
 ### Agent Tools
 
