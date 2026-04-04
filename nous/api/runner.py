@@ -168,6 +168,9 @@ class AgentRunner:
         forked._api_shared = True  # caller owns lifecycle
         if self._dispatcher is not None:
             forked._dispatcher = self._dispatcher
+        # F035.4: Share context logger so heartbeat/subtask calls are visible
+        if self._context_logger is not None:
+            forked._context_logger = self._context_logger
         return forked
 
     async def close(self) -> None:
