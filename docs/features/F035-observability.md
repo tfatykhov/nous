@@ -32,7 +32,7 @@ Minsky's Chapter 6 ("Self-Knowledge is Dangerous") warns that unrestricted self-
 
 ---
 
-## Architecture — Three Layers
+## Architecture — Four Layers
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -62,6 +62,8 @@ Minsky's Chapter 6 ("Self-Knowledge is Dangerous") warns that unrestricted self-
 
 **Layer 3 — Behavioral Drift Detection (F035.3):** Periodic snapshots of key metrics with trend analysis. Catches slow drift that individual events don't reveal. "Is the system changing in ways nobody intended?"
 
+**Layer 4 — Context Visibility (F035.4):** Full transparency into what the LLM actually sees on every API call. Token breakdown by section, memory loading inventory, turn-over-turn diffs. "What did the model see when it made that choice?"
+
 ---
 
 ## Sub-Specs
@@ -71,8 +73,9 @@ Minsky's Chapter 6 ("Self-Knowledge is Dangerous") warns that unrestricted self-
 | F035.1 | Event Bus Observability | P1 | F006 |
 | F035.2 | Autonomous Action Audit Trail | P1 | F035.1 |
 | F035.3 | Behavioral Drift Detection | P2 | F035.2 |
+| F035.4 | Context Visibility | P1 | F035 (umbrella) |
 
-**Sequencing rationale:** F035.1 gives us the infrastructure (stats collection, endpoints). F035.2 adds causal metadata to events. F035.3 builds on both to detect trends. Each is independently useful.
+**Sequencing rationale:** F035.1 gives us the infrastructure (stats collection, endpoints). F035.2 adds causal metadata to events. F035.3 builds on both to detect trends. F035.4 is independent — it hooks into the runner pipeline, not the event bus — and can be built in parallel with F035.1-3. Each sub-spec is independently useful.
 
 ---
 
@@ -89,3 +92,4 @@ Minsky's Chapter 6 ("Self-Knowledge is Dangerous") warns that unrestricted self-
 3. Behavioral trends (fact growth rate, censor changes, check frequency drift) are tracked and anomalies flagged
 4. The dashboard has an "Autonomous Activity" panel showing recent self-modifications
 5. None of this adds measurable latency to the hot path (event processing)
+6. For any API call, you can see the full token breakdown by context section and which memory items were loaded
