@@ -1367,7 +1367,7 @@ def create_app(
             result["drift_trends"] = {}
 
         # 6. Context log (last 5 calls)
-        if context_logger:
+        if context_logger is not None:
             entries = context_logger.get_recent(limit=5)
             result["context_log"] = [e.to_dict() for e in entries]
         else:
@@ -1928,14 +1928,14 @@ def create_app(
     async def context_log_list(request: Request) -> JSONResponse:
         session_id = request.query_params.get("session_id")
         limit = int(request.query_params.get("limit", "20"))
-        if not context_logger:
+        if context_logger is None:
             return JSONResponse({"entries": []})
         entries = context_logger.get_recent(session_id=session_id, limit=limit)
         return JSONResponse({"entries": [e.to_dict() for e in entries]})
 
     async def context_log_detail(request: Request) -> JSONResponse:
         entry_id = request.path_params["id"]
-        if not context_logger:
+        if context_logger is None:
             return JSONResponse({"error": "Not enabled"}, status_code=404)
         entry = context_logger.get_entry(entry_id)
         if not entry:
@@ -1944,7 +1944,7 @@ def create_app(
 
     async def context_log_payload(request: Request) -> JSONResponse:
         entry_id = request.path_params["id"]
-        if not context_logger:
+        if context_logger is None:
             return JSONResponse({"error": "Not enabled"}, status_code=404)
         payload = context_logger.get_payload(entry_id)
         if not payload:
@@ -1953,7 +1953,7 @@ def create_app(
 
     async def context_log_sections(request: Request) -> JSONResponse:
         entry_id = request.path_params["id"]
-        if not context_logger:
+        if context_logger is None:
             return JSONResponse({"error": "Not enabled"}, status_code=404)
         entry = context_logger.get_entry(entry_id)
         if not entry:
