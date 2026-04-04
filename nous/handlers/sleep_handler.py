@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from nous.brain.brain import Brain
@@ -198,6 +199,11 @@ class SleepHandler:
         self._sleep_task: asyncio.Task | None = None
         self._procedure_learner = None  # F012: Set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
+        # F035.1: Observability tracking
+        self._total_sleeps: int = 0
+        self._last_sleep_at: datetime | None = None
+        self._last_phases: list[str] = []
+        self._currently_sleeping: bool = False
 
         bus.on("sleep_started", self.handle)
         bus.on("message_received", self._on_wake)
@@ -224,10 +230,20 @@ class SleepHandler:
     def is_sleeping(self) -> bool:
         return self._sleeping
 
+    def get_stats(self) -> dict:
+        """F035.1: Return sleep handler statistics."""
+        return {
+            "total_sleeps": self._total_sleeps,
+            "last_sleep_at": self._last_sleep_at.isoformat() if self._last_sleep_at else None,
+            "last_phases_completed": self._last_phases,
+            "currently_sleeping": self._currently_sleeping,
+        }
+
     async def _run_sleep(self, event: Event) -> None:
         """Actual sleep work — runs as independent task, NOT blocking bus."""
         self._sleeping = True
         self._interrupted = False
+        self._currently_sleeping = True
         phases_completed: list[str] = []
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
 
@@ -289,7 +305,11 @@ class SleepHandler:
             logger.exception("Sleep handler error")
         finally:
             self._sleeping = False
+            self._currently_sleeping = False
             self._sleep_task = None
+            self._total_sleeps += 1
+            self._last_sleep_at = datetime.now(UTC)
+            self._last_phases = phases_completed
 
     # ------------------------------------------------------------------
     # Free phases (no LLM)

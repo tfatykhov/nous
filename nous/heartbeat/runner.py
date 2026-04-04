@@ -64,6 +64,7 @@ class HeartbeatRunner:
 
         self._task: asyncio.Task | None = None
         self._running = False
+        self._tick_count: int = 0
         self._tokens_used_today: int = 0
         self._budget_date: date = date.today()
         self._last_tick: datetime | None = None
@@ -154,6 +155,7 @@ class HeartbeatRunner:
 
     async def _tick(self, urgent_only: bool = False) -> list[Finding]:
         """Run due checks and triage findings."""
+        self._tick_count += 1
         now = datetime.now(UTC)
         due_checks = self._registry.get_due_checks(now)
 
@@ -566,6 +568,16 @@ class HeartbeatRunner:
     @property
     def last_tick(self) -> datetime | None:
         return self._last_tick
+
+    def get_stats(self) -> dict:
+        """F035.1: Return heartbeat runner statistics."""
+        return {
+            "total_ticks": self._tick_count,
+            "last_tick_at": self._last_tick.isoformat() if self._last_tick else None,
+            "currently_running": self._running,
+            "tokens_used_today": self._tokens_used_today,
+            "budget_remaining": max(0, self._settings.heartbeat_daily_token_budget - self._tokens_used_today),
+        }
 
     async def trigger_tick(self) -> list[Finding]:
         """Force an immediate tick (for REST endpoint)."""

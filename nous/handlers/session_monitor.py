@@ -169,3 +169,16 @@ class SessionTimeoutMonitor:
                 data={"idle_seconds": int(global_idle)},
             ))
             self._sleep_emitted = True
+
+    def get_stats(self) -> dict:
+        """F035.1: Return session monitor statistics."""
+        now = time.monotonic()
+        sessions = {}
+        for sid, last in self._last_activity.items():
+            sessions[sid] = {"idle_seconds": round(now - last, 1)}
+        return {
+            "tracked_sessions": len(self._last_activity),
+            "sessions": sessions,
+            "sleep_emitted": self._sleep_emitted,
+            "global_idle_seconds": round(now - self._global_last_activity, 1),
+        }

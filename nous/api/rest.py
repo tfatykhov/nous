@@ -72,6 +72,7 @@ def create_app(
     rubric_manager: Any | None = None,
     rubric_evolver: Any | None = None,
     heartbeat_runner: Any | None = None,
+    session_monitor: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1667,6 +1668,38 @@ def create_app(
             "report_text": tuner.generate_report_text(report),
         })
 
+    # ------------------------------------------------------------------
+    # F035.1: Event bus observability
+    # ------------------------------------------------------------------
+
+    async def events_stats(request: Request) -> JSONResponse:
+        """GET /events/stats — Event bus statistics (F035.1)."""
+        if bus is None:
+            return JSONResponse({"total_processed": 0, "total_dropped": 0, "handlers": {}, "event_counts": {}})
+        data = bus.stats.to_dict()
+        data["queue_depth"] = bus.pending
+        component_stats = {}
+        if session_monitor and hasattr(session_monitor, "get_stats"):
+            component_stats["session_monitor"] = session_monitor.get_stats()
+        if sleep_handler and hasattr(sleep_handler, "get_stats"):
+            component_stats["sleep_handler"] = sleep_handler.get_stats()
+        if heartbeat_runner and hasattr(heartbeat_runner, "get_stats"):
+            component_stats["heartbeat_runner"] = heartbeat_runner.get_stats()
+        if component_stats:
+            data["component_stats"] = component_stats
+        return JSONResponse(data)
+
+    async def events_recent(request: Request) -> JSONResponse:
+        """GET /events/recent — Recent events ring buffer (F035.1)."""
+        limit = int(request.query_params.get("limit", "20"))
+        if bus is None:
+            return JSONResponse({"events": [], "source": "memory", "count": 0})
+        events = bus.stats.recent_events(limit=limit)
+        return JSONResponse({
+            "events": [{"type": e.type, "timestamp": e.timestamp, "handlers_invoked": e.handlers_invoked, "handlers_failed": e.handlers_failed, "duration_ms": round(e.duration_ms, 2), "session_id": e.session_id} for e in events],
+            "source": "memory", "count": len(events),
+        })
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1693,6 +1726,9 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        # F035.1: Event bus observability
+        Route("/events/stats", events_stats),
+        Route("/events/recent", events_recent),
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),

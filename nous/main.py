@@ -569,6 +569,7 @@ def build_app(settings: Settings) -> Starlette:
         rubric_manager=_lazy_component(components, "rubric_manager"),
         rubric_evolver=_lazy_component(components, "rubric_evolver"),
         heartbeat_runner=_lazy_component(components, "heartbeat_runner"),
+        session_monitor=_lazy_component(components, "session_monitor"),
     )
 
     if settings.mcp_enabled:

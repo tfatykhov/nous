@@ -202,6 +202,31 @@ def format_usage_footer(usage: dict[str, int]) -> str:
     return f"\U0001f4ca {inp_str} in / {out_str} out"
 
 
+def format_event_bus_status(stats: dict) -> str:
+    """F035.1: Format event bus stats for Telegram /status output."""
+    total = stats.get("total_processed", 0)
+    dropped = stats.get("total_dropped", 0)
+    queue = stats.get("queue_depth", 0)
+    uptime_s = stats.get("uptime_seconds", 0)
+    hours = int(uptime_s // 3600)
+    mins = int((uptime_s % 3600) // 60)
+    uptime_str = f"{hours}h {mins}m" if hours else f"{mins}m"
+
+    lines = ["\n<b>Event Bus</b>", f"  {total} events processed, {dropped} dropped",
+             f"  Queue: {queue} pending | Uptime: {uptime_str}", "", "  Handlers:"]
+
+    for name, h in stats.get("handlers", {}).items():
+        # Safe class name extraction that handles names without dots
+        parts = name.split(".")
+        short_name = parts[-2] if len(parts) >= 2 else name
+        invocations = h.get("invocations", 0)
+        successes = h.get("successes", 0)
+        error_rate = h.get("error_rate", 0.0)
+        flag = "!!" if error_rate > 0.10 else "OK"
+        lines.append(f"  {flag} {short_name}: {successes}/{invocations}")
+    return "\n".join(lines)
+
+
 class StreamingMessage:
     """Manages progressive message editing for Telegram streaming."""
 
