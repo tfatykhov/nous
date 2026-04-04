@@ -112,6 +112,9 @@ class ContextLogEntry:
     loaded_episodes: int = 0
     recent_conversations: int = 0
 
+    # F035.4: Actual section text for deep inspection (in-memory only, not persisted to DB)
+    sections_text: dict[str, str] = field(default_factory=dict)
+
     input_tokens_actual: int | None = None
     output_tokens: int | None = None
     cache_creation_tokens: int | None = None
@@ -175,6 +178,7 @@ class ContextLogEntry:
             message_roles=role_counts,
             loaded_facts=facts_count,
             loaded_decisions=decisions_count,
+            sections_text=sections,
         )
 
     def to_dict(self) -> dict[str, Any]:

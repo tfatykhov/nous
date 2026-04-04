@@ -358,6 +358,14 @@ function renderObservability(container, data) {
                 html += '<div style="margin-top:4px;font-size:11px;color:var(--muted)">Tools: ' + toolNames.map(function (t) { return escapeHtml(t); }).join(', ') + '</div>';
             }
 
+            // View Context button + expandable section text viewer
+            html += '<div style="margin-top:12px;display:flex;gap:8px">';
+            html += '<button class="obs-view-ctx-btn" data-entry-id="' + escapeHtml(entry.id) + '" style="font-size:11px;padding:4px 12px;background:var(--accent-dim);color:var(--text);border:none;border-radius:4px;cursor:pointer">View Context Text</button>';
+            html += '<button class="obs-view-payload-btn" data-entry-id="' + escapeHtml(entry.id) + '" style="font-size:11px;padding:4px 12px;background:var(--border);color:var(--muted);border:none;border-radius:4px;cursor:pointer">View Raw Payload</button>';
+            html += '</div>';
+            html += '<div class="obs-ctx-text-viewer" id="obs-ctx-text-' + idx + '" style="display:none;margin-top:8px"></div>';
+            html += '<div class="obs-ctx-payload-viewer" id="obs-ctx-payload-' + idx + '" style="display:none;margin-top:8px"></div>';
+
             html += '</div>'; // obs-ctx-detail
         });
     } else {
@@ -379,6 +387,85 @@ function renderObservability(container, data) {
                 var isHidden = detail.style.display === 'none';
                 detail.style.display = isHidden ? 'block' : 'none';
                 this.style.background = isHidden ? 'var(--surface-hover)' : '';
+            }
+        });
+    });
+
+    // ── Click handlers for "View Context Text" buttons ──
+    container.querySelectorAll('.obs-view-ctx-btn').forEach(function (btn) {
+        btn.addEventListener('click', async function (e) {
+            e.stopPropagation();
+            var entryId = this.dataset.entryId;
+            var viewer = this.parentElement.nextElementSibling;
+            if (!viewer) return;
+
+            if (viewer.style.display !== 'none') {
+                viewer.style.display = 'none';
+                return;
+            }
+
+            viewer.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">Loading...</div>';
+            viewer.style.display = 'block';
+
+            try {
+                var resp = await fetch('/context/log/' + encodeURIComponent(entryId) + '/sections');
+                if (!resp.ok) throw new Error(resp.status);
+                var data = await resp.json();
+                var sectionsText = data.sections_text || {};
+                var sectionNames = Object.keys(sectionsText);
+
+                if (sectionNames.length === 0) {
+                    viewer.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">No section text available</div>';
+                    return;
+                }
+
+                var h = '';
+                sectionNames.forEach(function (name) {
+                    var text = sectionsText[name] || '';
+                    var tokens = (data.sections || {})[name] || 0;
+                    h += '<div style="margin-bottom:12px">';
+                    h += '<div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;padding:4px 0" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'block\':\'none\';this.querySelector(\'.obs-arrow\').textContent=this.nextElementSibling.style.display===\'none\'?\'\\u25B6\':\'\\u25BC\'">';
+                    h += '<span style="font-size:12px;font-weight:600;color:#38bdf8"><span class="obs-arrow">&#x25B6;</span> ' + escapeHtml(name) + '</span>';
+                    h += '<span style="font-size:11px;color:var(--muted)">' + tokens + ' tokens</span>';
+                    h += '</div>';
+                    h += '<pre style="display:none;max-height:400px;overflow:auto;font-size:11px;line-height:1.5;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;white-space:pre-wrap;word-break:break-word;color:var(--text)">' + escapeHtml(text) + '</pre>';
+                    h += '</div>';
+                });
+                viewer.innerHTML = h;
+            } catch (err) {
+                viewer.innerHTML = '<div style="color:var(--red);font-size:12px;padding:8px">Failed to load: ' + escapeHtml(err.message) + '</div>';
+            }
+        });
+    });
+
+    // ── Click handlers for "View Raw Payload" buttons ──
+    container.querySelectorAll('.obs-view-payload-btn').forEach(function (btn) {
+        btn.addEventListener('click', async function (e) {
+            e.stopPropagation();
+            var entryId = this.dataset.entryId;
+            var ctxViewer = this.parentElement.nextElementSibling;
+            var viewer = ctxViewer ? ctxViewer.nextElementSibling : null;
+            if (!viewer) return;
+
+            if (viewer.style.display !== 'none') {
+                viewer.style.display = 'none';
+                return;
+            }
+
+            viewer.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">Loading...</div>';
+            viewer.style.display = 'block';
+
+            try {
+                var resp = await fetch('/context/log/' + encodeURIComponent(entryId) + '/payload');
+                if (resp.status === 404) {
+                    viewer.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:8px">Payload not captured. Set NOUS_CONTEXT_LOG_FULL_PAYLOAD=true to enable.</div>';
+                    return;
+                }
+                if (!resp.ok) throw new Error(resp.status);
+                var payload = await resp.json();
+                viewer.innerHTML = '<pre style="max-height:500px;overflow:auto;font-size:11px;line-height:1.4;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;white-space:pre-wrap;word-break:break-word;color:var(--text)">' + escapeHtml(JSON.stringify(payload, null, 2)) + '</pre>';
+            } catch (err) {
+                viewer.innerHTML = '<div style="color:var(--red);font-size:12px;padding:8px">Failed to load: ' + escapeHtml(err.message) + '</div>';
             }
         });
     });

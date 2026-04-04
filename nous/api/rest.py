@@ -1960,6 +1960,7 @@ def create_app(
             return JSONResponse({"error": "Not found"}, status_code=404)
         return JSONResponse({
             "sections": entry.token_breakdown,
+            "sections_text": entry.sections_text,
             "total_tokens_est": entry.total_tokens_est,
             "sections_present": entry.sections_present,
         })
