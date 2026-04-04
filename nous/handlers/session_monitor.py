@@ -163,9 +163,24 @@ class SessionTimeoutMonitor:
             and all_sessions_sleeping
         ):
             logger.info("Global idle for %ds, emitting sleep_started", int(global_idle))
-            await self._bus.emit(Event(
+            _sleep_event = Event(
                 type="sleep_started",
                 agent_id="system",
                 data={"idle_seconds": int(global_idle)},
-            ))
+            )
+            _sleep_event.trace_id = _sleep_event.event_id  # Root event
+            await self._bus.emit(_sleep_event)
             self._sleep_emitted = True
+
+    def get_stats(self) -> dict:
+        """F035.1: Return session monitor statistics."""
+        now = time.monotonic()
+        sessions = {}
+        for sid, last in self._last_activity.items():
+            sessions[sid] = {"idle_seconds": round(now - last, 1)}
+        return {
+            "tracked_sessions": len(self._last_activity),
+            "sessions": sessions,
+            "sleep_emitted": self._sleep_emitted,
+            "global_idle_seconds": round(now - self._global_last_activity, 1),
+        }

@@ -95,6 +95,14 @@ class AgentRunner:
             self._compactor = ConversationCompactor(settings=settings)
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
+        # F035.4: Context visibility
+        self._context_logger: Any | None = None
+        self._current_session_id: str = "unknown"
+        self._current_turn_number: int = 0
+        self._current_frame_id: str = "unknown"
+        self._current_call_type: str = "chat"
+        self._last_context_entry_id: str | None = None
+
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
         self._pending_corrections: dict[str, list[str]] = {}
@@ -130,6 +138,14 @@ class AgentRunner:
         """Set a pre-initialized API client (shared with handlers)."""
         self._api = client
         self._api_shared = True
+
+    def set_context_logger(self, ctx_logger: Any) -> None:
+        """F035.4: Set context logger."""
+        self._context_logger = ctx_logger
+
+    def _get_context_window_size(self) -> int:
+        """Get configured or auto-detected context window size."""
+        return self._settings._get_context_window(self._settings.model)
 
     async def start(self) -> None:
         """Initialize the API client based on configured backend."""
@@ -222,6 +238,12 @@ class AgentRunner:
         # F026: Get/create execution ledger and set turn
         ledger = self._get_or_create_ledger(session_id)
         ledger.set_turn((len(conversation.messages) + 1) // 2)
+
+        # F035.4: Store current context for context logger
+        self._current_session_id = session_id
+        self._current_turn_number = turn_context.turn_count
+        self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
+        self._current_call_type = "subtask" if is_subtask else "chat"
 
         # 4-6. Build system prompt and run tool loop
         response_text = ""
@@ -454,6 +476,25 @@ class AgentRunner:
         # Effort parameter (works with or without thinking; "high" is API default)
         if self._settings.effort != "high":
             payload["output_config"] = {"effort": self._settings.effort}
+
+        # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
+        if self._context_logger:
+            try:
+                _entry = self._context_logger.log(
+                    session_id=self._current_session_id,
+                    turn_number=self._current_turn_number,
+                    call_type=self._current_call_type,
+                    model=payload.get("model", ""),
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tools,
+                    frame_id=self._current_frame_id,
+                    context_window=self._get_context_window_size(),
+                    payload=payload if self._settings.context_log_full_payload else None,
+                )
+                self._last_context_entry_id = _entry.id
+            except Exception:
+                logger.debug("F035.4: context log failed", exc_info=True)
 
         return payload
 
@@ -959,6 +1000,18 @@ class AgentRunner:
                 tools=tools if tools else None,
                 model_override=model_override,
             )
+
+            # F035.4: Update context log with response metadata
+            if self._context_logger and self._last_context_entry_id and api_response.usage:
+                self._context_logger.update_response(
+                    entry_id=self._last_context_entry_id,
+                    input_tokens=api_response.usage.get("input_tokens"),
+                    output_tokens=api_response.usage.get("output_tokens"),
+                    cache_creation=api_response.usage.get("cache_creation_input_tokens"),
+                    cache_read=api_response.usage.get("cache_read_input_tokens"),
+                    stop_reason=api_response.stop_reason,
+                )
+                self._last_context_entry_id = None  # Consumed
 
             # Accumulate usage + calibrate token estimator
             if api_response.usage:

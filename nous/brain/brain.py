@@ -1274,14 +1274,23 @@ class Brain:
         data: dict,
         session: AsyncSession | None = None,
         session_id: str | None = None,
+        event_id: str | None = None,
+        trace_id: str | None = None,
+        caused_by: str | None = None,
     ) -> None:
         """Log a cognitive event to nous_system.events."""
         if session is None:
             async with self.db.session() as session:
-                await self._emit_event(session, event_type, data, session_id=session_id)
+                await self._emit_event(
+                    session, event_type, data, session_id=session_id,
+                    event_id=event_id, trace_id=trace_id, caused_by=caused_by,
+                )
                 await session.commit()
         else:
-            await self._emit_event(session, event_type, data, session_id=session_id)
+            await self._emit_event(
+                session, event_type, data, session_id=session_id,
+                event_id=event_id, trace_id=trace_id, caused_by=caused_by,
+            )
 
     async def _emit_event(
         self,
@@ -1289,6 +1298,9 @@ class Brain:
         event_type: str,
         data: dict,
         session_id: str | None = None,
+        event_id: str | None = None,
+        trace_id: str | None = None,
+        caused_by: str | None = None,
     ) -> None:
         """Internal emit_event — inserts in same session (P2-9, 007.4)."""
         event = Event(
@@ -1296,6 +1308,9 @@ class Brain:
             event_type=event_type,
             data=data,
             session_id=session_id,
+            event_id=event_id,
+            trace_id=trace_id,
+            caused_by=caused_by,
         )
         session.add(event)
 

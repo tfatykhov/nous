@@ -924,12 +924,14 @@ class CognitiveLayer:
         }
         try:
             if self._bus:
-                await self._bus.emit(Event(
+                _turn_event = Event(
                     type="turn_completed",
                     agent_id=agent_id,
                     session_id=session_id,
                     data=event_data,
-                ))
+                )
+                _turn_event.trace_id = _turn_event.event_id  # Root event
+                await self._bus.emit(_turn_event)
             else:
                 await self._brain.emit_event("turn_completed", event_data, session=session)
         except Exception:
@@ -1410,12 +1412,14 @@ class CognitiveLayer:
         }
         try:
             if self._bus:
-                await self._bus.emit(Event(
+                _session_event = Event(
                     type="session_ended",
                     agent_id=agent_id,
                     session_id=session_id,
                     data=event_data,
-                ))
+                )
+                _session_event.trace_id = _session_event.event_id  # Root event
+                await self._bus.emit(_session_event)
             else:
                 await self._brain.emit_event("session_ended", event_data, session=session)
         except Exception:

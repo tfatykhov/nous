@@ -138,6 +138,8 @@ class EpisodeSummarizer:
                     "candidate_facts": summary.get("candidate_facts", []),
                     "transcript": transcript,  # F025 P2-E: pass for fact grounding
                 },
+                trace_id=event.trace_id,       # F035.2: inherit from parent
+                caused_by=event.event_id,      # F035.2: point to parent
             ))
 
             logger.info("Episode %s summarized: %s", episode_id, summary.get("title", "?"))

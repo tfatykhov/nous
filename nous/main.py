@@ -9,6 +9,7 @@ event loop as uvicorn (F2/F3 fix from 3-agent review).
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -80,7 +81,11 @@ async def create_components(settings: Settings) -> dict:
         # 007.4: Pass event.session_id to populate ORM column
         async def persist_to_db(event: Event) -> None:
             data = {**event.data}
-            await brain.emit_event(event.type, data, session_id=event.session_id)
+            await brain.emit_event(
+                event.type, data, session_id=event.session_id,
+                event_id=event.event_id, trace_id=event.trace_id,
+                caused_by=event.caused_by,
+            )
 
         bus.set_db_persister(persist_to_db)
 
@@ -349,6 +354,51 @@ async def create_components(settings: Settings) -> dict:
     runner.set_api_client(api_client)
     await runner.start()
 
+    # F035.4: Context Logger
+    context_logger = None
+    if settings.context_log_enabled:
+        from nous.observability.context_logger import ContextLogger
+
+        async def _write_context_log(entry):
+            try:
+                async with database.session() as s:
+                    from sqlalchemy import text
+                    await s.execute(text(
+                        "INSERT INTO nous_system.context_log "
+                        "(id, agent_id, session_id, turn_number, call_type, model, frame_id, trace_id, "
+                        "token_breakdown, total_tokens_est, context_window_size, utilization_pct, "
+                        "sections_present, tools_count, tool_names, messages_count, message_roles, "
+                        "loaded_facts, loaded_decisions, loaded_procedures, loaded_episodes, recent_conversations) "
+                        "VALUES (:id, :agent_id, :sid, :turn, :ctype, :model, :frame, :trace, "
+                        ":breakdown, :total, :window, :util, :sections, :tools_c, :tool_names, "
+                        ":msg_c, :msg_roles, :facts, :decisions, :procedures, :episodes, :conversations)"
+                    ), {
+                        "id": entry.id, "agent_id": settings.agent_id,
+                        "sid": entry.session_id, "turn": entry.turn_number,
+                        "ctype": entry.call_type, "model": entry.model,
+                        "frame": entry.frame_id, "trace": entry.trace_id,
+                        "breakdown": json.dumps(entry.token_breakdown),
+                        "total": entry.total_tokens_est, "window": entry.context_window_size,
+                        "util": entry.utilization_pct, "sections": entry.sections_present,
+                        "tools_c": entry.tools_count, "tool_names": entry.tool_names,
+                        "msg_c": entry.messages_count, "msg_roles": json.dumps(entry.message_roles),
+                        "facts": entry.loaded_facts, "decisions": entry.loaded_decisions,
+                        "procedures": entry.loaded_procedures, "episodes": entry.loaded_episodes,
+                        "conversations": entry.recent_conversations,
+                    })
+                    await s.commit()
+            except Exception:
+                logger.debug("F035.4: context log write failed", exc_info=True)
+
+        context_logger = ContextLogger(
+            db_writer=_write_context_log,
+            full_payload_enabled=settings.context_log_full_payload,
+            ring_size=settings.context_log_ring_size,
+            max_total=settings.context_log_max_total,
+        )
+        runner.set_context_logger(context_logger)
+        logger.info("F035.4: ContextLogger wired (full_payload=%s)", settings.context_log_full_payload)
+
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
     if settings.subtask_enabled:
         from nous.api.tools import register_subtask_tools
@@ -415,6 +465,16 @@ async def create_components(settings: Settings) -> dict:
             if settings.heartbeat_drive_enabled and settings.google_service_account_json:
                 registry.register(DriveCheck(settings, heart=heart))
 
+            # F035.3: Behavioral drift detection
+            if settings.drift_detection_enabled and bus is not None:
+                from nous.heartbeat.checks import BehaviorDriftCheck
+                drift_check = BehaviorDriftCheck(
+                    heart=heart, brain=brain, settings=settings,
+                    bus_stats=bus.stats, db=database,
+                )
+                registry.register(drift_check)
+                logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
+
             # Create dedicated API client for heartbeat (isolated connection pool)
             heartbeat_api_client = create_client(settings)
             await heartbeat_api_client.start()
@@ -451,6 +511,7 @@ async def create_components(settings: Settings) -> dict:
         "rubric_manager": rubric_manager,
         "rubric_evolver": rubric_evolver if bus else None,
         "heartbeat_runner": heartbeat_runner,
+        "context_logger": context_logger,
     }
 
 
@@ -569,6 +630,8 @@ def build_app(settings: Settings) -> Starlette:
         rubric_manager=_lazy_component(components, "rubric_manager"),
         rubric_evolver=_lazy_component(components, "rubric_evolver"),
         heartbeat_runner=_lazy_component(components, "heartbeat_runner"),
+        session_monitor=_lazy_component(components, "session_monitor"),
+        context_logger=_lazy_component(components, "context_logger"),
     )
 
     if settings.mcp_enabled:

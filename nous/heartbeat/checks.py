@@ -13,6 +13,7 @@ import imaplib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from typing import Any
 
 from nous.brain import Brain
@@ -814,3 +815,148 @@ class DriveCheck(BaseCheck):
             logger.debug("DriveCheck: contextualize failed for '%s'", file_name, exc_info=True)
 
         return None
+
+
+# ------------------------------------------------------------------
+# BehaviorDriftCheck (F035.3)
+# ------------------------------------------------------------------
+
+
+class BehaviorDriftCheck(BaseCheck):
+    """Periodic behavioral drift detection (F035.3).
+
+    Captures metric snapshots, stores to DB, compares against
+    rolling 7-day baseline using z-score analysis.
+    """
+
+    name = "behavior_drift"
+    timeout = 30
+
+    def __init__(self, heart: Heart, brain: Brain, settings: Settings, bus_stats: Any = None, db: Any = None) -> None:
+        super().__init__()
+        self._heart = heart
+        self._brain = brain
+        self._settings = settings
+        self._bus_stats = bus_stats
+        self._db = db
+        from nous.observability.drift import DriftDetector
+        self._detector = DriftDetector()
+        self._last_snapshot: Any = None  # BehaviorSnapshot
+        self._last_anomalies: list[dict] = []  # Serialized anomalies for DB persistence
+        self.interval = getattr(settings, 'drift_detection_interval', 3600)
+
+    async def run(self) -> CheckResult:
+        from nous.observability.snapshots import BehaviorSnapshot
+        findings: list[Finding] = []
+        try:
+            snapshot = await self._capture_snapshot()
+            baseline = await self._load_baseline(hours=168)
+            self._last_anomalies = []
+            if baseline:
+                anomalies = self._detector.detect(snapshot, baseline)
+                self._last_anomalies = [
+                    {"metric": a.metric, "current": a.current, "mean": a.mean,
+                     "stddev": a.stddev, "z_score": a.z_score, "direction": a.direction,
+                     "severity": a.severity}
+                    for a in anomalies
+                ]
+                for a in anomalies:
+                    findings.append(Finding(
+                        source="drift",
+                        summary=f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})",
+                        urgency="high" if a.severity == "alert" else "normal",
+                        needs_action=a.severity == "alert",
+                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score},
+                    ))
+            await self._store_snapshot(snapshot)
+            self._last_snapshot = snapshot
+        except Exception:
+            logger.exception("BehaviorDriftCheck failed")
+        return CheckResult(findings=findings)
+
+    async def _capture_snapshot(self):
+        from nous.observability.snapshots import BehaviorSnapshot
+        now = datetime.now(UTC)
+        fact_count = episode_count = censor_count = procedure_count = 0
+        if self._db:
+            try:
+                async with self._db.session() as session:
+                    from sqlalchemy import text
+                    result = await session.execute(text(
+                        "SELECT "
+                        "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
+                        "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
+                        "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
+                        "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures"
+                    ))
+                    row = result.fetchone()
+                    if row:
+                        fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
+            except Exception:
+                logger.debug("Snapshot: DB query failed", exc_info=True)
+
+        bus_data = self._bus_stats.to_dict() if self._bus_stats else {}
+        handlers = bus_data.get("handlers", {})
+        total_errors = sum(h.get("errors", 0) for h in handlers.values())
+        total_invocations = sum(h.get("invocations", 0) for h in handlers.values())
+        error_rate = total_errors / total_invocations if total_invocations else 0.0
+
+        prev = self._last_snapshot
+        return BehaviorSnapshot(
+            timestamp=now,
+            fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
+            episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
+            active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
+            procedure_count=procedure_count, decision_count=0,
+            events_processed=bus_data.get("total_processed", 0),
+            events_dropped=bus_data.get("total_dropped", 0),
+            handler_error_count=total_errors, handler_error_rate=round(error_rate, 4),
+            turns_processed=bus_data.get("event_counts", {}).get("turn_completed", 0),
+        )
+
+    async def _store_snapshot(self, snapshot) -> None:
+        if not self._db:
+            return
+        try:
+            import json
+            async with self._db.session() as session:
+                from sqlalchemy import text
+                await session.execute(text(
+                    "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
+                    "VALUES (:aid, :ts, :metrics, :anomalies)"
+                ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp,
+                    "metrics": json.dumps(snapshot.to_metrics_dict()),
+                    "anomalies": json.dumps(self._last_anomalies)})
+                await session.commit()
+        except Exception:
+            logger.debug("Snapshot store failed", exc_info=True)
+
+    async def _load_baseline(self, hours: int = 168) -> list:
+        if not self._db:
+            return []
+        try:
+            import json as _json
+            from nous.observability.snapshots import BehaviorSnapshot
+            async with self._db.session() as session:
+                from sqlalchemy import text
+                now = datetime.now(UTC)
+                cutoff = now - timedelta(hours=hours)
+                result = await session.execute(text(
+                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                ), {"aid": self._settings.agent_id, "cutoff": cutoff})
+                rows = result.fetchall()
+            snapshots = []
+            for row in rows:
+                metrics = row.metrics if isinstance(row.metrics, dict) else _json.loads(row.metrics)
+                # Build snapshot from stored metrics, defaulting missing keys to 0
+                kwargs: dict[str, Any] = {"timestamp": row.timestamp}
+                for k in BehaviorSnapshot.__dataclass_fields__:
+                    if k == "timestamp" or k == "interval_changes":
+                        continue
+                    kwargs[k] = metrics.get(k, 0)
+                snapshots.append(BehaviorSnapshot(**kwargs))
+            return snapshots
+        except Exception:
+            logger.debug("Baseline load failed", exc_info=True)
+            return []

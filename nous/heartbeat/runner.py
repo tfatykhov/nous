@@ -64,6 +64,7 @@ class HeartbeatRunner:
 
         self._task: asyncio.Task | None = None
         self._running = False
+        self._tick_count: int = 0
         self._tokens_used_today: int = 0
         self._budget_date: date = date.today()
         self._last_tick: datetime | None = None
@@ -154,6 +155,7 @@ class HeartbeatRunner:
 
     async def _tick(self, urgent_only: bool = False) -> list[Finding]:
         """Run due checks and triage findings."""
+        self._tick_count += 1
         now = datetime.now(UTC)
         due_checks = self._registry.get_due_checks(now)
 
@@ -203,7 +205,7 @@ class HeartbeatRunner:
 
             # Emit event for audit trail
             if self._bus:
-                await self._bus.emit(Event(
+                tick_event = Event(
                     type="heartbeat_tick",
                     agent_id=self._settings.agent_id,
                     data={
@@ -222,7 +224,10 @@ class HeartbeatRunner:
                         "by_source": dict(Counter(f.source for f in all_findings)),
                         "by_urgency": dict(Counter(f.urgency for f in all_findings)),
                     },
-                ))
+                )
+                tick_event.trace_id = tick_event.event_id  # Root event
+                self._current_tick_event = tick_event
+                await self._bus.emit(tick_event)
 
         return all_findings
 
@@ -359,6 +364,7 @@ class HeartbeatRunner:
             )
 
             if self._bus:
+                _parent = getattr(self, "_current_tick_event", None)
                 await self._bus.emit(Event(
                     type="heartbeat_triage",
                     agent_id=self._settings.agent_id,
@@ -368,6 +374,8 @@ class HeartbeatRunner:
                         "tokens_used": result.tokens_used,
                         "response_summary": result.response[:200],
                     },
+                    trace_id=_parent.trace_id if _parent else None,
+                    caused_by=_parent.event_id if _parent else None,
                 ))
         except Exception:
             logger.exception("Heartbeat cognitive triage failed")
@@ -566,6 +574,16 @@ class HeartbeatRunner:
     @property
     def last_tick(self) -> datetime | None:
         return self._last_tick
+
+    def get_stats(self) -> dict:
+        """F035.1: Return heartbeat runner statistics."""
+        return {
+            "total_ticks": self._tick_count,
+            "last_tick_at": self._last_tick.isoformat() if self._last_tick else None,
+            "currently_running": self._running,
+            "tokens_used_today": self._tokens_used_today,
+            "budget_remaining": max(0, self._settings.heartbeat_daily_token_budget - self._tokens_used_today),
+        }
 
     async def trigger_tick(self) -> list[Finding]:
         """Force an immediate tick (for REST endpoint)."""

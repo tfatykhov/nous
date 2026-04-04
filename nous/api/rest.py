@@ -72,6 +72,8 @@ def create_app(
     rubric_manager: Any | None = None,
     rubric_evolver: Any | None = None,
     heartbeat_runner: Any | None = None,
+    session_monitor: Any | None = None,
+    context_logger: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1246,6 +1248,133 @@ def create_app(
             logger.error("Dashboard heartbeat error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F035: Observability dashboard ---
+
+    async def dashboard_observability(request: Request) -> JSONResponse:
+        """GET /dashboard/observability - Aggregated observability data."""
+        from datetime import UTC, datetime, timedelta
+
+        result = {}
+
+        # 1. Event bus stats (in-memory, instant)
+        if bus is not None:
+            stats = bus.stats.to_dict()
+            stats["queue_depth"] = bus.pending
+            result["event_bus"] = stats
+        else:
+            result["event_bus"] = {"total_processed": 0, "total_dropped": 0, "handlers": {}, "event_counts": {}}
+
+        # 2. Recent traces (last 10)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                tr = await session.execute(text("""
+                    WITH trace_stats AS (
+                        SELECT trace_id,
+                               COUNT(*) AS event_count,
+                               BOOL_OR(data->>'modifies' IS NOT NULL) AS has_modifications
+                        FROM nous_system.events
+                        WHERE trace_id IS NOT NULL
+                        AND agent_id = :aid
+                        GROUP BY trace_id
+                    ),
+                    roots AS (
+                        SELECT event_id, event_type, trace_id, created_at
+                        FROM nous_system.events
+                        WHERE trace_id IS NOT NULL AND caused_by IS NULL
+                        AND agent_id = :aid
+                    )
+                    SELECT r.trace_id, r.event_type AS root_type, r.created_at,
+                           ts.event_count, ts.has_modifications
+                    FROM roots r
+                    JOIN trace_stats ts ON ts.trace_id = r.trace_id
+                    ORDER BY r.created_at DESC
+                    LIMIT 10
+                """), {"aid": settings.agent_id})
+                rows = tr.fetchall()
+            result["recent_traces"] = [{
+                "trace_id": r.trace_id, "root_type": r.root_type,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "event_count": r.event_count, "has_modifications": bool(r.has_modifications),
+            } for r in rows]
+        except Exception:
+            logger.debug("dashboard_observability: recent_traces failed", exc_info=True)
+            result["recent_traces"] = []
+
+        # 3. Recent modifications (last 24h)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                mr = await session.execute(text("""
+                    SELECT event_id, event_type, trace_id, data, created_at
+                    FROM nous_system.events
+                    WHERE data->>'modifies' IS NOT NULL
+                    AND agent_id = :aid
+                    AND created_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY created_at DESC LIMIT 20
+                """), {"aid": settings.agent_id})
+                rows = mr.fetchall()
+            result["recent_modifications"] = [{
+                "event_id": r.event_id, "type": r.event_type, "trace_id": r.trace_id,
+                "modifies": (r.data or {}).get("modifies"),
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+            } for r in rows]
+        except Exception:
+            logger.debug("dashboard_observability: recent_modifications failed", exc_info=True)
+            result["recent_modifications"] = []
+
+        # 4. Drift snapshot (latest + anomalies)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                sr = await session.execute(text(
+                    "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+                ), {"aid": settings.agent_id})
+                row = sr.fetchone()
+            if row:
+                result["drift"] = {
+                    "timestamp": row.timestamp.isoformat(),
+                    "metrics": row.metrics,
+                    "anomalies": row.anomalies or [],
+                }
+            else:
+                result["drift"] = None
+        except Exception:
+            logger.debug("dashboard_observability: drift snapshot failed", exc_info=True)
+            result["drift"] = None
+
+        # 5. Drift trends (last 7 days — key metrics only)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                cutoff = datetime.now(UTC) - timedelta(days=7)
+                tr2 = await session.execute(text(
+                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                ), {"aid": settings.agent_id, "cutoff": cutoff})
+                rows = tr2.fetchall()
+            trend_metrics = ["fact_count_delta", "handler_error_rate"]
+            trends = {m: [] for m in trend_metrics}
+            for row in rows:
+                metrics = row.metrics if isinstance(row.metrics, dict) else {}
+                ts = row.timestamp.isoformat()
+                for m in trend_metrics:
+                    trends[m].append({"t": ts, "v": metrics.get(m, 0)})
+            result["drift_trends"] = trends
+        except Exception:
+            logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
+            result["drift_trends"] = {}
+
+        # 6. Context log (last 5 calls)
+        if context_logger:
+            entries = context_logger.get_recent(limit=5)
+            result["context_log"] = [e.to_dict() for e in entries]
+        else:
+            result["context_log"] = []
+
+        return JSONResponse(result)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -1667,6 +1796,284 @@ def create_app(
             "report_text": tuner.generate_report_text(report),
         })
 
+    # ------------------------------------------------------------------
+    # F035.1: Event bus observability
+    # ------------------------------------------------------------------
+
+    async def events_stats(request: Request) -> JSONResponse:
+        """GET /events/stats — Event bus statistics (F035.1)."""
+        if bus is None:
+            return JSONResponse({"total_processed": 0, "total_dropped": 0, "handlers": {}, "event_counts": {}})
+        data = bus.stats.to_dict()
+        data["queue_depth"] = bus.pending
+        component_stats = {}
+        if session_monitor and hasattr(session_monitor, "get_stats"):
+            component_stats["session_monitor"] = session_monitor.get_stats()
+        if sleep_handler and hasattr(sleep_handler, "get_stats"):
+            component_stats["sleep_handler"] = sleep_handler.get_stats()
+        if heartbeat_runner and hasattr(heartbeat_runner, "get_stats"):
+            component_stats["heartbeat_runner"] = heartbeat_runner.get_stats()
+        if component_stats:
+            data["component_stats"] = component_stats
+        return JSONResponse(data)
+
+    async def events_recent(request: Request) -> JSONResponse:
+        """GET /events/recent — Recent events ring buffer (F035.1)."""
+        limit = int(request.query_params.get("limit", "20"))
+        if bus is None:
+            return JSONResponse({"events": [], "source": "memory", "count": 0})
+        events = bus.stats.recent_events(limit=limit)
+        return JSONResponse({
+            "events": [{"type": e.type, "timestamp": e.timestamp, "handlers_invoked": e.handlers_invoked, "handlers_failed": e.handlers_failed, "duration_ms": round(e.duration_ms, 2), "session_id": e.session_id} for e in events],
+            "source": "memory", "count": len(events),
+        })
+
+    # ------------------------------------------------------------------
+    # F035.2: Causal chain tracing endpoints
+    # ------------------------------------------------------------------
+
+    async def events_trace(request: Request) -> JSONResponse:
+        """GET /events/trace/{trace_id} — All events in a causal chain."""
+        trace_id = request.path_params["trace_id"]
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text("""
+                SELECT event_id, event_type, session_id, data, created_at, trace_id, caused_by
+                FROM nous_system.events
+                WHERE trace_id = :tid
+                ORDER BY created_at ASC
+            """), {"tid": trace_id})
+            rows = result.fetchall()
+
+        events = []
+        for r in rows:
+            events.append({
+                "event_id": r.event_id,
+                "type": r.event_type,
+                "session_id": r.session_id,
+                "data": r.data if isinstance(r.data, dict) else {},
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "trace_id": r.trace_id,
+                "caused_by": r.caused_by,
+            })
+
+        root_event = next((e for e in events if not e["caused_by"]), None)
+        return JSONResponse({
+            "trace_id": trace_id,
+            "root_event": root_event["type"] if root_event else None,
+            "depth": len(events),
+            "events": events,
+            "duration_ms": None,  # Could compute from first/last timestamps
+        })
+
+    async def events_recent_traces(request: Request) -> JSONResponse:
+        """GET /events/recent-traces — Recent trace roots with stats."""
+        limit = int(request.query_params.get("limit", "20"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text("""
+                WITH trace_stats AS (
+                    SELECT trace_id,
+                           COUNT(*) AS event_count,
+                           BOOL_OR(data->>'modifies' IS NOT NULL) AS has_modifications
+                    FROM nous_system.events
+                    WHERE trace_id IS NOT NULL
+                    GROUP BY trace_id
+                ),
+                roots AS (
+                    SELECT event_id, event_type, trace_id, created_at
+                    FROM nous_system.events
+                    WHERE trace_id IS NOT NULL AND caused_by IS NULL
+                )
+                SELECT r.trace_id, r.event_type AS root_type, r.created_at,
+                       ts.event_count, ts.has_modifications
+                FROM roots r
+                JOIN trace_stats ts ON ts.trace_id = r.trace_id
+                ORDER BY r.created_at DESC
+                LIMIT :lim
+            """), {"lim": limit})
+            rows = result.fetchall()
+
+        traces = [{"trace_id": r.trace_id, "root_type": r.root_type,
+                   "timestamp": r.created_at.isoformat() if r.created_at else None,
+                   "event_count": r.event_count, "has_modifications": bool(r.has_modifications)}
+                  for r in rows]
+        return JSONResponse({"traces": traces})
+
+    async def events_modifications(request: Request) -> JSONResponse:
+        """GET /events/modifications — Events that modify state."""
+        hours = int(request.query_params.get("hours", "24"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text("""
+                SELECT event_id, event_type, session_id, data, created_at, trace_id, caused_by
+                FROM nous_system.events
+                WHERE data->>'modifies' IS NOT NULL
+                  AND created_at > NOW() - INTERVAL '1 hour' * :hours
+                ORDER BY created_at DESC
+            """), {"hours": hours})
+            rows = result.fetchall()
+
+        events = [{"event_id": r.event_id, "type": r.event_type, "session_id": r.session_id,
+                   "modifies": (r.data or {}).get("modifies"),
+                   "timestamp": r.created_at.isoformat() if r.created_at else None,
+                   "trace_id": r.trace_id}
+                  for r in rows]
+        return JSONResponse({"events": events, "hours": hours, "count": len(events)})
+
+    # ------------------------------------------------------------------
+    # F035.4: Context visibility endpoints
+    # ------------------------------------------------------------------
+
+    async def context_log_list(request: Request) -> JSONResponse:
+        session_id = request.query_params.get("session_id")
+        limit = int(request.query_params.get("limit", "20"))
+        if not context_logger:
+            return JSONResponse({"entries": []})
+        entries = context_logger.get_recent(session_id=session_id, limit=limit)
+        return JSONResponse({"entries": [e.to_dict() for e in entries]})
+
+    async def context_log_detail(request: Request) -> JSONResponse:
+        entry_id = request.path_params["id"]
+        if not context_logger:
+            return JSONResponse({"error": "Not enabled"}, status_code=404)
+        entry = context_logger.get_entry(entry_id)
+        if not entry:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse(entry.to_dict())
+
+    async def context_log_payload(request: Request) -> JSONResponse:
+        entry_id = request.path_params["id"]
+        if not context_logger:
+            return JSONResponse({"error": "Not enabled"}, status_code=404)
+        payload = context_logger.get_payload(entry_id)
+        if not payload:
+            return JSONResponse({"error": "Not captured"}, status_code=404)
+        return JSONResponse(payload)
+
+    async def context_log_sections(request: Request) -> JSONResponse:
+        entry_id = request.path_params["id"]
+        if not context_logger:
+            return JSONResponse({"error": "Not enabled"}, status_code=404)
+        entry = context_logger.get_entry(entry_id)
+        if not entry:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse({
+            "sections": entry.token_breakdown,
+            "total_tokens_est": entry.total_tokens_est,
+            "sections_present": entry.sections_present,
+        })
+
+    async def context_diff(request: Request) -> JSONResponse:
+        a_id = request.query_params.get("a")
+        b_id = request.query_params.get("b")
+        if not context_logger or not a_id or not b_id:
+            return JSONResponse({"error": "Missing parameters"}, status_code=400)
+        a = context_logger.get_entry(a_id)
+        b = context_logger.get_entry(b_id)
+        if not a or not b:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        token_delta = {}
+        for s in set(a.token_breakdown) | set(b.token_breakdown):
+            d = b.token_breakdown.get(s, 0) - a.token_breakdown.get(s, 0)
+            if d != 0:
+                token_delta[s] = d
+        return JSONResponse({
+            "a": a_id, "b": b_id,
+            "token_delta": {
+                "total": b.total_tokens_est - a.total_tokens_est,
+                "by_section": token_delta,
+            },
+            "sections_added": [s for s in b.sections_present if s not in a.sections_present],
+            "sections_removed": [s for s in a.sections_present if s not in b.sections_present],
+            "tools_added": [t for t in b.tool_names if t not in a.tool_names],
+            "tools_removed": [t for t in a.tool_names if t not in b.tool_names],
+            "messages_delta": b.messages_count - a.messages_count,
+        })
+
+    # ------------------------------------------------------------------
+    # F035.3: Behavioral drift detection endpoints
+    # ------------------------------------------------------------------
+
+    async def behavior_snapshot_latest(request: Request) -> JSONResponse:
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text(
+                "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+            ), {"aid": settings.agent_id})
+            row = result.fetchone()
+        if not row:
+            return JSONResponse({"snapshot": None})
+        return JSONResponse({"snapshot": {"timestamp": row.timestamp.isoformat(), "metrics": row.metrics, "anomalies": row.anomalies or []}})
+
+    async def behavior_trends(request: Request) -> JSONResponse:
+        from datetime import UTC, datetime, timedelta
+        import statistics as st
+        metric = request.query_params.get("metric", "fact_count_delta")
+        hours = int(request.query_params.get("hours", "168"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            cutoff = datetime.now(UTC) - timedelta(hours=hours)
+            result = await session.execute(text(
+                "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+            ), {"aid": settings.agent_id, "cutoff": cutoff})
+            rows = result.fetchall()
+        points = []
+        values = []
+        for row in rows:
+            metrics = row.metrics if isinstance(row.metrics, dict) else {}
+            val = metrics.get(metric, 0)
+            points.append({"timestamp": row.timestamp.isoformat(), "value": val})
+            values.append(float(val))
+        stats = {}
+        if values:
+            stats = {"mean": round(st.mean(values), 2), "min": min(values), "max": max(values)}
+            if len(values) > 1:
+                stats["stddev"] = round(st.stdev(values), 2)
+        return JSONResponse({"metric": metric, "hours": hours, "points": points, "stats": stats})
+
+    async def behavior_anomalies(request: Request) -> JSONResponse:
+        from datetime import UTC, datetime, timedelta
+        hours = int(request.query_params.get("hours", "168"))
+        async with database.session() as session:
+            from sqlalchemy import text
+            cutoff = datetime.now(UTC) - timedelta(hours=hours)
+            result = await session.execute(text(
+                "SELECT timestamp, anomalies FROM nous_system.behavior_snapshots "
+                "WHERE agent_id = :aid AND anomalies != '[]'::jsonb AND timestamp > :cutoff ORDER BY timestamp DESC"
+            ), {"aid": settings.agent_id, "cutoff": cutoff})
+            rows = result.fetchall()
+        anomalies = []
+        for row in rows:
+            for a in (row.anomalies or []):
+                a["timestamp"] = row.timestamp.isoformat()
+                anomalies.append(a)
+        return JSONResponse({"anomalies": anomalies, "hours": hours})
+
+    async def behavior_drift_report(request: Request) -> JSONResponse:
+        """GET /behavior/drift-report - Human-readable drift summary."""
+        async with database.session() as session:
+            from sqlalchemy import text
+            result = await session.execute(text(
+                "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+            ), {"aid": settings.agent_id})
+            row = result.fetchone()
+        if not row:
+            return JSONResponse({"report": "No snapshots yet.", "anomalies": []})
+        anomalies = row.anomalies or []
+        metrics = row.metrics if isinstance(row.metrics, dict) else {}
+        if not anomalies:
+            report = f"System behavior is within normal parameters. Last snapshot: {row.timestamp.isoformat()}"
+        else:
+            lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
+            for a in anomalies:
+                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+            report = "\n".join(lines)
+        return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -1693,6 +2100,13 @@ def create_app(
         Route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/health", health),
+        # F035.1: Event bus observability
+        Route("/events/stats", events_stats),
+        Route("/events/recent", events_recent),
+        # F035.2: Causal chain tracing
+        Route("/events/trace/{trace_id}", events_trace, methods=["GET"]),
+        Route("/events/recent-traces", events_recent_traces, methods=["GET"]),
+        Route("/events/modifications", events_modifications, methods=["GET"]),
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
@@ -1735,6 +2149,19 @@ def create_app(
         Route("/dashboard/ledger", dashboard_ledger),
         # F034: Heartbeat dashboard
         Route("/dashboard/heartbeat", dashboard_heartbeat),
+        # F035: Observability dashboard
+        Route("/dashboard/observability", dashboard_observability),
+        # F035.4: Context visibility
+        Route("/context/log", context_log_list, methods=["GET"]),
+        Route("/context/log/{id}", context_log_detail, methods=["GET"]),
+        Route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
+        Route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
+        Route("/context/diff", context_diff, methods=["GET"]),
+        # F035.3: Behavioral drift detection
+        Route("/behavior/snapshot/latest", behavior_snapshot_latest, methods=["GET"]),
+        Route("/behavior/trends", behavior_trends, methods=["GET"]),
+        Route("/behavior/anomalies", behavior_anomalies, methods=["GET"]),
+        Route("/behavior/drift-report", behavior_drift_report, methods=["GET"]),
     ]
 
     # Static dashboard mount — only add if directory exists (avoids crash during tests)

@@ -202,6 +202,82 @@ def format_usage_footer(usage: dict[str, int]) -> str:
     return f"\U0001f4ca {inp_str} in / {out_str} out"
 
 
+def format_event_bus_status(stats: dict) -> str:
+    """F035.1: Format event bus stats for Telegram /status output."""
+    total = stats.get("total_processed", 0)
+    dropped = stats.get("total_dropped", 0)
+    queue = stats.get("queue_depth", 0)
+    uptime_s = stats.get("uptime_seconds", 0)
+    hours = int(uptime_s // 3600)
+    mins = int((uptime_s % 3600) // 60)
+    uptime_str = f"{hours}h {mins}m" if hours else f"{mins}m"
+
+    lines = ["\n<b>Event Bus</b>", f"  {total} events processed, {dropped} dropped",
+             f"  Queue: {queue} pending | Uptime: {uptime_str}", "", "  Handlers:"]
+
+    for name, h in stats.get("handlers", {}).items():
+        # Safe class name extraction that handles names without dots
+        parts = name.split(".")
+        short_name = parts[-2] if len(parts) >= 2 else name
+        invocations = h.get("invocations", 0)
+        successes = h.get("successes", 0)
+        error_rate = h.get("error_rate", 0.0)
+        flag = "!!" if error_rate > 0.10 else "OK"
+        lines.append(f"  {flag} {short_name}: {successes}/{invocations}")
+    return "\n".join(lines)
+
+
+def format_trace_summary(trace_data: dict) -> str:
+    """F035.2: Format a causal chain for Telegram."""
+    events = trace_data.get("events", [])
+    if not events:
+        return "No events found for this trace."
+    lines = [f"<b>Trace: {trace_data.get('trace_id', '?')}</b>",
+             f"Root: {trace_data.get('root_event', '?')}",
+             f"Depth: {trace_data.get('depth', 0)} events"]
+    if trace_data.get("duration_ms"):
+        lines.append(f"Duration: {trace_data['duration_ms']:.0f}ms")
+    lines.append("")
+    for e in events:
+        indent = "  " if e.get("caused_by") else ""
+        mod = " [MOD]" if e.get("data", {}).get("modifies") else ""
+        lines.append(f"{indent}{e.get('type', '?')}{mod}")
+    return "\n".join(lines)
+
+
+def format_context_summary(entry_data: dict) -> str:
+    """F035.4: Format context log entry for Telegram."""
+    total = entry_data.get("total_tokens_est", 0)
+    actual = entry_data.get("input_tokens_actual")
+    utilization = entry_data.get("utilization_pct", 0)
+    duration = entry_data.get("duration_ms")
+    lines = [
+        f"<b>Last API Call (Turn {entry_data.get('turn_number', '?')})</b>",
+        f"  Model: {entry_data.get('model', '?')}",
+        f"  Frame: {entry_data.get('frame_id', '?')}",
+    ]
+    token_str = f"  Tokens: ~{total:,} est"
+    if actual:
+        token_str += f" / {actual:,} actual"
+    token_str += f" ({utilization:.1f}% of window)"
+    lines.append(token_str)
+    if duration:
+        lines.append(f"  Duration: {duration / 1000:.1f}s")
+    breakdown = entry_data.get("token_breakdown", {})
+    if breakdown:
+        lines.extend(["", "  Token Breakdown:"])
+        for name, tokens in sorted(breakdown.items(), key=lambda x: x[1], reverse=True)[:5]:
+            pct = (tokens / total * 100) if total else 0
+            lines.append(f"  - {name}: {tokens:,} ({pct:.0f}%)")
+    facts = entry_data.get("loaded_facts", 0)
+    decisions = entry_data.get("loaded_decisions", 0)
+    procedures = entry_data.get("loaded_procedures", 0)
+    if facts or decisions or procedures:
+        lines.append(f"\n  Memory: {facts} facts, {procedures} procedures, {decisions} decisions")
+    lines.append(f"  Tools: {entry_data.get('tools_count', 0)}")
+    return "\n".join(lines)
+
+
 class StreamingMessage:
     """Manages progressive message editing for Telegram streaming."""
 
