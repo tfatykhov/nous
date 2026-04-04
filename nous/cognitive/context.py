@@ -246,7 +246,7 @@ class ContextEngine:
                     ]
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
-                    profile_text = self._truncate_to_budget(profile_text, budget.user_profile)
+                    profile_text = self._truncate_to_budget(profile_text, self._scaled_budget(budget.user_profile))
                     sections.append(
                         ContextSection(
                             priority=1,
@@ -734,7 +734,7 @@ class ContextEngine:
                 adjusted.append(r)
                 continue
             category = getattr(r, "category", "")
-            if category in {"rule", "preference", "technical", "concept"}:
+            if category in {"rule", "preference", "technical", "concept", "person"}:
                 adjusted.append(r)
                 continue
             age_days = (now - created).days
