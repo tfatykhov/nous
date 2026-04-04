@@ -147,10 +147,11 @@ class Heart:
         outcome: str,
         lessons_learned: list[str] | None = None,
         surprise_level: float | None = None,
+        transcript: str | None = None,  # F025 P3-C
         session: AsyncSession | None = None,
     ) -> EpisodeDetail:
         """Close an episode with outcome and lessons."""
-        return await self.episodes.end(episode_id, outcome, lessons_learned, surprise_level, session)
+        return await self.episodes.end(episode_id, outcome, lessons_learned, surprise_level, transcript, session)
 
     async def get_episode(self, episode_id: UUID, session: AsyncSession | None = None) -> EpisodeDetail:
         """Fetch a single episode. Raises ValueError if not found (P2-7)."""

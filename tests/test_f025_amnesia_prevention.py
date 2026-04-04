@@ -193,6 +193,7 @@ class TestSourceTextPassthrough:
         inp.source_episode_id = uuid4()
 
         mock_episode = MagicMock()
+        mock_episode.transcript = None  # F025 P3-C: no transcript available
         mock_episode.summary = "episode summary text"
 
         session = AsyncMock()
@@ -214,3 +215,75 @@ class TestSourceTextPassthrough:
         session = AsyncMock()
         result = await manager._get_source_text(inp, session)
         assert result is None
+
+
+class TestTranscriptPersistence:
+    """P3-C: Episode model should have transcript column."""
+
+    def test_episode_model_has_transcript(self):
+        from nous.storage.models import Episode
+
+        assert hasattr(Episode, "transcript")
+
+    def test_episode_transcript_nullable(self):
+        from nous.storage.models import Episode
+
+        col = Episode.__table__.columns["transcript"]
+        assert col.nullable is True
+
+    @pytest.mark.asyncio
+    async def test_get_source_text_prefers_transcript_over_summary(self):
+        """When no source_text, prefer episode.transcript over episode.summary."""
+        from nous.heart.facts import FactManager
+
+        manager = FactManager.__new__(FactManager)
+
+        inp = MagicMock()
+        inp.source_text = None
+        inp.source_episode_id = uuid4()
+
+        mock_episode = MagicMock()
+        mock_episode.transcript = "full transcript text here"
+        mock_episode.summary = "short summary"
+
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=mock_episode)
+
+        result = await manager._get_source_text(inp, session)
+        assert result == "full transcript text here"
+
+    @pytest.mark.asyncio
+    async def test_get_source_text_falls_back_to_summary_when_no_transcript(self):
+        """When transcript is None, fall back to summary."""
+        from nous.heart.facts import FactManager
+
+        manager = FactManager.__new__(FactManager)
+
+        inp = MagicMock()
+        inp.source_text = None
+        inp.source_episode_id = uuid4()
+
+        mock_episode = MagicMock()
+        mock_episode.transcript = None
+        mock_episode.summary = "summary text"
+
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=mock_episode)
+
+        result = await manager._get_source_text(inp, session)
+        assert result == "summary text"
+
+    @pytest.mark.asyncio
+    async def test_source_text_still_takes_priority(self):
+        """source_text > transcript > summary."""
+        from nous.heart.facts import FactManager
+
+        manager = FactManager.__new__(FactManager)
+
+        inp = MagicMock()
+        inp.source_text = "from FactInput directly"
+        inp.source_episode_id = None
+
+        session = AsyncMock()
+        result = await manager._get_source_text(inp, session)
+        assert result == "from FactInput directly"
