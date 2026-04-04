@@ -1566,3 +1566,97 @@ body {
 .budget-gauge-center { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; }
 .budget-gauge-value { font-size:1.4rem; font-weight:700; color:var(--text); }
 .budget-gauge-label { font-size:0.75rem; color:var(--muted); }
+
+/* F035: Observability */
+.obs-color { color: #38bdf8; }
+
+.obs-section { margin-bottom: 24px; }
+.obs-section h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
+
+.obs-trace-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+.obs-trace-row:last-child { border-bottom: none; }
+
+.obs-trace-type {
+    font-weight: 600;
+    min-width: 140px;
+    color: var(--text);
+}
+
+.obs-trace-meta {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.obs-trace-badge {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.obs-trace-badge.mod {
+    background: rgba(251, 191, 36, 0.15);
+    color: var(--yellow);
+}
+
+.obs-trace-badge.events {
+    background: rgba(56, 189, 248, 0.15);
+    color: #38bdf8;
+}
+
+.obs-mod-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 12px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+}
+.obs-mod-row:last-child { border-bottom: none; }
+.obs-mod-type { color: var(--yellow); font-weight: 600; min-width: 80px; }
+
+.obs-anomaly {
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+}
+.obs-anomaly.warning { background: rgba(251, 191, 36, 0.1); border-left: 3px solid var(--yellow); }
+.obs-anomaly.alert { background: rgba(248, 113, 113, 0.1); border-left: 3px solid var(--red); }
+
+.obs-ctx-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+.obs-ctx-row:last-child { border-bottom: none; }
+
+.obs-handler-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    font-size: 12px;
+}
+
+.obs-handler-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.obs-handler-dot.good { background: var(--green); }
+.obs-handler-dot.warn { background: var(--yellow); }
+.obs-handler-dot.bad { background: var(--red); }

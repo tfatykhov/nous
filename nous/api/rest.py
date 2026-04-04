@@ -1248,6 +1248,133 @@ def create_app(
             logger.error("Dashboard heartbeat error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F035: Observability dashboard ---
+
+    async def dashboard_observability(request: Request) -> JSONResponse:
+        """GET /dashboard/observability - Aggregated observability data."""
+        from datetime import UTC, datetime, timedelta
+
+        result = {}
+
+        # 1. Event bus stats (in-memory, instant)
+        if bus is not None:
+            stats = bus.stats.to_dict()
+            stats["queue_depth"] = bus.pending
+            result["event_bus"] = stats
+        else:
+            result["event_bus"] = {"total_processed": 0, "total_dropped": 0, "handlers": {}, "event_counts": {}}
+
+        # 2. Recent traces (last 10)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                tr = await session.execute(text("""
+                    WITH trace_stats AS (
+                        SELECT trace_id,
+                               COUNT(*) AS event_count,
+                               BOOL_OR(data->>'modifies' IS NOT NULL) AS has_modifications
+                        FROM nous_system.events
+                        WHERE trace_id IS NOT NULL
+                        AND agent_id = :aid
+                        GROUP BY trace_id
+                    ),
+                    roots AS (
+                        SELECT event_id, event_type, trace_id, created_at
+                        FROM nous_system.events
+                        WHERE trace_id IS NOT NULL AND caused_by IS NULL
+                        AND agent_id = :aid
+                    )
+                    SELECT r.trace_id, r.event_type AS root_type, r.created_at,
+                           ts.event_count, ts.has_modifications
+                    FROM roots r
+                    JOIN trace_stats ts ON ts.trace_id = r.trace_id
+                    ORDER BY r.created_at DESC
+                    LIMIT 10
+                """), {"aid": settings.agent_id})
+                rows = tr.fetchall()
+            result["recent_traces"] = [{
+                "trace_id": r.trace_id, "root_type": r.root_type,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "event_count": r.event_count, "has_modifications": bool(r.has_modifications),
+            } for r in rows]
+        except Exception:
+            logger.debug("dashboard_observability: recent_traces failed", exc_info=True)
+            result["recent_traces"] = []
+
+        # 3. Recent modifications (last 24h)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                mr = await session.execute(text("""
+                    SELECT event_id, event_type, trace_id, data, created_at
+                    FROM nous_system.events
+                    WHERE data->>'modifies' IS NOT NULL
+                    AND agent_id = :aid
+                    AND created_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY created_at DESC LIMIT 20
+                """), {"aid": settings.agent_id})
+                rows = mr.fetchall()
+            result["recent_modifications"] = [{
+                "event_id": r.event_id, "type": r.event_type, "trace_id": r.trace_id,
+                "modifies": (r.data or {}).get("modifies"),
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+            } for r in rows]
+        except Exception:
+            logger.debug("dashboard_observability: recent_modifications failed", exc_info=True)
+            result["recent_modifications"] = []
+
+        # 4. Drift snapshot (latest + anomalies)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                sr = await session.execute(text(
+                    "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+                ), {"aid": settings.agent_id})
+                row = sr.fetchone()
+            if row:
+                result["drift"] = {
+                    "timestamp": row.timestamp.isoformat(),
+                    "metrics": row.metrics,
+                    "anomalies": row.anomalies or [],
+                }
+            else:
+                result["drift"] = None
+        except Exception:
+            logger.debug("dashboard_observability: drift snapshot failed", exc_info=True)
+            result["drift"] = None
+
+        # 5. Drift trends (last 7 days — key metrics only)
+        try:
+            async with database.session() as session:
+                from sqlalchemy import text
+                cutoff = datetime.now(UTC) - timedelta(days=7)
+                tr2 = await session.execute(text(
+                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                ), {"aid": settings.agent_id, "cutoff": cutoff})
+                rows = tr2.fetchall()
+            trend_metrics = ["fact_count_delta", "handler_error_rate"]
+            trends = {m: [] for m in trend_metrics}
+            for row in rows:
+                metrics = row.metrics if isinstance(row.metrics, dict) else {}
+                ts = row.timestamp.isoformat()
+                for m in trend_metrics:
+                    trends[m].append({"t": ts, "v": metrics.get(m, 0)})
+            result["drift_trends"] = trends
+        except Exception:
+            logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
+            result["drift_trends"] = {}
+
+        # 6. Context log (last 5 calls)
+        if context_logger:
+            entries = context_logger.get_recent(limit=5)
+            result["context_log"] = [e.to_dict() for e in entries]
+        else:
+            result["context_log"] = []
+
+        return JSONResponse(result)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -2022,6 +2149,8 @@ def create_app(
         Route("/dashboard/ledger", dashboard_ledger),
         # F034: Heartbeat dashboard
         Route("/dashboard/heartbeat", dashboard_heartbeat),
+        # F035: Observability dashboard
+        Route("/dashboard/observability", dashboard_observability),
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
