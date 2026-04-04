@@ -203,10 +203,8 @@ class HeartbeatRunner:
             )
             try:
                 logger.info("Heartbeat triage starting for %d findings", len(all_findings))
-                await asyncio.wait_for(self._triage(all_findings), timeout=180)
+                await self._triage(all_findings)
                 logger.info("Heartbeat triage completed")
-            except asyncio.TimeoutError:
-                logger.error("Heartbeat triage timed out after 180s")
             except Exception:
                 logger.exception("Heartbeat triage crashed")
 
