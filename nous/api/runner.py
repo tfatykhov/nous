@@ -168,9 +168,10 @@ class AgentRunner:
         forked._api_shared = True  # caller owns lifecycle
         if self._dispatcher is not None:
             forked._dispatcher = self._dispatcher
-        # F035.4: Share context logger so heartbeat/subtask calls are visible
-        if self._context_logger is not None:
-            forked._context_logger = self._context_logger
+        # F035.4: Context logger NOT propagated to forks — heartbeat triage
+        # uses a dedicated API client on a separate connection pool, and the
+        # context logger's async DB writer can contend with triage DB sessions.
+        # Heartbeat calls are visible via event bus stats instead.
         return forked
 
     async def close(self) -> None:
