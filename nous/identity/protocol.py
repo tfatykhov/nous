@@ -45,6 +45,7 @@ appropriate section. Valid sections:
 - **boundaries** — topics to avoid, data restrictions, actions needing approval
 - **values** — what matters to the user, priorities
 - **protocols** — how to work together, workflows
+- **environment** — runtime capabilities: installed packages, OS tools, system constraints
 
 When ALL topics have been covered, call `complete_initiation` to finish setup.
 
@@ -88,7 +89,7 @@ STORE_IDENTITY_SCHEMA = {
         "properties": {
             "section": {
                 "type": "string",
-                "enum": ["character", "values", "protocols", "preferences", "boundaries"],
+                "enum": ["character", "values", "protocols", "preferences", "boundaries", "environment"],
                 "description": "Identity section to store.",
             },
             "content": {

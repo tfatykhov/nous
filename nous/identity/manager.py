@@ -25,7 +25,7 @@ from nous.storage.models import Agent, AgentIdentity
 
 logger = logging.getLogger(__name__)
 
-SECTIONS = ["character", "values", "protocols", "preferences", "boundaries"]
+SECTIONS = ["character", "values", "protocols", "preferences", "boundaries", "environment"]
 VALID_SECTIONS = set(SECTIONS) | {"status"}  # status is internal control field
 
 # Cache TTL in seconds
