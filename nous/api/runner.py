@@ -485,7 +485,14 @@ class AgentRunner:
 
             system_blocks: list[dict[str, Any]] = []
 
-            # Block 0: Static identity — always cached
+            # Block 0: Claude Code preamble — required for claude-code beta rate limits
+            system_blocks.append({
+                "type": "text",
+                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                "cache_control": {"type": "ephemeral"},
+            })
+
+            # Block 1: Static identity — always cached
             if static_text:
                 system_blocks.append({
                     "type": "text",

@@ -82,11 +82,12 @@ def test_build_api_payload_3_system_blocks_when_split() -> None:
     messages = [{"role": "user", "content": "hello"}]
     payload = runner._build_api_payload(prompt, messages)
     system_blocks = payload["system"]
-    assert len(system_blocks) == 3
-    assert system_blocks[0]["text"] == "## Identity\n\nI am Nous."
-    assert system_blocks[1]["text"] == "## Current Frame\n\nConversation frame."
+    assert len(system_blocks) == 4  # preamble + static + semi_stable + dynamic
+    assert system_blocks[0]["text"] == "You are Claude Code, Anthropic's official CLI for Claude."
+    assert system_blocks[1]["text"] == "## Identity\n\nI am Nous."
+    assert system_blocks[2]["text"] == "## Current Frame\n\nConversation frame."
     # Dynamic block text starts with working memory (may have frame instructions appended)
-    assert "## Working Memory" in system_blocks[2]["text"]
+    assert "## Working Memory" in system_blocks[3]["text"]
 
 
 # ── Test 2: 2-block fallback when split disabled ──
@@ -267,9 +268,13 @@ def test_static_block_always_has_cache_control() -> None:
     prompt = runner._build_system_prompt(tc)
     messages = [{"role": "user", "content": "hello"}]
     payload = runner._build_api_payload(prompt, messages)
+    # Block 0: preamble, Block 1: static identity — both always cached
     block0 = payload["system"][0]
+    block1 = payload["system"][1]
     assert "cache_control" in block0
     assert block0["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" in block1
+    assert block1["cache_control"] == {"type": "ephemeral"}
 
 
 def test_dynamic_block_never_has_cache_control() -> None:
@@ -284,9 +289,9 @@ def test_dynamic_block_never_has_cache_control() -> None:
     prompt = runner._build_system_prompt(tc)
     messages = [{"role": "user", "content": "hello"}]
     payload = runner._build_api_payload(prompt, messages)
-    # Dynamic is block index 2
-    block2 = payload["system"][2]
-    assert "cache_control" not in block2
+    # Dynamic is block index 3 (after preamble + static + semi_stable)
+    block3 = payload["system"][3]
+    assert "cache_control" not in block3
 
 
 def test_last_user_message_has_cache_control() -> None:
