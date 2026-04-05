@@ -347,6 +347,10 @@ class Settings(BaseSettings):
     heartbeat_tuning_learning_rate: float = 0.1
     heartbeat_tuning_rollback_threshold: float = 0.2
 
+    # F034.5: Dynamic heartbeat checks
+    heartbeat_max_dynamic_checks: int = 10
+    heartbeat_dynamic_sync_ticks: int = 60  # re-sync every N ticks (~30 min at 30s tick)
+
     # F035.3: Behavioral drift detection
     drift_detection_enabled: bool = True
     drift_detection_interval: int = 3600

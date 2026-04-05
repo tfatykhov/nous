@@ -113,6 +113,7 @@ All shipped implementation specs with PR references:
 | F034.2 | Intelligent Checks | ✅ Shipped | #241 — embedding search, LLM email classification, tunable params |
 | F034.3 | Self-Tuning Heartbeat | ✅ Shipped | #241 — outcome-driven adjustment, cross-cycle rollback, pinned params |
 | F034.4 | Heartbeat Completions | 📋 Proposed | #242 — consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email dedup migration |
+| F034.5 | Dynamic Heartbeat Checks | ✅ Shipped | #252 — prompt-driven checks, conversational creation, tool_filter, REST CRUD, periodic sync |
 | 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
 | 011.2 | Multimodal File Support | 📋 Draft | — image/document processing across input channels |
 | 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred to F024) |
@@ -141,6 +142,7 @@ All shipped implementation specs with PR references:
 | F034.2 | [Intelligent Checks](F034.2-intelligent-checks.md) | ✅ Shipped | Embedding search, LLM email classification, drive significance, tunable params |
 | F034.3 | [Self-Tuning Heartbeat](F034.3-self-tuning-heartbeat.md) | ✅ Shipped | Outcome-driven parameter adjustment, cross-cycle rollback, pinned params |
 | F034.4 | [Heartbeat Completions](F034.4-heartbeat-completions.md) | 📋 Proposed | Consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email→FindingStore migration, rollback threshold fix |
+| F034.5 | [Dynamic Heartbeat Checks](F034.5-dynamic-heartbeat-checks.md) | ✅ Shipped | Prompt-driven checks, conversational creation/management, DB-backed persistence, full lifecycle integration |
 
 ### P1: Memory Quality
 | Feature | Name | Status | Description |
@@ -181,9 +183,9 @@ All shipped implementation specs with PR references:
 
 - **Total source:** ~35,200 lines of production Python + ~36,800 lines of tests (~72K total)
 - **Test count:** 2,006 tests across 106 test files
-- **Database:** 27 tables across 3 schemas (brain, heart, nous_system), 19 migrations
-- **Tools:** 21 agent tools (record_decision, recall_deep, recall_recent, learn_fact, learn_skill, get_procedure, create_censor, cache_retrieve, spawn_task, schedule_task, list_tasks, cancel_task, run_python, bash, read_file, write_file, web_search, web_fetch, send_file, store_identity, complete_initiation)
-- **Endpoints:** 57 REST endpoints + 5 MCP tools + Telegram bot
+- **Database:** 28 tables across 3 schemas (brain, heart, nous_system), 20 migrations
+- **Tools:** 23 agent tools (record_decision, recall_deep, recall_recent, learn_fact, learn_skill, get_procedure, create_censor, cache_retrieve, spawn_task, schedule_task, list_tasks, cancel_task, run_python, bash, read_file, write_file, web_search, web_fetch, send_file, store_identity, complete_initiation, heartbeat_check_create, heartbeat_check_manage)
+- **Endpoints:** 62 REST endpoints + 5 MCP tools + Telegram bot
 - **Event handlers:** 13 automated handlers (decision review, episode summary, fact extraction, knowledge extraction, fact graph linking, outcome detection, procedure learning, rubric evolution, session monitoring, sleep/reflection, subtask workers, task scheduling, time parsing)
 - **Feature specs:** 41 feature docs + 19 research notes
 - **Voice:** 3 communication procedures (email, Telegram, A2A) + 2 censors
@@ -217,12 +219,12 @@ All shipped implementation specs with PR references:
 
 ![Nous Architecture](../nous-architecture.png)
 
-## Database: 27 Tables, 3 Schemas, 19 Migrations
+## Database: 28 Tables, 3 Schemas, 20 Migrations
 
 | Schema | Tables | Purpose |
 |--------|--------|---------|
 | `brain` (8) | decisions, decision_tags, decision_reasons, decision_bridge, thoughts, graph_edges, guardrails, calibration_snapshots | Decision intelligence |
 | `heart` (13) | episodes, episode_decisions, episode_procedures, facts, procedures, rubric_versions, outcome_signals, censors, working_memory, conversation_state, subtasks, schedules, tool_cache | Memory system |
-| `nous_system` (6) | agents, agent_identity, config, events, frames, schema_migrations | System infrastructure |
+| `nous_system` (7) | agents, agent_identity, config, dynamic_checks, events, frames, schema_migrations | System infrastructure |
 
 Migrations (006→024): event bus, agent identity, conversation state, decision review, subtasks/schedules, subtask delivery, frame typing, tool cache, notification defaults, schedule frames, polymorphic graph edges, admission control, dashboard indexes, admission scores, episode compaction, config table, rubric/outcome signals, procedure search, censor action payloads.

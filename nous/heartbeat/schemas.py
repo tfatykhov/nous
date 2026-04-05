@@ -43,6 +43,7 @@ class CheckResult:
 
     has_updates: bool = False
     findings: list[Finding] = field(default_factory=list)
+    tokens_used: int = 0  # F034.5: token consumption for budget tracking
 
 
 @dataclass

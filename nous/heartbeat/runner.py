@@ -25,6 +25,7 @@ from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.dynamic import DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -50,6 +51,7 @@ class HeartbeatRunner:
         http_client: httpx.AsyncClient | None,
         finding_store: FindingStore | None = None,
         api_client: AnthropicClient | None = None,
+        dynamic_loader: DynamicCheckLoader | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -60,6 +62,7 @@ class HeartbeatRunner:
         self._http = http_client
         self._finding_store = finding_store
         self._api_client = api_client
+        self._dynamic_loader = dynamic_loader
         self._dedicated_runner: AgentRunner | None = None
 
         self._task: asyncio.Task | None = None
@@ -85,6 +88,16 @@ class HeartbeatRunner:
         if self._api_client is not None:
             self._dedicated_runner = self._runner.fork(self._api_client)
             logger.info("F034: Heartbeat using dedicated API client (isolated connection pool)")
+
+        # F034.5: Wire dynamic check loader to dedicated runner and do initial sync
+        if self._dynamic_loader is not None:
+            runner_for_checks = self._dedicated_runner or self._runner
+            self._dynamic_loader.set_runner(runner_for_checks)
+            try:
+                count = await self._dynamic_loader.sync()
+                logger.info("F034.5: Initial dynamic check sync loaded %d checks", count)
+            except Exception:
+                logger.exception("F034.5: Initial dynamic check sync failed")
 
         await self._detect_missed_checks()
         self._task = asyncio.create_task(self._loop(), name="heartbeat-runner")
@@ -142,6 +155,17 @@ class HeartbeatRunner:
                 else:
                     await self._tick()
 
+                # F034.5: Periodic dynamic check sync
+                if (
+                    self._dynamic_loader is not None
+                    and self._settings.heartbeat_dynamic_sync_ticks > 0
+                    and self._tick_count % self._settings.heartbeat_dynamic_sync_ticks == 0
+                ):
+                    try:
+                        await self._dynamic_loader.sync()
+                    except Exception:
+                        logger.exception("F034.5: Dynamic check sync failed")
+
                 # F034.1: Daily digest at UTC hour 9
                 await self._maybe_send_digest()
 
@@ -181,6 +205,19 @@ class HeartbeatRunner:
                 )
                 check.mark_success()
 
+                # F034.5: Track token usage from dynamic checks
+                if result.tokens_used:
+                    self._tokens_used_today += result.tokens_used
+
+                # F034.5: Update run stats in DB for dynamic checks
+                if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
+                    try:
+                        await self._dynamic_loader.update_run_stats(
+                            check.check_id, success=True,
+                        )
+                    except Exception:
+                        logger.warning("F034.5: Failed to update run stats for '%s'", check.name)
+
                 if result.has_updates:
                     for f in result.findings:
                         f.check_name = check.name
@@ -189,9 +226,25 @@ class HeartbeatRunner:
             except asyncio.TimeoutError:
                 check.mark_failure()
                 logger.warning("Heartbeat check '%s' timed out", check.name)
-            except Exception:
+                # F034.5: Record timeout as error for dynamic checks
+                if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
+                    try:
+                        await self._dynamic_loader.update_run_stats(
+                            check.check_id, success=False, error_msg="timeout",
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
                 check.mark_failure()
                 logger.exception("Heartbeat check '%s' failed", check.name)
+                # F034.5: Record error for dynamic checks
+                if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
+                    try:
+                        await self._dynamic_loader.update_run_stats(
+                            check.check_id, success=False, error_msg=str(exc)[:200],
+                        )
+                    except Exception:
+                        pass
 
         self._last_tick = now
 
@@ -578,6 +631,10 @@ class HeartbeatRunner:
         return self._tuner
 
     @property
+    def dynamic_loader(self) -> DynamicCheckLoader | None:
+        return self._dynamic_loader
+
+    @property
     def tokens_used_today(self) -> int:
         return self._tokens_used_today
 
@@ -608,7 +665,23 @@ class HeartbeatRunner:
         try:
             result = await asyncio.wait_for(check.run(), timeout=check.timeout)
             check.mark_success()
+            # F034.5: Update DB stats for dynamic checks
+            if isinstance(check, DynamicCheck) and self._dynamic_loader:
+                try:
+                    await self._dynamic_loader.update_run_stats(check.check_id, success=True)
+                except Exception:
+                    logger.debug("Failed to update run stats for %s", name, exc_info=True)
+            if result.tokens_used:
+                self._tokens_used_today += result.tokens_used
             return result
-        except Exception:
+        except Exception as e:
             check.mark_failure()
+            # F034.5: Update DB stats for dynamic checks on failure
+            if isinstance(check, DynamicCheck) and self._dynamic_loader:
+                try:
+                    await self._dynamic_loader.update_run_stats(
+                        check.check_id, success=False, error_msg=str(e)[:200],
+                    )
+                except Exception:
+                    logger.debug("Failed to update run stats for %s", name, exc_info=True)
             raise

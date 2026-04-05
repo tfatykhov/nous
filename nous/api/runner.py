@@ -48,12 +48,12 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file"],
+    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage"],
     "question": ["recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "write_file", "record_decision", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python"],
     "decision": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task"],
     "creative": ["learn_fact", "recall_deep", "recall_recent", "get_procedure", "write_file", "web_search", "cache_retrieve"],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file"],
+    "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage"],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -195,6 +195,7 @@ class AgentRunner:
         is_subtask: bool = False,
         max_tool_calls: int | None = None,
         model_override: str | None = None,
+        tool_filter: list[str] | None = None,  # F034.5: restrict available tools
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -316,6 +317,7 @@ class AgentRunner:
                 model_override=model_override,
                 user_message=user_message,
                 ledger=ledger,
+                tool_filter=tool_filter,
             )
             conversation.messages.append(Message(role="assistant", content=response_text))
         except Exception as e:
@@ -968,6 +970,7 @@ class AgentRunner:
         model_override: str | None = None,
         user_message: str = "",
         ledger: ExecutionLedger | None = None,
+        tool_filter: list[str] | None = None,  # F034.5: restrict to named tools
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -990,6 +993,10 @@ class AgentRunner:
         if is_subtask:
             _SUBTASK_EXCLUDED_TOOLS = {"spawn_task", "schedule_task"}
             base_tools = [t for t in base_tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
+
+        # F034.5: Dynamic check tool restriction
+        if tool_filter is not None:
+            base_tools = [t for t in base_tools if t["name"] in tool_filter]
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages

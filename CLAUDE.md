@@ -38,7 +38,7 @@ nous/
 │   ├── utils.py                # Shared utilities
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
-│   │   ├── models.py           # ORM models for all 27 tables
+│   │   ├── models.py           # ORM models for all 28 tables
 │   │   └── migrator.py         # Schema migration runner
 │   ├── brain/                  # Decision intelligence organ
 │   │   ├── brain.py            # Core: record, query, review, calibrate
@@ -89,13 +89,14 @@ nous/
 │   │   ├── runner.py           # HeartbeatRunner tick loop + triage
 │   │   ├── registry.py         # CheckRegistry + BaseCheck ABC
 │   │   ├── checks.py           # HealthCheck, SelfInitiatedCheck, EmailCheck
+│   │   ├── dynamic.py          # DynamicCheck + DynamicCheckLoader (F034.5)
 │   │   └── schemas.py          # Finding, CheckResult, HeartbeatResult
 │   ├── identity/               # Agent identity system (F018)
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
 │   └── api/                    # External interfaces
-│       ├── rest.py             # Starlette REST API (47 endpoints)
+│       ├── rest.py             # Starlette REST API (52 endpoints)
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── tools.py            # Tool dispatcher + registration
@@ -153,6 +154,7 @@ nous/
 | F034.1 | Finding Lifecycle (fingerprint dedup, state machine, escalation, daily digest, outcome signals) | #241 |
 | F034.2 | Intelligent Checks (embedding search, LLM email classification, drive significance, tunable params) | #241 |
 | F034.3 | Self-Tuning Heartbeat (outcome-driven adjustment, cross-cycle rollback, pinned params) | #241 |
+| F034.5 | Dynamic Heartbeat Checks (prompt-driven checks, conversational creation/management, full lifecycle) | #252 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 | F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
 
@@ -190,7 +192,7 @@ nous/
 
 ### Database
 
-- Three schemas: `brain`, `heart`, `nous_system` (27 tables total)
+- Three schemas: `brain`, `heart`, `nous_system` (28 tables total)
 - All tables are agent-scoped (`agent_id` column) for multi-agent readiness
 - Use `vector(1536)` for embeddings (text-embedding-3-small)
 - Full-text search via `tsvector` + GIN indexes
@@ -349,6 +351,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_HEARTBEAT_TUNING_MIN_SAMPLES` | `10` | Minimum outcome signals before adjusting params |
 | `NOUS_HEARTBEAT_TUNING_LEARNING_RATE` | `0.1` | Max parameter change per cycle (fraction of range) |
 | `NOUS_HEARTBEAT_TUNING_ROLLBACK_THRESHOLD` | `0.2` | Negative rate increase that triggers auto-rollback |
+| `NOUS_HEARTBEAT_MAX_DYNAMIC_CHECKS` | `10` | Maximum number of concurrent dynamic checks |
+| `NOUS_HEARTBEAT_DYNAMIC_SYNC_TICKS` | `60` | Ticks between periodic dynamic check sync (re-loads from DB) |
 
 ### REST Endpoints
 
@@ -411,6 +415,11 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | PUT | `/heartbeat/escalation-policy` | Update escalation thresholds |
 | GET | `/heartbeat/tuning-report` | Latest tuning report |
 | POST | `/heartbeat/tune` | Force a tuning pass |
+| GET | `/heartbeat/checks/dynamic` | List all dynamic checks |
+| POST | `/heartbeat/checks/dynamic` | Create a new dynamic check |
+| PATCH | `/heartbeat/checks/dynamic/{name}` | Update a dynamic check |
+| DELETE | `/heartbeat/checks/dynamic/{name}` | Delete a dynamic check |
+| POST | `/heartbeat/checks/dynamic/{name}/trigger` | Force-run a dynamic check |
 
 ### Agent Tools
 
@@ -435,6 +444,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `web_fetch` | all | Fetch and extract web content |
 | `run_python` | conversation, question, debug, task | Execute Python with memory functions in scope |
 | `send_file` | task, conversation, debug | Send files to Telegram (images as photos, rest as documents) |
+| `heartbeat_check_create` | conversation, debug | Create a new dynamic heartbeat check |
+| `heartbeat_check_manage` | conversation, debug | List, enable, disable, delete, or update dynamic checks |
 
 ## Git Workflow
 

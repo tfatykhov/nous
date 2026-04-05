@@ -703,3 +703,40 @@ class ToolCache(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     item_count: Mapped[int | None] = mapped_column(Integer)
+
+
+class DynamicCheckModel(Base):
+    """F034.5: Dynamic heartbeat check definition."""
+
+    __tablename__ = "dynamic_checks"
+    __table_args__ = {"schema": "nous_system"}
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String, nullable=False, default="nous")
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    tools: Mapped[list] = mapped_column(ARRAY(String), server_default="{}")
+    cron_expr: Mapped[str | None] = mapped_column(String, nullable=True)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=3600)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    urgent: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    created_by: Mapped[str] = mapped_column(String, default="conversation")
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    run_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSONB, server_default="{}"
+    )
