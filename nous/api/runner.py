@@ -788,6 +788,7 @@ class AgentRunner:
                 text_parts: list[str] = []
                 tool_calls: list[dict[str, Any]] = []
                 stop_reason = ""
+                _segment_usage: dict[str, Any] = {}  # F036.1: per-segment usage
 
                 # Emit keepalives while waiting for Anthropic's first byte —
                 # large contexts + thinking can cause long waits (008.1)
@@ -804,9 +805,8 @@ class AgentRunner:
                     elif event.type == "message_start":
                         if event.usage:
                             total_usage["input_tokens"] += event.usage.get("input_tokens", 0)
-                            # F036.1: Capture cache tokens for context logger
-                            total_usage["cache_creation_input_tokens"] = event.usage.get("cache_creation_input_tokens", 0)
-                            total_usage["cache_read_input_tokens"] = event.usage.get("cache_read_input_tokens", 0)
+                        # F036.1: Capture per-segment usage for context logger
+                        _segment_usage = dict(event.usage) if event.usage else {}
 
                     # -- Thinking blocks (yielded to client for thinking indicators) --
                     elif event.type == "thinking_start":
@@ -882,15 +882,17 @@ class AgentRunner:
                         if event.usage:
                             total_usage["input_tokens"] += event.usage.get("input_tokens", 0)
                             total_usage["output_tokens"] += event.usage.get("output_tokens", 0)
+                            # F036.1: Merge output_tokens into segment usage
+                            _segment_usage["output_tokens"] = event.usage.get("output_tokens", 0)
 
-                # F036.1: Update context log with streaming response metadata
+                # F036.1: Update context log with per-segment usage (not cumulative)
                 if self._context_logger and self._last_context_entry_id:
                     self._context_logger.update_response(
                         entry_id=self._last_context_entry_id,
-                        input_tokens=total_usage.get("input_tokens"),
-                        output_tokens=total_usage.get("output_tokens"),
-                        cache_creation=total_usage.get("cache_creation_input_tokens"),
-                        cache_read=total_usage.get("cache_read_input_tokens"),
+                        input_tokens=_segment_usage.get("input_tokens"),
+                        output_tokens=_segment_usage.get("output_tokens"),
+                        cache_creation=_segment_usage.get("cache_creation_input_tokens"),
+                        cache_read=_segment_usage.get("cache_read_input_tokens"),
                         stop_reason=stop_reason or None,
                     )
                     self._last_context_entry_id = None  # Consumed
