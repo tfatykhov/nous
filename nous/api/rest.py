@@ -1375,6 +1375,94 @@ def create_app(
 
         return JSONResponse(result)
 
+    async def dashboard_cache(request: Request) -> JSONResponse:
+        """GET /dashboard/cache - Prompt cache efficiency metrics (F036.1)."""
+        if context_logger is None:
+            return JSONResponse({"error": "Context logging not enabled"}, status_code=503)
+
+        entries = context_logger.get_recent(limit=200)
+
+        # Filter to entries that have actual token data (API has responded)
+        calls = [e for e in entries if e.input_tokens_actual is not None]
+
+        total_calls = len(calls)
+        total_input = sum(e.input_tokens_actual or 0 for e in calls)
+        total_cache_read = sum(e.cache_read_tokens or 0 for e in calls)
+        total_cache_created = sum(e.cache_creation_tokens or 0 for e in calls)
+        total_breaks = sum(1 for e in calls if e.cache_break)
+        total_break_tokens = sum(e.cache_break_tokens_lost for e in calls if e.cache_break)
+
+        # Per-session aggregation
+        sessions: dict[str, dict] = {}
+        for e in calls:
+            sid = e.session_id
+            if sid not in sessions:
+                sessions[sid] = {"calls": 0, "input": 0, "cache_read": 0, "cache_created": 0, "breaks": 0}
+            s = sessions[sid]
+            s["calls"] += 1
+            s["input"] += e.input_tokens_actual or 0
+            s["cache_read"] += e.cache_read_tokens or 0
+            s["cache_created"] += e.cache_creation_tokens or 0
+            if e.cache_break:
+                s["breaks"] += 1
+
+        # Break component distribution
+        component_counts: dict[str, int] = {}
+        for e in calls:
+            if e.cache_break:
+                for comp in e.cache_break_components:
+                    component_counts[comp] = component_counts.get(comp, 0) + 1
+
+        # Per-call timeline (newest first, last 50)
+        timeline = []
+        for e in calls[:50]:
+            cache_read = e.cache_read_tokens or 0
+            input_tok = e.input_tokens_actual or 0
+            hit_rate = round(cache_read / input_tok * 100, 1) if input_tok > 0 else 0
+            timeline.append({
+                "timestamp": e.timestamp,
+                "session_id": e.session_id,
+                "turn": e.turn_number,
+                "model": e.model,
+                "input_tokens": input_tok,
+                "cache_read": cache_read,
+                "cache_created": e.cache_creation_tokens or 0,
+                "hit_rate": hit_rate,
+                "cache_break": e.cache_break,
+                "break_components": e.cache_break_components if e.cache_break else [],
+            })
+
+        # Session list sorted by calls descending
+        session_list = []
+        for sid, s in sessions.items():
+            hit_rate = round(s["cache_read"] / s["input"] * 100, 1) if s["input"] > 0 else 0
+            session_list.append({
+                "session_id": sid,
+                "calls": s["calls"],
+                "input_tokens": s["input"],
+                "cache_read": s["cache_read"],
+                "cache_created": s["cache_created"],
+                "hit_rate": hit_rate,
+                "breaks": s["breaks"],
+            })
+        session_list.sort(key=lambda x: x["calls"], reverse=True)
+
+        return JSONResponse({
+            "summary": {
+                "total_calls": total_calls,
+                "total_input_tokens": total_input,
+                "total_cache_read": total_cache_read,
+                "total_cache_created": total_cache_created,
+                "overall_hit_rate": round(total_cache_read / total_input * 100, 1) if total_input > 0 else 0,
+                "total_breaks": total_breaks,
+                "break_rate": round(total_breaks / total_calls * 100, 1) if total_calls > 0 else 0,
+                "tokens_lost_to_breaks": total_break_tokens,
+            },
+            "break_components": component_counts,
+            "sessions": session_list,
+            "timeline": timeline,
+        })
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -2265,6 +2353,8 @@ def create_app(
         Route("/dashboard/heartbeat", dashboard_heartbeat),
         # F035: Observability dashboard
         Route("/dashboard/observability", dashboard_observability),
+        # F036.1: Cache dashboard
+        Route("/dashboard/cache", dashboard_cache),
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
