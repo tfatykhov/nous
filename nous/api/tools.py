@@ -13,6 +13,7 @@ Each tool returns MCP-compliant response format and handles errors gracefully.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -1709,3 +1710,70 @@ def register_programmatic_tools(
     resolver = cognitive.get_active_episode_id if cognitive is not None else None
     closures = create_programmatic_tools(brain, heart, settings, episode_id_resolver=resolver)
     dispatcher.register("run_python", closures["run_python"], _RUN_PYTHON_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat dynamic check tools (F034.5)
+# ---------------------------------------------------------------------------
+
+
+def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
+    """F034.5: Register dynamic heartbeat check management tools."""
+
+    async def heartbeat_check_create(**kwargs) -> dict:
+        try:
+            result = await loader.create_check(
+                name=kwargs["name"],
+                description=kwargs["description"],
+                prompt=kwargs["prompt"],
+                tools=kwargs.get("tools"),
+                interval_seconds=kwargs.get("interval_seconds", 3600),
+                cron_expr=kwargs.get("cron_expr"),
+                timeout_seconds=kwargs.get("timeout_seconds", 30),
+                urgent=kwargs.get("urgent", False),
+            )
+            return {"content": [{"type": "text", "text": f"Created dynamic check: {json.dumps(result)}"}]}
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Failed to create check: {e}"}]}
+
+    async def heartbeat_check_manage(**kwargs) -> dict:
+        try:
+            result = await loader.manage_check(
+                action=kwargs["action"],
+                name=kwargs.get("name"),
+                updates=kwargs.get("updates"),
+            )
+            return {"content": [{"type": "text", "text": json.dumps(result)}]}
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Failed: {e}"}]}
+
+    dispatcher.register("heartbeat_check_create", heartbeat_check_create, {
+        "type": "object",
+        "description": "Create a new dynamic heartbeat check that runs on a schedule",
+        "properties": {
+            "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
+            "description": {"type": "string", "description": "Human-readable description of what this check monitors"},
+            "prompt": {"type": "string", "description": "Instruction for what to check and report on"},
+            "tools": {"type": "array", "items": {"type": "string"}, "description": "Tools the check can use (allowed: web_search, web_fetch, recall_deep, recall_recent, bash, read_file)"},
+            "interval_seconds": {"type": "integer", "description": "Seconds between runs (min 300, default 3600)"},
+            "cron_expr": {"type": "string", "description": "Cron expression for scheduling (overrides interval_seconds)"},
+            "timeout_seconds": {"type": "integer", "description": "Max seconds per run (default 30)"},
+            "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
+        },
+        "required": ["name", "description", "prompt"],
+    })
+
+    dispatcher.register("heartbeat_check_manage", heartbeat_check_manage, {
+        "type": "object",
+        "description": "List, enable, disable, delete, or update dynamic heartbeat checks",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "enable", "disable", "delete", "update"], "description": "Action to perform"},
+            "name": {"type": "string", "description": "Check name (required for enable/disable/delete/update)"},
+            "updates": {"type": "object", "description": "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, cron_expr, timeout_seconds, urgent)"},
+        },
+        "required": ["action"],
+    })

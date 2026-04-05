@@ -1797,6 +1797,113 @@ def create_app(
         })
 
     # ------------------------------------------------------------------
+    # F034.5: Dynamic heartbeat check endpoints
+    # ------------------------------------------------------------------
+
+    async def dynamic_checks_list(request: Request) -> JSONResponse:
+        """GET /heartbeat/checks/dynamic — list all dynamic checks."""
+        try:
+            loader = heartbeat_runner.dynamic_loader
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+        if loader is None:
+            return JSONResponse({"error": "Dynamic checks not enabled"}, status_code=503)
+        result = await loader.manage_check(action="list")
+        return JSONResponse(result)
+
+    async def dynamic_checks_create(request: Request) -> JSONResponse:
+        """POST /heartbeat/checks/dynamic — create a new dynamic check."""
+        try:
+            loader = heartbeat_runner.dynamic_loader
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+        if loader is None:
+            return JSONResponse({"error": "Dynamic checks not enabled"}, status_code=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        try:
+            result = await loader.create_check(
+                name=body.get("name", ""),
+                description=body.get("description", ""),
+                prompt=body.get("prompt", ""),
+                tools=body.get("tools"),
+                interval_seconds=body.get("interval_seconds", 3600),
+                cron_expr=body.get("cron_expr"),
+                timeout_seconds=body.get("timeout_seconds", 30),
+                urgent=body.get("urgent", False),
+            )
+            return JSONResponse(result, status_code=201)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dynamic_checks_update(request: Request) -> JSONResponse:
+        """PATCH /heartbeat/checks/dynamic/{name} — update a dynamic check."""
+        try:
+            loader = heartbeat_runner.dynamic_loader
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+        if loader is None:
+            return JSONResponse({"error": "Dynamic checks not enabled"}, status_code=503)
+        name = request.path_params["name"]
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        try:
+            result = await loader.manage_check(action="update", name=name, updates=body)
+            return JSONResponse(result)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dynamic_checks_delete(request: Request) -> JSONResponse:
+        """DELETE /heartbeat/checks/dynamic/{name} — delete a dynamic check."""
+        try:
+            loader = heartbeat_runner.dynamic_loader
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+        if loader is None:
+            return JSONResponse({"error": "Dynamic checks not enabled"}, status_code=503)
+        name = request.path_params["name"]
+        try:
+            result = await loader.manage_check(action="delete", name=name)
+            return JSONResponse(result)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dynamic_checks_trigger(request: Request) -> JSONResponse:
+        """POST /heartbeat/checks/dynamic/{name}/trigger — force-run a dynamic check."""
+        try:
+            loader = heartbeat_runner.dynamic_loader
+        except (RuntimeError, AttributeError):
+            return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
+        if loader is None:
+            return JSONResponse({"error": "Dynamic checks not enabled"}, status_code=503)
+        name = request.path_params["name"]
+        check = heartbeat_runner.registry.get_check(name)
+        if check is None:
+            return JSONResponse({"error": f"Check '{name}' not found"}, status_code=404)
+        try:
+            result = await heartbeat_runner.trigger_check(name)
+            return JSONResponse({
+                "status": "triggered",
+                "has_updates": result.has_updates if result else False,
+                "findings": [
+                    {"source": f.source, "summary": f.summary, "urgency": f.urgency}
+                    for f in (result.findings if result else [])
+                ],
+            })
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    # ------------------------------------------------------------------
     # F035.1: Event bus observability
     # ------------------------------------------------------------------
 
@@ -2124,6 +2231,12 @@ def create_app(
         # F034: Check-level endpoints
         Route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
         Route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
+        # F034.5: Dynamic check endpoints
+        Route("/heartbeat/checks/dynamic/{name}/trigger", dynamic_checks_trigger, methods=["POST"]),
+        Route("/heartbeat/checks/dynamic/{name}", dynamic_checks_update, methods=["PATCH"]),
+        Route("/heartbeat/checks/dynamic/{name}", dynamic_checks_delete, methods=["DELETE"]),
+        Route("/heartbeat/checks/dynamic", dynamic_checks_list),
+        Route("/heartbeat/checks/dynamic", dynamic_checks_create, methods=["POST"]),
         Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),

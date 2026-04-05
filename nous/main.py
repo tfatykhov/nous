@@ -475,6 +475,14 @@ async def create_components(settings: Settings) -> dict:
                 registry.register(drift_check)
                 logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
 
+            # F034.5: Create dynamic check loader
+            from nous.heartbeat.dynamic import DynamicCheckLoader
+            dynamic_loader = DynamicCheckLoader(
+                db=database, registry=registry,
+                agent_id=settings.agent_id,
+                max_checks=settings.heartbeat_max_dynamic_checks,
+            )
+
             # Create dedicated API client for heartbeat (isolated connection pool)
             heartbeat_api_client = create_client(settings)
             await heartbeat_api_client.start()
@@ -485,10 +493,16 @@ async def create_components(settings: Settings) -> dict:
                 brain=brain, heart=heart, bus=bus, http_client=handler_http,
                 finding_store=finding_store,
                 api_client=heartbeat_api_client,
+                dynamic_loader=dynamic_loader,
             )
             await heartbeat_runner.start()
         except ImportError:
             logger.debug("Heartbeat not available yet")
+
+    # F034.5: Register heartbeat check management tools
+    if heartbeat_runner and heartbeat_runner.dynamic_loader:
+        from nous.api.tools import register_heartbeat_tools
+        register_heartbeat_tools(dispatcher, heartbeat_runner.dynamic_loader)
 
     return {
         "database": database,
