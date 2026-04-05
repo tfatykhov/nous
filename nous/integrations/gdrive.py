@@ -110,12 +110,16 @@ def _load_service_account_credentials() -> ServiceAccountCredentials | None:
     return None
 
 
+_TRANSIENT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionError, OSError)
+
+
 class GDrive:
     """
     Thin wrapper around the Google Drive API v3.
 
     Supports OAuth2 (user account) and Service Account authentication.
     OAuth tokens are auto-refreshed before each API call.
+    Stale httplib2 connections are recovered via automatic service rebuild.
     """
 
     def __init__(self, auth: str | None = None) -> None:
@@ -156,6 +160,11 @@ class GDrive:
 
         self._service = build("drive", "v3", credentials=self._creds, cache_discovery=False)
 
+    def _rebuild_service(self) -> None:
+        """Rebuild the Drive service to recover from stale httplib2 connections."""
+        logger.info("Rebuilding Drive service (stale connection recovery)")
+        self._service = build("drive", "v3", credentials=self._creds, cache_discovery=False)
+
     def _ensure_valid_token(self) -> None:
         """
         Ensure the access token is valid. For OAuth, refreshes if expired
@@ -184,9 +193,15 @@ class GDrive:
         """
         Execute a Drive API call with automatic token refresh.
         Wraps every API call to ensure fresh credentials.
+        Retries once on transient connection errors after rebuilding the service.
         """
         self._ensure_valid_token()
-        return method(*args, **kwargs).execute()
+        try:
+            return method(*args, **kwargs).execute()
+        except _TRANSIENT_ERRORS:
+            logger.warning("Transient error in _call, rebuilding service and retrying", exc_info=True)
+            self._rebuild_service()
+            return method(*args, **kwargs).execute()
 
     @property
     def auth_mode(self) -> str:
@@ -234,16 +249,18 @@ class GDrive:
         page_token = None
 
         while True:
-            resp = (
-                self._service.files()
-                .list(
-                    q=q,
-                    pageSize=page_size,
-                    fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, parents)",
-                    pageToken=page_token,
-                )
-                .execute()
+            list_kwargs = dict(
+                q=q,
+                pageSize=page_size,
+                fields="nextPageToken, files(id, name, mimeType, size, modifiedTime, parents)",
+                pageToken=page_token,
             )
+            try:
+                resp = self._service.files().list(**list_kwargs).execute()
+            except _TRANSIENT_ERRORS:
+                logger.warning("Transient error in list_files, rebuilding service and retrying", exc_info=True)
+                self._rebuild_service()
+                resp = self._service.files().list(**list_kwargs).execute()
             results.extend(resp.get("files", []))
             page_token = resp.get("nextPageToken")
             if not page_token:
