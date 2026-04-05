@@ -572,7 +572,12 @@ class SdkAnthropicClient:
         return ApiResponse(
             content=content,
             stop_reason=message.stop_reason,
-            usage={"input_tokens": message.usage.input_tokens, "output_tokens": message.usage.output_tokens}
+            usage={
+                "input_tokens": message.usage.input_tokens,
+                "output_tokens": message.usage.output_tokens,
+                "cache_creation_input_tokens": getattr(message.usage, "cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": getattr(message.usage, "cache_read_input_tokens", 0),
+            }
             if message.usage
             else None,
         )
@@ -683,7 +688,12 @@ class SdkAnthropicClient:
             usage = None
             if hasattr(event, "message") and hasattr(event.message, "usage"):
                 u = event.message.usage
-                usage = {"input_tokens": u.input_tokens, "output_tokens": u.output_tokens}
+                usage = {
+                    "input_tokens": getattr(u, "input_tokens", 0),
+                    "output_tokens": getattr(u, "output_tokens", 0),
+                    "cache_creation_input_tokens": getattr(u, "cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": getattr(u, "cache_read_input_tokens", 0),
+                }
             return StreamEvent(type="message_start", usage=usage)
 
         if event_type == "content_block_start":
@@ -740,7 +750,12 @@ class SdkAnthropicClient:
         if event_type == "message_delta":
             usage = None
             if hasattr(event, "usage") and event.usage:
-                usage = {"input_tokens": getattr(event.usage, "input_tokens", 0), "output_tokens": getattr(event.usage, "output_tokens", 0)}
+                usage = {
+                    "input_tokens": getattr(event.usage, "input_tokens", 0),
+                    "output_tokens": getattr(event.usage, "output_tokens", 0),
+                    "cache_creation_input_tokens": getattr(event.usage, "cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": getattr(event.usage, "cache_read_input_tokens", 0),
+                }
             return StreamEvent(
                 type="done",
                 stop_reason=event.delta.stop_reason if hasattr(event.delta, "stop_reason") else "",
