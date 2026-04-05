@@ -576,7 +576,9 @@ class AgentRunner:
                 }
 
         # Effort parameter (works with or without thinking; "high" is API default)
-        if self._settings.effort != "high":
+        # Note: opus models don't support the effort parameter
+        effective_model = payload["model"]
+        if self._settings.effort != "high" and "opus" not in effective_model:
             payload["output_config"] = {"effort": self._settings.effort}
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)

@@ -47,6 +47,7 @@ class DynamicCheck(BaseCheck):
         timeout: int = 30,
         urgent: bool = False,
         runner: AgentRunner | None = None,
+        model_override: str | None = None,
     ) -> None:
         super().__init__()
         self.check_id = check_id
@@ -57,6 +58,7 @@ class DynamicCheck(BaseCheck):
         self.timeout = timeout
         self.urgent_override = urgent
         self._runner = runner
+        self._model_override = model_override
         self._cron_expr: str | None = None
 
     def set_cron(self, cron_expr: str | None) -> None:
@@ -101,6 +103,7 @@ class DynamicCheck(BaseCheck):
                 skip_episode=True,
                 is_subtask=True,
                 tool_filter=self._tools if self._tools else None,
+                model_override=self._model_override,
             )
 
             findings = self._parse_findings(response_text or "")
@@ -166,12 +169,14 @@ class DynamicCheckLoader:
         runner: AgentRunner | None = None,
         agent_id: str = "nous",
         max_checks: int = 10,
+        model_override: str | None = None,
     ) -> None:
         self._db = db
         self._registry = registry
         self._runner = runner
         self._agent_id = agent_id
         self._max_checks = max_checks
+        self._model_override = model_override
         self._loaded_ids: set[str] = set()
         self._id_to_name: dict[str, str] = {}
         self._signatures: dict[str, str] = {}  # name -> signature for change detection
@@ -222,6 +227,7 @@ class DynamicCheckLoader:
                 timeout=row.timeout_seconds,
                 urgent=row.urgent,
                 runner=self._runner,
+                model_override=self._model_override,
             )
             check.set_cron(row.cron_expr)
 
@@ -366,6 +372,7 @@ class DynamicCheckLoader:
             timeout=timeout_seconds,
             urgent=urgent,
             runner=self._runner,
+            model_override=self._model_override,
         )
         check.set_cron(cron_expr)
         self._registry.register(check, permanent=False)

@@ -362,6 +362,7 @@ class Settings(BaseSettings):
     heartbeat_tuning_rollback_threshold: float = 0.2
 
     # F034.5: Dynamic heartbeat checks
+    heartbeat_model: str = ""  # Empty = use background_model fallback
     heartbeat_max_dynamic_checks: int = 10
     heartbeat_dynamic_sync_ticks: int = 60  # re-sync every N ticks (~30 min at 30s tick)
 

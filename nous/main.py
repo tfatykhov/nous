@@ -481,6 +481,7 @@ async def create_components(settings: Settings) -> dict:
                 db=database, registry=registry,
                 agent_id=settings.agent_id,
                 max_checks=settings.heartbeat_max_dynamic_checks,
+                model_override=settings.heartbeat_model or settings.background_model,
             )
 
             # Create dedicated API client for heartbeat (isolated connection pool)

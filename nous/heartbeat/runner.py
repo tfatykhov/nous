@@ -410,11 +410,13 @@ class HeartbeatRunner:
         triage_runner = self._get_triage_runner()
 
         try:
+            heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
             response_text, _context, usage = await triage_runner.run_turn(
                 session_id, message,
                 platform="heartbeat",
                 skip_episode=True,
                 is_subtask=True,
+                model_override=heartbeat_model,
             )
             result.response = response_text or ""
             result.tokens_used = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)

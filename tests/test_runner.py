@@ -691,7 +691,7 @@ def test_payload_effort_default():
 
 def test_payload_effort_medium():
     """effort=medium: output_config with effort in payload."""
-    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium")
+    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-sonnet-4-6")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
     assert payload["output_config"] == {"effort": "medium"}
@@ -699,7 +699,7 @@ def test_payload_effort_medium():
 
 def test_payload_effort_without_thinking():
     """effort works independently of thinking mode."""
-    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="off", effort="low")
+    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="off", effort="low", model="claude-sonnet-4-6")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
     assert "thinking" not in payload
@@ -716,11 +716,30 @@ def test_payload_skip_thinking():
 
 def test_payload_adaptive_with_effort():
     """Adaptive thinking combined with effort parameter."""
-    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="adaptive", effort="medium")
+    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="adaptive", effort="medium", model="claude-sonnet-4-6")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
     assert payload["thinking"] == {"type": "adaptive"}
     assert payload["output_config"] == {"effort": "medium"}
+
+
+def test_payload_effort_skipped_for_opus():
+    """effort parameter omitted when model is opus (unsupported)."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-opus-4-6")
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
+    assert "output_config" not in payload
+
+
+def test_payload_effort_skipped_for_opus_override():
+    """effort parameter omitted when model_override is opus."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium")
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload(
+        "system", [{"role": "user", "content": "hi"}],
+        model_override="claude-opus-4-6",
+    )
+    assert "output_config" not in payload
 
 
 # ---------------------------------------------------------------------------
