@@ -114,6 +114,7 @@ All shipped implementation specs with PR references:
 | F034.3 | Self-Tuning Heartbeat | ✅ Shipped | #241 — outcome-driven adjustment, cross-cycle rollback, pinned params |
 | F034.4 | Heartbeat Completions | 📋 Proposed | #242 — consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email dedup migration |
 | F034.5 | Dynamic Heartbeat Checks | ✅ Shipped | #252 — prompt-driven checks, conversational creation, tool_filter, REST CRUD, periodic sync |
+| F036 | Prompt Cache Optimization | ✅ Shipped | #253 — 3-tier system prompt split, cache break detection, single breakpoint, tool schema cache |
 | 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
 | 011.2 | Multimodal File Support | 📋 Draft | — image/document processing across input channels |
 | 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred to F024) |
@@ -133,6 +134,7 @@ All shipped implementation specs with PR references:
 |---------|------|--------|-------------|
 | F021 | [Memory Dashboard](F021-memory-dashboard.md) | ✅ Shipped | Full SPA — overview, memory browser, graph visualization, calibration, activity timeline, health metrics |
 | F021.1 | [Admission Dashboard](F021-admission-dashboard.md) | ✅ Shipped | Admission analytics panel — shadow mode visibility, scoring breakdown, histogram, rejected facts browser, threshold simulator |
+| F036 | [Prompt Cache Optimization](F036-prompt-cache-optimization.md) | ✅ Shipped | 3-tier system prompt split, cache break detection, single breakpoint strategy, tool schema caching per frame |
 
 ### P1: Proactive Autonomy
 | Feature | Name | Status | Description |

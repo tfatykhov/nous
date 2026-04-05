@@ -13,6 +13,7 @@ Each tool returns MCP-compliant response format and handles errors gracefully.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import time
@@ -46,14 +47,17 @@ class ToolDispatcher:
     The dispatcher extracts plain text for the Anthropic API tool_result format.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, tool_schema_cache_enabled: bool = True) -> None:
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._schemas: dict[str, dict[str, Any]] = {}  # P0-7 fix
+        self._tool_schema_cache: dict[str, list[dict[str, Any]]] = {}  # F036
+        self._tool_schema_cache_enabled = tool_schema_cache_enabled  # F036
 
     def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
         """Register a tool handler with its JSON schema."""
         self._handlers[name] = handler
         self._schemas[name] = schema
+        self._tool_schema_cache.clear()  # F036: invalidate on registration
 
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
@@ -96,24 +100,37 @@ class ToolDispatcher:
 
         Uses FRAME_TOOLS map from runner module to determine which
         tools are available for a given frame. Wildcard "*" means all tools.
+
+        F036: Results cached per frame_id. Returns deep copy to prevent
+        mutation from corrupting the cache.
         """
+        # F036: Check cache first (skip if caching disabled)
+        if self._tool_schema_cache_enabled and frame_id in self._tool_schema_cache:
+            return copy.deepcopy(self._tool_schema_cache[frame_id])
+
         from nous.api.runner import FRAME_TOOLS
 
         allowed = FRAME_TOOLS.get(frame_id, [])
 
         # Wildcard means all tools
         if "*" in allowed:
-            return self.tool_definitions()
+            result = self.tool_definitions()
+        else:
+            result = [
+                {
+                    "name": name,
+                    "description": schema.get("description", ""),
+                    "input_schema": schema,
+                }
+                for name, schema in self._schemas.items()
+                if name in allowed
+            ]
 
-        return [
-            {
-                "name": name,
-                "description": schema.get("description", ""),
-                "input_schema": schema,
-            }
-            for name, schema in self._schemas.items()
-            if name in allowed
-        ]
+        # F036: Cache and return deep copy
+        if self._tool_schema_cache_enabled:
+            self._tool_schema_cache[frame_id] = result
+            return copy.deepcopy(result)
+        return result
 
 
 # ---------------------------------------------------------------------------

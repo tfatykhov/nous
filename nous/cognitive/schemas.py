@@ -151,6 +151,7 @@ class ContextSection(BaseModel):
     label: str
     content: str
     token_estimate: int  # rough char/4 estimate
+    tier: str = "dynamic"  # F036: "static", "semi_stable", or "dynamic"
 
 
 class BuildResult(BaseModel):
@@ -161,6 +162,7 @@ class BuildResult(BaseModel):
     recalled_ids: dict[str, list[str]] = Field(default_factory=dict)
     recalled_content_map: dict[str, str] = Field(default_factory=dict)
     recalled_score_map: dict[str, float] = Field(default_factory=dict)
+    sections_by_tier: dict[str, str] = Field(default_factory=dict)  # F036: tier -> joined text
 
 
 class TurnContext(BaseModel):
@@ -181,6 +183,7 @@ class TurnContext(BaseModel):
     recalled_score_map: dict[str, float] = Field(default_factory=dict)
     diagnostic_nudges: str = ""  # F024: Critic diagnostic observations
     censor_injected_context: dict[str, str] = Field(default_factory=dict)  # F031: censor_id -> action results
+    sections_by_tier: dict[str, str] = Field(default_factory=dict)  # F036: tier -> joined text
 
 
 class ToolResult(BaseModel):

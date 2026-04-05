@@ -155,6 +155,7 @@ nous/
 | F034.2 | Intelligent Checks (embedding search, LLM email classification, drive significance, tunable params) | #241 |
 | F034.3 | Self-Tuning Heartbeat (outcome-driven adjustment, cross-cycle rollback, pinned params) | #241 |
 | F034.5 | Dynamic Heartbeat Checks (prompt-driven checks, conversational creation/management, full lifecycle) | #252 |
+| F036 | Prompt Cache Optimization (3-tier system prompt split, cache break detection, single breakpoint strategy, tool schema caching) | #253 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 | F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
 
@@ -353,6 +354,10 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_HEARTBEAT_TUNING_ROLLBACK_THRESHOLD` | `0.2` | Negative rate increase that triggers auto-rollback |
 | `NOUS_HEARTBEAT_MAX_DYNAMIC_CHECKS` | `10` | Maximum number of concurrent dynamic checks |
 | `NOUS_HEARTBEAT_DYNAMIC_SYNC_TICKS` | `60` | Ticks between periodic dynamic check sync (re-loads from DB) |
+| `NOUS_CACHE_BREAK_DETECTION_ENABLED` | `true` | Enable cache break detection logging (F036) |
+| `NOUS_CACHE_SPLIT_SYSTEM_PROMPT` | `true` | Enable 3-tier system prompt splitting (F036) |
+| `NOUS_CACHE_SINGLE_BREAKPOINT` | `true` | Use single cache breakpoint strategy (F036) |
+| `NOUS_TOOL_SCHEMA_CACHE_ENABLED` | `true` | Cache tool schemas per frame (F036) |
 
 ### REST Endpoints
 

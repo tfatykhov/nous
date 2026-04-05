@@ -314,7 +314,7 @@ async def create_components(settings: Settings) -> dict:
         logger.debug("Skill bootstrap skipped or failed (non-fatal)")
 
     # Create tool dispatcher and register all tools
-    dispatcher = ToolDispatcher()
+    dispatcher = ToolDispatcher(tool_schema_cache_enabled=settings.tool_schema_cache_enabled)
     register_nous_tools(dispatcher, brain, heart, settings=settings)
     register_builtin_tools(dispatcher, settings)
 
