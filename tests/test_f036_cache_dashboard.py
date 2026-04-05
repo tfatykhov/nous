@@ -118,17 +118,20 @@ def test_entries_without_token_data_filtered() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert data["summary"]["total_calls"] == 1
-    assert data["summary"]["total_input_tokens"] == 8000
+    # total_input = input_tokens(8000) + cache_read(4000) + cache_created(2000)
+    assert data["summary"]["total_input_tokens"] == 14000
 
 
 def test_hit_rate_calculation() -> None:
-    """10000 input, 6000 cache_read -> 60.0% hit rate."""
-    entry = _make_entry(input_tokens=10000, cache_read=6000, cache_created=1000)
+    """Total input = input + cache_read + cache_created. Hit rate = cache_read / total * 100."""
+    # total_input = 1000 + 6000 + 3000 = 10000, hit_rate = 6000/10000 = 60%
+    entry = _make_entry(input_tokens=1000, cache_read=6000, cache_created=3000)
     client = _make_client(entries=[entry])
     resp = client.get("/dashboard/cache")
     assert resp.status_code == 200
     data = resp.json()
     assert data["summary"]["overall_hit_rate"] == 60.0
+    assert data["summary"]["total_input_tokens"] == 10000
     # Timeline entry should also reflect per-call hit rate
     assert len(data["timeline"]) == 1
     assert data["timeline"][0]["hit_rate"] == 60.0
@@ -192,16 +195,20 @@ def test_per_session_grouping() -> None:
 
     a = sessions["sess-a"]
     assert a["calls"] == 2
-    assert a["input_tokens"] == 10000
+    # total_input = (5000+3000+1000) + (5000+4000+500) = 18500
+    assert a["input_tokens"] == 18500
     assert a["cache_read"] == 7000
     assert a["cache_created"] == 1500
-    assert a["hit_rate"] == 70.0
+    # hit_rate = 7000/18500 * 100 = 37.8%
+    assert a["hit_rate"] == 37.8
 
     b = sessions["sess-b"]
     assert b["calls"] == 1
-    assert b["input_tokens"] == 8000
+    # total_input = 8000+2000+3000 = 13000
+    assert b["input_tokens"] == 13000
     assert b["cache_read"] == 2000
-    assert b["hit_rate"] == 25.0
+    # hit_rate = 2000/13000 * 100 = 15.4%
+    assert b["hit_rate"] == 15.4
 
 
 def test_timeline_newest_first_max_50() -> None:

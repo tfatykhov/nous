@@ -1386,9 +1386,14 @@ def create_app(
         calls = [e for e in entries if e.input_tokens_actual is not None]
 
         total_calls = len(calls)
-        total_input = sum(e.input_tokens_actual or 0 for e in calls)
+        # Anthropic API reports input_tokens as non-cached only.
+        # Total input = input_tokens + cache_creation + cache_read.
         total_cache_read = sum(e.cache_read_tokens or 0 for e in calls)
         total_cache_created = sum(e.cache_creation_tokens or 0 for e in calls)
+        total_input = (
+            sum(e.input_tokens_actual or 0 for e in calls)
+            + total_cache_read + total_cache_created
+        )
         total_breaks = sum(1 for e in calls if e.cache_break)
         total_break_tokens = sum(e.cache_break_tokens_lost for e in calls if e.cache_break)
 
@@ -1400,9 +1405,14 @@ def create_app(
                 sessions[sid] = {"calls": 0, "input": 0, "cache_read": 0, "cache_created": 0, "breaks": 0}
             s = sessions[sid]
             s["calls"] += 1
-            s["input"] += e.input_tokens_actual or 0
             s["cache_read"] += e.cache_read_tokens or 0
             s["cache_created"] += e.cache_creation_tokens or 0
+            # Total input = non-cached + cache_creation + cache_read
+            s["input"] += (
+                (e.input_tokens_actual or 0)
+                + (e.cache_read_tokens or 0)
+                + (e.cache_creation_tokens or 0)
+            )
             if e.cache_break:
                 s["breaks"] += 1
 
@@ -1417,7 +1427,9 @@ def create_app(
         timeline = []
         for e in calls[:50]:
             cache_read = e.cache_read_tokens or 0
-            input_tok = e.input_tokens_actual or 0
+            cache_created = e.cache_creation_tokens or 0
+            # Total input = non-cached + cache_creation + cache_read
+            input_tok = (e.input_tokens_actual or 0) + cache_read + cache_created
             hit_rate = round(cache_read / input_tok * 100, 1) if input_tok > 0 else 0
             timeline.append({
                 "timestamp": e.timestamp,
@@ -1426,7 +1438,7 @@ def create_app(
                 "model": e.model,
                 "input_tokens": input_tok,
                 "cache_read": cache_read,
-                "cache_created": e.cache_creation_tokens or 0,
+                "cache_created": cache_created,
                 "hit_rate": hit_rate,
                 "cache_break": e.cache_break,
                 "break_components": e.cache_break_components if e.cache_break else [],
