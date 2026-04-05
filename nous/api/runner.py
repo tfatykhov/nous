@@ -21,6 +21,7 @@ from nous.api.anthropic_client import (
     _parse_sse_event,  # noqa: F401 — re-exported for backward compat (tests)
     create_client,
 )
+from nous.api.cache_optimizer import CacheBreakDetector, _hash as cache_hash
 from nous.api.compaction import ConversationCompactor
 from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
@@ -115,6 +116,11 @@ class AgentRunner:
         self._action_gate: ActionGate | None = (
             ActionGate(settings, call_gate_model=self._call_gate_model)
             if settings.action_gating_enabled else None
+        )
+
+        # F036: Prompt cache optimization
+        self._cache_break_detector: CacheBreakDetector | None = (
+            CacheBreakDetector() if settings.cache_break_detection_enabled else None
         )
 
     async def _call_gate_model(self, prompt: str) -> str:
@@ -262,13 +268,27 @@ class AgentRunner:
                 turn_context, platform=platform,
                 ledger=ledger, corrections=corrections,
             )
+            # F036: Handle system_prompt_prefix for both str and dict paths
             if system_prompt_prefix:
-                system_prompt = system_prompt_prefix + "\n\n" + system_prompt
+                if isinstance(system_prompt, dict):
+                    # Prefix is stable across session — prepend to static tier
+                    existing = system_prompt.get("static", "")
+                    system_prompt["static"] = (
+                        system_prompt_prefix + "\n\n" + existing if existing
+                        else system_prompt_prefix
+                    )
+                else:
+                    system_prompt = system_prompt_prefix + "\n\n" + system_prompt
 
             # Layer 2: History compaction (Spec 008.1)
             messages = self._format_messages(conversation)
+            # F036: Compactor needs flat string for token estimation
+            _flat_prompt = (
+                "\n\n".join(v for v in system_prompt.values() if v)
+                if isinstance(system_prompt, dict) else system_prompt
+            )
             if self._compactor and self._settings.compaction_enabled:
-                system_tokens = self._compactor.estimator.estimate(system_prompt)
+                system_tokens = self._compactor.estimator.estimate(_flat_prompt)
                 history_tokens = self._compactor.estimator.estimate_messages(messages)
                 if self._compactor.should_compact(system_tokens, history_tokens):
                     lock = self._compaction_locks.setdefault(session_id, asyncio.Lock())
@@ -295,7 +315,7 @@ class AgentRunner:
                                     _agent_id, session_id, conversation
                                 )
             else:
-                system_tokens = len(system_prompt) // 4
+                system_tokens = len(_flat_prompt) // 4
                 history_tokens = sum(
                     len(m.get("content", "")) // 4 for m in messages
                 )
@@ -401,6 +421,8 @@ class AgentRunner:
                 session_id, len(ledger.actions), blocked,
             )
         self._pending_corrections.pop(session_id, None)  # F026
+        if self._cache_break_detector:  # F036
+            self._cache_break_detector.reset()
         await self._delete_conversation_state(session_id)
 
     # ------------------------------------------------------------------
@@ -409,7 +431,7 @@ class AgentRunner:
 
     def _build_api_payload(
         self,
-        system_prompt: str,
+        system_prompt: str | dict[str, str],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         stream: bool = False,
@@ -421,6 +443,10 @@ class AgentRunner:
         Shared by _call_api and _call_api_stream to avoid divergence.
         skip_thinking=True omits thinking params (for utility calls like reflection).
         model_override replaces the default model (used by compaction summarization).
+
+        F036: system_prompt may be a dict[str, str] (tier -> text) when
+        cache_split_system_prompt is enabled. Builds 3 system blocks with
+        optimized cache_control placement.
         """
         # Add cache_control to last user message for prompt caching
         cached_messages = list(messages)
@@ -440,8 +466,6 @@ class AgentRunner:
                         ],
                     }
                 elif isinstance(content, list) and content:
-                    # Content is already a list of blocks (e.g. tool_result blocks)
-                    # Add cache_control to the last block
                     last_block = {**content[-1], "cache_control": {"type": "ephemeral"}}
                     cached_messages[i] = {
                         **msg,
@@ -449,10 +473,67 @@ class AgentRunner:
                     }
                 break
 
-        payload: dict[str, Any] = {
-            "model": model_override or self._settings.model,
-            "max_tokens": self._settings.max_tokens,
-            "system": [
+        # F036: Build system blocks based on tier split or legacy
+        if isinstance(system_prompt, dict):
+            # 3-tier split: static, semi_stable, dynamic
+            static_text = system_prompt.get("static", "")
+            semi_stable_text = system_prompt.get("semi_stable", "")
+            dynamic_text = system_prompt.get("dynamic", "")
+            flat_system_prompt = "\n\n".join(
+                t for t in [static_text, semi_stable_text, dynamic_text] if t
+            )
+
+            system_blocks: list[dict[str, Any]] = []
+
+            # Block 0: Static identity — always cached
+            if static_text:
+                system_blocks.append({
+                    "type": "text",
+                    "text": static_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+
+            # Block 1: Semi-stable context — cached with single breakpoint strategy
+            if semi_stable_text:
+                block1: dict[str, Any] = {"type": "text", "text": semi_stable_text}
+                if self._settings.cache_single_breakpoint:
+                    # Only add cache_control if semi-stable hasn't changed
+                    # (cache break detector will report if it did)
+                    prev_hash = (
+                        self._cache_break_detector.last_semi_stable_hash()
+                        if self._cache_break_detector else None
+                    )
+                    if prev_hash is not None:
+                        if cache_hash(semi_stable_text) == prev_hash:
+                            block1["cache_control"] = {"type": "ephemeral"}
+                    else:
+                        # First call or no detector — cache it
+                        block1["cache_control"] = {"type": "ephemeral"}
+                else:
+                    block1["cache_control"] = {"type": "ephemeral"}
+                system_blocks.append(block1)
+
+            # Block 2: Dynamic context — never cached (changes every turn)
+            if dynamic_text:
+                system_blocks.append({"type": "text", "text": dynamic_text})
+
+            # F036: Run cache break detection
+            if self._cache_break_detector:
+                tools_json = json.dumps(tools) if tools else ""
+                model_str = model_override or self._settings.model
+                cache_break = self._cache_break_detector.check(
+                    static_text=static_text,
+                    semi_stable_text=semi_stable_text,
+                    dynamic_text=dynamic_text,
+                    tools_json=tools_json,
+                    model=model_str,
+                )
+            else:
+                cache_break = None
+        else:
+            # Legacy 2-block path (no tier split)
+            flat_system_prompt = system_prompt
+            system_blocks = [
                 {
                     "type": "text",
                     "text": "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -463,7 +544,13 @@ class AgentRunner:
                     "text": system_prompt,
                     "cache_control": {"type": "ephemeral"},
                 },
-            ],
+            ]
+            cache_break = None
+
+        payload: dict[str, Any] = {
+            "model": model_override or self._settings.model,
+            "max_tokens": self._settings.max_tokens,
+            "system": system_blocks,
             "messages": cached_messages,
         }
         if tools:
@@ -493,7 +580,7 @@ class AgentRunner:
                     turn_number=self._current_turn_number,
                     call_type=self._current_call_type,
                     model=payload.get("model", ""),
-                    system_prompt=system_prompt,
+                    system_prompt=flat_system_prompt,
                     messages=messages,
                     tools=tools,
                     frame_id=self._current_frame_id,
@@ -501,6 +588,11 @@ class AgentRunner:
                     payload=payload if self._settings.context_log_full_payload else None,
                 )
                 self._last_context_entry_id = _entry.id
+                # F036: Attach cache break info to context log entry
+                if cache_break:
+                    _entry.cache_break = True
+                    _entry.cache_break_components = cache_break.components_changed
+                    _entry.cache_break_tokens_lost = cache_break.estimated_tokens_lost
             except Exception:
                 logger.debug("F035.4: context log failed", exc_info=True)
 
@@ -508,7 +600,7 @@ class AgentRunner:
 
     async def _call_api(
         self,
-        system_prompt: str,
+        system_prompt: str | dict[str, str],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         skip_thinking: bool = False,
@@ -518,6 +610,7 @@ class AgentRunner:
 
         Delegates to self._api.call() which handles retries and error mapping.
         Returns parsed ApiResponse with content blocks and stop_reason.
+        F036: system_prompt may be str or dict[str, str] (tier split).
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
@@ -530,7 +623,7 @@ class AgentRunner:
 
     async def _call_api_stream(
         self,
-        system_prompt: str,
+        system_prompt: str | dict[str, str],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
@@ -610,14 +703,28 @@ class AgentRunner:
             turn_context, platform=platform,
             ledger=ledger, corrections=corrections,
         )
+        # F036: Handle system_prompt_prefix for both str and dict paths
         if system_prompt_prefix:
-            system_prompt = system_prompt_prefix + "\n\n" + system_prompt
+            if isinstance(system_prompt, dict):
+                existing = system_prompt.get("static", "")
+                system_prompt["static"] = (
+                    system_prompt_prefix + "\n\n" + existing if existing
+                    else system_prompt_prefix
+                )
+            else:
+                system_prompt = system_prompt_prefix + "\n\n" + system_prompt
         tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
         messages = self._format_messages(conversation)
 
+        # F036: Compactor needs flat string for token estimation
+        _flat_prompt = (
+            "\n\n".join(v for v in system_prompt.values() if v)
+            if isinstance(system_prompt, dict) else system_prompt
+        )
+
         # Layer 2: History compaction (Spec 008.1)
         if self._compactor and self._settings.compaction_enabled:
-            system_tokens = self._compactor.estimator.estimate(system_prompt)
+            system_tokens = self._compactor.estimator.estimate(_flat_prompt)
             history_tokens = self._compactor.estimator.estimate_messages(messages)
             if self._compactor.should_compact(system_tokens, history_tokens):
                 lock = self._compaction_locks.setdefault(session_id, asyncio.Lock())
@@ -648,7 +755,7 @@ class AgentRunner:
                             )
                             messages = self._format_messages(conversation)
         else:
-            system_tokens = len(system_prompt) // 4
+            system_tokens = len(_flat_prompt) // 4
             history_tokens = sum(
                 len(m.get("content", "")) // 4 for m in messages
             )
@@ -961,7 +1068,7 @@ class AgentRunner:
 
     async def _tool_loop(
         self,
-        system_prompt: str,
+        system_prompt: str | dict[str, str],
         conversation: Conversation,
         frame_id: str,
         session_id: str | None = None,
@@ -1238,36 +1345,70 @@ Rules:
         *,
         ledger: ExecutionLedger | None = None,
         corrections: list[str] | None = None,
-    ) -> str:
+    ) -> str | dict[str, str]:
         """Build the system prompt: cognitive context + frame instructions.
 
         P0-2 fix: Does NOT inject conversation history. History flows
         through messages[] array via _format_messages().
+
+        F036: When cache_split_system_prompt is enabled AND sections_by_tier
+        is available, returns dict[str, str] mapping tier names to prompt text.
+        Runner-appended sections (frame instructions, ledger, corrections)
+        go into the dynamic tier. Otherwise returns a flat string (legacy).
         """
+        # F036: 3-tier split path
+        if (
+            self._settings.cache_split_system_prompt
+            and turn_context.sections_by_tier
+        ):
+            tiers = dict(turn_context.sections_by_tier)  # copy to avoid mutation
+
+            # Collect runner-appended dynamic content
+            dynamic_extras: list[str] = []
+            frame_instructions = self._get_frame_instructions(turn_context)
+            if frame_instructions:
+                dynamic_extras.append(frame_instructions)
+            if turn_context.diagnostic_nudges:
+                dynamic_extras.append(turn_context.diagnostic_nudges)
+            if ledger and self._settings.execution_ledger_enabled:
+                ledger_section = ledger.system_prompt_section(
+                    self._settings.execution_ledger_max_tokens
+                )
+                if ledger_section:
+                    dynamic_extras.append(ledger_section)
+            if corrections:
+                dynamic_extras.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
+            if platform == "telegram":
+                dynamic_extras.append(self._TELEGRAM_FORMAT_INSTRUCTIONS)
+
+            # Append runner extras to dynamic tier
+            if dynamic_extras:
+                existing_dynamic = tiers.get("dynamic", "")
+                extras_text = "\n\n".join(dynamic_extras)
+                tiers["dynamic"] = (
+                    existing_dynamic + "\n\n" + extras_text
+                    if existing_dynamic
+                    else extras_text
+                )
+
+            return tiers
+
+        # Legacy flat string path
         parts = [turn_context.system_prompt]
 
-        # Add frame-specific tool instructions
         frame_instructions = self._get_frame_instructions(turn_context)
         if frame_instructions:
             parts.append(frame_instructions)
-
-        # F024: Diagnostic nudges from Critic
         if turn_context.diagnostic_nudges:
             parts.append(turn_context.diagnostic_nudges)
-
-        # F026: Execution ledger (non-prunable, non-compactable)
         if ledger and self._settings.execution_ledger_enabled:
             ledger_section = ledger.system_prompt_section(
                 self._settings.execution_ledger_max_tokens
             )
             if ledger_section:
                 parts.append(ledger_section)
-
-        # F026: Pending corrections from prior turn
         if corrections:
             parts.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
-
-        # Platform-specific formatting
         if platform == "telegram":
             parts.append(self._TELEGRAM_FORMAT_INSTRUCTIONS)
 

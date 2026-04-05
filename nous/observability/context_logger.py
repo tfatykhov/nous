@@ -119,6 +119,12 @@ class ContextLogEntry:
     output_tokens: int | None = None
     cache_creation_tokens: int | None = None
     cache_read_tokens: int | None = None
+
+    # F036: Cache break detection (in-memory only, not persisted to DB)
+    cache_break: bool = False
+    cache_break_components: list[str] = field(default_factory=list)
+    cache_break_tokens_lost: int = 0
+
     duration_ms: float | None = None
     stop_reason: str | None = None
 

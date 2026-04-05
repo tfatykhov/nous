@@ -458,6 +458,7 @@ class CognitiveLayer:
         recalled_episode_ids: list[str] = []
         recalled_content_map: dict[str, str] = {}
         recalled_score_map: dict[str, float] = {}
+        sections_by_tier: dict[str, str] = {}
         build_result = None
         context_token_estimate = 0
         if not _is_initiation:
@@ -497,6 +498,7 @@ class CognitiveLayer:
                 recalled_episode_ids = build_result.recalled_ids.get("episode", [])
                 recalled_content_map = build_result.recalled_content_map
                 recalled_score_map = build_result.recalled_score_map
+                sections_by_tier = build_result.sections_by_tier
         except Exception:
             logger.warning("Context build failed, using identity prompt only")
             system_prompt = self._context._identity_prompt or ""
@@ -696,6 +698,7 @@ class CognitiveLayer:
             recalled_score_map=recalled_score_map,
             diagnostic_nudges=_diagnostic_nudges,
             censor_injected_context=censor_injected,
+            sections_by_tier=sections_by_tier,
         )
 
     async def post_turn(

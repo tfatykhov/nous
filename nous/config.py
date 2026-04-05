@@ -173,6 +173,20 @@ class Settings(BaseSettings):
         default=0.3, description="Score cliff threshold for adaptive K"
     )
 
+    # F036: Prompt Cache Optimization
+    cache_break_detection_enabled: bool = Field(
+        default=True, validation_alias="NOUS_CACHE_BREAK_DETECTION_ENABLED"
+    )
+    cache_split_system_prompt: bool = Field(
+        default=True, validation_alias="NOUS_CACHE_SPLIT_SYSTEM_PROMPT"
+    )
+    cache_single_breakpoint: bool = Field(
+        default=True, validation_alias="NOUS_CACHE_SINGLE_BREAKPOINT"
+    )
+    tool_schema_cache_enabled: bool = Field(
+        default=True, validation_alias="NOUS_TOOL_SCHEMA_CACHE_ENABLED"
+    )
+
     # Compaction: Layer 1 (Tool Pruning)
     tool_pruning_enabled: bool = Field(
         default=True, validation_alias="NOUS_TOOL_PRUNING_ENABLED"

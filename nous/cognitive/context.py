@@ -28,6 +28,16 @@ logger = logging.getLogger(__name__)
 # Tier 1 fact categories — loaded by category (always-on), excluded from Tier 3 search
 TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 
+# F036: Section tier classification for prompt cache optimization
+SECTION_TIERS: dict[str, str] = {
+    "Identity": "static",
+    "Context Safety": "static",
+    "User Profile": "semi_stable",
+    "Active Censors": "semi_stable",
+    "Current Frame": "semi_stable",
+}
+# Everything else defaults to "dynamic" via ContextSection.tier default
+
 # Sources exempt from relevance filter gap detection
 FILTER_EXEMPT_SOURCES: set[str] = {
     "pre_prune_extraction",
@@ -171,6 +181,7 @@ class ContextEngine:
                 label="Current Date/Time",
                 content=datetime_text,
                 token_estimate=self._estimate_tokens(datetime_text),
+                tier=SECTION_TIERS.get("Current Date/Time", "dynamic"),
             )
         )
 
@@ -185,6 +196,7 @@ class ContextEngine:
                     label="Identity",
                     content=identity_text,
                     token_estimate=self._estimate_tokens(identity_text),
+                    tier=SECTION_TIERS.get("Identity", "dynamic"),
                 )
             )
 
@@ -205,6 +217,7 @@ class ContextEngine:
                     label="Context Safety",
                     content=anti_halluc,
                     token_estimate=self._estimate_tokens(anti_halluc),
+                    tier=SECTION_TIERS.get("Context Safety", "dynamic"),
                 )
             )
 
@@ -221,6 +234,7 @@ class ContextEngine:
                             label="Cached Results",
                             content=hint_text,
                             token_estimate=self._estimate_tokens(hint_text),
+                            tier=SECTION_TIERS.get("Cached Results", "dynamic"),
                         )
                     )
             except Exception:
@@ -253,6 +267,7 @@ class ContextEngine:
                             label="User Profile",
                             content=profile_text,
                             token_estimate=self._estimate_tokens(profile_text),
+                            tier=SECTION_TIERS.get("User Profile", "dynamic"),
                         )
                     )
             except Exception:
@@ -272,6 +287,7 @@ class ContextEngine:
                             label="Active Censors",
                             content=censor_text,
                             token_estimate=self._estimate_tokens(censor_text),
+                            tier=SECTION_TIERS.get("Active Censors", "dynamic"),
                         )
                     )
             except Exception:
@@ -287,6 +303,7 @@ class ContextEngine:
                     label="Current Frame",
                     content=frame_text,
                     token_estimate=self._estimate_tokens(frame_text),
+                    tier=SECTION_TIERS.get("Current Frame", "dynamic"),
                 )
             )
 
@@ -311,6 +328,7 @@ class ContextEngine:
                     label="Working Memory",
                     content=wm_text,
                     token_estimate=self._estimate_tokens(wm_text),
+                    tier=SECTION_TIERS.get("Working Memory", "dynamic"),
                 )
             )
 
@@ -359,6 +377,7 @@ class ContextEngine:
                             label="Related Decisions",
                             content=dec_text,
                             token_estimate=self._estimate_tokens(dec_text),
+                            tier=SECTION_TIERS.get("Related Decisions", "dynamic"),
                         )
                     )
             except Exception as e:
@@ -414,6 +433,7 @@ class ContextEngine:
                             label="Relevant Facts",
                             content=facts_text,
                             token_estimate=self._estimate_tokens(facts_text),
+                            tier=SECTION_TIERS.get("Relevant Facts", "dynamic"),
                         )
                     )
             except Exception as e:
@@ -518,6 +538,7 @@ class ContextEngine:
                             label="Known Procedures",
                             content=proc_text,
                             token_estimate=self._estimate_tokens(proc_text),
+                            tier=SECTION_TIERS.get("Known Procedures", "dynamic"),
                         )
                     )
             except Exception as e:
@@ -550,6 +571,7 @@ class ContextEngine:
                             label="Recent Conversations",
                             content=recent_text,
                             token_estimate=self._estimate_tokens(recent_text),
+                            tier=SECTION_TIERS.get("Recent Conversations", "dynamic"),
                         )
                     )
             except Exception as e:
@@ -597,6 +619,7 @@ class ContextEngine:
                             label="Past Episodes",
                             content=ep_text,
                             token_estimate=self._estimate_tokens(ep_text),
+                            tier=SECTION_TIERS.get("Past Episodes", "dynamic"),
                         )
                     )
             except Exception as e:
@@ -617,12 +640,27 @@ class ContextEngine:
             (total_used / total_budget * 100) if total_budget > 0 else 0,
         )
 
+        # F036: Group sections by tier for cache-optimized system prompt splitting
+        tier_groups: dict[str, list[str]] = {"static": [], "semi_stable": [], "dynamic": []}
+        for section in sorted(sections, key=lambda s: s.priority):
+            tier = section.tier
+            if tier not in tier_groups:
+                tier = "dynamic"
+            tier_groups[tier].append(f"## {section.label}\n\n{section.content}")
+
+        sections_by_tier = {
+            tier: "\n\n".join(parts)
+            for tier, parts in tier_groups.items()
+            if parts
+        }
+
         return BuildResult(
             system_prompt=system_prompt,
             sections=sections,
             recalled_ids=recalled_ids,
             recalled_content_map=recalled_content_map,
             recalled_score_map=recalled_score_map,
+            sections_by_tier=sections_by_tier,
         )
 
     async def _apply_dedup(
