@@ -19,7 +19,7 @@ def compute_quality_score(
     - Reason diversity (>=2 types): +0.10
 
     Total possible: 1.0
-    Block threshold: < 0.5 (enforced by guardrail, not here)
+    Block threshold: < 0.55 (enforced by guardrail, not here)
     """
     score = 0.0
 

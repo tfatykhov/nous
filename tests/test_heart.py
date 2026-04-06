@@ -420,3 +420,44 @@ async def test_events_emitted(heart, session):
     )
     fact_events = result2.scalars().all()
     assert len(fact_events) >= 1
+
+
+# ---------------------------------------------------------------------------
+# F038-1.2: Fact minimum content length
+# ---------------------------------------------------------------------------
+
+
+async def test_fact_minimum_content_rejected(heart, session):
+    """Content shorter than 30 chars -> FactRejected."""
+    from nous.heart.schemas import FactRejected
+
+    result = await heart.learn(
+        _fact_input(content="for: CORPGEN"),
+        session=session,
+    )
+    assert isinstance(result, FactRejected)
+    assert "too short" in result.explanation.lower()
+
+
+async def test_fact_minimum_content_boundary(heart, session):
+    """Content exactly 30 chars -> accepted (not rejected)."""
+    from nous.heart.schemas import FactRejected
+
+    content_30 = "A" * 30  # exactly 30 characters
+    result = await heart.learn(
+        _fact_input(content=content_30),
+        session=session,
+    )
+    assert not isinstance(result, FactRejected)
+
+
+async def test_fact_minimum_content_whitespace(heart, session):
+    """Content with whitespace padding that strips to < 30 chars -> rejected."""
+    from nous.heart.schemas import FactRejected
+
+    result = await heart.learn(
+        _fact_input(content="   short   "),
+        session=session,
+    )
+    assert isinstance(result, FactRejected)
+    assert "too short" in result.explanation.lower()

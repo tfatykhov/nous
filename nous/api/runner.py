@@ -1473,7 +1473,10 @@ Rules:
                 "Use `recall_deep` to search for relevant past decisions and knowledge. "
                 "Use `learn_fact` to store any new facts discovered. You can also use "
                 "`bash`, `read_file`, and `write_file` for system operations. "
-                "Use `web_search` and `web_fetch` for research."
+                "Use `web_search` and `web_fetch` for research.\n\n"
+                "**Efficiency:** For multi-file investigation or batch operations, "
+                "prefer `run_python` over sequential `bash` calls. Combine related "
+                "commands into a single `bash` call using `&&` when possible."
             )
         elif frame_id == "debug":
             return (
@@ -1484,7 +1487,10 @@ Rules:
                 "`record_decision`. Do NOT record routine debug steps or status "
                 "observations. Store root cause findings with `learn_fact`. "
                 "Use `bash` and `read_file` for investigation. Use `web_search` and "
-                "`web_fetch` to look up documentation or error messages."
+                "`web_fetch` to look up documentation or error messages.\n\n"
+                "**Efficiency:** For multi-file investigation, prefer `run_python` "
+                "with file reads over sequential `bash` calls. Combine related "
+                "commands into a single `bash` call using `&&`."
             )
         elif frame_id == "question":
             return (

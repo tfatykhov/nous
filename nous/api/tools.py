@@ -261,7 +261,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 category=category,
                 subject=subject,
                 confidence=confidence,
-                source="user_direct",  # F023: Always bypass admission gate for user tool calls
+                source="user_direct",  # F023/F038: +0.15 admission bonus for user tool calls
                 source_episode_id=episode_uuid,
                 source_decision_id=decision_uuid,
                 tags=tags or [],
@@ -270,8 +270,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # Store to Heart
             result = await heart.learn(input_data)
 
-            # F023: Handle rejected facts (should not happen with user_direct bypass,
-            # but handle gracefully in case bypass list changes)
+            # F023/F038: Handle rejected facts — user_direct gets +0.15 bonus (F038-2.4)
+            # but very low-quality or short content can still be rejected
             if isinstance(result, FactRejected):
                 return {
                     "content": [
@@ -1629,11 +1629,11 @@ def create_programmatic_tools(
             result = _schedule(heart.learn(FactInput(
                 content=content, category=category,
                 subject=subject, confidence=confidence,
-                source="user_direct",  # F023: bypass admission gate
+                source="user_direct",  # F023/F038: +0.15 admission bonus
                 source_episode_id=ep_uuid,
             )))
-            # F023: Handle FactRejected (shouldn't happen with user_direct bypass,
-            # but defensive in case bypass_sources config changes)
+            # F023/F038: Handle FactRejected (user_direct gets +0.15 bonus
+            # but very low-quality facts can still be rejected)
             if hasattr(result, "admitted") and not result.admitted:
                 return f"rejected: {content[:60]} (score={result.composite_score:.2f})"
             return f"stored: {content[:60]}"

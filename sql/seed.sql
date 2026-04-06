@@ -39,4 +39,4 @@ INSERT INTO brain.guardrails (agent_id, name, description, condition, severity, 
     ('nous-default', 'no-high-stakes-low-confidence', 'Block high-stakes decisions with low confidence', '{"cel": "decision.stakes == ''high'' && decision.confidence < 0.5"}', 'block', 100),
     ('nous-default', 'no-critical-without-review', 'Block critical-stakes without explicit review', '{"cel": "decision.stakes == ''critical''"}', 'block', 90),
     ('nous-default', 'require-reasons', 'Block decisions without at least one reason', '{"cel": "decision.reason_count < 1"}', 'block', 110),
-    ('nous-default', 'low-quality-recording', 'Block low-quality decisions (missing tags/pattern)', '{"cel": "decision.quality_score < 0.5"}', 'block', 120);
+    ('nous-default', 'low-quality-recording', 'Block low-quality decisions (missing tags/pattern)', '{"cel": "decision.quality_score < 0.55"}', 'block', 120);
