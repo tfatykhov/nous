@@ -70,6 +70,11 @@ services:
       - NOUS_STALENESS_HALF_LIFE_DAYS=${NOUS_STALENESS_HALF_LIFE_DAYS:-14}
       - NOUS_TOOL_TIMEOUT=${NOUS_TOOL_TIMEOUT:-120}
       - NOUS_KEEPALIVE_INTERVAL=${NOUS_KEEPALIVE_INTERVAL:-10}
+    volumes:
+      # Claude Code auth (F054) — mount host's .claude.json for Max subscription auth
+      - ${CLAUDE_AUTH_FILE:-./.claude.json}:/root/.claude.json:ro
+      # Claude Code job runner working directory
+      - claude-jobs:/workspace/claude-jobs
     depends_on:
       postgres:
         condition: service_healthy
@@ -109,3 +114,4 @@ services:
 
 volumes:
   pgdata:
+  claude-jobs:

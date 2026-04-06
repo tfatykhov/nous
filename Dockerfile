@@ -16,8 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     redis-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Create workspace directory
-RUN mkdir -p /tmp/nous-workspace
+# Install Claude Code CLI (F054: Claude Code Job Runner)
+RUN npm install -g @anthropic-ai/claude-code
+
+# Create workspace and claude-jobs directories
+RUN mkdir -p /tmp/nous-workspace /workspace/claude-jobs
 
 # Copy source BEFORE pip install (F5: non-editable install)
 COPY pyproject.toml .
