@@ -526,7 +526,7 @@ function renderBypassBreakdown(el, data) {
         },
         options: {
             plugins: {
-                legend: { position: 'right' }
+                legend: { position: Dashboard.legendPosition() }
             }
         }
     }));

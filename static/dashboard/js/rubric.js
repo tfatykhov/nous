@@ -194,7 +194,7 @@ function renderOutcomeSignals(el, data) {
             }]
         },
         options: {
-            plugins: { legend: { position: 'right' } }
+            plugins: { legend: { position: Dashboard.legendPosition() } }
         }
     }));
 }

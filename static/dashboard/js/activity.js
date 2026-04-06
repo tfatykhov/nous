@@ -49,7 +49,7 @@ Dashboard.registerView('activity', async function(container) {
     html += '</div>';
 
     // Two columns: timeline + side panels
-    html += '<div style="display:grid;grid-template-columns:1fr 360px;gap:24px;align-items:start">';
+    html += '<div class="activity-grid">';
 
     // Activity Timeline
     html += '<div>';
