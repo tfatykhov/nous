@@ -115,6 +115,7 @@ All shipped implementation specs with PR references:
 | F034.4 | Heartbeat Completions | 📋 Proposed | #242 — consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email dedup migration |
 | F034.5 | Dynamic Heartbeat Checks | ✅ Shipped | #252 — prompt-driven checks, conversational creation, tool_filter, REST CRUD, periodic sync |
 | F036 | Prompt Cache Optimization | ✅ Shipped | #253 — 3-tier system prompt split, cache break detection, single breakpoint, tool schema cache |
+| F038 | Memory Quality Fixes | ✅ Shipped | #258 — quality gate 0.55, fact 30-char min, procedure floor, episode recency, admission bonus, task synthesis, context dedup, bash hints |
 | 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
 | 011.2 | Multimodal File Support | 📋 Draft | — image/document processing across input channels |
 | 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred to F024) |
@@ -151,6 +152,7 @@ All shipped implementation specs with PR references:
 |---------|------|--------|-------------|
 | F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | ✅ Shipped | SmartCompress (ingestion-time statistical compression) + ReversibleCache (Postgres-backed tool result caching) + `cache_retrieve` tool |
 | F031-b | [Consolidation Orient & Resolve](F031-consolidation-orient-resolve.md) | ✅ Shipped | Orient context injection in sleep reflection — checks existing facts before extracting. Contradiction resolution phase with fact supersession |
+| F038 | Memory Quality & Context Loading Fixes | ✅ Shipped | Quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency weighting, user_direct admission bonus, task synthesis, context dedup, bash batching hints |
 
 ### Phase 2 — Quality (next to build)
 
@@ -229,4 +231,4 @@ All shipped implementation specs with PR references:
 | `heart` (13) | episodes, episode_decisions, episode_procedures, facts, procedures, rubric_versions, outcome_signals, censors, working_memory, conversation_state, subtasks, schedules, tool_cache | Memory system |
 | `nous_system` (7) | agents, agent_identity, config, dynamic_checks, events, frames, schema_migrations | System infrastructure |
 
-Migrations (006→024): event bus, agent identity, conversation state, decision review, subtasks/schedules, subtask delivery, frame typing, tool cache, notification defaults, schedule frames, polymorphic graph edges, admission control, dashboard indexes, admission scores, episode compaction, config table, rubric/outcome signals, procedure search, censor action payloads.
+Migrations (006→028): event bus, agent identity, conversation state, decision review, subtasks/schedules, subtask delivery, frame typing, tool cache, notification defaults, schedule frames, polymorphic graph edges, admission control, dashboard indexes, admission scores, episode compaction, config table, rubric/outcome signals, procedure search, censor action payloads, episode transcript, observability, dynamic checks, quality guardrail threshold.

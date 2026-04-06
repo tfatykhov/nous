@@ -158,6 +158,7 @@ nous/
 | F036 | Prompt Cache Optimization (3-tier system prompt split, cache break detection, single breakpoint strategy, tool schema caching) | #253 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 | F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
+| F038 | Memory Quality & Context Loading Fixes (quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency, user_direct bonus, task synthesis, context dedup, bash hints) | #258 |
 
 ## How to Work
 
@@ -317,6 +318,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_ACTION_GATING_MODE` | `enforce` | Action gating mode (shadow/warn/enforce) |
 | `NOUS_ACTION_GATING_MODEL` | `claude-haiku-4-5-20251001` | Model for Tier 3 LLM gate |
 | `NOUS_ACTION_GATING_EXTERNAL_ONLY` | `false` | Skip Tier 2, only gate external/irreversible |
+| `NOUS_PROCEDURE_SCORE_FLOOR` | `0.40` | Minimum score for procedures when embeddings enabled (F038) |
 | `NOUS_MMR_ENABLED` | `false` | Enable MMR diversity re-ranking in recall_deep |
 | `NOUS_MMR_DIVERSITY_WEIGHT` | `0.7` | MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity) |
 | `NOUS_CRITIC_SKILL_INJECTION` | `disabled` | Critic skill injection mode: enabled, disabled, log_only |
