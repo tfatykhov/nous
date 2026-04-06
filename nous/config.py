@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
 
+    # F038-2.1: Procedure score floor (embedding mode only)
+    procedure_score_floor: float = 0.40
+
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
     relevance_drop_ratio: float = 0.5
 

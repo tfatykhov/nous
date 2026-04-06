@@ -423,8 +423,9 @@ class TestCompositeScoring:
 
 class TestBypass:
     @pytest.mark.asyncio
-    async def test_user_direct_bypasses(self):
-        ctrl = _controller(shadow_mode=False)
+    async def test_user_direct_no_bypass(self):
+        """F038-2.4: user_direct facts now go through scoring (no bypass)."""
+        ctrl = _controller(shadow_mode=False, utility_llm_enabled=False)
         result = await ctrl.score(
             fact_input=_fact(source="user_direct"),
             embedding=None,
@@ -433,8 +434,8 @@ class TestBypass:
             session=None,
         )
         assert result.admitted is True
-        assert result.bypassed is True
-        assert result.composite_score == 1.0
+        assert result.bypassed is False
+        assert len(result.scores) == 5
 
     @pytest.mark.asyncio
     async def test_user_stated_bypasses(self):
@@ -544,3 +545,69 @@ class TestShadowMode:
         )
         assert len(result.scores) == 5
         assert result.composite_score > 0
+
+
+# ---------------------------------------------------------------------------
+# F038-2.4: user_direct Admission Bonus
+# ---------------------------------------------------------------------------
+
+
+class TestUserDirectBonus:
+    @pytest.mark.asyncio
+    async def test_admission_user_direct_bonus(self):
+        """user_direct facts get +0.15 composite bonus."""
+        ctrl = _controller(utility_llm_enabled=False, shadow_mode=False)
+        # Score same fact with and without user_direct source
+        fact_ud = _fact(source="user_direct")
+        fact_ext = _fact(source="fact_extractor")
+
+        result_ud = await ctrl.score(
+            fact_input=fact_ud, embedding=None,
+            max_existing_similarity=None, source_text=None, session=None,
+        )
+        result_ext = await ctrl.score(
+            fact_input=fact_ext, embedding=None,
+            max_existing_similarity=None, source_text=None, session=None,
+        )
+        # user_direct should score 0.15 higher
+        assert abs(result_ud.composite_score - result_ext.composite_score - 0.15) < 0.001
+
+    @pytest.mark.asyncio
+    async def test_admission_user_direct_short_content_still_admitted(self):
+        """A reasonable user_direct fact with the bonus should pass threshold."""
+        ctrl = _controller(utility_llm_enabled=False, shadow_mode=False)
+        # Short but valid fact — would score lower without bonus
+        result = await ctrl.score(
+            fact_input=_fact(
+                content="Tim uses neovim as his primary editor",
+                category="preference",
+                subject="Tim",
+                confidence=0.9,
+                source="user_direct",
+            ),
+            embedding=None,
+            max_existing_similarity=None,
+            source_text=None,
+            session=None,
+        )
+        assert result.admitted is True
+        assert result.composite_score >= ctrl.config.threshold
+
+    @pytest.mark.asyncio
+    async def test_admission_user_direct_bonus_capped_at_1(self):
+        """Bonus should not push composite above 1.0."""
+        ctrl = _controller(utility_llm_enabled=False, shadow_mode=False)
+        result = await ctrl.score(
+            fact_input=_fact(
+                content="Tim prefers dark mode in his IDE and uses it consistently across all environments",
+                category="preference",
+                subject="Tim",
+                confidence=1.0,
+                source="user_direct",
+            ),
+            embedding=None,
+            max_existing_similarity=0.0,  # High novelty
+            source_text="Tim prefers dark mode in his IDE and uses it consistently across all environments",
+            session=None,
+        )
+        assert result.composite_score <= 1.0

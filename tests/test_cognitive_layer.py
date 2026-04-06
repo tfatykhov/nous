@@ -726,3 +726,81 @@ async def test_end_session_clears_working_memory(cognitive, heart, session):
     # Working memory should be cleared
     wm_after = await heart.get_working_memory(sid, session=session)
     assert wm_after is None
+
+
+# ---------------------------------------------------------------------------
+# F038-2.2: Task field synthesis from conversation history
+# ---------------------------------------------------------------------------
+
+
+async def test_task_synthesis_empty_current_task_fallback(cognitive, heart, session):
+    """When current_task is empty and user sends 'yes', scan back for substantive message."""
+    sid = f"test-task-synth-{uuid.uuid4().hex[:8]}"
+
+    # First turn with substantive input sets the task
+    ctx1 = await cognitive.pre_turn(
+        "nous-default", sid, "Help me design a database schema for users",
+        session=session,
+    )
+
+    # Verify task was set
+    wm = await heart.get_working_memory(sid, session=session)
+    assert wm is not None
+    assert wm.current_task is not None
+    assert "database" in wm.current_task.lower()
+
+    # Clear working memory to simulate empty current_task
+    await heart.clear_working_memory(sid, session=session)
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    # Verify task is now empty
+    wm_empty = await heart.get_working_memory(sid, session=session)
+    assert wm_empty is not None
+    assert not wm_empty.current_task
+
+    # Second turn with short "yes" and conversation history
+    ctx2 = await cognitive.pre_turn(
+        "nous-default", sid, "yes",
+        session=session,
+        conversation_messages=[
+            "Help me design a database schema for users",
+            "yes",
+        ],
+    )
+
+    # Task should have been synthesized from conversation history
+    wm_after = await heart.get_working_memory(sid, session=session)
+    assert wm_after is not None
+    assert wm_after.current_task is not None
+    assert "database" in wm_after.current_task.lower()
+
+
+async def test_task_synthesis_existing_task_preserved(cognitive, heart, session):
+    """When current_task exists and user sends 'ok', preserve existing task."""
+    sid = f"test-task-preserve-{uuid.uuid4().hex[:8]}"
+
+    # First turn sets the task
+    await cognitive.pre_turn(
+        "nous-default", sid, "Build the authentication module",
+        session=session,
+    )
+
+    wm = await heart.get_working_memory(sid, session=session)
+    assert wm is not None
+    original_task = wm.current_task
+    assert original_task is not None
+
+    # Second turn with "ok" — existing task should be preserved
+    await cognitive.pre_turn(
+        "nous-default", sid, "ok",
+        session=session,
+        conversation_messages=[
+            "Build the authentication module",
+            "ok",
+        ],
+    )
+
+    wm_after = await heart.get_working_memory(sid, session=session)
+    assert wm_after is not None
+    # Task should remain the same (not overwritten)
+    assert wm_after.current_task == original_task

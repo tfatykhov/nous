@@ -278,17 +278,34 @@ class Brain:
         """Lightweight pre-check to detect obvious non-decisions.
 
         Returns True if the description looks like a status report
-        rather than a real decision. Checks:
+        rather than a real decision. This is a HARD filter — callers
+        should raise ValueError when True.
+
+        Checks:
         1. Very short description (<20 chars) with no reasons
         2. Description is mostly noise keywords with no reasoning
-
-        This is a SOFT filter — it logs a warning but does not block.
-        The frame instruction changes (C1) are the primary fix.
+        3. Description contains error-processing phrases
+        4. Description starts with a quote character
+        5. Description is conversational filler (< 60 chars, starts with filler word)
         """
         desc_lower = description.lower().strip()
+        desc_stripped = description.strip()
 
         # Very short with no reasons — almost certainly noise
         if len(desc_lower) < 20 and not reasons:
+            return True
+
+        # F038-1.1: Error processing patterns
+        if "error processing your request" in desc_lower or "encountered an error" in desc_lower:
+            return True
+
+        # F038-1.1: Starts with quote character
+        if desc_stripped and desc_stripped[0] in ('"', "'", '\u201c', '\u201d'):
+            return True
+
+        # F038-1.1: Conversational filler — short descriptions starting with filler words
+        _FILLER_PREFIXES = ("excellent", "great", "perfect", "wonderful", "let me", "i'll", "i will")
+        if len(desc_stripped) < 60 and any(desc_lower.startswith(p) for p in _FILLER_PREFIXES):
             return True
 
         # P1-4: Use regex tokenization to strip punctuation
@@ -309,13 +326,9 @@ class Brain:
         Steps 4-7 use ORM cascade — single session.add(decision) inserts
         the decision, tags, reasons, and bridge together (P1-1).
         """
-        # C2: Noise check — warn but still record (soft filter)
+        # F038-1.1: Noise check — hard reject
         if self._is_noise_decision(input.description, input.reasons):
-            logger.warning(
-                "Possible noise decision detected: '%s' — "
-                "consider if this is a real choice between alternatives",
-                input.description[:80],
-            )
+            raise ValueError(f"Noise decision rejected: {input.description[:80]}")
 
         # 1. Compute quality score
         reasons_dicts = [r.model_dump() for r in input.reasons]

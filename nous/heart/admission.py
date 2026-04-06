@@ -69,7 +69,6 @@ class AdmissionConfig:
     bypass_sources: list[str] = field(
         default_factory=lambda: [
             "user_stated",
-            "user_direct",
             "identity",
             "censor",
             "supersede",
@@ -348,6 +347,10 @@ Respond with ONLY a number between 0.0 and 1.0."""
         # Weighted composite
         w = self.config.weights
         composite = sum(w[k] * scores[k] for k in w)
+
+        # F038-2.4: Scoring bonus for agent-initiated facts (replaces bypass)
+        if fact_input.source == "user_direct":
+            composite = min(1.0, composite + 0.15)
 
         # Shadow mode: always admit, log what would have happened
         if self.config.shadow_mode:

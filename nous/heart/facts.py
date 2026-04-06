@@ -154,6 +154,16 @@ class FactManager:
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
     ) -> FactDetail | FactRejected:
+        # F038-1.2: Reject facts with content < 30 characters
+        if len(input.content.strip()) < 30:
+            return FactRejected(
+                content=input.content,
+                composite_score=0.0,
+                threshold=0.0,
+                scores={},
+                explanation="Content too short (< 30 chars)",
+            )
+
         # Generate embedding
         embedding = None
         if self.embeddings:

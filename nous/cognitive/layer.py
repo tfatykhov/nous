@@ -564,6 +564,17 @@ class CognitiveLayer:
             focus_text = self._resolve_focus_text(user_input)
             if focus_text is not None:
                 await self._heart.focus(session_id, focus_text, frame.frame_id, session=session)
+            else:
+                # F038-2.2: Synthesize task from conversation history when current is empty
+                wm = await self._heart.get_working_memory(session_id, session=session)
+                if wm and not wm.current_task and conversation_messages:
+                    for msg in reversed(conversation_messages[:-1]):  # Skip current message
+                        candidate = self._resolve_focus_text(msg)
+                        if candidate:
+                            await self._heart.focus(
+                                session_id, candidate, frame.frame_id, session=session
+                            )
+                            break
         except Exception:
             logger.warning("Failed to update working memory for session %s", session_id, exc_info=True)
 

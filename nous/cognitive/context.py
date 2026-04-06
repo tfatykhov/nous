@@ -502,6 +502,12 @@ class ContextEngine:
                     embedding_procedures = self._apply_usage_boost(
                         embedding_procedures, usage_tracker,
                     )
+                    # F038-2.1: Absolute procedure score floor (embedding mode only)
+                    if self._has_embeddings and self._settings.procedure_score_floor > 0:
+                        embedding_procedures = [
+                            p for p in embedding_procedures
+                            if (getattr(p, "score", 0) or 0) >= self._settings.procedure_score_floor
+                        ]
                     embedding_procedures = self._apply_relevance_filter(
                         embedding_procedures, "procedure",
                     )
@@ -514,6 +520,17 @@ class ContextEngine:
                         ]
 
                     embedding_procedures = embedding_procedures[:embedding_limit]
+
+                # F038-1.3: Dedup procedures vs identity prompt
+                _effective_identity = identity_override or self._identity_prompt
+                if embedding_procedures and _effective_identity:
+                    embedding_procedures = [
+                        p for p in embedding_procedures
+                        if text_overlap(
+                            getattr(p, "body", "") or getattr(p, "steps_text", "") or "",
+                            _effective_identity,
+                        ) < _IDENTITY_OVERLAP_THRESHOLD
+                    ]
 
                 # --- Combine tracks ---
                 all_procedures = critic_procedures + (embedding_procedures or [])
@@ -589,8 +606,8 @@ class ContextEngine:
                 if _temporal_episode_ids:
                     episodes = [e for e in episodes if str(e.id) not in _temporal_episode_ids]
                 if episodes:
-                    # F017: Staleness penalty (before boosts)
-                    episodes = self._apply_staleness_penalty(episodes)
+                    # F038-2.3: Episode-specific recency weighting (replaces general staleness)
+                    episodes = self._apply_episode_recency(episodes)
                     # F10: apply_frame_boost
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
 
@@ -781,6 +798,29 @@ class ContextEngine:
                 adjusted.append(_wrap_with_score(r, score * max(decay, 0.3)))
             else:
                 adjusted.append(r)
+        return adjusted
+
+    def _apply_episode_recency(self, episodes: list) -> list:
+        """Apply linear time-decay to episode scores (F038-2.3).
+
+        Uses linear decay instead of exponential staleness:
+        final_score = score * max(0.5, 1.0 - (age_days / 60))
+        Episodes >60 days old get 0.5x penalty, recent ones ~1.0x.
+        """
+        now = datetime.now(timezone.utc)
+        adjusted = []
+        for ep in episodes:
+            score = getattr(ep, "score", None)
+            if score is None:
+                adjusted.append(ep)
+                continue
+            started = getattr(ep, "started_at", None)
+            if started is None:
+                adjusted.append(ep)
+                continue
+            age_days = (now - started).total_seconds() / 86400
+            decay = max(0.5, 1.0 - (age_days / 60))
+            adjusted.append(_wrap_with_score(ep, score * decay))
         return adjusted
 
     def _enforce_diversity(self, items: list, topic_attr: str, max_per_subject: int = 2) -> list:
