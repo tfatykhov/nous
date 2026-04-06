@@ -580,7 +580,7 @@ function renderObsCharts(data) {
                 options: {
                     cutout: '60%',
                     plugins: {
-                        legend: { position: 'right', labels: { font: { size: 11 }, padding: 8 } }
+                        legend: { position: Dashboard.legendPosition(), labels: { font: { size: 11 }, padding: 8 } }
                     }
                 }
             }));

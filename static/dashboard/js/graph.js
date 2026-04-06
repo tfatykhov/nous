@@ -38,6 +38,12 @@ Dashboard.registerView('graph', async function(container) {
     var graphEl = document.getElementById('graph-container');
     var statsEl = document.getElementById('graph-stats');
     var detailEl = document.getElementById('graph-detail');
+    detailEl.addEventListener('pointerdown', function(e) {
+        e.stopPropagation();
+    });
+    detailEl.addEventListener('touchstart', function(e) {
+        e.stopPropagation();
+    }, { passive: true });
     var controlsEl = document.getElementById('graph-controls');
 
     // Compute edge_count for each node from edge data

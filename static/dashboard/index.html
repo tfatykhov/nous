@@ -6,65 +6,69 @@
     <meta name="theme-color" content="#0a0a0f">
     <meta name="color-scheme" content="dark">
     <title>Nous Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/dashboard.css">
 </head>
 <body>
-    <nav class="sidebar" id="sidebar">
+    <a href="#content" class="skip-link">Skip to content</a>
+    <nav class="sidebar" id="sidebar" role="navigation" aria-label="Main navigation">
         <div class="sidebar-header">
             <span class="sidebar-logo">&#x1D6B9;</span>
             <span class="sidebar-title">Nous</span>
         </div>
         <div class="nav-links">
-            <a href="#/overview" class="nav-link active" data-view="overview">
+            <a href="#/overview" class="nav-link active" data-view="overview" aria-label="Overview">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zm10 0a1 1 0 011-1h2a1 1 0 011 1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-6z"/></svg>
                 <span>Overview</span>
             </a>
-            <a href="#/graph" class="nav-link" data-view="graph">
+            <a href="#/graph" class="nav-link" data-view="graph" aria-label="Knowledge Graph">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zm0 8a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zm6-6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zm0 8a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
                 <span>Knowledge Graph</span>
             </a>
-            <a href="#/browser" class="nav-link" data-view="browser">
+            <a href="#/browser" class="nav-link" data-view="browser" aria-label="Memory Browser">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V14a1 1 0 11-2 0V4.804z"/></svg>
                 <span>Memory Browser</span>
             </a>
-            <a href="#/decisions" class="nav-link" data-view="decisions">
+            <a href="#/decisions" class="nav-link" data-view="decisions" aria-label="Decisions">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
                 <span>Decisions</span>
             </a>
-            <a href="#/activity" class="nav-link" data-view="activity">
+            <a href="#/activity" class="nav-link" data-view="activity" aria-label="Activity">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/></svg>
                 <span>Activity</span>
             </a>
-            <a href="#/heartbeat" class="nav-link" data-view="heartbeat">
+            <a href="#/heartbeat" class="nav-link" data-view="heartbeat" aria-label="Heartbeat">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor">
                     <path d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z"/>
                 </svg>
                 <span>Heartbeat</span>
             </a>
-            <a href="#/observability" class="nav-link" data-view="observability">
+            <a href="#/observability" class="nav-link" data-view="observability" aria-label="Observability">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor">
                     <path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/>
                     <path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/>
                 </svg>
                 <span>Observability</span>
             </a>
-            <a href="#/health" class="nav-link" data-view="health">
+            <a href="#/health" class="nav-link" data-view="health" aria-label="Graph Health">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 3a1 1 0 000 2v8a2 2 0 002 2h2.586l-1.293 1.293a1 1 0 101.414 1.414L10 15.414l2.293 2.293a1 1 0 001.414-1.414L12.414 15H15a2 2 0 002-2V5a1 1 0 100-2H3zm11.707 4.707a1 1 0 00-1.414-1.414L10 9.586 8.707 8.293a1 1 0 00-1.414 0l-2 2a1 1 0 101.414 1.414L8 10.414l1.293 1.293a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
                 <span>Graph Health</span>
             </a>
-            <a href="#/admission" class="nav-link" data-view="admission">
+            <a href="#/admission" class="nav-link" data-view="admission" aria-label="Admission">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
                 <span>Admission</span>
             </a>
-            <a href="#/rubric" class="nav-link" data-view="rubric">
+            <a href="#/rubric" class="nav-link" data-view="rubric" aria-label="Rubric">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm5 6a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V8z" clip-rule="evenodd"/></svg>
                 <span>Rubric</span>
             </a>
-            <a href="#/execution" class="nav-link" data-view="execution">
+            <a href="#/execution" class="nav-link" data-view="execution" aria-label="Execution">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 2a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2H4zm3 3a1 1 0 011-1h4a1 1 0 110 2H8a1 1 0 01-1-1zm0 4a1 1 0 011-1h8a1 1 0 110 2H8a1 1 0 01-1-1zm0 4a1 1 0 011-1h5a1 1 0 110 2H8a1 1 0 01-1-1zM5 6a1 1 0 100-2 1 1 0 000 2zm0 4a1 1 0 100-2 1 1 0 000 2zm0 4a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/></svg>
                 <span>Execution</span>
             </a>
-            <a href="#/cache" class="nav-link" data-view="cache">
+            <a href="#/cache" class="nav-link" data-view="cache" aria-label="Cache">
                 <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor">
                     <path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/>
                     <path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/>
@@ -78,7 +82,15 @@
         </button>
     </nav>
 
+    <div class="sidebar-overlay" id="sidebar-overlay"></div>
+
     <main class="content" id="content">
+        <div class="mobile-header">
+            <button class="mobile-menu-btn" id="mobile-menu-btn" aria-label="Open navigation menu">
+                <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm0 5a1 1 0 011-1h6a1 1 0 110 2H4a1 1 0 01-1-1z" clip-rule="evenodd"/></svg>
+            </button>
+            <span class="mobile-header-title">Nous</span>
+        </div>
         <div id="view-overview" class="view"></div>
         <div id="view-graph" class="view"></div>
         <div id="view-browser" class="view"></div>

@@ -223,7 +223,7 @@ function createCategoriesChart(categories) {
             cutout: '60%',
             plugins: {
                 legend: {
-                    position: 'right',
+                    position: Dashboard.legendPosition(),
                     labels: { font: { size: 11 } }
                 }
             }
@@ -267,7 +267,7 @@ function createOutcomesChart(outcomes) {
             cutout: '60%',
             plugins: {
                 legend: {
-                    position: 'right',
+                    position: Dashboard.legendPosition(),
                     labels: { font: { size: 11 } }
                 }
             }

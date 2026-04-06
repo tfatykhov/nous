@@ -249,6 +249,14 @@ const Dashboard = {
         if (!outcome) return 'badge-pending';
         var map = { success: 'badge-success', failure: 'badge-failure', partial: 'badge-partial', pending: 'badge-pending' };
         return map[outcome] || 'badge-pending';
+    },
+
+    /**
+     * Get responsive legend position based on viewport width.
+     * Returns 'bottom' on mobile, 'right' on desktop.
+     */
+    legendPosition: function() {
+        return window.innerWidth <= 768 ? 'bottom' : 'right';
     }
 };
 
@@ -297,13 +305,78 @@ function handleRoute() {
 window.addEventListener('hashchange', handleRoute);
 
 document.addEventListener('DOMContentLoaded', function() {
-    // Sidebar toggle
+    // Sidebar toggle (desktop collapse)
     var toggleBtn = document.getElementById('sidebar-toggle');
     var sidebar = document.getElementById('sidebar');
     if (toggleBtn && sidebar) {
         toggleBtn.addEventListener('click', function() {
             sidebar.classList.toggle('collapsed');
         });
+    }
+
+    // Mobile drawer
+    var mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    var overlay = document.getElementById('sidebar-overlay');
+
+    function openMobileNav() {
+        if (sidebar) {
+            sidebar.classList.add('mobile-open');
+            sidebar.removeAttribute('aria-hidden');
+            sidebar.removeAttribute('inert');
+        }
+        if (overlay) overlay.classList.add('visible');
+    }
+
+    function closeMobileNav() {
+        if (sidebar) {
+            sidebar.classList.remove('mobile-open');
+            if (window.innerWidth <= 768) {
+                sidebar.setAttribute('aria-hidden', 'true');
+                sidebar.setAttribute('inert', '');
+            }
+        }
+        if (overlay) overlay.classList.remove('visible');
+    }
+
+    if (mobileMenuBtn) {
+        mobileMenuBtn.addEventListener('click', openMobileNav);
+    }
+
+    if (overlay) {
+        overlay.addEventListener('click', closeMobileNav);
+    }
+
+    // Close drawer on nav link click (mobile)
+    document.querySelectorAll('.nav-link').forEach(function(link) {
+        link.addEventListener('click', function() {
+            if (window.innerWidth <= 768) {
+                closeMobileNav();
+            }
+        });
+    });
+
+    // Escape key closes drawer
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && sidebar && sidebar.classList.contains('mobile-open')) {
+            closeMobileNav();
+        }
+    });
+
+    // Close drawer on orientation change / resize past breakpoint
+    window.addEventListener('resize', function() {
+        if (window.innerWidth > 768) {
+            closeMobileNav();
+            if (sidebar) {
+                sidebar.removeAttribute('aria-hidden');
+                sidebar.removeAttribute('inert');
+            }
+        }
+    });
+
+    // Set initial ARIA state for mobile
+    if (window.innerWidth <= 768 && sidebar) {
+        sidebar.setAttribute('aria-hidden', 'true');
+        sidebar.setAttribute('inert', '');
     }
 
     // Initial route
