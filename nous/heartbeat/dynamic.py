@@ -24,11 +24,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Tools allowed for dynamic checks (sensors only, no state mutation)
+# Tools allowed for dynamic checks.
 # Note: bash is included per spec but could execute arbitrary commands;
 # check creation is restricted to admin/conversation so risk is accepted.
+# heartbeat_check_create/manage enable autonomous sequential pipelines:
+# a check can spawn follow-up checks and disable itself when done.
 ALLOWED_TOOLS = frozenset({
     "web_search", "web_fetch", "recall_deep", "recall_recent", "bash", "read_file",
+    "heartbeat_check_create", "heartbeat_check_manage",
 })
 
 MIN_INTERVAL_SECONDS = 300  # 5 minutes minimum
@@ -85,11 +88,25 @@ class DynamicCheck(BaseCheck):
             return CheckResult()
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
+        has_pipeline_tools = bool(
+            {"heartbeat_check_create", "heartbeat_check_manage"} & set(self._tools)
+        )
+        pipeline_section = ""
+        if has_pipeline_tools:
+            pipeline_section = (
+                "\n\nYou can create follow-up checks with heartbeat_check_create "
+                "and manage existing checks (enable/disable/delete/update) with "
+                "heartbeat_check_manage. This lets you build sequential pipelines: "
+                "spawn the next step as a new check, then disable yourself with "
+                "heartbeat_check_manage(action='disable', name='" + self.name + "') "
+                "when your task is complete."
+            )
         instruction = (
             f"[Dynamic Heartbeat Check: {self.name}]\n"
             f"You are running a heartbeat check. Your job is to evaluate "
             f"whether there is anything worth reporting.\n\n"
-            f"Instructions: {self._prompt}\n\n"
+            f"Instructions: {self._prompt}\n"
+            f"{pipeline_section}\n\n"
             f"Respond with a JSON object:\n"
             f'{{"has_findings": bool, "findings": [{{"summary": "...", '
             f'"urgency": "high|normal|low", "needs_action": bool}}]}}\n\n'

@@ -575,10 +575,13 @@ class AgentRunner:
                     "budget_tokens": self._settings.thinking_budget,
                 }
 
-        # Effort parameter (works with or without thinking; "high" is API default)
-        # Note: opus models don't support the effort parameter
+        # Effort parameter ("high" is API default, so only send if different)
+        # Supported by Sonnet 4.6 and Opus 4.6. Haiku 4.5 does NOT support it.
         effective_model = payload["model"]
-        if self._settings.effort != "high" and "opus" not in effective_model:
+        if (
+            self._settings.effort != "high"
+            and "haiku" not in effective_model
+        ):
             payload["output_config"] = {"effort": self._settings.effort}
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
