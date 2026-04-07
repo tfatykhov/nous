@@ -11,6 +11,11 @@ from nous.brain.schemas import RecordInput
 from nous.config import Settings
 from nous.storage.models import GraphEdge
 
+pytestmark = pytest.mark.integration
+
+
+
+
 
 # ---------------------------------------------------------------------------
 # Unit tests (no DB required)

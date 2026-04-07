@@ -9,6 +9,11 @@ from nous.heart import Heart
 from nous.heart.schemas import ProcedureInput
 from nous.storage.models import Procedure
 
+pytestmark = pytest.mark.integration
+
+
+
+
 
 @pytest_asyncio.fixture
 async def heart_no_env(db, mock_embeddings):

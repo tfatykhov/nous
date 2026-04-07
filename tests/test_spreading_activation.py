@@ -10,6 +10,10 @@ from nous.brain.spreading_activation import (
 )
 from nous.config import Settings
 
+pytestmark = pytest.mark.integration
+
+
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -96,6 +100,7 @@ async def test_spreading_activation_empty_seeds(session):
 async def test_spreading_activation_returns_seeds(brain, session):
     """Spreading activation returns at least the seed nodes."""
     from nous.brain.schemas import RecordInput
+
 
     d1 = await brain.record(
         RecordInput(description="SA test", confidence=0.8, category="architecture", stakes="low"),

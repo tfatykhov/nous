@@ -14,6 +14,10 @@ from nous.cognitive.execution_ledger import (
 )
 from nous.cognitive.layer import CognitiveLayer
 
+pytestmark = pytest.mark.integration
+
+
+
 
 class MockAgentRunner:
     def __init__(self):
@@ -48,6 +52,7 @@ def runner():
 @pytest.fixture
 def app(runner, brain, heart, cognitive, db, settings):
     from nous.api.rest import create_app
+
     return create_app(runner, brain, heart, cognitive, db, settings)
 
 

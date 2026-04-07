@@ -14,6 +14,12 @@ from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import TurnContext, TurnResult
 from nous.heart import FactInput
 from tests.conftest import MockEmbeddingProvider
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
+
 
 
 # ---------------------------------------------------------------------------

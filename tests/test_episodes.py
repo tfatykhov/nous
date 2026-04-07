@@ -14,6 +14,10 @@ from nous.heart import (
     EpisodeSummary,
 )
 from nous.storage.models import EpisodeDecision, EpisodeProcedure
+import pytest
+
+pytestmark = pytest.mark.integration
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -147,6 +151,8 @@ async def test_link_decision(heart, db, settings, session):
 async def test_link_procedure_with_effectiveness(heart, session):
     """episode_procedures row created with effectiveness."""
     from nous.heart import ProcedureInput
+
+
 
     episode = await heart.start_episode(_episode_input(), session=session)
     procedure = await heart.store_procedure(
