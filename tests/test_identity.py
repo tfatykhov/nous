@@ -101,7 +101,7 @@ class TestSectionValidation:
         assert "charactor" not in VALID_SECTIONS
 
     def test_sections_list_completeness(self):
-        expected = ["character", "values", "protocols", "preferences", "boundaries"]
+        expected = ["character", "values", "protocols", "preferences", "boundaries", "environment"]
         assert SECTIONS == expected
 
 

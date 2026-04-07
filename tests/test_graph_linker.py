@@ -12,6 +12,9 @@ from nous.config import Settings
 from nous.storage.models import GraphEdge
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # Unit tests (no DB required)
 # ---------------------------------------------------------------------------
@@ -50,6 +53,9 @@ class TestCosine:
 # ---------------------------------------------------------------------------
 
 
+pytestmark_integration = pytest.mark.integration
+
+
 @pytest_asyncio.fixture
 async def brain(db, settings):
     """Brain without embeddings (keyword-only mode)."""
@@ -58,7 +64,7 @@ async def brain(db, settings):
     await b.close()
 
 
-@pytest_asyncio.fixture(autouse=True)
+@pytest_asyncio.fixture
 async def _fix_stale_relation_constraint(db):
     """Drop the stale inline relation check if it exists.
 
@@ -75,8 +81,9 @@ async def _fix_stale_relation_constraint(db):
         ))
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_link_episode_deterministic(brain, session):
+async def test_link_episode_deterministic(brain, session, _fix_stale_relation_constraint):
     """Deterministic episode linking creates discussed_in and extracted_from edges."""
     settings = Settings()
     linker = GraphLinker(brain.db, None, settings, brain.agent_id)

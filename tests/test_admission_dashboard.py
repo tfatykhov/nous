@@ -12,6 +12,9 @@ from nous.cognitive.layer import CognitiveLayer
 from nous.heart import FactInput
 from nous.storage.models import Fact
 
+pytestmark = pytest.mark.postgres_only
+
+
 
 # ---------------------------------------------------------------------------
 # Task 1: Schema tests
@@ -176,6 +179,9 @@ async def test_get_admission_data_with_facts(heart_with_shadow_admission, db, se
 
 from nous.api.dashboard_queries import get_admission_rejected
 
+pytestmark = pytest.mark.integration
+
+
 
 @pytest.mark.asyncio
 async def test_get_admission_rejected_empty(db, settings):
@@ -244,6 +250,7 @@ async def cognitive(brain, heart, settings):
 @pytest.fixture
 def app(brain, heart, cognitive, db, settings):
     from nous.api.rest import create_app
+
     return create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
 
 

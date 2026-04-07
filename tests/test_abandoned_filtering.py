@@ -18,6 +18,11 @@ from nous.cognitive.context import ContextEngine
 from nous.heart import EpisodeInput, EpisodeSummary
 from nous.storage.models import Decision, Episode
 
+pytestmark = pytest.mark.integration
+
+
+
+
 
 # ---------------------------------------------------------------------------
 # Helpers

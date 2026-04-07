@@ -17,6 +17,11 @@ from nous.heart.facts import FactManager
 from nous.heart.schemas import FactInput
 from nous.storage.models import Event
 
+pytestmark = pytest.mark.integration
+
+
+
+
 
 @pytest_asyncio.fixture
 async def fact_manager(db, mock_embeddings):
