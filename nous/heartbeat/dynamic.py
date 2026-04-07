@@ -35,6 +35,7 @@ ALLOWED_TOOLS = frozenset({
 })
 
 MIN_INTERVAL_SECONDS = 300  # 5 minutes minimum
+CALLBACK_RETRY_DELAY_SECONDS = 30
 
 
 class DynamicCheck(BaseCheck):
@@ -51,6 +52,8 @@ class DynamicCheck(BaseCheck):
         urgent: bool = False,
         runner: AgentRunner | None = None,
         model_override: str | None = None,
+        on_complete_prompt: str | None = None,
+        on_complete_tools: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.check_id = check_id
@@ -63,6 +66,9 @@ class DynamicCheck(BaseCheck):
         self._runner = runner
         self._model_override = model_override
         self._cron_expr: str | None = None
+        self.on_complete_prompt = on_complete_prompt
+        self.on_complete_tools = [t for t in on_complete_tools if t in ALLOWED_TOOLS] if on_complete_tools else []
+        self._self_disabled = False
 
     def set_cron(self, cron_expr: str | None) -> None:
         """Set cron expression for scheduling."""
@@ -129,6 +135,7 @@ class DynamicCheck(BaseCheck):
                 has_updates=bool(findings),
                 findings=findings,
                 tokens_used=tokens,
+                self_disabled=self._self_disabled,
             )
         except Exception:
             logger.exception("DynamicCheck '%s' failed", self.name)
@@ -173,7 +180,7 @@ class DynamicCheck(BaseCheck):
 
     def signature(self) -> str:
         """Return a signature string for change detection."""
-        return f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|{self.urgent_override}|{self._cron_expr}"
+        return f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"
 
 
 class DynamicCheckLoader:
@@ -247,6 +254,8 @@ class DynamicCheckLoader:
                 urgent=row.urgent,
                 runner=self._runner,
                 model_override=self._model_override,
+                on_complete_prompt=row.on_complete_prompt,
+                on_complete_tools=row.on_complete_tools or [],
             )
             check.set_cron(row.cron_expr)
 
@@ -329,6 +338,8 @@ class DynamicCheckLoader:
         cron_expr: str | None = None,
         timeout_seconds: int | None = None,
         urgent: bool = False,
+        on_complete_prompt: str | None = None,
+        on_complete_tools: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a new dynamic check. Returns the check dict."""
         if timeout_seconds is None:
@@ -360,6 +371,11 @@ class DynamicCheckLoader:
         # Filter tools to allowed set
         validated_tools = [t for t in (tools or []) if t in ALLOWED_TOOLS]
 
+        # Validate on_complete_tools
+        validated_on_complete_tools = [t for t in (on_complete_tools or []) if t in ALLOWED_TOOLS]
+        if validated_on_complete_tools and not set(validated_on_complete_tools).issubset(set(validated_tools)):
+            raise ValueError("on_complete_tools must be a subset of check tools")
+
         # Reject permanent name collisions
         existing = self._registry.get_check(name)
         if existing and name in self._registry._permanent:
@@ -376,6 +392,8 @@ class DynamicCheckLoader:
                 interval_seconds=interval_seconds,
                 timeout_seconds=timeout_seconds,
                 urgent=urgent,
+                on_complete_prompt=on_complete_prompt,
+                on_complete_tools=validated_on_complete_tools,
             )
             session.add(model)
             await session.commit()
@@ -394,6 +412,8 @@ class DynamicCheckLoader:
             urgent=urgent,
             runner=self._runner,
             model_override=self._model_override,
+            on_complete_prompt=on_complete_prompt,
+            on_complete_tools=validated_on_complete_tools,
         )
         check.set_cron(cron_expr)
         self._registry.register(check, permanent=False)
@@ -409,6 +429,8 @@ class DynamicCheckLoader:
             "cron_expr": cron_expr,
             "tools": validated_tools,
             "urgent": urgent,
+            "on_complete_prompt": on_complete_prompt,
+            "on_complete_tools": validated_on_complete_tools,
         }
 
     async def manage_check(
@@ -441,6 +463,10 @@ class DynamicCheckLoader:
                 return {"status": "enabled", "name": name}
 
             elif action == "disable":
+                # Set _self_disabled on in-memory check before unregistering
+                existing = self._registry.get_check(name)
+                if existing and isinstance(existing, DynamicCheck):
+                    existing._self_disabled = True
                 model.enabled = False
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
@@ -467,6 +493,7 @@ class DynamicCheckLoader:
                 allowed_fields = {
                     "description", "prompt", "tools", "interval_seconds",
                     "cron_expr", "timeout_seconds", "urgent",
+                    "on_complete_prompt", "on_complete_tools",
                 }
                 for key, value in updates.items():
                     if key not in allowed_fields:
@@ -478,7 +505,11 @@ class DynamicCheckLoader:
                         raise ValueError("tools must be a list")
                     if key == "urgent" and not isinstance(value, bool):
                         raise ValueError("urgent must be a boolean")
+                    if key == "on_complete_tools" and not isinstance(value, list):
+                        raise ValueError("on_complete_tools must be a list")
                     if key == "tools":
+                        value = [t for t in value if t in ALLOWED_TOOLS]
+                    if key == "on_complete_tools":
                         value = [t for t in value if t in ALLOWED_TOOLS]
                     if key == "interval_seconds" and value < MIN_INTERVAL_SECONDS:
                         raise ValueError(f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds")
@@ -490,6 +521,11 @@ class DynamicCheckLoader:
                             f"Minimum interval is {MIN_INTERVAL_SECONDS} seconds "
                             f"(current: {model.interval_seconds}s) — set a valid interval or cron expression"
                         )
+                # Re-validate on_complete_tools subset after all updates
+                current_tools = set(model.tools or [])
+                current_on_complete = set(model.on_complete_tools or [])
+                if current_on_complete and not current_on_complete.issubset(current_tools):
+                    raise ValueError("on_complete_tools must be a subset of check tools")
                 model.updated_at = datetime.now(UTC)
                 await session.commit()
                 await self.sync()
@@ -527,6 +563,8 @@ class DynamicCheckLoader:
                 "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
                 "created_by": row.created_by,
+                "on_complete_prompt": (row.on_complete_prompt or "")[:200] if row.on_complete_prompt else None,
+                "on_complete_tools": row.on_complete_tools or [],
                 "circuit_breaker_open": (
                     registry_check.consecutive_failures >= registry_check.max_failures
                     if registry_check else False

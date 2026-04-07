@@ -25,7 +25,7 @@ from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import CheckRegistry
-from nous.heartbeat.dynamic import DynamicCheck, DynamicCheckLoader
+from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -199,6 +199,9 @@ class HeartbeatRunner:
         successful_checks: set[str] = set()
         current_fingerprints: dict[str, set[str]] = {}
 
+        # #273: Fire on_complete callbacks for self-disabled dynamic checks
+        callback_candidates: list[DynamicCheck] = []
+
         for check in due_checks:
             try:
                 result: CheckResult = await asyncio.wait_for(
@@ -220,6 +223,14 @@ class HeartbeatRunner:
                         )
                     except Exception:
                         logger.warning("F034.5: Failed to update run stats for '%s'", check.name)
+
+                # #273: Collect self-disabled checks with callbacks
+                if (
+                    isinstance(check, DynamicCheck)
+                    and result.self_disabled
+                    and check.on_complete_prompt
+                ):
+                    callback_candidates.append(check)
 
                 if result.has_updates:
                     for f in result.findings:
@@ -250,6 +261,19 @@ class HeartbeatRunner:
                         )
                     except Exception:
                         pass
+
+        # #273: Fire callbacks as background tasks (non-blocking)
+        for cb_check in callback_candidates:
+            if self._has_budget():
+                asyncio.create_task(
+                    self._execute_callback(cb_check),
+                    name=f"callback-{cb_check.name}",
+                )
+            else:
+                logger.warning(
+                    "#273: Skipping callback for '%s' — token budget exhausted",
+                    cb_check.name,
+                )
 
         self._last_tick = now
 
@@ -499,6 +523,104 @@ class HeartbeatRunner:
         return result
 
     # ------------------------------------------------------------------
+    # #273: on_complete callback execution
+    # ------------------------------------------------------------------
+
+    async def _execute_callback(self, check: DynamicCheck) -> None:
+        """#273: Execute on_complete callback for a self-disabled dynamic check.
+
+        3-layer failure handling:
+        1. Run callback prompt; on failure, retry once after delay
+        2. On second failure, send Telegram notification
+        3. Create warning Finding and persist callback context
+        """
+        session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
+        triage_runner = self._get_triage_runner()
+
+        instruction = (
+            f"[Dynamic Check Callback: {check.name}]\n"
+            f"The check '{check.name}' has completed and self-disabled. "
+            f"Execute the following callback task.\n\n"
+            f"Instructions: {check.on_complete_prompt}\n\n"
+            f"IMPORTANT: You may NOT re-enable the check '{check.name}' that triggered this callback."
+        )
+
+        tool_filter = check.on_complete_tools if check.on_complete_tools else None
+        heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
+
+        for attempt in range(2):
+            if not self._has_budget():
+                logger.warning(
+                    "#273: Skipping callback for '%s' — budget exhausted (attempt %d)",
+                    check.name, attempt + 1,
+                )
+                break
+            if attempt == 1:
+                # Layer 1: Retry after delay
+                await asyncio.sleep(CALLBACK_RETRY_DELAY_SECONDS)
+
+            try:
+                response_text, _ctx, usage = await triage_runner.run_turn(
+                    session_id, instruction,
+                    platform="heartbeat",
+                    skip_episode=True,
+                    is_subtask=True,
+                    tool_filter=tool_filter,
+                    model_override=heartbeat_model,
+                )
+                tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
+                self._tokens_used_today += tokens
+                logger.info(
+                    "#273: Callback for '%s' completed (tokens=%d, attempt=%d)",
+                    check.name, tokens, attempt + 1,
+                )
+                # Success — clean up and return
+                try:
+                    await triage_runner.end_conversation(session_id)
+                except Exception:
+                    pass
+                return
+            except Exception:
+                logger.exception(
+                    "#273: Callback for '%s' failed (attempt %d/2)",
+                    check.name, attempt + 1,
+                )
+                # Clean up session before retry
+                try:
+                    await triage_runner.end_conversation(session_id)
+                except Exception:
+                    pass
+                # Generate new session_id for retry
+                session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
+
+        # Layer 2: Both attempts failed — send Telegram notification
+        await self._send_telegram(
+            f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed"
+        )
+
+        # Layer 3: Create warning Finding
+        failure_finding = Finding(
+            source=f"dynamic-callback:{check.name}",
+            summary=f"on_complete callback failed after 2 attempts for check '{check.name}'",
+            urgency="normal",
+            needs_action=True,
+            raw_data={
+                "check_id": check.check_id,
+                "check_name": check.name,
+                "on_complete_prompt": check.on_complete_prompt,
+                "dynamic": True,
+            },
+            check_name=check.name,
+        )
+        # Route through finding store if available
+        if self._finding_store is not None:
+            self._finding_store.ingest(failure_finding)
+        logger.warning(
+            "#273: Callback for '%s' failed after 2 attempts — Finding created",
+            check.name,
+        )
+
+    # ------------------------------------------------------------------
     # F034.1: Daily digest + maintenance
     # ------------------------------------------------------------------
 
@@ -720,6 +842,22 @@ class HeartbeatRunner:
                     logger.debug("Failed to update run stats for %s", name, exc_info=True)
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
+            # #273: Fire callback if check self-disabled
+            if (
+                isinstance(check, DynamicCheck)
+                and result.self_disabled
+                and check.on_complete_prompt
+            ):
+                if self._has_budget():
+                    asyncio.create_task(
+                        self._execute_callback(check),
+                        name=f"callback-{check.name}",
+                    )
+                else:
+                    logger.warning(
+                        "#273: Skipping callback for '%s' — budget exhausted",
+                        check.name,
+                    )
             return result
         except Exception as e:
             check.mark_failure()

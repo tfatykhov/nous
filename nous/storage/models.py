@@ -737,6 +737,8 @@ class DynamicCheckModel(Base):
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    on_complete_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    on_complete_tools: Mapped[list] = mapped_column(ARRAY(String), nullable=False, server_default="{}")
     metadata_: Mapped[dict] = mapped_column(
         "metadata", JSONB, server_default="{}"
     )

@@ -1,6 +1,6 @@
-"""Tests for F034.5 Dynamic Heartbeat Checks.
+"""Tests for F034.5 Dynamic Heartbeat Checks + #273 on_complete callback.
 
-50 test cases across 9 test classes:
+71 test cases across 15 test classes:
 - TestDynamicCheckInit (4): default values, tools filtered to allowed, empty tools, cron set
 - TestDynamicCheckIsDue (8): due when never run, not due when inactive, not due circuit breaker,
     due after interval, not due before interval, cron due, cron not due, cron never run
@@ -19,6 +19,13 @@
     tick tracks dynamic tokens, tick updates run stats, tick updates run stats on failure,
     periodic sync
 - TestToolFilter (2): tool filter restricts tools, tool filter none keeps all
+- TestOnCompleteFields (3): fields stored, in signature, tools filtered
+- TestSelfDisabledFlag (3): default false, set on disable, in check result
+- TestOnCompleteExecution (5): callback success, retry on failure, both fail telegram,
+    both fail finding, budget exhausted skips
+- TestOnCompleteValidation (3): create subset, update tools validates, update on_complete validates
+- TestOnCompleteCRUD (3): create with on_complete, list includes on_complete, update on_complete
+- TestRunnerCallback (3): tick fires callback, tick skips no prompt, trigger fires callback
 """
 
 from __future__ import annotations
@@ -101,6 +108,8 @@ def _mock_db_row(
     last_run_at: datetime | None = None,
     created_at: datetime | None = None,
     created_by: str | None = None,
+    on_complete_prompt: str | None = None,
+    on_complete_tools: list[str] | None = None,
 ) -> MagicMock:
     """Create a mock DB row resembling DynamicCheckModel."""
     row = MagicMock()
@@ -119,6 +128,8 @@ def _mock_db_row(
     row.last_run_at = last_run_at
     row.created_at = created_at
     row.created_by = created_by
+    row.on_complete_prompt = on_complete_prompt
+    row.on_complete_tools = on_complete_tools if on_complete_tools is not None else []
     return row
 
 
@@ -979,3 +990,586 @@ class TestToolFilter:
             filtered = all_tools
 
         assert len(filtered) == 2
+
+
+# ===========================================================================
+# TestOnCompleteFields — 3 tests
+# ===========================================================================
+
+
+class TestOnCompleteFields:
+    """DynamicCheck on_complete field storage and signature."""
+
+    def test_on_complete_fields_stored(self):
+        """52. on_complete_prompt and on_complete_tools are stored on construction."""
+        check = DynamicCheck(
+            check_id="check-uuid-100",
+            name="callback_check",
+            prompt="Run something",
+            tools=["web_search"],
+            on_complete_prompt="Send summary to user",
+            on_complete_tools=["web_search", "bash"],
+        )
+        assert check.on_complete_prompt == "Send summary to user"
+        assert check.on_complete_tools == ["web_search", "bash"]
+
+    def test_on_complete_in_signature(self):
+        """53. on_complete fields are included in signature() for change detection."""
+        check_a = DynamicCheck(
+            check_id="check-uuid-101",
+            name="sig_test",
+            prompt="Check X",
+            tools=[],
+            on_complete_prompt="Do cleanup",
+            on_complete_tools=["web_search"],
+        )
+        check_b = DynamicCheck(
+            check_id="check-uuid-101",
+            name="sig_test",
+            prompt="Check X",
+            tools=[],
+            on_complete_prompt="Do different cleanup",
+            on_complete_tools=["web_search"],
+        )
+        sig_a = check_a.signature()
+        sig_b = check_b.signature()
+        assert "Do cleanup" in sig_a
+        assert sig_a != sig_b
+
+    def test_on_complete_tools_filtered(self):
+        """54. on_complete_tools are filtered through ALLOWED_TOOLS."""
+        check = DynamicCheck(
+            check_id="check-uuid-102",
+            name="filter_test",
+            prompt="Run",
+            tools=["web_search"],
+            on_complete_prompt="Callback",
+            on_complete_tools=["web_search", "evil_tool", "recall_deep"],
+        )
+        assert "evil_tool" not in check.on_complete_tools
+        assert check.on_complete_tools == ["web_search", "recall_deep"]
+
+
+# ===========================================================================
+# TestSelfDisabledFlag — 3 tests
+# ===========================================================================
+
+
+class TestSelfDisabledFlag:
+    """DynamicCheck _self_disabled flag behavior."""
+
+    def test_self_disabled_default_false(self):
+        """55. New DynamicCheck has _self_disabled=False."""
+        check = _make_dynamic_check()
+        assert check._self_disabled is False
+
+    @pytest.mark.asyncio
+    async def test_self_disabled_set_on_disable(self):
+        """56. manage_check(action='disable') sets _self_disabled=True on in-memory check."""
+        db, mock_session = _mock_db()
+        registry = CheckRegistry()
+        loader = DynamicCheckLoader(
+            db=db, registry=registry, runner=AsyncMock(), agent_id="test-agent",
+        )
+
+        # Register a check in the registry
+        check = _make_dynamic_check(name="disable_me")
+        registry.register(check, permanent=False)
+        loader._loaded_ids = {"id-1"}
+        loader._id_to_name = {"id-1": "disable_me"}
+        loader._signatures = {"disable_me": "sig"}
+
+        # Mock DB lookup
+        mock_model = MagicMock()
+        mock_model.id = "id-1"
+        mock_model.enabled = True
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_model
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+
+        await loader.manage_check(action="disable", name="disable_me")
+
+        # The in-memory check should have _self_disabled set before unregister
+        assert check._self_disabled is True
+
+    @pytest.mark.asyncio
+    async def test_self_disabled_in_check_result(self):
+        """57. When _self_disabled is True, run() sets result.self_disabled=True."""
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(return_value=(
+            '{"has_findings": false, "findings": []}',
+            MagicMock(),
+            {"input_tokens": 50, "output_tokens": 20},
+        ))
+        runner.end_conversation = AsyncMock()
+
+        check = _make_dynamic_check(runner=runner)
+        check._self_disabled = True
+        result = await check.run()
+
+        assert result.self_disabled is True
+
+
+# ===========================================================================
+# TestOnCompleteExecution — 5 tests
+# ===========================================================================
+
+
+class TestOnCompleteExecution:
+    """HeartbeatRunner._execute_callback behavior."""
+
+    def _make_runner_for_callback(self, **kwargs):
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings(**kwargs)
+        settings.heartbeat_model = None
+        settings.background_model = "claude-sonnet-4-6"
+        registry = CheckRegistry()
+        mock_runner = AsyncMock()
+        runner = HeartbeatRunner(
+            settings=settings,
+            registry=registry,
+            runner=mock_runner,
+            brain=AsyncMock(),
+            heart=MagicMock(),
+            bus=None,
+            http_client=AsyncMock(),
+        )
+        return runner
+
+    @pytest.mark.asyncio
+    async def test_execute_callback_success(self):
+        """58. _execute_callback runs prompt, tracks tokens, cleans up session."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(return_value=(
+            "Callback completed successfully",
+            MagicMock(),
+            {"input_tokens": 200, "output_tokens": 100},
+        ))
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+
+        check = DynamicCheck(
+            check_id="cb-001", name="cb_check", prompt="Check X",
+            tools=["web_search"],
+            on_complete_prompt="Send summary",
+            on_complete_tools=["web_search"],
+        )
+
+        initial_tokens = runner._tokens_used_today
+        await runner._execute_callback(check)
+
+        triage_runner.run_turn.assert_called_once()
+        assert runner._tokens_used_today == initial_tokens + 300
+        triage_runner.end_conversation.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_callback_retry_on_failure(self):
+        """59. First attempt fails, retry succeeds after delay."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        # First call fails, second succeeds
+        triage_runner.run_turn = AsyncMock(side_effect=[
+            RuntimeError("API timeout"),
+            ("Retry success", MagicMock(), {"input_tokens": 100, "output_tokens": 50}),
+        ])
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+
+        check = DynamicCheck(
+            check_id="cb-002", name="retry_check", prompt="Check Y",
+            tools=["web_search"],
+            on_complete_prompt="Retry me",
+            on_complete_tools=["web_search"],
+        )
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await runner._execute_callback(check)
+
+        # Two run_turn calls (first fails, second succeeds)
+        assert triage_runner.run_turn.call_count == 2
+        # Sleep called before retry
+        mock_sleep.assert_called_once()
+        # Tokens tracked from successful attempt
+        assert runner._tokens_used_today == 150
+
+    @pytest.mark.asyncio
+    async def test_execute_callback_both_fail_telegram(self):
+        """60. Both attempts fail -> Telegram notification sent."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(side_effect=RuntimeError("Always fails"))
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+        runner._send_telegram = AsyncMock()
+
+        check = DynamicCheck(
+            check_id="cb-003", name="fail_check", prompt="Check Z",
+            tools=["web_search"],
+            on_complete_prompt="Will fail",
+            on_complete_tools=[],
+        )
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            await runner._execute_callback(check)
+
+        runner._send_telegram.assert_called_once()
+        telegram_text = runner._send_telegram.call_args[0][0]
+        assert "fail_check" in telegram_text
+        assert "Callback failed" in telegram_text
+
+    @pytest.mark.asyncio
+    async def test_execute_callback_both_fail_finding(self):
+        """61. Both attempts fail -> warning Finding created in FindingStore."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(side_effect=RuntimeError("Always fails"))
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+        runner._send_telegram = AsyncMock()
+
+        mock_store = MagicMock()
+        runner._finding_store = mock_store
+
+        check = DynamicCheck(
+            check_id="cb-004", name="find_check", prompt="Check W",
+            tools=["web_search"],
+            on_complete_prompt="Will fail and create finding",
+            on_complete_tools=[],
+        )
+
+        with patch("nous.heartbeat.runner.asyncio.sleep", new_callable=AsyncMock):
+            await runner._execute_callback(check)
+
+        mock_store.ingest.assert_called_once()
+        finding = mock_store.ingest.call_args[0][0]
+        assert "find_check" in finding.summary
+        assert finding.urgency == "normal"
+        assert finding.needs_action is True
+        assert finding.raw_data["check_id"] == "cb-004"
+
+    @pytest.mark.asyncio
+    async def test_execute_callback_budget_exhausted_skips(self):
+        """62. Budget exhausted -> callback not executed at all."""
+        runner = self._make_runner_for_callback()
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock()
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+        runner._send_telegram = AsyncMock()
+
+        # Budget exhausted from the start — first attempt skipped
+        runner._has_budget = MagicMock(return_value=False)
+
+        check = DynamicCheck(
+            check_id="cb-005", name="budget_check", prompt="Check B",
+            tools=["web_search"],
+            on_complete_prompt="No budget callback",
+            on_complete_tools=[],
+        )
+
+        await runner._execute_callback(check)
+
+        # No run_turn calls — budget exhausted before first attempt
+        assert triage_runner.run_turn.call_count == 0
+
+
+# ===========================================================================
+# TestOnCompleteValidation — 3 tests
+# ===========================================================================
+
+
+class TestOnCompleteValidation:
+    """Validation of on_complete_tools as subset of check tools."""
+
+    def _make_loader(self, registry=None, max_checks=10):
+        db, mock_session = _mock_db()
+        registry = registry or CheckRegistry()
+        loader = DynamicCheckLoader(
+            db=db, registry=registry, runner=AsyncMock(),
+            agent_id="test-agent", max_checks=max_checks,
+        )
+        return loader, registry, mock_session
+
+    @pytest.mark.asyncio
+    async def test_create_check_on_complete_tools_subset(self):
+        """63. on_complete_tools must be subset of check tools at creation."""
+        loader, _, mock_session = self._make_loader()
+
+        with pytest.raises(ValueError, match="on_complete_tools must be a subset"):
+            await loader.create_check(
+                name="bad_subset",
+                description="Invalid on_complete_tools",
+                prompt="Check it",
+                tools=["web_search"],
+                on_complete_tools=["web_search", "bash"],  # bash not in tools
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_check_on_complete_tools_empty_tools_rejected(self):
+        """63b. on_complete_tools with empty tools list is rejected."""
+        loader, _, mock_session = self._make_loader()
+
+        with pytest.raises(ValueError, match="on_complete_tools must be a subset"):
+            await loader.create_check(
+                name="empty_tools",
+                description="Empty tools check",
+                prompt="Check something",
+                tools=[],
+                on_complete_tools=["web_search"],
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_tools_validates_on_complete_subset(self):
+        """64. Updating tools validates on_complete_tools still subset."""
+        loader, _, mock_session = self._make_loader()
+        loader.sync = AsyncMock()
+
+        mock_model = MagicMock()
+        mock_model.tools = ["web_search", "bash"]
+        mock_model.on_complete_tools = ["web_search", "bash"]
+        mock_model.cron_expr = None
+        mock_model.interval_seconds = 3600
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_model
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+
+        # Remove bash from tools, but on_complete_tools still has it
+        with pytest.raises(ValueError, match="on_complete_tools must be a subset"):
+            await loader.manage_check(
+                action="update", name="check_a",
+                updates={"tools": ["web_search"]},
+            )
+
+    @pytest.mark.asyncio
+    async def test_update_on_complete_tools_validates_subset(self):
+        """65. Updating on_complete_tools validates against current tools."""
+        loader, _, mock_session = self._make_loader()
+        loader.sync = AsyncMock()
+
+        mock_model = MagicMock()
+        mock_model.tools = ["web_search"]
+        mock_model.on_complete_tools = []
+        mock_model.cron_expr = None
+        mock_model.interval_seconds = 3600
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_model
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+
+        # Try to set on_complete_tools with a tool not in check tools
+        with pytest.raises(ValueError, match="on_complete_tools must be a subset"):
+            await loader.manage_check(
+                action="update", name="check_a",
+                updates={"on_complete_tools": ["web_search", "bash"]},
+            )
+
+
+# ===========================================================================
+# TestOnCompleteCRUD — 3 tests
+# ===========================================================================
+
+
+class TestOnCompleteCRUD:
+    """CRUD operations including on_complete fields."""
+
+    def _make_loader(self, registry=None, max_checks=10):
+        db, mock_session = _mock_db()
+        registry = registry or CheckRegistry()
+        loader = DynamicCheckLoader(
+            db=db, registry=registry, runner=AsyncMock(),
+            agent_id="test-agent", max_checks=max_checks,
+        )
+        return loader, registry, mock_session
+
+    @pytest.mark.asyncio
+    async def test_create_check_with_on_complete(self):
+        """66. create_check includes on_complete fields in DB and return dict."""
+        loader, registry, mock_session = self._make_loader()
+
+        mock_model = MagicMock()
+        mock_model.id = "new-uuid-oc"
+        mock_session.add = MagicMock()
+        mock_session.commit = AsyncMock()
+        mock_session.refresh = AsyncMock()
+
+        with patch("nous.storage.models.DynamicCheckModel") as MockModel:
+            MockModel.return_value = mock_model
+            result = await loader.create_check(
+                name="oc_check",
+                description="With on_complete",
+                prompt="Check the thing",
+                tools=["web_search", "bash"],
+                on_complete_prompt="Summarize findings",
+                on_complete_tools=["web_search"],
+            )
+
+        assert result["on_complete_prompt"] == "Summarize findings"
+        assert result["on_complete_tools"] == ["web_search"]
+        assert result["name"] == "oc_check"
+
+        # Verify the check is registered with on_complete fields
+        registered = registry.get_check("oc_check")
+        assert registered is not None
+        assert registered.on_complete_prompt == "Summarize findings"
+        assert registered.on_complete_tools == ["web_search"]
+
+    @pytest.mark.asyncio
+    async def test_list_includes_on_complete(self):
+        """67. _list_checks includes on_complete_prompt (truncated) and on_complete_tools."""
+        loader, _, mock_session = self._make_loader()
+
+        long_prompt = "A" * 300
+        row = _mock_db_row(name="oc_list")
+        row.on_complete_prompt = long_prompt
+        row.on_complete_tools = ["web_search"]
+        row.description = "Test check"
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [row]
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        result = await loader.manage_check(action="list")
+
+        assert result["count"] == 1
+        check_info = result["checks"][0]
+        assert check_info["on_complete_tools"] == ["web_search"]
+        # Truncated to 200 chars
+        assert len(check_info["on_complete_prompt"]) == 200
+
+    @pytest.mark.asyncio
+    async def test_update_on_complete_fields(self):
+        """68. manage_check(action='update') can update on_complete_prompt and on_complete_tools."""
+        loader, _, mock_session = self._make_loader()
+        loader.sync = AsyncMock()
+
+        mock_model = MagicMock()
+        mock_model.on_complete_prompt = "Old prompt"
+        mock_model.on_complete_tools = []
+        mock_model.tools = ["web_search", "bash"]
+        mock_model.cron_expr = None
+        mock_model.interval_seconds = 3600
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_model
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.commit = AsyncMock()
+
+        result = await loader.manage_check(
+            action="update", name="oc_update",
+            updates={
+                "on_complete_prompt": "New callback prompt",
+                "on_complete_tools": ["web_search"],
+            },
+        )
+
+        assert result["status"] == "updated"
+        assert mock_model.on_complete_prompt == "New callback prompt"
+        assert mock_model.on_complete_tools == ["web_search"]
+
+
+# ===========================================================================
+# TestRunnerCallback — 3 tests
+# ===========================================================================
+
+
+class TestRunnerCallback:
+    """HeartbeatRunner callback firing from _tick and trigger_check."""
+
+    def _make_runner(self, registry=None, **kwargs):
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings(**kwargs)
+        settings.heartbeat_model = None
+        settings.background_model = "claude-sonnet-4-6"
+        registry = registry or CheckRegistry()
+        loader = MagicMock()
+        loader.update_run_stats = AsyncMock()
+        runner = HeartbeatRunner(
+            settings=settings,
+            registry=registry,
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=MagicMock(),
+            bus=None,
+            http_client=AsyncMock(),
+            dynamic_loader=loader,
+        )
+        return runner, loader
+
+    @pytest.mark.asyncio
+    async def test_tick_fires_callback_for_self_disabled(self):
+        """69. _tick detects self_disabled check and creates background task."""
+        reg = CheckRegistry()
+        check = DynamicCheck(
+            check_id="cb-tick-001", name="self_disable_check",
+            prompt="Check and disable",
+            tools=["web_search"],
+            on_complete_prompt="Run callback after disable",
+            on_complete_tools=["web_search"],
+        )
+        check.run = AsyncMock(return_value=CheckResult(
+            has_updates=False, self_disabled=True,
+        ))
+        reg.register(check)
+
+        runner, _ = self._make_runner(registry=reg)
+
+        with patch("nous.heartbeat.runner.asyncio.create_task") as mock_create_task:
+            await runner._tick()
+
+        mock_create_task.assert_called_once()
+        # Verify the task name includes the check name
+        call_kwargs = mock_create_task.call_args
+        assert "self_disable_check" in call_kwargs[1]["name"]
+
+    @pytest.mark.asyncio
+    async def test_tick_skips_callback_no_prompt(self):
+        """70. self_disabled but no on_complete_prompt -> no callback."""
+        reg = CheckRegistry()
+        check = DynamicCheck(
+            check_id="cb-tick-002", name="no_prompt_check",
+            prompt="Check without callback",
+            tools=["web_search"],
+            # No on_complete_prompt
+        )
+        check.run = AsyncMock(return_value=CheckResult(
+            has_updates=False, self_disabled=True,
+        ))
+        reg.register(check)
+
+        runner, _ = self._make_runner(registry=reg)
+
+        with patch("nous.heartbeat.runner.asyncio.create_task") as mock_create_task:
+            await runner._tick()
+
+        mock_create_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_trigger_check_fires_callback(self):
+        """71. trigger_check detects self_disabled and creates background task."""
+        reg = CheckRegistry()
+        check = DynamicCheck(
+            check_id="cb-trig-001", name="trigger_cb_check",
+            prompt="Trigger me",
+            tools=["web_search"],
+            on_complete_prompt="Callback on trigger",
+            on_complete_tools=["web_search"],
+        )
+        check.run = AsyncMock(return_value=CheckResult(
+            has_updates=False, self_disabled=True,
+        ))
+        reg.register(check)
+
+        runner, _ = self._make_runner(registry=reg)
+
+        with patch("nous.heartbeat.runner.asyncio.create_task") as mock_create_task:
+            result = await runner.trigger_check("trigger_cb_check")
+
+        assert result is not None
+        assert result.self_disabled is True
+        mock_create_task.assert_called_once()
+        call_kwargs = mock_create_task.call_args
+        assert "trigger_cb_check" in call_kwargs[1]["name"]

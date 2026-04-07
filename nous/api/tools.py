@@ -1748,6 +1748,8 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
                 cron_expr=kwargs.get("cron_expr"),
                 timeout_seconds=kwargs.get("timeout_seconds"),
                 urgent=kwargs.get("urgent", False),
+                on_complete_prompt=kwargs.get("on_complete_prompt"),
+                on_complete_tools=kwargs.get("on_complete_tools"),
             )
             return {"content": [{"type": "text", "text": f"Created dynamic check: {json.dumps(result)}"}]}
         except ValueError as e:
@@ -1780,6 +1782,8 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
             "cron_expr": {"type": "string", "description": "Cron expression for scheduling (overrides interval_seconds)"},
             "timeout_seconds": {"type": "integer", "description": "Max seconds per run (default from NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT)"},
             "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
+            "on_complete_prompt": {"type": "string", "description": "Prompt to execute when check self-disables (callback)"},
+            "on_complete_tools": {"type": "array", "items": {"type": "string"}, "description": "Tools for callback (must be subset of check tools)"},
         },
         "required": ["name", "description", "prompt"],
     })
@@ -1790,7 +1794,7 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
         "properties": {
             "action": {"type": "string", "enum": ["list", "enable", "disable", "delete", "update"], "description": "Action to perform"},
             "name": {"type": "string", "description": "Check name (required for enable/disable/delete/update)"},
-            "updates": {"type": "object", "description": "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, cron_expr, timeout_seconds, urgent)"},
+            "updates": {"type": "object", "description": "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, cron_expr, timeout_seconds, urgent, on_complete_prompt, on_complete_tools)"},
         },
         "required": ["action"],
     })
