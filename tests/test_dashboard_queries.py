@@ -12,16 +12,12 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from nous.api.dashboard_queries import (
-
-
     get_activity_data,
     get_calibration_data,
     get_dashboard_stats,
     get_graph_data,
     get_health_data,
 )
-
-pytestmark = pytest.mark.integration
 
 AGENT_ID = "test-dashboard"
 
@@ -119,7 +115,6 @@ async def _insert_edge(session, source_id, target_id, *,
 async def _insert_event(session, event_type="turn_completed", days_ago=0, data=None):
     """Insert an event."""
     import json as _json
-
     created = datetime.now(timezone.utc) - timedelta(days=days_ago)
     await session.execute(
         text("""

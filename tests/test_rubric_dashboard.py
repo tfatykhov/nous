@@ -9,10 +9,6 @@ from httpx import ASGITransport, AsyncClient
 
 from nous.storage.models import Episode, OutcomeSignal, RubricVersion
 
-pytestmark = pytest.mark.integration
-
-
-
 
 class MockAgentRunner:
     def __init__(self):
@@ -111,7 +107,6 @@ async def cognitive(brain, heart, settings):
 @pytest.fixture
 def app(brain, heart, cognitive, db, settings):
     from nous.api.rest import create_app
-
     return create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
 
 

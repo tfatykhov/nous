@@ -16,11 +16,6 @@ from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import ContextBudget, FrameSelection
 from nous.heart import FactInput
 
-pytestmark = pytest.mark.integration
-
-
-
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

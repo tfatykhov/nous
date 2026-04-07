@@ -16,10 +16,6 @@ from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.heart import FactInput
 
-pytestmark = pytest.mark.integration
-
-
-
 # ---------------------------------------------------------------------------
 # Mock AgentRunner
 # ---------------------------------------------------------------------------
@@ -80,7 +76,6 @@ async def mcp_tools(mock_runner, brain, heart, settings):
     manager = create_mcp_server(mock_runner, brain, heart, settings)
 
     from mcp.types import CallToolRequest, CallToolRequestParams
-
 
     # MCPTransportManager exposes .server directly
     server = manager.server

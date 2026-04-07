@@ -59,8 +59,6 @@ def _mock_settings(**overrides) -> MagicMock:
     s.episode_summary_enabled = True
     s.fact_extraction_enabled = True
     s.sleep_enabled = True
-    s.transcript_max_chars = 16000
-    s.fact_dedup_threshold = 0.92
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -407,11 +405,8 @@ class TestEpisodeSummarizer:
 
     @pytest.mark.asyncio
     async def test_truncates_long_transcripts(self):
-        """14. Truncates long transcripts (> transcript_max_chars)."""
-        # Use a small transcript_max_chars so a 30-turn transcript triggers truncation
-        summarizer, heart, bus, llm_client = self._make_summarizer(
-            settings=_mock_settings(transcript_max_chars=4000)
-        )
+        """14. Truncates long transcripts (>8000 chars)."""
+        summarizer, heart, bus, llm_client = self._make_summarizer()
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening", structured_summary=None)
         )
@@ -428,15 +423,19 @@ class TestEpisodeSummarizer:
 
         # Use turns separated by \n\n so truncation can split them
         long_transcript = "\n\n".join([f"User: Turn {i} " + "x" * 400 for i in range(30)])
-        assert len(long_transcript) > 4000  # verify transcript exceeds threshold
         event = _make_event(
             "session_ended",
             data={"episode_id": str(uuid4()), "transcript": long_transcript},
         )
         await summarizer.handle(event)
 
-        # Verify that summarizer was called (truncation triggered chunked summarization)
-        assert len(captured_payloads) >= 1
+        # The prompt sent to LLM should be truncated (shorter than original)
+        assert len(captured_payloads) == 1
+        user_msg = captured_payloads[0]["messages"][0]["content"]
+        # Content is a list of blocks with cache_control
+        if isinstance(user_msg, list):
+            user_msg = user_msg[0]["text"]
+        assert len(user_msg) < len(long_transcript)
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
@@ -625,9 +624,9 @@ class TestFactExtractor:
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
 
-        # Return existing fact with .score above threshold -> should be deduped
+        # Return existing fact with .score above 0.85 threshold -> should be deduped
         existing_fact = MagicMock(spec=FactSummary)
-        existing_fact.score = 0.95  # Above 0.92 threshold -> deduped
+        existing_fact.score = 0.90  # Above 0.85 threshold -> deduped
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
@@ -825,7 +824,7 @@ class TestFactExtractor:
         extractor, heart, bus, llm_client = self._make_extractor()
 
         existing_fact = MagicMock(spec=FactSummary)
-        existing_fact.score = 0.95  # Above 0.92 threshold -> deduped
+        existing_fact.score = 0.90  # Above 0.85 -> deduped
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
 
@@ -1061,16 +1060,14 @@ class TestSessionTimeoutMonitor:
 
     @pytest.mark.asyncio
     async def test_sleep_not_emitted_while_sessions_active(self):
-        """31. sleep_started NOT emitted while sessions still active (within sleep_timeout)."""
-        # Use sleep_timeout=200 so global_idle (100s) > sleep_timeout triggers the check,
-        # but session was just touched (<< 200s ago) so all_sessions_sleeping=False
+        """31. sleep_started NOT emitted while sessions still active."""
         monitor, bus, cognitive = self._make_monitor(
-            settings=_mock_settings(session_idle_timeout=9999, sleep_timeout=200, sleep_check_interval=1)
+            settings=_mock_settings(session_idle_timeout=9999, sleep_timeout=0, sleep_check_interval=1)
         )
 
-        # Active session exists (just touched, well within sleep_timeout of 200s)
+        # Active session exists
         monitor._last_activity["sess-1"] = time.monotonic()
-        monitor._global_last_activity = time.monotonic() - 250  # > sleep_timeout
+        monitor._global_last_activity = time.monotonic() - 100
 
         received: list[Event] = []
 
@@ -1136,7 +1133,7 @@ class TestSleepHandler:
 
     @pytest.mark.asyncio
     async def test_all_5_phases_run_when_not_interrupted(self):
-        """34. All phases run when not interrupted."""
+        """34. All 5 phases run when not interrupted."""
         handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Mock all phases to be no-ops (stubs in real implementation)
@@ -1144,9 +1141,7 @@ class TestSleepHandler:
         handler._phase_prune = AsyncMock(return_value=True)
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
-        handler._phase_resolve_contradictions = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
-        handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
         event = _make_event("sleep_started", agent_id="system")
         await handler._run_sleep(event)
@@ -1155,15 +1150,13 @@ class TestSleepHandler:
         handler._phase_prune.assert_called_once()
         handler._phase_compress.assert_called_once()
         handler._phase_reflect.assert_called_once()
-        handler._phase_resolve_contradictions.assert_called_once()
         handler._phase_generalize.assert_called_once()
-        handler._phase_evolve_rubric.assert_called_once()
 
         # Check sleep_completed emitted
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
         assert emitted.type == "sleep_completed"
-        assert len(emitted.data["phases_completed"]) == 7
+        assert len(emitted.data["phases_completed"]) == 5
         assert emitted.data["interrupted"] is False
 
     @pytest.mark.asyncio
@@ -1383,7 +1376,6 @@ class TestReviewFixes:
         cognitive._context = MagicMock()
         cognitive._context.build = AsyncMock(return_value=MagicMock(
             system_prompt="prompt", sections=[], recalled_ids={}, recalled_content_map={},
-            recalled_score_map={}, sections_by_tier={},
         ))
         cognitive._context._identity_prompt = ""
         cognitive._deliberation = MagicMock()

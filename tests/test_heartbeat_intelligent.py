@@ -156,7 +156,7 @@ class TestSelfInitiatedEmbedding:
 
         mock_fact = MagicMock()
         mock_fact.id = "fact-1"
-        mock_fact.content = "TODO: need to follow-up on the issue"
+        mock_fact.content = "pending action: need to follow-up"
         mock_fact.score = 0.6
         heart.facts.search = AsyncMock(return_value=[mock_fact])
         heart.search_episodes = AsyncMock(return_value=[])

@@ -15,10 +15,6 @@ import pytest
 
 from nous.heart.search import apply_frame_boost
 
-pytestmark = pytest.mark.integration
-
-
-
 # ---------------------------------------------------------------------------
 # apply_frame_boost tests
 # ---------------------------------------------------------------------------
@@ -239,7 +235,6 @@ async def test_procedure_frame_encoding(db, session):
     await session.flush()
 
     from sqlalchemy import select
-
 
     result = await session.execute(select(Procedure).where(Procedure.id == proc.id))
     procedure = result.scalar_one()

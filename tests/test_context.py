@@ -17,10 +17,6 @@ from nous.cognitive.schemas import ContextBudget, FrameSelection
 from nous.config import Settings
 from nous.heart import CensorInput, FactInput, ProcedureInput
 
-pytestmark = pytest.mark.integration
-
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -512,7 +508,6 @@ def _mock_decision(**kwargs):
 def _mock_episode(**kwargs):
     """Build a mock episode with given attributes."""
     from unittest.mock import MagicMock
-
 
     e = MagicMock()
     e.id = kwargs.get("id", "ep-1")

@@ -17,10 +17,6 @@ from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.heart import CensorInput, FactInput
 
-pytestmark = pytest.mark.integration
-
-
-
 # ---------------------------------------------------------------------------
 # Mock AgentRunner
 # ---------------------------------------------------------------------------
@@ -381,7 +377,6 @@ async def test_health_db_down(mock_runner, brain, heart, cognitive, settings):
 
     from nous.api.rest import create_app
     from nous.storage.database import Database
-
 
     # Create a mock database that fails on health check
     mock_db = MagicMock(spec=Database)

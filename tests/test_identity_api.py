@@ -18,10 +18,6 @@ from nous.brain.brain import Brain
 from nous.cognitive import CognitiveLayer
 from nous.identity.manager import IdentityManager, VALID_SECTIONS
 
-pytestmark = pytest.mark.integration
-
-
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -50,7 +46,6 @@ def app(brain, heart, cognitive, db, settings, identity_manager):
     """Create Starlette app with identity_manager wired in."""
     from nous.api.rest import create_app
     from nous.api.runner import AgentRunner
-
 
     mock_runner = AsyncMock(spec=AgentRunner)
     return create_app(

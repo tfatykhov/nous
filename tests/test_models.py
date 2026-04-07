@@ -5,9 +5,6 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from nous.storage.models import (
-
-
-
     Decision,
     DecisionReason,
     DecisionTag,
@@ -16,8 +13,6 @@ from nous.storage.models import (
     Fact,
     Guardrail,
 )
-
-pytestmark = pytest.mark.integration
 
 
 async def test_create_decision(session):

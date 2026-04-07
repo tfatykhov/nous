@@ -45,7 +45,7 @@ class MockCognitiveLayer:
             context_token_estimate=100,
         )
 
-    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False, is_subtask=False):
+    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 
@@ -99,7 +99,6 @@ def mock_settings():
         agent_id="test-agent",
         model="claude-sonnet-4-5-20250514",
         max_tokens=1024,
-        NOUS_COMPACTION_ENABLED=False,  # disable compaction so history capping tests work
     )
 
 
@@ -203,12 +202,12 @@ async def test_run_turn_calls_post_turn(runner, mock_cognitive):
 
 
 async def test_run_turn_api_error(runner_error, mock_cognitive):
-    """API error -> re-raised after post_turn is called with error."""
+    """API error -> error message returned, post_turn still called with error."""
     session_id = f"test-{uuid.uuid4().hex[:8]}"
+    response_text, turn_context, _usage = await runner_error.run_turn(session_id, "Hello!")
 
-    # Error is re-raised after cleanup so callers see the real exception
-    with pytest.raises(RuntimeError, match="API call failed"):
-        await runner_error.run_turn(session_id, "Hello!")
+    # Should return error fallback message
+    assert "error" in response_text.lower()
 
     # post_turn should still be called (per spec: always called, even on error)
     assert len(mock_cognitive.post_turn_calls) == 1
@@ -508,7 +507,6 @@ async def test_start_credentials_api_key(mock_cognitive):
     heart = MockHeart()
     settings = Settings(
         ANTHROPIC_API_KEY="test-api-key-abc",
-        ANTHROPIC_AUTH_TOKEN="",  # ensure env auth token doesn't leak in
         agent_id="test-agent",
         api_backend="httpx",
     )
@@ -556,12 +554,7 @@ async def test_start_credentials_none(mock_cognitive, caplog):
     """start() with no credentials logs a warning but doesn't raise."""
     brain = MockBrain()
     heart = MockHeart()
-    settings = Settings(
-        ANTHROPIC_API_KEY="",
-        ANTHROPIC_AUTH_TOKEN="",  # explicitly clear env credentials
-        agent_id="test-agent",
-        api_backend="httpx",
-    )
+    settings = Settings(agent_id="test-agent", api_backend="httpx")
     r = AgentRunner(mock_cognitive, brain, heart, settings)
 
     with caplog.at_level(logging.WARNING, logger="nous.api.anthropic_client"):
@@ -730,21 +723,21 @@ def test_payload_adaptive_with_effort():
     assert payload["output_config"] == {"effort": "medium"}
 
 
-def test_payload_effort_skipped_for_haiku():
-    """effort parameter omitted when model is haiku (unsupported)."""
-    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-haiku-4-5-20251001")
+def test_payload_effort_skipped_for_opus():
+    """effort parameter omitted when model is opus (unsupported)."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-opus-4-6")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
     assert "output_config" not in payload
 
 
-def test_payload_effort_skipped_for_haiku_override():
-    """effort parameter omitted when model_override is haiku."""
+def test_payload_effort_skipped_for_opus_override():
+    """effort parameter omitted when model_override is opus."""
     s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload(
         "system", [{"role": "user", "content": "hi"}],
-        model_override="claude-haiku-4-5-20251001",
+        model_override="claude-opus-4-6",
     )
     assert "output_config" not in payload
 

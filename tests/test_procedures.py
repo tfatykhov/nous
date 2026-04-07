@@ -7,14 +7,10 @@ Heart methods receive the test session via the session parameter (P1-1).
 import pytest
 
 from nous.heart import (
-
-
     ProcedureDetail,
     ProcedureInput,
     ProcedureSummary,
 )
-
-pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -309,7 +305,6 @@ def test_build_embed_text_helper():
 def test_build_embed_text_none_fields():
     """_build_embed_text handles None fields without error."""
     from nous.heart.procedures import _build_embed_text
-
 
     result = _build_embed_text(
         name="Minimal",

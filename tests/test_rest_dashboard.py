@@ -12,10 +12,6 @@ from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.heart import CensorInput, FactInput
 
-pytestmark = pytest.mark.integration
-
-
-
 
 class MockAgentRunner:
     def __init__(self):
@@ -118,7 +114,6 @@ async def test_facts_search_still_works(client, heart, db):
 async def test_episodes_with_offset_and_total(client, heart, db):
     """GET /episodes returns total count and supports offset."""
     from nous.heart.schemas import EpisodeInput
-
 
     async with db.session() as session:
         await heart.start_episode(

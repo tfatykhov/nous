@@ -33,10 +33,6 @@ from nous.cognitive.schemas import (
 from nous.heart import CensorInput, FactInput, ProcedureInput
 from nous.storage.models import Event
 
-pytestmark = pytest.mark.integration
-
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -680,7 +676,6 @@ async def test_post_turn_resolves_thread_on_success(cognitive, heart, session):
     await heart.get_or_create_working_memory(sid, session=session)
 
     from nous.cognitive.schemas import FrameSelection
-
     ctx = TurnContext(
         system_prompt="test",
         frame=FrameSelection(

@@ -15,10 +15,6 @@ from nous.heart import (
     CensorInput,
 )
 from nous.storage.models import Censor
-import pytest
-
-pytestmark = pytest.mark.integration
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -949,8 +945,6 @@ async def test_spawn_task_allows_unblocked_subtask(heart, session):
     # Verify unblock would work
     from nous.heart.censor_actions import CensorActionExecutor
     import re
-
-
     executor = CensorActionExecutor(heart)
     for match in block_matches:
         if match.trigger_action and match.unblock_pattern:
