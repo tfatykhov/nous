@@ -1746,7 +1746,7 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
                 tools=kwargs.get("tools"),
                 interval_seconds=kwargs.get("interval_seconds", 3600),
                 cron_expr=kwargs.get("cron_expr"),
-                timeout_seconds=kwargs.get("timeout_seconds", 30),
+                timeout_seconds=kwargs.get("timeout_seconds"),
                 urgent=kwargs.get("urgent", False),
             )
             return {"content": [{"type": "text", "text": f"Created dynamic check: {json.dumps(result)}"}]}

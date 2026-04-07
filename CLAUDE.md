@@ -354,6 +354,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_HEARTBEAT_TUNING_MIN_SAMPLES` | `10` | Minimum outcome signals before adjusting params |
 | `NOUS_HEARTBEAT_TUNING_LEARNING_RATE` | `0.1` | Max parameter change per cycle (fraction of range) |
 | `NOUS_HEARTBEAT_TUNING_ROLLBACK_THRESHOLD` | `0.2` | Negative rate increase that triggers auto-rollback |
+| `NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT` | `30` | Default max seconds per heartbeat check run |
 | `NOUS_HEARTBEAT_MAX_DYNAMIC_CHECKS` | `10` | Maximum number of concurrent dynamic checks |
 | `NOUS_HEARTBEAT_DYNAMIC_SYNC_TICKS` | `60` | Ticks between periodic dynamic check sync (re-loads from DB) |
 | `NOUS_CACHE_BREAK_DETECTION_ENABLED` | `true` | Enable cache break detection logging (F036) |

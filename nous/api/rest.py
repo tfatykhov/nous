@@ -1931,7 +1931,7 @@ def create_app(
                 tools=body.get("tools"),
                 interval_seconds=body.get("interval_seconds", 3600),
                 cron_expr=body.get("cron_expr"),
-                timeout_seconds=body.get("timeout_seconds", 30),
+                timeout_seconds=body.get("timeout_seconds"),
                 urgent=body.get("urgent", False),
             )
             return JSONResponse(result, status_code=201)

@@ -367,6 +367,7 @@ class Settings(BaseSettings):
     # F034.5: Dynamic heartbeat checks
     heartbeat_model: str = ""  # Empty = use background_model fallback
     heartbeat_max_dynamic_checks: int = 10
+    heartbeat_default_check_timeout: int = 30  # default max seconds per check run
     heartbeat_dynamic_sync_ticks: int = 60  # re-sync every N ticks (~30 min at 30s tick)
 
     # F035.3: Behavioral drift detection

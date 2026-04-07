@@ -170,6 +170,7 @@ class DynamicCheckLoader:
         agent_id: str = "nous",
         max_checks: int = 10,
         model_override: str | None = None,
+        default_timeout: int = 30,
     ) -> None:
         self._db = db
         self._registry = registry
@@ -177,6 +178,7 @@ class DynamicCheckLoader:
         self._agent_id = agent_id
         self._max_checks = max_checks
         self._model_override = model_override
+        self._default_timeout = default_timeout
         self._loaded_ids: set[str] = set()
         self._id_to_name: dict[str, str] = {}
         self._signatures: dict[str, str] = {}  # name -> signature for change detection
@@ -308,10 +310,12 @@ class DynamicCheckLoader:
         tools: list[str] | None = None,
         interval_seconds: int = 3600,
         cron_expr: str | None = None,
-        timeout_seconds: int = 30,
+        timeout_seconds: int | None = None,
         urgent: bool = False,
     ) -> dict[str, Any]:
         """Create a new dynamic check. Returns the check dict."""
+        if timeout_seconds is None:
+            timeout_seconds = self._default_timeout
         from nous.storage.models import DynamicCheckModel
 
         # Validate required fields
