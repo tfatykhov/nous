@@ -64,6 +64,7 @@ class FindingStore:
         if fp in self._findings:
             existing = self._findings[fp]
             existing.last_seen = datetime.now(UTC)
+            existing.absent_ticks = 0  # Reset — finding is still active
 
             if existing.state == FindingState.RESOLVED:
                 # Re-opened — check flapping
@@ -177,6 +178,44 @@ class FindingStore:
             self._accumulation_escalated[check_name] = datetime.now(UTC)
             return True
         return False
+
+    # ------------------------------------------------------------------
+    # Auto-resolve helpers
+    # ------------------------------------------------------------------
+
+    def get_active_by_check(self, check_name: str) -> set[str]:
+        """Return fingerprints of active (non-resolved) findings for a check."""
+        active = set()
+        for fp, tracked in self._findings.items():
+            if tracked.state == FindingState.RESOLVED:
+                continue
+            if tracked.finding.check_name == check_name:
+                active.add(fp)
+        return active
+
+    def mark_absent_tick(self, fingerprint: str) -> None:
+        """Increment absent_ticks counter for a finding not reported this tick."""
+        if fingerprint in self._findings:
+            self._findings[fingerprint].absent_ticks += 1
+
+    def get_auto_resolvable(self, threshold: int = 2) -> set[str]:
+        """Return fingerprints of ACKNOWLEDGED findings absent for >= threshold ticks.
+
+        Only ACKNOWLEDGED findings are eligible — NEW findings haven't been
+        triaged yet (auto-resolving them would silently drop issues), and
+        SUPPRESSED findings were never actionable.
+        """
+        resolvable = set()
+        for fp, tracked in self._findings.items():
+            if tracked.state != FindingState.ACKNOWLEDGED:
+                continue
+            if tracked.absent_ticks >= threshold:
+                resolvable.add(fp)
+        return resolvable
+
+    def get_tracked(self, fingerprint: str) -> TrackedFinding | None:
+        """Get a tracked finding by fingerprint."""
+        return self._findings.get(fingerprint)
 
     # ------------------------------------------------------------------
     # Maintenance
