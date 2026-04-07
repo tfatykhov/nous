@@ -501,19 +501,15 @@ class SdkAnthropicClient:
             "base_url": settings.api_base_url,
         }
 
-        # Auth: OAT uses auth_token, regular uses api_key.
-        # When using auth_token, explicitly set api_key=None to prevent the
-        # SDK from reading ANTHROPIC_API_KEY from env and sending both headers.
+        # Auth: OAT uses auth_token, regular uses api_key
         if auth_token:
             if "sk-ant-oat" in auth_token:
                 is_oat = True
             kwargs["auth_token"] = auth_token
-            kwargs["api_key"] = None
         elif api_key:
             if "sk-ant-oat" in api_key:
                 is_oat = True
                 kwargs["auth_token"] = api_key
-                kwargs["api_key"] = None
             else:
                 kwargs["api_key"] = api_key
         else:
