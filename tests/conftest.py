@@ -1,6 +1,12 @@
-"""Test fixtures using real Postgres via docker-compose."""
+"""Test fixtures using real Postgres via docker-compose, or SQLite in-memory for offline runs.
+
+Set NOUS_TEST_DB=postgres to use a live PostgreSQL database.
+The default (sqlite) runs with an in-memory SQLite backend; tests that
+require Postgres-specific features are skipped automatically.
+"""
 
 import hashlib
+import os
 import random
 
 import pytest
@@ -10,6 +16,42 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.config import Settings
 from nous.storage.database import Database
 from nous.storage.models import Guardrail
+
+# ---------------------------------------------------------------------------
+# Backend selection
+# ---------------------------------------------------------------------------
+
+USE_POSTGRES: bool = os.environ.get("NOUS_TEST_DB", "sqlite") == "postgres"
+
+# ---------------------------------------------------------------------------
+# Integration test gating
+# ---------------------------------------------------------------------------
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add --integration flag to run tests that require a live PostgreSQL database."""
+    parser.addoption(
+        "--integration",
+        action="store_true",
+        default=False,
+        help="run integration tests that require a live PostgreSQL database",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip @pytest.mark.integration tests unless --integration flag is passed."""
+    if config.getoption("--integration"):
+        return
+    skip_integration = pytest.mark.skip(reason="requires --integration flag (live PostgreSQL)")
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip_integration)
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Skip tests marked postgres_only when running without a real Postgres connection."""
+    if "postgres_only" in item.keywords and not USE_POSTGRES:
+        pytest.skip("requires NOUS_TEST_DB=postgres (real PostgreSQL connection)")
 
 # ---------------------------------------------------------------------------
 # Mock embedding provider (P1-4 fix: PRNG-seeded, L2-normalized vectors)
@@ -58,12 +100,26 @@ class MockEmbeddingProvider:
 
 @pytest_asyncio.fixture(scope="session")
 async def db():
-    """Session-scoped database connection pool."""
-    settings = Settings()
-    database = Database(settings)
-    await database.connect()
-    yield database
-    await database.disconnect()
+    """Session-scoped database connection pool.
+
+    Uses a real PostgreSQL connection when ``NOUS_TEST_DB=postgres``,
+    or an in-memory SQLite database otherwise. Tests that require
+    Postgres-specific features must be marked ``@pytest.mark.integration``
+    or ``@pytest.mark.postgres_only``.
+    """
+    if USE_POSTGRES:
+        settings = Settings()
+        database = Database(settings)
+        await database.connect()
+        yield database
+        await database.disconnect()
+    else:
+        from tests.sqlite_compat import TestDatabase
+
+        database = TestDatabase()
+        await database.connect()
+        yield database
+        await database.disconnect()
 
 
 @pytest.fixture(scope="session")

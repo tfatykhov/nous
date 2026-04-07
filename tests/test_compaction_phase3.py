@@ -35,6 +35,10 @@ from nous.handlers.knowledge_extractor import KnowledgeExtractor
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, FactInput, FactSummary
 from nous.storage.models import ConversationState
 
+pytestmark = pytest.mark.integration
+
+
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -953,6 +957,7 @@ class TestRunnerSaveRestore:
         """_get_or_create_conversation is now async (Phase 3 change)."""
         import inspect
         from nous.api.runner import AgentRunner
+
 
         assert inspect.iscoroutinefunction(AgentRunner._get_or_create_conversation)
 
