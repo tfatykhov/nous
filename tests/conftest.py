@@ -11,6 +11,31 @@ from nous.config import Settings
 from nous.storage.database import Database
 from nous.storage.models import Guardrail
 
+
+# ---------------------------------------------------------------------------
+# Integration test gating
+# ---------------------------------------------------------------------------
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Add --integration flag to run tests that require a live PostgreSQL database."""
+    parser.addoption(
+        "--integration",
+        action="store_true",
+        default=False,
+        help="run integration tests that require a live PostgreSQL database",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip @pytest.mark.integration tests unless --integration flag is passed."""
+    if config.getoption("--integration"):
+        return
+    skip_integration = pytest.mark.skip(reason="requires --integration flag (live PostgreSQL)")
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip_integration)
+
 # ---------------------------------------------------------------------------
 # Mock embedding provider (P1-4 fix: PRNG-seeded, L2-normalized vectors)
 # ---------------------------------------------------------------------------

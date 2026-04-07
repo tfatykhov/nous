@@ -18,6 +18,12 @@ from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.monitor import MonitorEngine
 from nous.cognitive.schemas import Assessment, FrameSelection, ToolResult, TurnResult
 from nous.heart import EpisodeInput
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
