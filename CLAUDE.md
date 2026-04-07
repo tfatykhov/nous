@@ -155,6 +155,7 @@ nous/
 | F034.2 | Intelligent Checks (embedding search, LLM email classification, drive significance, tunable params) | #241 |
 | F034.3 | Self-Tuning Heartbeat (outcome-driven adjustment, cross-cycle rollback, pinned params) | #241 |
 | F034.5 | Dynamic Heartbeat Checks (prompt-driven checks, conversational creation/management, full lifecycle) | #252 |
+| F034.6 | on_complete Callback for Dynamic Checks (callback prompt on self-disable, 3-layer failure handling, background execution) | #275 |
 | F036 | Prompt Cache Optimization (3-tier system prompt split, cache break detection, single breakpoint strategy, tool schema caching) | #253 |
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 | F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
@@ -452,7 +453,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `web_fetch` | all | Fetch and extract web content |
 | `run_python` | conversation, question, debug, task | Execute Python with memory functions in scope |
 | `send_file` | task, conversation, debug | Send files to Telegram (images as photos, rest as documents) |
-| `heartbeat_check_create` | conversation, debug | Create a new dynamic heartbeat check |
+| `heartbeat_check_create` | conversation, debug | Create a new dynamic heartbeat check (supports on_complete callback) |
 | `heartbeat_check_manage` | conversation, debug | List, enable, disable, delete, or update dynamic checks |
 
 ## Git Workflow

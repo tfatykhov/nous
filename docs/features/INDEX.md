@@ -114,6 +114,7 @@ All shipped implementation specs with PR references:
 | F034.3 | Self-Tuning Heartbeat | ✅ Shipped | #241 — outcome-driven adjustment, cross-cycle rollback, pinned params |
 | F034.4 | Heartbeat Completions | 📋 Proposed | #242 — consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email dedup migration |
 | F034.5 | Dynamic Heartbeat Checks | ✅ Shipped | #252 — prompt-driven checks, conversational creation, tool_filter, REST CRUD, periodic sync |
+| F034.6 | on_complete Callback | ✅ Shipped | #275 — callback prompt on self-disable, 3-layer failure handling, background execution |
 | F036 | Prompt Cache Optimization | ✅ Shipped | #253 — 3-tier system prompt split, cache break detection, single breakpoint, tool schema cache |
 | F038 | Memory Quality Fixes | ✅ Shipped | #258 — quality gate 0.55, fact 30-char min, procedure floor, episode recency, admission bonus, task synthesis, context dedup, bash hints |
 | 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
@@ -146,6 +147,7 @@ All shipped implementation specs with PR references:
 | F034.3 | [Self-Tuning Heartbeat](F034.3-self-tuning-heartbeat.md) | ✅ Shipped | Outcome-driven parameter adjustment, cross-cycle rollback, pinned params |
 | F034.4 | [Heartbeat Completions](F034.4-heartbeat-completions.md) | 📋 Proposed | Consolidates remaining F034.1–F034.3 gaps: suppression TTL, FindingStore persistence, email→FindingStore migration, rollback threshold fix |
 | F034.5 | [Dynamic Heartbeat Checks](F034.5-dynamic-heartbeat-checks.md) | ✅ Shipped | Prompt-driven checks, conversational creation/management, DB-backed persistence, full lifecycle integration |
+| F034.6 | on_complete Callback | ✅ Shipped | Callback prompt executes on self-disable, 3-layer failure handling (retry, Telegram, Finding), background execution |
 
 ### P1: Memory Quality
 | Feature | Name | Status | Description |
@@ -231,4 +233,4 @@ All shipped implementation specs with PR references:
 | `heart` (13) | episodes, episode_decisions, episode_procedures, facts, procedures, rubric_versions, outcome_signals, censors, working_memory, conversation_state, subtasks, schedules, tool_cache | Memory system |
 | `nous_system` (7) | agents, agent_identity, config, dynamic_checks, events, frames, schema_migrations | System infrastructure |
 
-Migrations (006→028): event bus, agent identity, conversation state, decision review, subtasks/schedules, subtask delivery, frame typing, tool cache, notification defaults, schedule frames, polymorphic graph edges, admission control, dashboard indexes, admission scores, episode compaction, config table, rubric/outcome signals, procedure search, censor action payloads, episode transcript, observability, dynamic checks, quality guardrail threshold.
+Migrations (006→029): event bus, agent identity, conversation state, decision review, subtasks/schedules, subtask delivery, frame typing, tool cache, notification defaults, schedule frames, polymorphic graph edges, admission control, dashboard indexes, admission scores, episode compaction, config table, rubric/outcome signals, procedure search, censor action payloads, episode transcript, observability, dynamic checks, quality guardrail threshold, on_complete callback.

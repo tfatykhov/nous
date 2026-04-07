@@ -1933,6 +1933,8 @@ def create_app(
                 cron_expr=body.get("cron_expr"),
                 timeout_seconds=body.get("timeout_seconds"),
                 urgent=body.get("urgent", False),
+                on_complete_prompt=body.get("on_complete_prompt"),
+                on_complete_tools=body.get("on_complete_tools"),
             )
             return JSONResponse(result, status_code=201)
         except ValueError as e:
