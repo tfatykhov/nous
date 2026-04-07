@@ -196,6 +196,8 @@ class HeartbeatRunner:
         )
 
         all_findings: list[Finding] = []
+        successful_checks: set[str] = set()
+        current_fingerprints: dict[str, set[str]] = {}
 
         for check in due_checks:
             try:
@@ -204,6 +206,7 @@ class HeartbeatRunner:
                     timeout=check.timeout,
                 )
                 check.mark_success()
+                successful_checks.add(check.name)
 
                 # F034.5: Track token usage from dynamic checks
                 if result.tokens_used:
@@ -222,6 +225,8 @@ class HeartbeatRunner:
                     for f in result.findings:
                         f.check_name = check.name
                     all_findings.extend(result.findings)
+                    for f in result.findings:
+                        current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
 
             except asyncio.TimeoutError:
                 check.mark_failure()
@@ -247,6 +252,9 @@ class HeartbeatRunner:
                         pass
 
         self._last_tick = now
+
+        # Auto-resolve findings no longer reported by successful checks
+        self._auto_resolve_absent_findings(successful_checks, current_fingerprints)
 
         if all_findings:
             logger.info(
@@ -288,6 +296,43 @@ class HeartbeatRunner:
                 await self._bus.emit(tick_event)
 
         return all_findings
+
+    # ------------------------------------------------------------------
+    # Auto-resolve absent findings
+    # ------------------------------------------------------------------
+
+    def _auto_resolve_absent_findings(
+        self,
+        successful_checks: set[str],
+        current_fingerprints: dict[str, set[str]],
+        threshold: int = 2,
+    ) -> None:
+        """Auto-resolve ACKNOWLEDGED findings no longer reported by successful checks.
+
+        For each check that ran successfully this tick, compare its current
+        findings against tracked findings. Mark absent findings, then resolve
+        any ACKNOWLEDGED findings absent for >= threshold consecutive ticks.
+        """
+        if self._finding_store is None:
+            return
+
+        # Phase 1: Mark absent findings for all successful checks
+        for check_name in successful_checks:
+            active_fps = self._finding_store.get_active_by_check(check_name)
+            current_fps = current_fingerprints.get(check_name, set())
+            absent_fps = active_fps - current_fps
+
+            for fp in absent_fps:
+                self._finding_store.mark_absent_tick(fp)
+
+        # Phase 2: Single pass — resolve ACKNOWLEDGED findings past threshold
+        resolvable = self._finding_store.get_auto_resolvable(threshold=threshold)
+        for fp in resolvable:
+            # Only resolve if the finding's check ran successfully this tick
+            tracked = self._finding_store.get_tracked(fp)
+            if tracked and tracked.finding.check_name in successful_checks:
+                self._finding_store.resolve(fp)
+                logger.info("Auto-resolved finding %s (absent for %d+ ticks)", fp, threshold)
 
     # ------------------------------------------------------------------
     # Triage

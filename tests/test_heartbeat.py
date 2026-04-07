@@ -695,17 +695,47 @@ class TestSelfInitiatedCheck:
         return check, heart, brain
 
     def test_looks_like_pending_matches(self):
-        """49. _looks_like_pending detects known markers."""
+        """49. _looks_like_pending detects known action markers."""
         assert SelfInitiatedCheck._looks_like_pending("TODO: check the report") is True
-        assert SelfInitiatedCheck._looks_like_pending("need to follow-up with Tim") is True
-        assert SelfInitiatedCheck._looks_like_pending("This is pending review") is True
+        assert SelfInitiatedCheck._looks_like_pending("I need to follow-up on Tim's request") is True
+        assert SelfInitiatedCheck._looks_like_pending("Pending review of the PR") is True
         assert SelfInitiatedCheck._looks_like_pending("remind me about the meeting") is True
         assert SelfInitiatedCheck._looks_like_pending("Action needed on PR") is True
+        assert SelfInitiatedCheck._looks_like_pending("waiting for response from vendor") is True
 
     def test_looks_like_pending_no_match(self):
         """50. _looks_like_pending rejects non-matching content."""
         assert SelfInitiatedCheck._looks_like_pending("The weather is nice today") is False
         assert SelfInitiatedCheck._looks_like_pending("Database schema updated") is False
+        assert SelfInitiatedCheck._looks_like_pending("Committed changes to main branch") is False
+
+    def test_looks_like_pending_rejects_observations(self):
+        """_looks_like_pending rejects observational/descriptive facts."""
+        assert SelfInitiatedCheck._looks_like_pending(
+            "The team follows a pattern of draft → review → targeted improvements"
+        ) is False
+        assert SelfInitiatedCheck._looks_like_pending(
+            "In general, the process is to review PRs before merging"
+        ) is False
+        assert SelfInitiatedCheck._looks_like_pending(
+            "The system typically handles reconnections automatically"
+        ) is False
+        assert SelfInitiatedCheck._looks_like_pending(
+            "Users need to authenticate before accessing the dashboard"
+        ) is False
+        assert SelfInitiatedCheck._looks_like_pending(
+            "The pending state is used for unreviewed decisions"
+        ) is False
+
+    def test_looks_like_pending_action_wins_over_observation(self):
+        """When content has both action and observation markers, action wins."""
+        # "the team" is a negative pattern but "need to review" is positive — positive wins
+        assert SelfInitiatedCheck._looks_like_pending(
+            "The team needs to review this PR by Friday"
+        ) is True
+        assert SelfInitiatedCheck._looks_like_pending(
+            "The system needs to be restarted after the patch — action needed"
+        ) is True
 
     @pytest.mark.asyncio
     async def test_finds_pending_facts(self):
@@ -1002,3 +1032,219 @@ class TestHeartbeatPublicProperties:
             brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
         )
         assert runner.tokens_used_today == 0
+
+
+# ===========================================================================
+# TestRunnerAutoResolve — 3 tests
+# ===========================================================================
+
+
+class TestRunnerAutoResolve:
+    """Runner auto-resolves findings when checks stop reporting them."""
+
+    @pytest.mark.asyncio
+    async def test_auto_resolves_after_grace_period(self):
+        """Findings not reported for 2 consecutive successful ticks get auto-resolved."""
+        from nous.heartbeat.finding_store import FindingStore
+        from nous.heartbeat.runner import HeartbeatRunner
+        from nous.heartbeat.schemas import FindingState
+
+        settings = _mock_settings()
+        registry = CheckRegistry()
+        store = FindingStore()
+
+        runner = HeartbeatRunner(
+            settings=settings,
+            registry=registry,
+            runner=MagicMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=MagicMock(),
+            http_client=MagicMock(),
+            finding_store=store,
+        )
+
+        f = Finding(
+            source="facts",
+            summary="Pending action: TODO fix the thing",
+            urgency="normal",
+            needs_action=True,
+            check_name="self_initiated",
+        )
+        store.ingest(f)
+        store.acknowledge(f.fingerprint())
+
+        # Tick 1: absent — not yet resolved
+        runner._auto_resolve_absent_findings(
+            successful_checks={"self_initiated"},
+            current_fingerprints={"self_initiated": set()},
+        )
+        assert store._findings[f.fingerprint()].state != FindingState.RESOLVED
+
+        # Tick 2: still absent — now resolved
+        runner._auto_resolve_absent_findings(
+            successful_checks={"self_initiated"},
+            current_fingerprints={"self_initiated": set()},
+        )
+        assert store._findings[f.fingerprint()].state == FindingState.RESOLVED
+
+    @pytest.mark.asyncio
+    async def test_no_auto_resolve_on_failed_check(self):
+        """Failed checks don't trigger auto-resolve."""
+        from nous.heartbeat.finding_store import FindingStore
+        from nous.heartbeat.runner import HeartbeatRunner
+        from nous.heartbeat.schemas import FindingState
+
+        settings = _mock_settings()
+        registry = CheckRegistry()
+        store = FindingStore()
+
+        runner = HeartbeatRunner(
+            settings=settings,
+            registry=registry,
+            runner=MagicMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=MagicMock(),
+            http_client=MagicMock(),
+            finding_store=store,
+        )
+
+        f = Finding(
+            source="facts",
+            summary="Pending action: TODO fix it",
+            urgency="normal",
+            needs_action=True,
+            check_name="self_initiated",
+        )
+        store.ingest(f)
+        store.acknowledge(f.fingerprint())
+
+        # self_initiated NOT in successful_checks (failed/timed out)
+        runner._auto_resolve_absent_findings(
+            successful_checks=set(),
+            current_fingerprints={},
+        )
+        runner._auto_resolve_absent_findings(
+            successful_checks=set(),
+            current_fingerprints={},
+        )
+        assert store._findings[f.fingerprint()].state != FindingState.RESOLVED
+
+    @pytest.mark.asyncio
+    async def test_no_auto_resolve_for_new_findings(self):
+        """NEW (un-triaged) findings are not auto-resolved."""
+        from nous.heartbeat.finding_store import FindingStore
+        from nous.heartbeat.runner import HeartbeatRunner
+        from nous.heartbeat.schemas import FindingState
+
+        settings = _mock_settings()
+        registry = CheckRegistry()
+        store = FindingStore()
+
+        runner = HeartbeatRunner(
+            settings=settings,
+            registry=registry,
+            runner=MagicMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=MagicMock(),
+            http_client=MagicMock(),
+            finding_store=store,
+        )
+
+        f = Finding(
+            source="facts",
+            summary="Pending action: TODO new thing",
+            urgency="normal",
+            needs_action=True,
+            check_name="self_initiated",
+        )
+        store.ingest(f)
+        # Do NOT acknowledge — stays in NEW state
+
+        runner._auto_resolve_absent_findings(
+            successful_checks={"self_initiated"},
+            current_fingerprints={"self_initiated": set()},
+        )
+        runner._auto_resolve_absent_findings(
+            successful_checks={"self_initiated"},
+            current_fingerprints={"self_initiated": set()},
+        )
+        # NEW finding should NOT be resolved
+        assert store._findings[f.fingerprint()].state != FindingState.RESOLVED
+
+
+# ===========================================================================
+# TestFindingQualityIntegration — 2 tests
+# ===========================================================================
+
+
+class TestFindingQualityIntegration:
+    """End-to-end: detection -> triage -> auto-resolve lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_observation_fact_never_becomes_finding(self):
+        """An observational fact is not flagged as pending even with keyword match."""
+        heart = MagicMock()
+        brain = AsyncMock()
+        settings = _mock_settings()
+        check = SelfInitiatedCheck(heart=heart, brain=brain, settings=settings)
+
+        fact = MagicMock()
+        fact.content = "The pending state is used for decisions awaiting review"
+        fact.id = "fact-obs"
+        fact.score = 0.5
+
+        heart.facts.search = AsyncMock(return_value=[fact])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        result = await check.run()
+        fact_findings = [f for f in result.findings if f.raw_data.get("fact_id") == "fact-obs"]
+        assert len(fact_findings) == 0
+
+    @pytest.mark.asyncio
+    async def test_action_fact_detected_and_auto_resolved(self):
+        """An actionable fact is detected, then auto-resolved when no longer reported."""
+        from nous.heartbeat.finding_store import FindingStore
+        from nous.heartbeat.schemas import FindingState
+
+        heart = MagicMock()
+        brain = AsyncMock()
+        settings = _mock_settings()
+        check = SelfInitiatedCheck(heart=heart, brain=brain, settings=settings)
+
+        # First run: actionable fact present
+        fact = MagicMock()
+        fact.content = "TODO: follow-up on deployment issue"
+        fact.id = "fact-action"
+        fact.score = 0.5
+        heart.facts.search = AsyncMock(return_value=[fact])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        result = await check.run()
+        action_findings = [f for f in result.findings if f.raw_data.get("fact_id") == "fact-action"]
+        assert len(action_findings) == 1
+
+        # Simulate FindingStore tracking
+        store = FindingStore()
+        for f in result.findings:
+            f.check_name = check.name
+            store.ingest(f)
+            store.acknowledge(f.fingerprint())
+
+        # Second run: fact gone
+        heart.facts.search = AsyncMock(return_value=[])
+        result2 = await check.run()
+        assert result2.has_updates is False
+
+        # Simulate auto-resolve (2 absent ticks)
+        for _ in range(2):
+            for fp in store.get_active_by_check("self_initiated"):
+                store.mark_absent_tick(fp)
+
+        resolvable = store.get_auto_resolvable(threshold=2)
+        for fp in resolvable:
+            store.resolve(fp)
+
+        assert len(store.get_active_by_check("self_initiated")) == 0

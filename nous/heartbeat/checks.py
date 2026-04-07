@@ -132,6 +132,16 @@ class HealthCheck(BaseCheck):
 # SelfInitiatedCheck
 # ------------------------------------------------------------------
 
+_OBSERVATION_PATTERNS = [
+    "follows a pattern",
+    "in general",
+    "typically",
+    "the process is",
+    "is used for",
+    "is designed to",
+    "pattern of",
+]
+
 PENDING_PROTOTYPES = [
     "I need to follow up on this",
     "This task is waiting for completion",
@@ -216,7 +226,9 @@ class SelfInitiatedCheck(BaseCheck):
                     # Check recency using fact score as proxy (hybrid search)
                     # and content relevance via _looks_like_pending
                     score = getattr(fact, "score", 0.0) or 0.0
-                    if score >= threshold or self._looks_like_pending(fact.content):
+                    if not self._is_observation(fact.content) and (
+                        score >= threshold or self._looks_like_pending(fact.content)
+                    ):
                         findings.append(Finding(
                             source="facts",
                             summary=f"Pending action: {fact.content[:100]}",
@@ -433,10 +445,55 @@ class SelfInitiatedCheck(BaseCheck):
 
     @staticmethod
     def _looks_like_pending(content: str) -> bool:
-        """Simple heuristic to detect pending action markers."""
+        """Detect actionable pending items, rejecting observations/descriptions.
+
+        Uses positive + negative patterns. Positive match is required.
+        Negative patterns only reject when no positive match is found.
+        """
         lower = content.lower()
-        markers = ["todo", "follow-up", "pending", "action needed", "remind me", "need to"]
-        return any(m in lower for m in markers)
+
+        # Positive patterns — action-oriented language (checked first)
+        action_patterns = [
+            "todo",
+            "follow-up on",
+            "follow up on",
+            "action needed",
+            "remind me",
+            "i need to",
+            "need to finish",
+            "need to complete",
+            "need to send",
+            "need to review",
+            "needs to review",
+            "need to check",
+            "need to restart",
+            "needs to be",
+            "should follow up",
+            "must complete",
+            "waiting for response",
+            "hasn't been done",
+            "not yet completed",
+            "pending review",
+            "pending approval",
+        ]
+        has_action = any(p in lower for p in action_patterns)
+
+        if has_action:
+            return True
+
+        # Negative patterns — observational/descriptive language
+        # Only checked when no positive match (positive wins)
+        has_observation = any(p in lower for p in _OBSERVATION_PATTERNS)
+        if has_observation:
+            return False
+
+        # No positive match and no negative match — not pending
+        return False
+
+    @staticmethod
+    def _is_observation(content: str) -> bool:
+        """Detect observational/descriptive content that should not be flagged."""
+        return any(p in content.lower() for p in _OBSERVATION_PATTERNS)
 
 
 # ------------------------------------------------------------------

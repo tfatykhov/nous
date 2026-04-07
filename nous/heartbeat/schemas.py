@@ -125,6 +125,7 @@ class TrackedFinding:
     outcome_at: datetime | None = None
     reopen_count: int = 0  # flapping detection
     last_escalated_at: datetime | None = None  # for periodic re-alert throttling
+    absent_ticks: int = 0  # consecutive ticks where check ran but didn't report this finding
 
 
 @dataclass

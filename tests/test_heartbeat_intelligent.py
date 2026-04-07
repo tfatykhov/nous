@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nous.heartbeat.checks import DriveCheck, EmailCheck, HealthCheck, SelfInitiatedCheck
+from nous.heartbeat.checks import PENDING_PROTOTYPES, DriveCheck, EmailCheck, HealthCheck, SelfInitiatedCheck
 from nous.heartbeat.registry import BaseCheck
 from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
 
@@ -156,7 +156,7 @@ class TestSelfInitiatedEmbedding:
 
         mock_fact = MagicMock()
         mock_fact.id = "fact-1"
-        mock_fact.content = "pending action: need to follow-up"
+        mock_fact.content = "TODO: need to follow-up on this task"
         mock_fact.score = 0.6
         heart.facts.search = AsyncMock(return_value=[mock_fact])
         heart.search_episodes = AsyncMock(return_value=[])
@@ -219,6 +219,29 @@ class TestSelfInitiatedEmbedding:
 
         max_items = int(check.get_param_value("max_pending_items"))
         assert len(result.findings) <= max_items
+
+    @pytest.mark.asyncio
+    async def test_rejects_high_score_observation(self):
+        """Embedding match with high score but observational content is rejected."""
+        heart = MagicMock()
+        brain = AsyncMock()
+        settings = _mock_settings()
+        embeddings = AsyncMock()
+        embeddings.embed_batch = AsyncMock(return_value=[[0.1] * 1536] * len(PENDING_PROTOTYPES))
+        check = SelfInitiatedCheck(heart=heart, brain=brain, settings=settings, embeddings=embeddings)
+
+        fact = MagicMock()
+        fact.content = "The team follows a pattern of reviewing PRs before merging"
+        fact.id = "fact-obs-1"
+        fact.score = 0.85  # Above threshold
+        heart.facts.search = AsyncMock(return_value=[fact])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        result = await check.run()
+
+        # Should NOT produce findings — observational content rejected
+        fact_findings = [f for f in result.findings if f.raw_data.get("fact_id") == "fact-obs-1"]
+        assert len(fact_findings) == 0
 
 
 # ===========================================================================
