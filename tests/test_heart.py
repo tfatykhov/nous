@@ -25,6 +25,10 @@ from nous.heart import (
 )
 from nous.storage.models import Event
 
+pytestmark = pytest.mark.integration
+
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -454,6 +458,7 @@ async def test_fact_minimum_content_boundary(heart, session):
 async def test_fact_minimum_content_whitespace(heart, session):
     """Content with whitespace padding that strips to < 30 chars -> rejected."""
     from nous.heart.schemas import FactRejected
+
 
     result = await heart.learn(
         _fact_input(content="   short   "),

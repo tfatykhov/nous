@@ -1,6 +1,12 @@
 """Tests for database infrastructure: connection, schemas, extensions, tables, seed data, triggers."""
 
 from sqlalchemy import text
+import pytest
+
+pytestmark = [pytest.mark.integration, pytest.mark.postgres_only]
+
+
+
 
 
 async def test_connection(db):

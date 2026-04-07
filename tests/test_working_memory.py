@@ -12,6 +12,9 @@ from nous.heart import (
     WorkingMemoryItem,
     WorkingMemoryState,
 )
+import pytest
+
+pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -23,6 +23,10 @@ from nous.brain.schemas import (
 )
 from nous.storage.models import Event, GraphEdge
 
+pytestmark = pytest.mark.integration
+
+
+
 # Must match conftest.GUARDRAIL_TEST_AGENT
 GUARDRAIL_TEST_AGENT = "test-guardrail-agent"
 
@@ -526,6 +530,7 @@ async def test_neighbors_returns_neighbor_result(brain, session):
 async def test_neighbors_with_node_type(brain, session):
     """neighbors() accepts node_type parameter for cross-type traversal."""
     from uuid import uuid4
+
 
     d1 = await brain.record(_record_input(description="Cross-type neighbor"), session=session)
 

@@ -102,8 +102,10 @@ class TestRunnerCriticWiring:
         )
 
         prompt = runner._build_system_prompt(turn_context)
-        assert "[DIAGNOSTIC OBSERVATIONS]" in prompt
-        assert "[Critic/repetition]" in prompt
+        # _build_system_prompt may return str or dict[str, str]
+        prompt_text = prompt if isinstance(prompt, str) else " ".join(prompt.values())
+        assert "[DIAGNOSTIC OBSERVATIONS]" in prompt_text
+        assert "[Critic/repetition]" in prompt_text
 
     def test_no_nudges_when_empty(self):
         from nous.api.runner import AgentRunner
@@ -123,7 +125,8 @@ class TestRunnerCriticWiring:
         turn_context.diagnostic_nudges = ""
 
         prompt = runner._build_system_prompt(turn_context)
-        assert "[DIAGNOSTIC OBSERVATIONS]" not in prompt
+        prompt_text = prompt if isinstance(prompt, str) else " ".join(prompt.values())
+        assert "[DIAGNOSTIC OBSERVATIONS]" not in prompt_text
 
 
 class TestShadowModeEvent:

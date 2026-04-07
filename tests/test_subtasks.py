@@ -15,6 +15,7 @@ from nous.handlers.subtask_worker import SubtaskWorkerPool
 from nous.storage.models import Schedule, Subtask
 
 
+
 @pytest_asyncio.fixture
 async def session(db):
     """Function-scoped session with transaction rollback."""
@@ -956,6 +957,9 @@ class TestIntegration:
 
 from nous.cognitive.layer import _format_subtask_results
 
+pytestmark = pytest.mark.integration
+
+
 
 class TestSubtaskDelivery:
     """Tests for subtask result delivery (011.2): get_undelivered,
@@ -1252,6 +1256,7 @@ class TestRunTurnErrorPropagation:
         """run_turn should return normally when no error occurs."""
         from nous.api.runner import AgentRunner
         from nous.cognitive.schemas import TurnContext, FrameSelection
+
 
         settings = Settings()
         mock_cognitive = AsyncMock()
