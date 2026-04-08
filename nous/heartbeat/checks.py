@@ -133,6 +133,7 @@ class HealthCheck(BaseCheck):
 # ------------------------------------------------------------------
 
 _OBSERVATION_PATTERNS = [
+    # Generic descriptive/rule patterns
     "follows a pattern",
     "in general",
     "typically",
@@ -140,6 +141,38 @@ _OBSERVATION_PATTERNS = [
     "is used for",
     "is designed to",
     "pattern of",
+    # Resolved / completed language
+    "are resolved",
+    "is resolved",
+    "has been resolved",
+    "were resolved",
+    "already completed",
+    "no longer pending",
+    "should no longer trigger",
+    "was fixed",
+    "has been done",
+    "marked as done",
+    "both emails rep",  # "Both emails replied" completion note
+    # False-alarm / meta-documentation patterns
+    "false alarm",
+    "false positive",
+    "false-alarm",
+    "stale fact cleanup",
+    "heartbeat repeatedly flags",
+    "purely observational",
+    "not action items",
+    "not an action item",
+    # Confirmed receipt / observation patterns
+    "confirmed receipt",
+    "confirmed that it was",  # narrowed from "confirmed that" to avoid suppressing actionable confirmations
+    "tim confirmed",
+    "indicating interest in",
+    "has requested information about",  # narrowed from "has requested" to avoid suppressing actionable requests
+    # Lesson-learned / rule patterns (not actionable)
+    "lesson learned",
+    "showed that",
+    "need both a",  # "need both X and Y" is descriptive, not a task
+    "tasks need both",
 ]
 
 PENDING_PROTOTYPES = [
