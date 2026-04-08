@@ -164,10 +164,10 @@ _OBSERVATION_PATTERNS = [
     "not an action item",
     # Confirmed receipt / observation patterns
     "confirmed receipt",
-    "confirmed that",
+    "confirmed that it was",  # narrowed from "confirmed that" to avoid suppressing actionable confirmations
     "tim confirmed",
     "indicating interest in",
-    "has requested",  # capability/interest notes
+    "has requested information about",  # narrowed from "has requested" to avoid suppressing actionable requests
     # Lesson-learned / rule patterns (not actionable)
     "lesson learned",
     "showed that",
