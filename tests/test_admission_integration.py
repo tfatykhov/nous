@@ -8,11 +8,6 @@ import pytest
 
 from nous.heart.schemas import FactDetail, FactInput, FactRejected
 
-pytestmark = pytest.mark.integration
-
-
-
-
 
 def _fact(**overrides) -> FactInput:
     defaults = dict(

@@ -16,10 +16,6 @@ import pytest
 from nous.heart.schemas import EpisodeSummary
 from nous.storage.models import Episode as EpisodeORM
 
-pytestmark = pytest.mark.integration
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +632,6 @@ class TestBudgetBoost:
     async def test_no_boost_excludes_summaries(self, mock_heart, mock_brain, settings, frame):
         from unittest.mock import AsyncMock
         from nous.cognitive.context import ContextEngine
-
 
         episodes = [
             EpisodeSummary(

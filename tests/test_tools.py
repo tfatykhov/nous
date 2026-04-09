@@ -18,11 +18,6 @@ from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.heart import Heart
 
-pytestmark = pytest.mark.integration
-
-
-
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

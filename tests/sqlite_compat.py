@@ -1,32 +1,27 @@
-"""SQLite in-memory test database compatibility layer.
+"""SQLite compatibility layer for tests.
 
-Provides a TestDatabase that uses aiosqlite for offline testing.
-The schema is a best-effort SQLite-compatible subset — columns using
-PG-specific types (Vector, JSONB, ARRAY) are mapped to compatible
-SQLite equivalents (TEXT/JSON). Tests that require real Postgres
-features (pgvector, tsvector, JSONB operators, schema namespaces)
-must be marked @pytest.mark.integration or @pytest.mark.postgres_only.
+Provides:
+1. Type compilation overrides (Vector -> Text, ARRAY -> JSON, JSONB -> JSON)
+2. sqlite3 type adapters for list/dict serialization
+3. TestDatabase class matching production Database interface
+4. SQL rewriting hook to strip PG-specific syntax
+5. Table creation with schema remapping
+6. Pure-Python search helpers
 """
 
 from __future__ import annotations
 
+import json
+import math
+import re
+import sqlite3
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timezone
+from typing import Any
 
-from sqlalchemy import (
-    Boolean,
-    DateTime,
-    Float,
-    ForeignKey,
-    Integer,
-    JSON,
-    MetaData,
-    String,
-    Table,
-    Text,
-    Column,
-    func,
-    event,
-)
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -35,423 +30,391 @@ from sqlalchemy.ext.asyncio import (
 
 
 # ---------------------------------------------------------------------------
-# SQLite-compatible metadata (no schema namespaces, no PG-specific types)
+# 0. sqlite3 type adapters
 # ---------------------------------------------------------------------------
 
-metadata = MetaData()
+def _adapt_list(val):
+    return json.dumps(val)
 
-# nous_system schema tables (prefixed: nous_system_*)
-agents_table = Table(
-    "nous_system_agents",
-    metadata,
-    Column("id", String(100), primary_key=True),
-    Column("name", String(200), nullable=False),
-    Column("description", Text),
-    Column("config", JSON, nullable=False, server_default="{}"),
-    Column("active", Boolean, server_default="1"),
-    Column("is_initiated", Boolean, server_default="0"),
-    Column("last_active", DateTime),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
+def _adapt_dict(val):
+    return json.dumps(val)
 
-agent_identity_table = Table(
-    "nous_system_agent_identity",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), ForeignKey("nous_system_agents.id"), nullable=False),
-    Column("section", String(50), nullable=False),
-    Column("content", Text, nullable=False),
-    Column("version", Integer, nullable=False, server_default="1"),
-    Column("is_current", Boolean, nullable=False, server_default="1"),
-    Column("updated_at", DateTime, server_default=func.now()),
-    Column("updated_by", String(50)),
-    Column("previous_version_id", String(36)),
-)
+def _adapt_uuid(val):
+    return str(val).replace("-", "") if val else None
 
-frames_table = Table(
-    "nous_system_frames",
-    metadata,
-    Column("id", String(100), primary_key=True),
-    Column("agent_id", String(100), ForeignKey("nous_system_agents.id")),
-    Column("name", String(200), nullable=False),
-    Column("description", Text),
-    Column("activation_patterns", JSON),
-    Column("default_category", String(50)),
-    Column("default_stakes", String(20)),
-    Column("questions_to_ask", JSON),
-    Column("agencies_to_activate", JSON),
-    Column("suppressed_frames", JSON),
-    Column("frame_censors", JSON),
-    Column("usage_count", Integer, server_default="0"),
-    Column("last_used", DateTime),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-)
-
-events_table = Table(
-    "nous_system_events",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("session_id", String(100)),
-    Column("event_type", String(50), nullable=False),
-    Column("data", JSON, nullable=False, server_default="{}"),
-    Column("created_at", DateTime, server_default=func.now()),
-)
-
-# brain schema tables
-decisions_table = Table(
-    "brain_decisions",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("session_id", String(100)),
-    Column("question", Text, nullable=False),
-    Column("choice", Text, nullable=False),
-    Column("confidence", Float, nullable=False),
-    Column("outcome", String(20)),
-    Column("outcome_notes", Text),
-    Column("stakes", String(20)),
-    Column("category", String(50)),
-    Column("tags", JSON),
-    Column("embedding", Text),  # JSON array in SQLite
-    Column("bridge", JSON),
-    Column("frame_id", String(100)),
-    Column("reviewed", Boolean, server_default="0"),
-    Column("review_notes", Text),
-    Column("quality_score", Float),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-decision_reasons_table = Table(
-    "brain_decision_reasons",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("decision_id", String(36), ForeignKey("brain_decisions.id"), nullable=False),
-    Column("reason", Text, nullable=False),
-    Column("weight", Float, server_default="1.0"),
-    Column("created_at", DateTime, server_default=func.now()),
-)
-
-guardrails_table = Table(
-    "brain_guardrails",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("name", String(200), nullable=False),
-    Column("description", Text),
-    Column("condition", JSON, nullable=False),
-    Column("severity", String(20), nullable=False),
-    Column("priority", Integer, server_default="0"),
-    Column("active", Boolean, server_default="1"),
-    Column("trigger_action", String(50)),
-    Column("action_instruction", Text),
-    Column("unblock_pattern", String(500)),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-graph_edges_table = Table(
-    "brain_graph_edges",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("source_type", String(50), nullable=False),
-    Column("source_id", String(36), nullable=False),
-    Column("target_type", String(50), nullable=False),
-    Column("target_id", String(36), nullable=False),
-    Column("edge_type", String(50), nullable=False),
-    Column("weight", Float, server_default="1.0"),
-    Column("metadata", JSON),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-)
-
-rubric_versions_table = Table(
-    "brain_rubric_versions",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("version", Integer, nullable=False),
-    Column("dimensions", JSON, nullable=False),
-    Column("is_current", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("evolved_from_id", String(36)),
-    Column("evolution_reason", Text),
-)
-
-dimension_proposals_table = Table(
-    "brain_dimension_proposals",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("name", String(100), nullable=False),
-    Column("description", Text),
-    Column("rationale", Text),
-    Column("status", String(20), server_default="pending"),
-    Column("proposed_at", DateTime, server_default=func.now()),
-    Column("reviewed_at", DateTime),
-)
-
-outcome_signals_table = Table(
-    "brain_outcome_signals",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("episode_id", String(36)),
-    Column("signal_type", String(50), nullable=False),
-    Column("signal_value", Float),
-    Column("metadata", JSON),
-    Column("created_at", DateTime, server_default=func.now()),
-)
-
-# heart schema tables
-episodes_table = Table(
-    "heart_episodes",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("session_id", String(100)),
-    Column("title", String(500)),
-    Column("summary", Text),
-    Column("transcript", Text),
-    Column("outcome", String(20)),
-    Column("tags", JSON),
-    Column("embedding", Text),
-    Column("frame_id", String(100)),
-    Column("topic", String(200)),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-    Column("started_at", DateTime),
-    Column("ended_at", DateTime),
-)
-
-facts_table = Table(
-    "heart_facts",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("content", Text, nullable=False),
-    Column("source", String(200)),
-    Column("confidence", Float, server_default="1.0"),
-    Column("tags", JSON),
-    Column("embedding", Text),
-    Column("domain", String(100)),
-    Column("user_id", String(100)),
-    Column("frame_id", String(100)),
-    Column("superseded_by", String(36)),
-    Column("admission_scores", JSON),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-procedures_table = Table(
-    "heart_procedures",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("name", String(200), nullable=False),
-    Column("description", Text),
-    Column("steps", JSON, nullable=False),
-    Column("tags", JSON),
-    Column("embedding", Text),
-    Column("usage_count", Integer, server_default="0"),
-    Column("last_used", DateTime),
-    Column("source_decision_ids", JSON),
-    Column("frame_id", String(100)),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-censors_table = Table(
-    "heart_censors",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("name", String(200), nullable=False),
-    Column("description", Text),
-    Column("pattern", Text),
-    Column("severity", String(20)),
-    Column("trigger_action", String(50)),
-    Column("action_instruction", Text),
-    Column("unblock_pattern", String(500)),
-    Column("active", Boolean, server_default="1"),
-    Column("frame_ids", JSON),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-working_memory_table = Table(
-    "heart_working_memory",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("session_id", String(100)),
-    Column("key", String(200)),
-    Column("value", Text),
-    Column("expires_at", DateTime),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-subtasks_table = Table(
-    "heart_subtasks",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("parent_session_id", String(100)),
-    Column("title", String(500)),
-    Column("description", Text),
-    Column("status", String(20), server_default="pending"),
-    Column("result", Text),
-    Column("error", Text),
-    Column("metadata", JSON),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-    Column("started_at", DateTime),
-    Column("completed_at", DateTime),
-)
-
-schedules_table = Table(
-    "heart_schedules",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("name", String(200)),
-    Column("description", Text),
-    Column("task_prompt", Text, nullable=False),
-    Column("schedule_type", String(20), nullable=False),
-    Column("cron_expression", String(100)),
-    Column("run_at", DateTime),
-    Column("last_run_at", DateTime),
-    Column("next_run_at", DateTime),
-    Column("run_count", Integer, server_default="0"),
-    Column("active", Boolean, server_default="1"),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-heartbeat_findings_table = Table(
-    "nous_system_heartbeat_findings",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("fingerprint", String(200), nullable=False),
-    Column("check_name", String(100)),
-    Column("title", String(500)),
-    Column("description", Text),
-    Column("urgency", String(20)),
-    Column("state", String(20), server_default="active"),
-    Column("metadata", JSON),
-    Column("first_seen_at", DateTime, server_default=func.now()),
-    Column("last_seen_at", DateTime, server_default=func.now()),
-    Column("resolved_at", DateTime),
-    Column("acknowledged_at", DateTime),
-)
-
-heartbeat_dynamic_checks_table = Table(
-    "nous_system_heartbeat_dynamic_checks",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("name", String(200), nullable=False),
-    Column("description", Text),
-    Column("prompt", Text),
-    Column("prompt_embedding", Text),
-    Column("interval_seconds", Integer, server_default="1800"),
-    Column("enabled", Boolean, server_default="1"),
-    Column("last_run_at", DateTime),
-    Column("last_result", JSON),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
-
-execution_ledger_table = Table(
-    "nous_system_execution_ledger",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("session_id", String(100)),
-    Column("action_type", String(50)),
-    Column("action_input", JSON),
-    Column("action_output", JSON),
-    Column("status", String(20)),
-    Column("side_effect_class", String(50)),
-    Column("claimed_actions", JSON),
-    Column("verified", Boolean, server_default="0"),
-    Column("created_at", DateTime, server_default=func.now()),
-)
-
-prompt_cache_table = Table(
-    "nous_system_prompt_cache",
-    metadata,
-    Column("id", String(36), primary_key=True, default=lambda: str(uuid.uuid4())),
-    Column("agent_id", String(100), nullable=False),
-    Column("frame_id", String(100)),
-    Column("tier", Integer),
-    Column("content_hash", String(64)),
-    Column("token_count", Integer),
-    Column("metadata", JSON),
-    Column("created_at", DateTime, server_default=func.now()),
-    Column("updated_at", DateTime, server_default=func.now()),
-)
+sqlite3.register_adapter(list, _adapt_list)
+sqlite3.register_adapter(dict, _adapt_dict)
+sqlite3.register_adapter(uuid.UUID, _adapt_uuid)
 
 
 # ---------------------------------------------------------------------------
-# TestDatabase class
+# 1. Type compilation overrides
+# ---------------------------------------------------------------------------
+
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB, ARRAY
+from pgvector.sqlalchemy import Vector
+
+
+@compiles(Vector, "sqlite")
+def _compile_vector_sqlite(type_, compiler, **kw):
+    return "TEXT"
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+
+@compiles(ARRAY, "sqlite")
+def _compile_array_sqlite(type_, compiler, **kw):
+    return "JSON"
+
+
+# ---------------------------------------------------------------------------
+# 2. TestDatabase
 # ---------------------------------------------------------------------------
 
 
 class TestDatabase:
-    """In-memory SQLite database for offline testing.
+    """In-memory SQLite database matching the production Database interface."""
 
-    Provides the same interface as ``nous.storage.database.Database``
-    but backed by aiosqlite instead of asyncpg + Postgres. The schema
-    is a simplified SQLite-compatible version with JSON columns in place
-    of JSONB/ARRAY/Vector, and without schema namespaces.
-
-    Tests that rely on Postgres-specific features (pgvector cosine search,
-    JSONB operators, tsvector, schema introspection) must be marked
-    ``@pytest.mark.integration`` or ``@pytest.mark.postgres_only`` and
-    are excluded from offline runs.
-    """
-
-    def __init__(self) -> None:
-        self.engine = create_async_engine(
-            "sqlite+aiosqlite:///:memory:",
-            echo=False,
-            connect_args={"check_same_thread": False},
-        )
+    def __init__(self, engine):
+        self.engine = engine
         self.session_factory = async_sessionmaker(
-            self.engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
+            engine, class_=AsyncSession, expire_on_commit=False,
         )
-        # Enable foreign keys for SQLite
-        @event.listens_for(self.engine.sync_engine, "connect")
-        def set_sqlite_pragma(dbapi_conn, connection_record):  # noqa: ARG001
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
 
     async def connect(self) -> None:
-        """Create all SQLite-compatible tables."""
-        async with self.engine.begin() as conn:
-            await conn.run_sync(metadata.create_all)
+        pass
 
     async def disconnect(self) -> None:
-        """Dispose of connection pool."""
         await self.engine.dispose()
 
-    async def __aenter__(self) -> "TestDatabase":
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        async with self.session_factory() as session:
+            yield session
+
+    async def __aenter__(self):
         await self.connect()
         return self
 
-    async def __aexit__(self, *args: object) -> None:
+    async def __aexit__(self, *args):
         await self.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# 3. Engine and table creation
+# ---------------------------------------------------------------------------
+
+_SCHEMA_PREFIXES = re.compile(r'\b(heart|brain|nous_system)\.')
+
+
+def _rewrite_sql_for_sqlite(sql_text: str) -> str:
+    """Strip PG schema prefixes and rewrite PG functions for SQLite."""
+    # Remove schema prefixes (heart.facts -> facts)
+    sql_text = _SCHEMA_PREFIXES.sub('', sql_text)
+    # ON CONFLICT DO NOTHING with constraint name -> simpler form
+    sql_text = re.sub(
+        r"ON CONFLICT\s*\([^)]+\)\s*DO\s+NOTHING",
+        "ON CONFLICT DO NOTHING",
+        sql_text,
+        flags=re.IGNORECASE
+    )
+    # Replace NOW() with CURRENT_TIMESTAMP
+    sql_text = sql_text.replace("NOW()", "CURRENT_TIMESTAMP")
+    sql_text = sql_text.replace("now()", "CURRENT_TIMESTAMP")
+    # Replace make_interval(hours => :hours) with datetime(:hours, '-' || :hours || ' hours')
+    sql_text = re.sub(
+        r"NOW\(\)\s*-\s*make_interval\(hours\s*=>\s*:hours\)",
+        "datetime('now', '-' || :hours || ' hours')",
+        sql_text,
+        flags=re.IGNORECASE
+    )
+    return sql_text
+
+
+async def create_test_engine():
+    """Create async SQLite engine with schema remapping and SQL rewriting."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        execution_options={
+            "schema_translate_map": {
+                "brain": None,
+                "heart": None,
+                "nous_system": None,
+            }
+        },
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        # Register gen_random_uuid as SQLite function
+        dbapi_connection.create_function(
+            "gen_random_uuid", 0,
+            lambda: str(uuid.uuid4()).replace("-", ""),
+        )
+        # Register stddev aggregate (SQLite doesn't have it natively)
+        class StddevAggregate:
+            def __init__(self):
+                self.values = []
+            def step(self, value):
+                if value is not None:
+                    self.values.append(float(value))
+            def finalize(self):
+                if len(self.values) < 2:
+                    return None
+                mean = sum(self.values) / len(self.values)
+                variance = sum((x - mean) ** 2 for x in self.values) / (len(self.values) - 1)
+                return math.sqrt(variance)
+
+        # Register aggregates/functions via raw connection
+        # Use check_same_thread=False workaround
+        try:
+            raw_conn = dbapi_connection._connection._conn
+            raw_conn.create_aggregate("stddev", 1, StddevAggregate)
+            raw_conn.create_function("power", 2, lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None)
+        except Exception:
+            # Fallback: register via the adapter which proxies create_function
+            dbapi_connection.create_function("power", 2, lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None)
+        cursor.close()
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute", retval=True)
+    def _rewrite_sql(conn, cursor, statement, parameters, context, executemany):
+        """Rewrite PG-specific SQL for SQLite compatibility."""
+        new_stmt = _rewrite_sql_for_sqlite(statement)
+        return new_stmt, parameters
+
+    return engine
+
+
+async def create_tables(engine):
+    """Create all ORM tables in SQLite."""
+    from nous.storage.models import Base
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
+# ---------------------------------------------------------------------------
+# 4. ORM event listeners for Python-side defaults
+# ---------------------------------------------------------------------------
+
+
+def install_sqlite_defaults():
+    """Install listeners for PG function defaults (gen_random_uuid, now)."""
+    from nous.storage.models import Base
+
+    @event.listens_for(Base, "init", propagate=True)
+    def _set_defaults(target, args, kwargs):
+        mapper = inspect(type(target))
+        for col in mapper.columns:
+            attr_name = col.key
+            if attr_name in kwargs and kwargs[attr_name] is not None:
+                continue
+            current = getattr(target, attr_name, None)
+            if current is not None:
+                continue
+
+            sd = col.server_default
+            if sd is None:
+                continue
+
+            sd_text = str(sd.arg) if hasattr(sd, "arg") else str(sd)
+
+            if "gen_random_uuid" in sd_text:
+                setattr(target, attr_name, uuid.uuid4())
+            elif "now()" in sd_text.lower() or "current_timestamp" in sd_text.lower():
+                setattr(target, attr_name, datetime.now(UTC))
+            elif sd_text == "true":
+                setattr(target, attr_name, True)
+            elif sd_text == "false":
+                setattr(target, attr_name, False)
+            elif sd_text in ("'pending'", "'active'", "'raw'", "'manual'", "'warn'"):
+                setattr(target, attr_name, sd_text.strip("'"))
+            elif sd_text == "{}":
+                setattr(target, attr_name, {})
+            elif sd_text == "[]":
+                setattr(target, attr_name, [])
+            elif sd_text == "'1.0'":
+                setattr(target, attr_name, 1.0)
+            else:
+                try:
+                    setattr(target, attr_name, int(sd_text))
+                except (ValueError, TypeError):
+                    pass
+
+
+# ---------------------------------------------------------------------------
+# 5. Timezone helpers
+# ---------------------------------------------------------------------------
+
+
+def ensure_aware(dt):
+    """Ensure a datetime is timezone-aware (UTC)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
+# ---------------------------------------------------------------------------
+# 6. Pure-Python search helpers
+# ---------------------------------------------------------------------------
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    if not a or not b:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def keyword_match_score(query: str, text: str) -> float:
+    if not query or not text:
+        return 0.0
+    query_words = set(query.lower().split())
+    text_words = set(text.lower().split())
+    if not query_words:
+        return 0.0
+    overlap = len(query_words & text_words)
+    return overlap / len(query_words)
+
+
+def _parse_embedding(val: Any) -> list[float] | None:
+    if val is None:
+        return None
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        try:
+            return json.loads(val)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 7. ARRAY column deserialization for SQLite
+# ---------------------------------------------------------------------------
+
+def install_array_deserializer():
+    """Register a load listener that deserializes JSON strings in ARRAY columns.
+
+    SQLite stores Python lists as JSON strings (via sqlite3.register_adapter).
+    When read back, SQLAlchemy returns raw strings instead of lists because
+    ARRAY type has no result_processor for SQLite. This listener fixes that.
+    """
+    from nous.storage.models import Base
+    from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+
+    @event.listens_for(Base, "load", propagate=True)
+    def _deserialize_arrays(target, context):
+        mapper = inspect(type(target))
+        for col in mapper.columns:
+            if isinstance(col.type, PG_ARRAY):
+                attr_name = col.key
+                val = getattr(target, attr_name, None)
+                if isinstance(val, str):
+                    try:
+                        parsed = json.loads(val)
+                        if isinstance(parsed, list):
+                            # Use object.__setattr__ to avoid SA dirty tracking
+                            object.__setattr__(target, attr_name, parsed)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
+    # Also handle Vector (embedding) columns — stored as JSON string in SQLite
+    @event.listens_for(Base, "load", propagate=True)
+    def _deserialize_vectors(target, context):
+        mapper = inspect(type(target))
+        for col in mapper.columns:
+            if isinstance(col.type, Vector):
+                attr_name = col.key
+                val = getattr(target, attr_name, None)
+                if isinstance(val, str):
+                    try:
+                        parsed = json.loads(val)
+                        if isinstance(parsed, list):
+                            object.__setattr__(target, attr_name, parsed)
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+
+
+
+# ---------------------------------------------------------------------------
+# 8. TypeDecorator wrappers for transparent ARRAY/Vector serialization
+# ---------------------------------------------------------------------------
+
+from sqlalchemy import TypeDecorator, Text as SAText_TD
+from sqlalchemy.types import JSON as SA_JSON
+
+
+class JSONEncodedList(TypeDecorator):
+    """Stores Python lists as JSON strings in SQLite TEXT columns."""
+    impl = SAText_TD
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            return json.dumps(value)
+        return None
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    return None
+        return None
+
+
+class JSONEncodedVector(TypeDecorator):
+    """Stores embedding vectors as JSON strings in SQLite TEXT columns."""
+    impl = SAText_TD
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            if isinstance(value, list):
+                return json.dumps(value)
+            return str(value)
+        return None
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    return None
+        return None
+
+
+def patch_model_columns_for_sqlite():
+    """Replace ARRAY and Vector column types with TypeDecorator versions.
+
+    Must be called AFTER models are imported but BEFORE create_all.
+    Modifies the Column.type in-place on the Table metadata objects.
+    """
+    from nous.storage.models import Base
+
+    for table in Base.metadata.tables.values():
+        for column in table.columns:
+            if isinstance(column.type, ARRAY):
+                column.type = JSONEncodedList()
+            elif isinstance(column.type, Vector):
+                column.type = JSONEncodedVector()

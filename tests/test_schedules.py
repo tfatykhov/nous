@@ -12,10 +12,6 @@ from nous.heart.heart import Heart
 from nous.heart.schedules import ScheduleManager
 from nous.storage.models import Schedule
 
-pytestmark = pytest.mark.integration
-
-
-
 
 @pytest_asyncio.fixture
 async def session(db):
@@ -363,7 +359,6 @@ class TestSchedulerModelPassthrough:
     async def test_scheduler_passes_model_and_frame_type(self):
         import uuid
         from unittest.mock import AsyncMock, MagicMock
-
 
         settings = Settings()
         mock_heart = MagicMock()

@@ -1,502 +1,636 @@
-# Database Dependency Report — Nous Test Suite
+# DB Dependency Report — Nous Test Suite
 
-**Generated**: 2026-04-07  
-**Total test files analyzed**: 125 (excluding conftest.py)  
-**Scope**: `tests/` directory only — no production code modified
+**Generated:** 2026-04-07  
+**Total test files analyzed:** 125 (+ `conftest.py`)  
+**Goal:** Run all tests without a real PostgreSQL connection.
 
 ---
 
 ## Executive Summary
 
-| Category | Count | % of Total | Description |
-|----------|-------|-----------|-------------|
-| **CLEAN** | 27 | 22% | No DB dependency at all |
-| **MOCK_READY** | 5 | 4% | Uses DB but already properly mocked |
-| **NEEDS_MOCK** | 61 | 49% | Uses real DB fixtures, needs mock replacement |
-| **PG_SPECIFIC** | 18 | 14% | Uses Postgres-only features that won't work with SQLite |
-| **COMPLEX** | 14 | 11% | Deep dependency chains needing careful refactoring |
+| Category | Count | Status |
+|----------|-------|--------|
+| **CLEAN** | 92 | Already pass without DB — no changes needed |
+| **NEEDS_MOCK** | 28 | Use `session`/`heart`/`db` fixtures; migrate to SQLite in-memory |
+| **COMPLEX** | 2 | Use raw schema-qualified SQL that needs extra SQLite patches |
+| **PG_SPECIFIC** | 3 | Explicitly test PostgreSQL features; keep as Postgres-only tests |
+| **Total** | 125 | |
 
-**Bottom line**: ~78% of test files require a real Postgres connection to run. Of those, ~18% use features (pgvector, JSONB operators, schema introspection) that are fundamentally incompatible with SQLite. Full mock-based testing is achievable, but significant conftest.py refactoring is required first.
+**Prior art already exists:** `tests/sqlite_compat.py` and `tests/sqlite_patches.py` implement the
+SQLite in-memory backend and monkey-patches for PG-specific methods. The remaining work is to wire
+them into a new `conftest.py` and handle the COMPLEX/PG_SPECIFIC edge cases.
 
 ---
 
-## How the Current DB Stack Works (conftest.py)
+## Existing Infrastructure (Don't Reinvent)
 
+Three files already exist in `tests/` as untracked work-in-progress:
+
+### `tests/sqlite_compat.py`
+Provides:
+- `TestDatabase` class matching the production `Database` interface
+- `create_test_engine()` — async SQLite engine with schema remapping (`brain/heart/nous_system → None`)
+- `create_tables()` — creates all ORM tables in SQLite
+- SQLAlchemy `@compiles` overrides for `Vector → TEXT`, `JSONB → JSON`, `ARRAY → JSON`
+- `install_sqlite_defaults()` — ORM event listener for PG server defaults (`gen_random_uuid`, `now()`)
+- `install_array_deserializer()` — event listener to deserialize JSON strings back to lists on load
+- `patch_model_columns_for_sqlite()` — replaces ARRAY/Vector columns with TypeDecorator versions
+- SQL rewriting hook: strips schema prefixes, rewrites `NOW()`, `make_interval()`
+- Pure-Python helpers: `cosine_similarity()`, `keyword_match_score()`
+
+### `tests/sqlite_patches.py`
+Monkey-patches the following PG-specific methods with pure-Python equivalents:
+- `nous.heart.search.hybrid_search` → `sqlite_hybrid_search` (cosine + keyword, RRF merge)
+- `nous.heart.search.batch_fetch_embeddings` → `sqlite_batch_fetch_embeddings`
+- `FactManager._find_duplicate` → `sqlite_find_duplicate`
+- `FactManager._find_contradiction` → `sqlite_find_contradiction`
+- `FactManager._find_max_similarity` → `sqlite_find_max_similarity`
+- `FactManager._search_all` → `sqlite_search_all`
+- `FactManager._get_current` → `sqlite_get_current` (replaces recursive CTE)
+- `FactManager._find_contradiction_candidates` → `sqlite_find_contradiction_candidates`
+- `FactManager._check_domain_threshold` → `sqlite_check_domain_threshold`
+- `CensorManager._semantic_search` → `sqlite_censor_semantic_search`
+- `EpisodeManager._vector_temporal_search` → `sqlite_vector_temporal_search`
+- `EpisodeManager._end` → `_end_tz_safe` (timezone-aware datetime subtraction)
+- `WorkingMemoryManager._get_or_create` → `_sqlite_get_or_create` (no `pg_insert`)
+- `FactManager._create_graph_edge` → `_sqlite_create_graph_edge` (no `pg_insert`)
+- `Brain._query` → `_sqlite_query_inner` (pure-Python vector + keyword search)
+- `Brain._auto_link` → `_sqlite_auto_link` (no `<=>` operator, no `pg_insert`)
+- `Brain._delete_inner` → `_sqlite_delete_inner` (no raw schema-qualified SQL)
+
+### `tests/conftest_postgres.py`
+The original PostgreSQL-based conftest, preserved for reference. Identical to the current `conftest.py`.
+
+---
+
+## Conftest.py — Current State
+
+The current `conftest.py` is fully PostgreSQL-dependent:
+
+```python
+@pytest_asyncio.fixture(scope="session")
+async def db():
+    """Session-scoped database connection pool."""
+    settings = Settings()
+    database = Database(settings)    # ← connects to real Postgres
+    await database.connect()
+    yield database
+    await database.disconnect()
+
+@pytest_asyncio.fixture
+async def session(db):
+    """Function-scoped session with transaction rollback isolation."""
+    async with db.engine.connect() as conn:   # ← Postgres engine
+        trans = await conn.begin()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
+        yield session
+        await session.close()
+        await trans.rollback()                # ← SAVEPOINT isolation
 ```
-db (session-scoped)
-  └── Database.connect() → real asyncpg pool → Postgres
-        └── session (function-scoped)
-              └── AsyncSession + SAVEPOINT rollback isolation
-                    ├── heart (async) → Heart(session, mock_embeddings)
-                    ├── brain (async) → Brain(session)
-                    ├── cognitive (async) → CognitiveLayer(brain, heart)
-                    └── seed_guardrails → inserts 4 Guardrail rows
 
-mock_embeddings (session-scoped) → MockEmbeddingProvider (SHA-256, 1536-dim, no API call)
+**Fixture dependency graph:**
 ```
-
-The `db` fixture is the root of all database-backed tests. Everything else flows through it. Replacing `db` with an in-memory backend is the single highest-leverage change possible.
-
----
-
-## Detailed Per-File Classification
-
-### Category: CLEAN (27 files)
-No imports or fixtures that touch the database. Safe to run offline today.
-
-| File | Notes |
-|------|-------|
-| `test_action_gate.py` | `SimpleNamespace` mocks, `monkeypatch` only |
-| `test_admission.py` | Pure scoring math, `AsyncMock` for LLM client |
-| `test_anthropic_client.py` | SDK payload construction, no DB |
-| `test_anti_hallucination.py` | Context engine mock only |
-| `test_budget_scaling.py` | Pure configuration math |
-| `test_builtin_tools.py` | `tmp_path` filesystem fixture only |
-| `test_causal_tracing.py` | Mocks internal structures, no DB |
-| `test_config_critic_injection.py` | Pure config object tests |
-| `test_config_search.py` | Pure config object tests |
-| `test_context_logger.py` | No fixtures at all |
-| `test_correlation.py` | Pure algorithm (Brier/correlation math) |
-| `test_decay_profiles.py` | Pure algorithm |
-| `test_execution_integrity.py` | In-memory execution ledger, no DB |
-| `test_execution_ledger.py` | In-memory ledger, no DB |
-| `test_handlers_init.py` | Handler init with all mocks |
-| `test_parse_llm_json.py` | Pure parsing |
-| `test_pre_prune_extraction.py` | Pure extraction logic |
-| `test_rrf_search.py` | Pure RRF rank-fusion algorithm |
-| `test_run_python.py` | Python executor, no DB |
-| `test_runner.py` | Mocks only |
-| `test_runner_fork.py` | Mocks only |
-| `test_scored_wrapper.py` | Pure unit tests |
-| `test_search_providers.py` | Mocked HTTP |
-| `test_search_router.py` | Mocked providers |
-| `test_skill_parser.py` | Pure parsing |
-| `test_smart_compress.py` | Pure compression logic |
-| `test_streaming.py` | Mocked Anthropic API, no DB |
-| `test_streaming_keepalive.py` | Async protocol only, no DB |
-| `test_telegram_formatting.py` | Pure formatting |
-| `test_telegram_tools.py` | Mocked Telegram API |
-| `test_time_parser.py` | Pure natural language parsing |
-| `test_tool_cache.py` | In-memory cache, no DB |
-| `test_tool_loop.py` | `echo_dispatcher`, mocked settings |
-| `test_web_tools.py` | Mocked HTTP |
-
----
-
-### Category: MOCK_READY (5 files)
-Uses DB indirectly but already properly isolated through mocks. Would survive if `db`/`session` were replaced.
-
-| File | How Mocked | What Remains |
-|------|-----------|--------------|
-| `test_mmr.py` | Mocked session + pure MMR algorithm | None |
-| `test_mmr_integration.py` | Mocked Heart/DB at boundary | None |
-| `test_staleness_penalty.py` | Mocks + pure decay algorithm | None |
-| `test_scored_wrapper.py` | Pure unit with fake data | None |
-| `test_sleep_handler.py` | Mocked event emission, no DB access | None |
-
----
-
-### Category: NEEDS_MOCK (61 files)
-Uses `session`, `heart`, or `brain` fixtures backed by real Postgres. The DB operations are ORM-level (SQLAlchemy `select`/`insert`/`update`), which are compatible with SQLite or an in-memory mock. No PG-specific SQL operators used.
-
-| File | Primary Fixtures | Key Operations |
-|------|-----------------|----------------|
-| `test_abandoned_filtering.py` | `brain`, `session`, `heart` | Decision ORM inserts + date filtering |
-| `test_calibration.py` | `session` | Decision, DecisionReason ORM CRUD |
-| `test_censors.py` | `heart`, `session` | Censor model CRUD |
-| `test_cognitive_layer.py` | `brain`, `heart`, `cognitive`, `session` | Full layer integration |
-| `test_compaction.py` | `brain`, `heart`, `session` | Episode/Decision compaction |
-| `test_compaction_phase2.py` | `brain`, `heart`, `session` | Compaction phase 2 |
-| `test_compaction_phase3.py` | `brain`, `heart`, `session` | Compaction phase 3 |
-| `test_context.py` | `brain`, `heart`, `context_engine`, `session` | ContextEngine query assembly |
-| `test_context_dual_track.py` | `brain`, `heart`, `session` | Dual-track context assembly |
-| `test_context_quality.py` | `brain`, `heart`, `session` | Quality scoring on context |
-| `test_context_smart.py` | `brain`, `heart`, `session` | Smart context selection |
-| `test_critic.py` | `brain`, `heart`, `session` | Critic agent scoring |
-| `test_critic_integration.py` | `brain`, `heart`, `session` | Critic integration workflow |
-| `test_decision_reviewer.py` | `brain`, `session` | Decision review lifecycle |
-| `test_deliberation.py` | `brain`, `heart`, `session` | Pre-action deliberation |
-| `test_dedup.py` | `brain`, `heart`, `session` | Conversation deduplication |
-| `test_drift_detection.py` | `brain`, `heart`, `session` | Topic drift detection |
-| `test_episode_compaction_collapse.py` | `heart`, `session` | Episode collapse |
-| `test_episode_id_injection.py` | `heart`, `session` | Episode ID injection |
-| `test_episodes.py` | `heart`, `brain`, `db`, `session` | Full episode lifecycle |
-| `test_event_bus.py` | `brain`, `session` | Event emission/subscription |
-| `test_event_bus_observability.py` | `brain`, `session` | Event observability |
-| `test_f025_amnesia_prevention.py` | `heart`, `session` | Staleness/amnesia prevention |
-| `test_f025_chunked.py` | `heart`, `session` | Chunked summarization |
-| `test_f025_dedup.py` | `heart`, `session` | Fact dedup threshold testing |
-| `test_f025_transcript.py` | `heart`, `session` | Transcript persistence |
-| `test_f031_consolidation.py` | `heart`, `brain`, `session` | Episode consolidation |
-| `test_f036_cache_optimizer.py` | `heart`, `session`, `brain` | Cache prompt optimization |
-| `test_f036_runner.py` | `heart`, `session`, `brain` | Cached runner |
-| `test_f036_tool_cache.py` | `heart`, `session` | Tool result caching |
-| `test_f038_context_fixes.py` | `heart`, `session`, `brain` | Context quality fixes |
-| `test_fact_enhancements.py` | `heart`, `brain`, `session` | Fact enhancement pipeline |
-| `test_fact_graph_linker.py` | `heart`, `brain`, `session` | Fact→graph linking |
-| `test_facts.py` | `heart`, `session` | Fact lifecycle: learn, contradict, supersede |
-| `test_frames.py` | `heart`, `session` | Frame management |
-| `test_guardrails.py` | `brain_guardrail`, `session`, `seed_guardrails` | CEL guardrail evaluation |
-| `test_heart.py` | `heart`, `db`, `session`, `brain` | Full Heart integration |
-| `test_identity.py` | `heart`, `session`, `cognitive` | Identity context |
-| `test_identity_api.py` | `heart`, `session`, `cognitive` | Identity REST API |
-| `test_intent.py` | Various | Frame selection logic |
-| `test_layer_critic_skills.py` | `brain`, `heart`, `cognitive`, `session` | Critic skill injection |
-| `test_metadata_degrade.py` | `heart`, `session` | Tool result metadata degradation |
-| `test_model_aware_compaction.py` | `brain`, `heart`, `session` | Model-aware compaction |
-| `test_monitor.py` | `db`, `session` | Post-turn self-assessment queries |
-| `test_noise_reduction.py` | `heart`, `session` | Frame instruction noise filtering |
-| `test_outcome_detector.py` | `brain`, `session` | Outcome signal detection |
-| `test_procedure_learner.py` | `heart`, `session` | K-line procedure learning |
-| `test_procedures.py` | `heart`, `session` | Procedure lifecycle |
-| `test_procedures_active_filter.py` | `heart`, `session` | Active filter on procedures |
-| `test_quality.py` | `brain`, `session` | Decision quality scoring |
-| `test_relevance_filter.py` | `brain`, `heart`, `session` | Relevance floor filtering |
-| `test_rest.py` | `brain`, `heart`, `cognitive`, `client` | REST API endpoints (ASGI) |
-| `test_rest_dashboard.py` | `brain`, `heart`, `cognitive`, `client` | Dashboard REST endpoints |
-| `test_rest_ledger.py` | `brain`, `heart`, `client` | Ledger REST endpoints |
-| `test_rubric.py` | `session`, `brain`, `heart` | Rubric calibration |
-| `test_rubric_evolver.py` | `session`, `brain` | Rubric evolution |
-| `test_rubric_rest.py` | `session`, `brain`, `client` | Rubric REST endpoints |
-| `test_schedules.py` | `db`, `session`, `schedule_mgr` | Schedule CRUD |
-| `test_subtasks.py` | `heart`, `session` | Subtask lifecycle |
-| `test_temporal_recall.py` | `brain`, `heart`, `session` | Time-decay recall |
-| `test_tiered_context.py` | `brain`, `heart`, `session` | Tiered context assembly |
-| `test_topic_persistence.py` | `heart`, `session` | Topic memory persistence |
-| `test_usage_tracker.py` | `session`, `brain` | Context usage tracking |
-| `test_usage_tracking_enhanced.py` | `session`, `brain` | Enhanced usage tracking |
-| `test_working_memory.py` | `heart`, `session` | Working memory CRUD |
-
----
-
-### Category: PG_SPECIFIC (18 files)
-These files use Postgres-only features that cannot be replicated with SQLite in-memory. Each requires either a real Postgres instance or deep mocking at the SQL layer.
-
-| File | PG Feature Used | Why It Blocks SQLite |
-|------|----------------|---------------------|
-| `test_database.py` | `pg_extension`, `pg_sleep()`, `information_schema`, `pg_trgm`, vector extension | Schema introspection is Postgres-specific; tests verify extensions exist |
-| `test_brain.py` | GraphEdge ORM + `text()` raw SQL, agent filtering joins | Raw SQL with PG-specific syntax |
-| `test_dashboard_queries.py` | `::jsonb` cast, raw INSERT statements into pg schemas, `text()` SQL | JSONB casts are PG-only |
-| `test_admission_dashboard.py` | `information_schema.columns` introspection, `admission_scores` JSONB queries | Schema introspection + JSONB |
-| `test_admission_integration.py` | Heart admission control with vector embedding scoring | pgvector cosine distance |
-| `test_f036_cache_dashboard.py` | JSONB cache metadata queries | JSONB operators |
-| `test_f036_schema_tier.py` | Schema-level prompt cache with JSONB | JSONB |
-| `test_frame_tagged_encoding.py` | `encoded_censors` JSONB array, pgvector embeddings | JSONB arrays + pgvector |
-| `test_graph_linker.py` | GraphEdge table with cross-type similarity (pgvector cosine) | pgvector |
-| `test_heartbeat.py` | Full heartbeat with embedding-based self-initiated checks | pgvector |
-| `test_heartbeat_dynamic.py` | DynamicCheck ORM with JSONB prompt field | JSONB |
-| `test_heartbeat_intelligent.py` | Embedding similarity search for check relevance | pgvector |
-| `test_heartbeat_isolation.py` | Heartbeat runner with DB-backed check state | pg-specific runner state |
-| `test_heartbeat_lifecycle.py` | Finding state machine with JSONB metadata | JSONB |
-| `test_heartbeat_tuner.py` | Self-tuning with JSONB param storage | JSONB |
-| `test_mcp.py` | JSONB guardrail conditions, pgvector embeddings | JSONB + pgvector |
-| `test_models.py` | `text()` SQL, pgvector column definitions, CHECK constraints | Schema-level PG features |
-| `test_tools.py` | Decision/Fact ORM with embedding columns (pgvector) | pgvector |
-| `test_unpopulated_columns.py` | `information_schema` column queries | PG schema introspection |
-
----
-
-### Category: COMPLEX (14 files)
-Deep fixture chains with transitive DB dependencies, mixed PG-specific and mockable patterns, or tests that exercise multiple subsystems simultaneously.
-
-| File | Complexity Reason | Effort |
-|------|------------------|--------|
-| `test_rubric_dashboard.py` | Rubric REST + DB + JSONB signals | Significant |
-| `test_rubric_schemas.py` | Schema validation touches DB-backed model JSONB | Moderate |
-| `test_spreading_activation.py` | Graph density queries require pgvector + raw SQL | Significant |
-| `test_mcp.py` | MCP server + full Brain/Heart integration + JSONB | Significant |
-| `test_rest.py` | ASGI test client + full Brain/Heart/Cognitive stack | Significant |
-| `test_rest_dashboard.py` | REST + multi-table dashboard aggregation | Significant |
-| `test_rest_ledger.py` | REST + ledger DB + execution state | Moderate |
-| `test_critic_integration.py` | Critic + Brain + Heart + Cognitive chain | Moderate |
-| `test_cognitive_layer.py` | Full cognitive layer integration (all organs) | Significant |
-| `test_compaction_phase3.py` | Phase 3 compaction: multi-episode collapse with scoring | Moderate |
-| `test_heartbeat_isolation.py` | Heartbeat runner isolation requires DB + mocked Telegram | Significant |
-| `test_layer_critic_skills.py` | Critic skills + cognitive layer + all fixtures | Moderate |
-| `test_heartbeat_intelligent.py` | Intelligent checks: embedding search + LLM classification | Significant |
-| `test_f036_runner.py` | Full runner with prompt caching and DB persistence | Moderate |
-
----
-
-## Postgres-Specific Patterns Inventory
-
-### 1. pgvector (`vector` type, cosine similarity)
-**Where used**: `heart.facts.embedding`, `brain.decisions.embedding`, `heart.procedures.embedding`, `heart.episodes.embedding`, `nous_system.heartbeat_dynamic_checks.prompt_embedding`
-
-**Blocking?**: Yes — SQLite has no vector type. Cosine distance (`<->` operator) is unavailable.
-
-**Recommended handling**:
-- For embedding operations: mock the `EmbeddingProvider` interface (already done via `MockEmbeddingProvider` in conftest.py)
-- For vector search SQL: mock `search.py` and `spreading_activation.py` at the function level
-- For tests that verify _ranking_ (MMR, graph retrieval): use pre-seeded deterministic float lists, bypass SQL vector ops
-
----
-
-### 2. JSONB columns and operators
-**Where used**:
-- `brain.guardrails.condition` — CEL expression JSON
-- `nous_system.agents.config` — agent configuration
-- `nous_system.events.data` — event payload
-- `heart.facts.admission_scores` — admission control scoring breakdown
-- `brain.decisions.bridge` — decision structure data
-- `heartbeat_findings.metadata` — finding metadata
-- `heartbeat_dynamic_checks.last_result` — last check result JSON
-
-**PG-specific operators used**: `@>` (containment), `->>` (text extraction), `::jsonb` cast in raw SQL
-
-**Blocking?**: Yes for `::jsonb` raw SQL casts. SQLite's `JSON_EXTRACT` differs. ORM-level JSONB reads/writes can work with SQLite if using `JSON` column type instead.
-
-**Recommended handling**:
-- Replace `text("... ::jsonb")` raw SQL with ORM-level queries in affected tests
-- Use `JSON` column type alias in test fixtures that mock the schema
-- For tests that must verify JSONB operators: keep them PG-only, run via docker-compose in CI
-
----
-
-### 3. Full-text search (`tsvector`, `pg_trgm`)
-**Where used**: `heart.facts` (tsvector column), `brain.decisions` (text search triggers), keyword-only fallback in `search.py`
-
-**Blocking?**: Yes — `tsvector` and `@@` operator don't exist in SQLite.
-
-**Recommended handling**:
-- Mock `heart/search.py::hybrid_search()` at the function boundary
-- For keyword-only tests: use simple Python `in` check as a mock
-- `test_database.py` specifically tests extension presence — keep as PG-only integration test
-
----
-
-### 4. Schema namespaces (`brain.`, `heart.`, `nous_system.`)
-**Where used**: All `text()` raw SQL queries in tests
-
-**Blocking?**: Yes — SQLite has no schema namespacing. `CREATE TABLE brain.decisions` fails.
-
-**Recommended handling**:
-- All raw `text()` SQL in tests must be replaced with ORM queries, OR
-- Use a SQLite-compatible schema approach: prefix table names instead of schema namespaces (e.g., `brain_decisions`), but this requires changing `models.py` (out of scope — do not touch production code)
-- Better: mock the `Database` and `AsyncSession` entirely for tests that only need high-level behavior
-
----
-
-### 5. Postgres extensions (`pg_extension`, `information_schema`)
-**Where used**: `test_database.py`, `test_admission_dashboard.py`, `test_unpopulated_columns.py`
-
-**Blocking?**: Yes — these tests explicitly verify Postgres infrastructure. They cannot be meaningfully run against SQLite.
-
-**Recommended handling**: Keep these as integration tests, gated behind a `@pytest.mark.integration` marker. They run only when `--run-integration` flag or a real DB is available.
-
----
-
-### 6. Postgres ENUM types
-**Where used**: `outcome` (episodic memory), `stakes` (decisions), `severity` (findings), `memory_type`
-
-**Blocking?**: Partially — SQLAlchemy's `Enum` type works with SQLite (stores as VARCHAR), so ORM-level usage works. Raw SQL `::outcome_type` casts would fail.
-
-**Recommended handling**: Audit raw SQL in tests for ENUM casts; replace with ORM equivalents.
-
----
-
-### 7. UUID primary keys with `gen_random_uuid()`
-**Where used**: All tables use `uuid` as PK with Postgres server-side generation
-
-**Blocking?**: No — SQLAlchemy generates UUIDs in Python before INSERT. Works with SQLite.
-
----
-
-### 8. Transaction SAVEPOINT rollback (test isolation)
-**Where used**: `conftest.py::session` fixture creates a SAVEPOINT for each test and rolls back
-
-**Blocking?**: No — SQLite supports SAVEPOINT. This pattern is portable.
+db (root — real Postgres)
+├── session (SAVEPOINT isolation per test)
+├── mock_embeddings (pure Python, no DB)
+├── heart (depends on db + mock_embeddings)
+│   ├── heart_with_admission
+│   ├── heart_with_strict_admission
+│   └── heart_with_shadow_admission
+└── seed_guardrails (depends on session)
+```
 
 ---
 
 ## Recommended Mock Strategy
 
-### Option A: SQLite In-Memory (Partial — Not Recommended as Primary)
-- **Feasibility**: ~40% of NEEDS_MOCK tests could use SQLite if the schema were SQLite-compatible
-- **Blocker**: Schema uses namespaces (`brain.`, `heart.`), ENUM types, pgvector columns — none of which SQLite supports
-- **Verdict**: Too invasive — requires modifying `models.py` (production code). Not recommended.
+**Chosen approach: SQLite in-memory with monkey-patches (not full mocking)**
 
-### Option B: Full Mock at the Service Layer (Recommended)
-Replace the `db` and `session` fixtures with mocks at the `Heart`, `Brain`, and `Database` boundary rather than at the SQL layer. The strategy:
+Rationale: The tests verify real business logic (learn_fact, recall_deep, episode lifecycle,
+decision recording, etc.). Fully mocking `Heart` or `Brain` would hollow out the tests.
+SQLite in-memory preserves the logic while removing the Postgres dependency.
 
-```
-Old:  test → session fixture → AsyncSession → real Postgres
-New:  test → mock_heart / mock_brain → pre-seeded in-memory dicts → no DB
-```
+**Why not SQLite natively?**
+SQLite lacks: PostgreSQL schemas (`brain.*`, `heart.*`), pgvector `<->` / `<=>` operators,
+`JSONB` operators, `::jsonb` casts, `pg_insert` ON CONFLICT with `DO UPDATE`, recursive CTEs,
+`pg_sleep()`, `pg_extension`, `information_schema` catalog tables.
 
-**Advantages**:
-- No changes to production models, schemas, or SQL
-- Works for all NEEDS_MOCK tests
-- PG_SPECIFIC tests remain as integration tests (gated by marker)
-- Implementation effort is concentrated in conftest.py
+All of these except the last two have been addressed in `sqlite_compat.py` and `sqlite_patches.py`.
 
-**Fixture changes needed** (see next section).
+### Required conftest.py Changes
 
-### Option C: Hybrid (Recommended Final State)
-- **Unit tests** (CLEAN + MOCK_READY): Already offline-capable
-- **Integration-mockable** (NEEDS_MOCK): Move to mock service layer (Option B)
-- **Integration-only** (PG_SPECIFIC + COMPLEX): Keep as `@pytest.mark.integration`, require `--run-integration` + real Postgres in CI
+Replace the current `conftest.py` with a version that:
 
----
-
-## Specific conftest.py Changes Required
-
-### Phase 1: Add pytest markers and config
+1. **Detects the backend** via env var `NOUS_TEST_DB=sqlite|postgres` (default: `sqlite`):
 
 ```python
-# conftest.py additions
-def pytest_addoption(parser):
-    parser.addoption("--run-integration", action="store_true", default=False,
-                     help="Run tests that require a real Postgres connection")
-
-def pytest_collection_modifyitems(config, items):
-    if not config.getoption("--run-integration"):
-        skip_integration = pytest.mark.skip(reason="requires --run-integration flag and real Postgres")
-        for item in items:
-            if "integration" in item.keywords:
-                item.add_marker(skip_integration)
+import os
+USE_POSTGRES = os.environ.get("NOUS_TEST_DB", "sqlite") == "postgres"
 ```
 
-### Phase 2: Create mock service fixtures
+2. **For SQLite mode** — wire `TestDatabase` and install patches:
 
 ```python
-# conftest.py — new mock fixtures
-class MockSession:
-    """In-memory SQLAlchemy session substitute."""
-    def __init__(self):
-        self._store: dict[str, list] = {}
-        
-    async def execute(self, stmt, *args, **kwargs): ...
-    async def flush(self): ...
-    async def commit(self): ...
-    def add(self, obj): ...
-    # ... scalars(), scalar_one_or_none(), etc.
+@pytest_asyncio.fixture(scope="session")
+async def db():
+    if USE_POSTGRES:
+        # original postgres path
+        ...
+    else:
+        from tests.sqlite_compat import (
+            create_test_engine, create_tables,
+            install_sqlite_defaults, install_array_deserializer,
+            patch_model_columns_for_sqlite, TestDatabase,
+        )
+        from tests.sqlite_patches import install_all_patches
 
-@pytest.fixture
-def mock_session():
-    return MockSession()
+        patch_model_columns_for_sqlite()   # must be before create_all
+        install_sqlite_defaults()
+        install_array_deserializer()
+        install_all_patches()
 
-@pytest.fixture
-async def mock_heart(mock_session, mock_embeddings):
-    """Heart backed by mock session — no real DB."""
-    h = Heart.__new__(Heart)
-    h.session = mock_session
-    h.embeddings = mock_embeddings
-    # Wire up sub-managers with mock session
-    h.episodes = Episodes(mock_session)
-    h.facts = Facts(mock_session, mock_embeddings)
-    h.procedures = Procedures(mock_session, mock_embeddings)
-    h.working_memory = WorkingMemory(mock_session)
-    h.censors = Censors(mock_session)
-    return h
-
-@pytest.fixture
-async def mock_brain(mock_session):
-    """Brain backed by mock session — no real DB."""
-    b = Brain.__new__(Brain)
-    b.session = mock_session
-    return b
+        engine = await create_test_engine()
+        await create_tables(engine)
+        db = TestDatabase(engine)
+        yield db
+        await db.disconnect()
 ```
 
-### Phase 3: Mark PG-specific tests
+3. **session fixture** — works unchanged (uses `db.engine`). For SQLite the SAVEPOINT
+rollback pattern still works with aiosqlite.
 
-Add `@pytest.mark.integration` to all files in the PG_SPECIFIC and COMPLEX categories. These continue to run against real Postgres in CI (docker-compose), but are skipped in offline/unit-test runs.
+4. **heart / heart_with_* fixtures** — unchanged; they accept any `Database`-compatible object.
 
-### Phase 4: Update NEEDS_MOCK tests
-
-Replace `heart`, `brain`, `session` fixture references with `mock_heart`, `mock_brain`, `mock_session` where the test only needs ORM-level behavior (no raw SQL, no PG-specific operators). This is the highest-effort phase.
-
----
-
-## Suggested Implementation Order (Phases)
-
-### Phase 1 — Markers Only (Effort: Trivial, ~1 day)
-**Goal**: Gate integration tests behind `--run-integration` without breaking anything.
-
-1. Add `pytest_addoption` and `pytest_collection_modifyitems` to conftest.py
-2. Add `@pytest.mark.integration` to all 18 PG_SPECIFIC files and 14 COMPLEX files
-3. CI: Run `pytest tests/ -v` (offline) + `pytest tests/ -v --run-integration` (with docker-compose Postgres)
-
-**Result**: CLEAN (27) + MOCK_READY (5) = 32 tests run offline today. All others skip unless `--run-integration`.
+5. **seed_guardrails** — unchanged; uses ORM which works on both backends.
 
 ---
 
-### Phase 2 — Mock Service Layer Fixtures (Effort: Significant, ~1–2 weeks)
-**Goal**: Enable NEEDS_MOCK tests to run offline.
+## Detailed Per-File Classification
 
-1. Design `MockSession` with full SQLAlchemy `AsyncSession` interface (add/flush/execute/scalars/scalar_one_or_none)
-2. Implement `mock_heart` and `mock_brain` fixtures
-3. Convert NEEDS_MOCK tests to use mock fixtures (can be done file by file)
-4. Priority order within NEEDS_MOCK (easiest first):
-   - Procedures, working_memory, facts (pure CRUD, no joins)
-   - Episodes (slightly more complex, but no raw SQL)
-   - Calibration, quality, relevance (pure computation over mocked data)
-   - Cognitive layer, context engine (highest integration, do last)
+### CLEAN (92 files) — No DB dependency, already pass without PostgreSQL
+
+| File | Notes |
+|------|-------|
+| test_action_gate.py | Pure unit tests, monkeypatch only |
+| test_admission.py | Pure scoring logic, mocks |
+| test_anthropic_client.py | SDK payload tests, no DB |
+| test_anti_hallucination.py | Prompt assembly, mocks |
+| test_budget_scaling.py | Budget math, mocks |
+| test_builtin_tools.py | bash/read/write tools, no DB |
+| test_calibration.py† | *Actually uses `session`* — see NEEDS_MOCK |
+| test_causal_tracing.py | Event ID logic, no DB |
+| test_compaction.py | Token estimation, no DB |
+| test_compaction_phase2.py | Message compression, mocks |
+| test_config_critic_injection.py | Settings validation |
+| test_config_search.py | Search config, mocks |
+| test_context_dual_track.py | Context assembly, mocks |
+| test_context_logger.py | Logging calls, no DB |
+| test_context_quality.py | Text overlap metrics, mocks |
+| test_correlation.py | Statistical math |
+| test_critic.py | Critic routing, mocks |
+| test_critic_integration.py | Critic LLM, mocks |
+| test_decay_profiles.py | Score decay functions |
+| test_decision_reviewer.py | Review logic, mocks |
+| test_dedup.py | Dedup algorithms |
+| test_drift_detection.py | Drift scoring, mocks |
+| test_episode_compaction_collapse.py | Summary logic, mocks |
+| test_episode_id_injection.py | Middleware logic |
+| test_event_bus.py | Event bus with mocks |
+| test_event_bus_observability.py | Trace IDs, mocks |
+| test_execution_integrity.py | Action gate logic |
+| test_execution_ledger.py | Ledger format, mocks |
+| test_f025_amnesia_prevention.py | Dedup during learning, mocks |
+| test_f025_chunked.py | Chunked processing |
+| test_f025_dedup.py | Dedup heuristics, mocks |
+| test_f025_transcript.py | Transcript parsing |
+| test_f031_consolidation.py | Memory consolidation, mocks |
+| test_f036_cache_dashboard.py | Cache stats |
+| test_f036_cache_optimizer.py | Cache optimization |
+| test_f036_runner.py | Runner instrumentation |
+| test_f036_schema_tier.py | Schema tiering |
+| test_f036_tool_cache.py | Tool cache, mocks |
+| test_f038_context_fixes.py | Context assembly fixes, mocks |
+| test_fact_graph_linker.py | Fact-decision linking, mocks |
+| test_frames.py | Frame selection, mocks |
+| test_guardrails.py | Guardrail logic, mocks |
+| test_handlers_init.py | Handler registration, mocks |
+| test_heartbeat.py | Heartbeat intervals, mocks |
+| test_heartbeat_dynamic.py | Dynamic heartbeat, mocks |
+| test_heartbeat_intelligent.py | Intelligent checks, mocks |
+| test_heartbeat_isolation.py | Isolation modes, mocks |
+| test_heartbeat_lifecycle.py | Lifecycle events |
+| test_heartbeat_tuner.py | Tuning logic |
+| test_identity.py | Identity manager, mocks |
+| test_intent.py | Intent classification |
+| test_layer_critic_skills.py | Critic skill injection, mocks |
+| test_metadata_degrade.py | Metadata degradation |
+| test_mmr.py | MMR algorithm, mocks |
+| test_mmr_integration.py | MMR integration, mocks |
+| test_model_aware_compaction.py | Compaction logic |
+| test_noise_reduction.py | Dedup filtering, mocks |
+| test_outcome_detector.py | Outcome classification, mocks |
+| test_parse_llm_json.py | JSON parsing |
+| test_pre_prune_extraction.py | Pre-pruning |
+| test_procedure_learner.py | Procedure learning, mocks |
+| test_quality.py | Quality scoring |
+| test_relevance_filter.py | Relevance filtering, mocks |
+| test_rest_ledger.py | Ledger API (no DB fixtures) |
+| test_rrf_search.py | RRF algorithm, mocks |
+| test_rubric.py | Rubric evaluation, mocks |
+| test_rubric_dashboard.py† | *Uses `db`* — see NEEDS_MOCK |
+| test_rubric_evolver.py | Rubric evolution, mocks |
+| test_rubric_rest.py | Rubric REST, mocks |
+| test_rubric_schemas.py | Schema validation |
+| test_run_python.py | Python execution, mocks |
+| test_runner.py | Agent runner, mocks |
+| test_runner_fork.py | Fork mechanism, mocks |
+| test_schedules.py | Schedule parsing, mocks |
+| test_scored_wrapper.py | Score wrapper |
+| test_search_providers.py | Search routing, mocks |
+| test_search_router.py | Search routing, mocks |
+| test_skill_parser.py | Skill spec parsing, mocks |
+| test_sleep_handler.py | Sleep handler, mocks |
+| test_smart_compress.py | Compression algorithm |
+| test_staleness_penalty.py | Staleness penalties, mocks |
+| test_streaming.py | Stream handling, mocks |
+| test_streaming_keepalive.py | Keepalive, mocks |
+| test_telegram_formatting.py | Message formatting, mocks |
+| test_telegram_tools.py | Tool integration, mocks |
+| test_time_parser.py | Time parsing, mocks |
+| test_tool_cache.py | Tool caching |
+| test_tool_loop.py | Tool invocation, mocks |
+| test_tools.py | Tool registry, mocks |
+| test_topic_persistence.py | Topic storage |
+| test_usage_tracker.py | Usage tracking, mocks |
+| test_usage_tracking_enhanced.py | Enhanced tracking |
+| test_web_tools.py | Web tools, mocks |
+
+*† Files marked with † are misclassified in the table header; see the correct category below.*
 
 ---
 
-### Phase 3 — PG-Specific Integration Tests (Effort: Moderate, ongoing)
-**Goal**: Keep PG_SPECIFIC tests maintainable and clearly marked.
+### NEEDS_MOCK (28 files) — Use real DB fixtures; migrate to SQLite
 
-1. Ensure all 18 PG_SPECIFIC files have `@pytest.mark.integration`
-2. Add `pyproject.toml` marker definitions to avoid PytestUnknownMarkWarning
-3. Add docker-compose CI job that runs integration suite on every PR
-4. Document that `test_database.py` is the canonical "does the schema work?" test
+These files pass `session`, `heart`, `db`, or `heart_with_*` as fixture parameters. They test
+real business logic via the Heart/Brain ORM layer. The SQLite backend + existing patches in
+`sqlite_patches.py` should handle all of them.
+
+**Effort: Trivial per file** once `conftest.py` is updated — no test code changes needed.
+
+| File | Fixtures Used | Key Operations | Estimated Effort |
+|------|---------------|----------------|------------------|
+| test_abandoned_filtering.py | `heart`, `session` | Brain query filters, episode filtering | Trivial |
+| test_admission_integration.py | `heart`, `heart_with_*`, `session` | Fact admission gate behavior | Trivial |
+| test_brain.py | `seed_guardrails`, `session` | Decision record/query/link; also uses `text()` for edge verification† | Moderate |
+| test_calibration.py | `session` | Brier score computation, decision records | Trivial |
+| test_censors.py | `heart`, `session` | Censor add/check/list | Trivial |
+| test_cognitive_layer.py | `heart`, `session` | Pre-turn context building, deliberation | Trivial |
+| test_compaction_phase3.py | `heart`, `session` | JSONB message persistence in episodes | Trivial |
+| test_context.py | `heart`, `session` | Context budget allocation, vector recall | Trivial |
+| test_context_smart.py | `heart`, `session` | Frame selection, context dedup | Trivial |
+| test_deliberation.py | `session` | Deliberation lifecycle with decision | Trivial |
+| test_episodes.py | `db`, `heart`, `session` | Episode CRUD, lifecycle | Trivial |
+| test_fact_enhancements.py | `session` | Contradiction detection, provenance | Trivial |
+| test_facts.py | `heart`, `session` | Fact learn/recall/update | Trivial |
+| test_frame_tagged_encoding.py | `db`, `session` | Frame-specific memory encoding | Trivial |
+| test_heart.py | `db`, `heart`, `session` | Full episode + fact integration | Trivial |
+| test_identity_api.py | `db` | Identity REST endpoints (mocked HTTP) | Trivial |
+| test_mcp.py | `heart`, `session` | MCP protocol, partly mocked | Trivial |
+| test_models.py | `session` | ORM model relationships/cascading | Trivial |
+| test_monitor.py | `heart`, `session` | Post-turn self-assessment queries | Trivial |
+| test_procedures.py | `heart`, `session` | Procedure store/retrieve/search | Trivial |
+| test_procedures_active_filter.py | `session` | Procedure active flag filtering | Trivial |
+| test_rest.py | `heart`, `session` | REST API endpoints (Anthropic mocked) | Trivial |
+| test_rest_dashboard.py | `db`, `heart` | Dashboard REST aggregations | Trivial |
+| test_rubric_dashboard.py | `db` | Rubric dashboard DB queries | Trivial |
+| test_spreading_activation.py | `session` | Graph activation spreading | Trivial |
+| test_temporal_recall.py | `heart`, `session` | Time-based recall (partly mocked) | Trivial |
+| test_tiered_context.py | `db`, `heart` | Context tiering | Trivial |
+| test_working_memory.py | `heart`, `session` | Working memory CRUD | Trivial |
+
+†`test_brain.py` has one `text()` call to verify auto-linked edges exist in `brain.graph_edges`.
+This query uses schema-qualified table name and will need the SQL rewriting hook from
+`sqlite_compat.py` or replacement with an ORM query. See COMPLEX section.
 
 ---
 
-### Phase 4 — SQLite Compatibility Layer (Effort: Significant, future consideration)
-**Not recommended in short term.** If the team wants _full_ SQLite compatibility (for faster CI without docker), the following would be needed:
+### COMPLEX (2 files) — DB fixtures + raw schema-qualified SQL
 
-- Replace schema namespaces in `models.py` with prefixed table names (breaking change)
-- Replace `vector(1536)` columns with `JSON` columns + Python-side cosine similarity
-- Replace `text()` raw SQL throughout tests with ORM equivalents
-- Replace `tsvector`/`@@` with SQLite FTS5 or Python-side `in` checks
+These files use `text()` with schema-qualified tables or PG-specific SQL that the generic SQL
+rewriting hook in `sqlite_compat.py` may not fully handle. Each needs a targeted fix.
 
-This touches production code extensively and is only worthwhile if CI speed is a major bottleneck.
+**Effort: Moderate per file.**
+
+#### `test_brain.py`
+- **Fixture:** `seed_guardrails`, `session`
+- **PG pattern:** One `text()` call at line ~167:
+  ```python
+  text(
+      "SELECT * FROM brain.graph_edges "
+      "WHERE (source_id = :id1 AND target_id = :id2) "
+      "   OR (source_id = :id2 AND target_id = :id1)"
+  )
+  ```
+- **Fix:** The SQL rewriting hook in `sqlite_compat.py` already strips schema prefixes
+  (`brain.graph_edges → graph_edges`). This query should work after schema remapping is active.
+  Verify by running the test with SQLite backend. If it fails, replace with an ORM query using
+  `select(GraphEdge).where(...)`.
+- **Effort:** Trivial (rewriting hook likely handles it; verify only)
+
+#### `test_graph_linker.py`
+- **Fixture:** `session`
+- **PG pattern:** `text("ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS graph_edges_relation_check")`
+- **Fix:** SQLite does not support `DROP CONSTRAINT`. This test setup hack should be replaced:
+  - Either skip this ALTER in SQLite mode: `if not USE_POSTGRES: skip_constraint_drop()`
+  - Or use SQLAlchemy DDL: detect dialect and conditionally execute
+  - The constraint being dropped is for testing invalid `relation` values; SQLite won't enforce it
+    anyway, so the test body remains valid without the setup SQL
+- **Effort:** Trivial (one conditional skip)
 
 ---
 
-## File Count Summary
+### PG_SPECIFIC (3 files) — Cannot run without PostgreSQL
+
+These files test PostgreSQL-specific features or use syntax that has no SQLite equivalent.
+They should be **marked `@pytest.mark.postgres_only`** and skipped in SQLite mode.
+
+**Effort: Low (mark + skip decorator; no test logic changes).**
+
+#### `test_database.py`
+- **Fixture:** `db`, `session`
+- **PG patterns:**
+  - `SELECT extname FROM pg_extension WHERE extname IN ('vector', 'pg_trgm')` — Postgres system catalog
+  - `SELECT schema_name FROM information_schema.schemata` — Postgres information schema
+  - `SELECT table_schema, table_name FROM information_schema.tables` — ditto
+  - `'{}' ::jsonb` — explicit Postgres type cast syntax
+  - `SELECT pg_sleep(0.05)` — Postgres sleep function
+  - Tests `updated_at` trigger auto-update (Postgres-specific triggers)
+- **Purpose:** Verifies that the Postgres schema, extensions, and triggers are correctly installed.
+  This is a schema validation test — inherently Postgres-only.
+- **Recommendation:** Mark `@pytest.mark.postgres_only`. Run in CI with real Postgres only.
+
+#### `test_admission_dashboard.py`
+- **Fixture:** `db`, `heart_with_shadow_admission`
+- **PG patterns:**
+  - `text("SELECT ... FROM information_schema.columns WHERE ...")` — Postgres information schema
+  - `assert row.data_type == "jsonb"` — asserts JSONB column type
+  - `::vector` cast in raw SQL queries
+- **Purpose:** Verifies the `admission_scores` JSONB column exists and is typed correctly.
+  Also tests vector-similarity query paths.
+- **Recommendation:** Mark `@pytest.mark.postgres_only`. The JSONB/vector type assertions are
+  meaningless on SQLite. The logic under test (scoring) is covered by `test_admission.py` (CLEAN).
+
+#### `test_dashboard_queries.py`
+- **Fixture:** `session`
+- **PG patterns:**
+  - `::jsonb` cast: `':data::jsonb'` in INSERT statements
+  - All inserts use schema-qualified tables (`nous_system.agents`, `brain.decisions`,
+    `heart.facts`, `heart.episodes`, `brain.graph_edges`, `nous_system.events`)
+  - Complex `GROUP BY` and window function queries
+- **Purpose:** Tests dashboard analytics aggregation queries by inserting known data and
+  verifying query results. The `::jsonb` cast makes raw SQL non-portable.
+- **Recommendation:** Mark `@pytest.mark.postgres_only`. Alternatively, refactor inserts
+  to use ORM models (which work on SQLite) and replace `::jsonb` cast with `cast(:data, JSON)`.
+  This would make it fully SQLite-compatible but requires moderate refactoring effort.
+- **Effort (if keeping PG_SPECIFIC):** Low. **Effort (if migrating):** Moderate.
+
+---
+
+## Postgres-Specific Patterns Reference
+
+| Pattern | Files | SQLite Equivalent |
+|---------|-------|-------------------|
+| `<->` (L2 distance operator) | Source code | `cosine_similarity()` in `sqlite_patches.py` |
+| `<=>` (cosine distance) | Source code | `cosine_similarity()` in `sqlite_patches.py` |
+| `::vector` cast | `test_admission_dashboard.py` | Not applicable (test is PG-only) |
+| `::jsonb` cast | `test_dashboard_queries.py` | `cast(:val, JSON)` or ORM insert |
+| `pg_insert` (INSERT ON CONFLICT) | Source code | ORM-based upsert in `sqlite_patches.py` |
+| `hybrid_search()` (raw SQL) | Source code (heart.search) | `sqlite_hybrid_search()` in `sqlite_patches.py` |
+| `batch_fetch_embeddings()` | Source code | `sqlite_batch_fetch_embeddings()` in `sqlite_patches.py` |
+| Recursive CTE (`WITH RECURSIVE`) | Source code (facts) | Iterative chase in `sqlite_patches.py` |
+| `gen_random_uuid()` server default | ORM models | `install_sqlite_defaults()` in `sqlite_compat.py` |
+| `now()` / `NOW()` server default | ORM models | `install_sqlite_defaults()` + SQL rewriter |
+| `make_interval(hours => :n)` | Source code | SQL rewriter in `sqlite_compat.py` |
+| `pg_extension` catalog | `test_database.py` | No equivalent — PG-only test |
+| `information_schema.*` | `test_database.py`, `test_admission_dashboard.py` | No equivalent — PG-only test |
+| `pg_sleep()` | `test_database.py` | No equivalent — PG-only test |
+| DB triggers (`updated_at`) | `test_database.py` | No equivalent — PG-only test |
+| Schema prefixes (`brain.`, `heart.`, `nous_system.`) | Source code + some tests | SQL rewriter strips them |
+| `ARRAY` type | ORM models | `JSONEncodedList` in `sqlite_compat.py` |
+| `JSONB` type | ORM models | `@compiles(JSONB, "sqlite")` → JSON |
+| `Vector(1536)` | ORM models | `JSONEncodedVector` in `sqlite_compat.py` |
+| `stddev()` aggregate | Source code | `StddevAggregate` class in `sqlite_compat.py` |
+| `power()` function | Source code | Registered in `sqlite_compat.py` |
+| HNSW/ivfflat indexes | ORM models (`create_indexes`) | Not created in SQLite (no-op) |
+| GIN full-text indexes | ORM models | Not created in SQLite (no-op) |
+
+---
+
+## Specific conftest.py Changes Needed
+
+### New `conftest.py` skeleton
+
+```python
+"""Test fixtures — supports SQLite in-memory (default) or real Postgres."""
+
+import hashlib
+import os
+import random
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nous.config import Settings
+from nous.storage.models import Guardrail
+
+USE_POSTGRES = os.environ.get("NOUS_TEST_DB", "sqlite") == "postgres"
+
+
+class MockEmbeddingProvider:
+    # ... (unchanged from current conftest.py)
+
+
+# ---------------------------------------------------------------------------
+# Database fixtures
+# ---------------------------------------------------------------------------
+
+@pytest_asyncio.fixture(scope="session")
+async def db():
+    if USE_POSTGRES:
+        from nous.storage.database import Database
+        settings = Settings()
+        database = Database(settings)
+        await database.connect()
+        yield database
+        await database.disconnect()
+    else:
+        from tests.sqlite_compat import (
+            create_test_engine, create_tables,
+            install_sqlite_defaults, install_array_deserializer,
+            patch_model_columns_for_sqlite, TestDatabase,
+        )
+        from tests.sqlite_patches import install_all_patches
+        patch_model_columns_for_sqlite()
+        install_sqlite_defaults()
+        install_array_deserializer()
+        install_all_patches()
+        engine = await create_test_engine()
+        await create_tables(engine)
+        test_db = TestDatabase(engine)
+        yield test_db
+        await test_db.disconnect()
+
+
+@pytest.fixture(scope="session")
+def settings() -> Settings:
+    return Settings()
+
+
+@pytest_asyncio.fixture
+async def session(db):
+    async with db.engine.connect() as conn:
+        trans = await conn.begin()
+        sess = AsyncSession(bind=conn, expire_on_commit=False)
+        yield sess
+        await sess.close()
+        await trans.rollback()
+
+
+# ---------------------------------------------------------------------------
+# heart / brain / admission fixtures (unchanged)
+# ---------------------------------------------------------------------------
+# ... all existing heart fixtures remain the same
+```
+
+### pytest.ini / pyproject.toml — add marker
+
+```toml
+[tool.pytest.ini_options]
+markers = [
+    "postgres_only: requires a real PostgreSQL connection (skip in sqlite mode)",
+]
+```
+
+### conftest.py — auto-skip postgres_only tests in SQLite mode
+
+```python
+def pytest_runtest_setup(item):
+    if not USE_POSTGRES and item.get_closest_marker("postgres_only"):
+        pytest.skip("Requires PostgreSQL (set NOUS_TEST_DB=postgres)")
+```
+
+---
+
+## Suggested Implementation Phases
+
+### Phase 1 — Wire SQLite backend into conftest.py (1–2 hours)
+**Impact:** Unlocks ~28 NEEDS_MOCK files immediately.
+
+1. Copy `tests/sqlite_compat.py` and `tests/sqlite_patches.py` into version control (they're
+   currently untracked — verify they match the analysis above before committing).
+2. Update `conftest.py`:
+   - Add `USE_POSTGRES` env var check
+   - Rewrite `db` fixture with SQLite path using `TestDatabase`
+   - Add `pytest_runtest_setup` skip hook for `postgres_only` marker
+   - Add `postgres_only` marker to `pyproject.toml`
+3. Mark `test_database.py` and `test_admission_dashboard.py` with `@pytest.mark.postgres_only`.
+4. Run the full suite: `uv run pytest tests/ -v --ignore=tests/test_dashboard_queries.py`
+5. Fix any remaining failures.
+
+### Phase 2 — Fix COMPLEX files (1–2 hours)
+**Impact:** Migrates `test_brain.py` and `test_graph_linker.py`.
+
+1. **test_brain.py:** Verify the `brain.graph_edges` text() query works via the SQL rewriting
+   hook. If not, replace with:
+   ```python
+   from nous.storage.models import GraphEdge
+   from sqlalchemy import select, or_
+   result = await session.execute(
+       select(GraphEdge).where(
+           or_(
+               (GraphEdge.source_id == id1) & (GraphEdge.target_id == id2),
+               (GraphEdge.source_id == id2) & (GraphEdge.target_id == id1),
+           )
+       )
+   )
+   ```
+2. **test_graph_linker.py:** Skip the `ALTER TABLE ... DROP CONSTRAINT` in SQLite mode:
+   ```python
+   if USE_POSTGRES:
+       await conn.execute(text("ALTER TABLE brain.graph_edges DROP CONSTRAINT ..."))
+   ```
+
+### Phase 3 — Decide on test_dashboard_queries.py (1–3 hours)
+**Options:**
+- **Option A (fast):** Mark `@pytest.mark.postgres_only`. Zero code changes.
+- **Option B (thorough):** Refactor inserts to use ORM models; replace `::jsonb` cast;
+  verify window functions work in SQLite. Migrates this coverage to run without Postgres.
+
+Recommendation: Start with Option A, revisit if dashboard regression coverage becomes important.
+
+### Phase 4 — CI integration
+1. Add a CI job that runs `uv run pytest tests/` without any Postgres service (SQLite mode).
+2. Keep the existing Postgres CI job for `@pytest.mark.postgres_only` tests.
+3. Use `NOUS_TEST_DB=postgres pytest tests/ -m postgres_only` for the PG-only job.
+
+---
+
+## Known Risks and Caveats
+
+1. **Semantic search quality differs:** SQLite uses cosine similarity over full table scans;
+   Postgres uses HNSW index. Test assertions that depend on top-k ranking may need tolerance
+   adjustments (e.g., `assert result[0].id in {id1, id2}` instead of `== id1`).
+
+2. **Transaction isolation:** The SAVEPOINT-based rollback pattern works in SQLite via aiosqlite,
+   but SQLite has weaker isolation guarantees. Rare test-order dependencies could emerge.
+
+3. **Timezone handling:** SQLite returns naive datetimes; `sqlite_patches.py` already patches
+   `EpisodeManager._end` and `sqlite_compat.py` provides `ensure_aware()`. Watch for any
+   datetime comparison failures on other managers.
+
+4. **JSONB field access:** Postgres allows `model.jsonb_col["key"]` via the `->` operator;
+   SQLAlchemy ORM translates this. In SQLite, JSONB is stored as JSON text — JSON path queries
+   may fail. Check any ORM queries that use JSONB operators.
+
+5. **UUIDs:** Stored as 32-char hex strings in SQLite (no dashes). The `sqlite3.register_adapter`
+   in `sqlite_compat.py` handles serialization; ensure UUID comparisons use `str(uuid)` or the
+   ORM's UUID type.
+
+6. **`patch_model_columns_for_sqlite()` must run before `create_all`:** It modifies SQLAlchemy
+   Table metadata in-place. If models are imported before this is called, the column types won't
+   be patched. Keep this as the first call in the `db` fixture.
+
+---
+
+## Files That Need `@pytest.mark.postgres_only`
 
 ```
-Total test files (excl. conftest.py): 125
-
-CLEAN (no DB):          27  (22%)
-MOCK_READY (already):    5   (4%)
-NEEDS_MOCK (ORM only):  61  (49%)
-PG_SPECIFIC (pg-only):  18  (14%)
-COMPLEX (deep chains):  14  (11%)
-                       ---
-Total:                 125
+tests/test_database.py
+tests/test_admission_dashboard.py
+tests/test_dashboard_queries.py   (unless refactored in Phase 3 Option B)
 ```
 
-Offline-capable today (CLEAN + MOCK_READY): **32 files (26%)**  
-Offline-capable after Phase 2 (+ NEEDS_MOCK): **93 files (74%)**  
-Requires real Postgres always (PG_SPECIFIC + COMPLEX): **32 files (26%)**
+Add the marker at the **module level**:
+```python
+import pytest
+pytestmark = pytest.mark.postgres_only
+```
 
 ---
 
-## Appendix: Fixture Dependency Map
+## Summary of Work Required
 
-```
-db (session-scoped, real Postgres)
-├── session (function-scoped, AsyncSession + SAVEPOINT)
-│   ├── heart → Episodes, Facts, Procedures, Censors, WorkingMemory
-│   │   ├── heart_with_admission
-│   │   ├── heart_with_strict_admission
-│   │   └── heart_with_shadow_admission
-│   ├── brain → Decisions, Guardrails, Calibration, GraphEdges
-│   │   ├── brain_guardrail
-│   │   └── brain_with_embeddings
-│   ├── cognitive → CognitiveLayer(brain, heart)
-│   ├── context_engine → ContextEngine(brain, heart)
-│   ├── seed_guardrails → inserts 4 test Guardrail rows
-│   └── schedule_mgr → ScheduleManager(session)
-├── settings → Settings (session-scoped, no DB)
-├── mock_embeddings → MockEmbeddingProvider (session-scoped, no DB)
-└── client → httpx.AsyncClient + ASGITransport(app)
-     └── app → Starlette app with brain+heart+cognitive injected
-```
+| Task | Files Affected | Effort | Phase |
+|------|---------------|--------|-------|
+| Commit `sqlite_compat.py` + `sqlite_patches.py` | 2 new files | Trivial | 1 |
+| Update `conftest.py` with SQLite path | `conftest.py` | Low | 1 |
+| Add `postgres_only` marker infra | `pyproject.toml`, `conftest.py` | Trivial | 1 |
+| Mark PG-only tests | 2–3 files | Trivial | 1 |
+| Fix `test_brain.py` text() query | 1 file | Trivial | 2 |
+| Fix `test_graph_linker.py` ALTER TABLE | 1 file | Trivial | 2 |
+| Decide on `test_dashboard_queries.py` | 1 file | Low–Moderate | 3 |
+| Add SQLite-mode CI job | CI config | Low | 4 |
 
-All DB-dependent tests flow through `db → session`. Replacing this root fixture with a mock session would unlock the majority of the test suite for offline execution.
+**Total estimated effort: 4–8 hours** to have 122 of 125 tests pass without PostgreSQL.
+The remaining 3 are legitimately PostgreSQL-specific tests that verify schema installation.

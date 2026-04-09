@@ -7,14 +7,10 @@ Heart methods receive the test session via the session parameter (P1-1).
 import pytest
 
 from nous.heart import (
-
-
     EpisodeInput,
     FactDetail,
     FactInput,
 )
-
-pytestmark = pytest.mark.integration
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -325,7 +321,6 @@ async def test_supersede_creates_graph_edge(heart, session):
     """facts.supersede() also creates a 'supersedes' graph edge."""
     from nous.storage.models import GraphEdge
     from sqlalchemy import select
-
 
     f1 = await heart.learn(
         _fact_input(content="Python 3.11 is latest", subject="Python"),

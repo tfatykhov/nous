@@ -5,11 +5,6 @@ import pytest
 from nous.brain.calibration import CalibrationEngine
 from nous.storage.models import Decision, DecisionReason
 
-pytestmark = pytest.mark.integration
-
-
-
-
 
 @pytest.fixture
 def engine() -> CalibrationEngine:

@@ -12,10 +12,6 @@ import pytest_asyncio
 from nous.brain.brain import Brain
 from nous.cognitive.deliberation import DeliberationEngine
 from nous.cognitive.schemas import FrameSelection
-import pytest
-
-pytestmark = pytest.mark.integration
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -211,8 +207,6 @@ async def test_get_recent_decisions_filters_by_session(brain, session):
     from datetime import UTC, datetime, timedelta
 
     from nous.brain.schemas import ReasonInput, RecordInput
-
-
 
     input_a = RecordInput(
         description="Decision in session A",

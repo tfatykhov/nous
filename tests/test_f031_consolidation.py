@@ -48,13 +48,7 @@ def _mock_llm_client(text: str = "", status_code: int = 200) -> AsyncMock:
     client = AsyncMock()
     if status_code == 200:
         response = MagicMock()
-        # Production code expects tool_use block (call_background_llm_structured uses tool_choice)
-        try:
-            import json as _json
-            parsed = _json.loads(text) if text else {}
-        except Exception:
-            parsed = {}
-        response.content = [{"type": "tool_use", "name": "store_reflection", "input": parsed}]
+        response.content = [{"type": "text", "text": text}]
         client.call = AsyncMock(return_value=response)
     else:
         client.call = AsyncMock(side_effect=RuntimeError(f"API error ({status_code})"))

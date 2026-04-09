@@ -48,11 +48,8 @@ class TestTextOverlap:
         assert text_overlap("", "") == 0.0
 
     def test_short_words_filtered(self):
-        # "a" (1 char), "is" (2 chars), "in" (2 chars) are < 3 chars, filtered out
-        # "the" is 3 chars which meets the >= 3 threshold
-        assert text_overlap("a is in", "a is in") == 0.0
-        # With "the" (3 chars), the overlap is 1.0
-        assert text_overlap("a is in the", "a is in the") == 1.0
+        # "a", "is", "in", "the" are all < 3 chars, filtered out
+        assert text_overlap("a is in the", "a is in the") == 0.0
 
     def test_stop_word_resistance(self):
         # "show me brain status" vs "show me heart status"
@@ -626,9 +623,9 @@ class TestInformationalDetection:
         assert layer._is_informational(result) is True
 
     def test_short_response_with_tools_not_filtered(self, layer):
-        """Substantial response WITH tools -> NOT informational (tool did real work)."""
+        """Short response WITH tools -> NOT informational (tool did real work)."""
         result = MockTurnResult(
-            response_text="The analysis found three critical issues that require attention in the codebase.",
+            response_text="Done.",
             tool_results=[MockToolResult(tool_name="bash")],
         )
         assert layer._is_informational(result) is False

@@ -229,12 +229,9 @@ class TestDynamicCheckIsDue:
         """11. Cron check not due when before next fire time."""
         check = _make_dynamic_check()
         check.set_cron("0 */6 * * *")
-        # Fix a reference time to avoid clock-alignment flakiness:
-        # anchor = 10:01, next fire = 12:00, now = 11:00 → not due
-        anchor = datetime(2025, 1, 1, 10, 1, tzinfo=UTC)
-        check.last_run = anchor
-        now = datetime(2025, 1, 1, 11, 0, tzinfo=UTC)
-        assert check.is_due(now=now) is False
+        # Last run was 2 hours ago -> next fire is ~4h from now
+        check.last_run = datetime.now(UTC) - timedelta(hours=2)
+        assert check.is_due() is False
 
     def test_cron_never_run(self):
         """12. Cron with no last_run is due (anchor year 2000)."""
