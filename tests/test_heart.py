@@ -384,13 +384,13 @@ async def test_unified_recall_type_filter(heart, session):
 async def test_events_emitted(heart, db):
     """Verify events logged to nous_system.events."""
     import uuid as _uuid
-    # Start an episode — use unique summary to avoid dedup with other tests
-    unique_tag = _uuid.uuid4().hex[:8]
+    # Use a fully random summary (no common words) to bypass text_overlap dedup
+    unique_id = _uuid.uuid4().hex
     async with db.session() as session:
         episode = await heart.start_episode(
             _episode_input(
-                title=f"Event emission test {unique_tag}",
-                summary=f"Testing event emission uniquely {unique_tag}",
+                title=unique_id,
+                summary=unique_id,
             ),
             session=session,
         )
