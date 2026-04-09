@@ -410,9 +410,9 @@ async def test_events_emitted(heart, db):
         found = any(e.data.get("episode_id") == str(episode.id) for e in events)
         assert found, "episode_started event not found with correct episode_id"
 
-    # Learn a fact — should emit fact_learned
+    # Learn a fact — should emit fact_learned (content must be >= 30 chars)
     await heart.learn(
-        _fact_input(content="Event emission test fact"),
+        _fact_input(content="Event emission test fact for verifying event bus"),
         session=session,
     )
 
