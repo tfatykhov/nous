@@ -13,7 +13,7 @@ from uuid import UUID
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.sqlite_compat import cosine_similarity, keyword_match_score, _parse_embedding
+from sqlite_compat import cosine_similarity, keyword_match_score, _parse_embedding
 
 
 # ============================================================================
@@ -495,7 +495,7 @@ async def sqlite_censor_semantic_search(
 async def sqlite_vector_temporal_search(self, query_embedding, hours, limit, session):
     """Pure-Python temporal vector search for episodes."""
     from nous.storage.models import Episode
-    from tests.sqlite_compat import ensure_aware
+    from sqlite_compat import ensure_aware
 
     cutoff = datetime.now(UTC) - timedelta(hours=hours)
 
@@ -535,7 +535,7 @@ def patch_episode_duration():
     async def _end_tz_safe(self, episode_id, outcome, lessons, surprise_level, transcript, session):
         """Wrapper that ensures timezone-aware datetimes before calling original."""
         from nous.storage.models import Episode
-        from tests.sqlite_compat import ensure_aware
+        from sqlite_compat import ensure_aware
 
         # Ensure started_at is timezone-aware before the original method tries subtraction
         result = await session.execute(

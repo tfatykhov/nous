@@ -85,4 +85,5 @@ jobs:
           DB_USER: nous
           DB_PASSWORD: nous_dev_password
           DB_NAME: nous
+          NOUS_TEST_DB: postgres
         run: pytest tests/ -v --tb=short
