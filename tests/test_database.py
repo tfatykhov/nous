@@ -32,7 +32,7 @@ async def test_extensions(db):
 
 
 async def test_all_tables_exist(db):
-    """All 18 tables exist in correct schemas."""
+    """Core tables exist in correct schemas (subset check — allows migrations to add more)."""
     expected = {
         # nous_system (3)
         ("nous_system", "agents"),
@@ -65,7 +65,8 @@ async def test_all_tables_exist(db):
             )
         )
         actual = {(row[0], row[1]) for row in result}
-    assert actual == expected, f"Missing: {expected - actual}, Extra: {actual - expected}"
+    missing = expected - actual
+    assert not missing, f"Missing tables: {missing}"
 
 
 async def test_seed_agent(db):

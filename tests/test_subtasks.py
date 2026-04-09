@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
@@ -141,6 +142,10 @@ from nous.heart.subtasks import SubtaskManager  # noqa: E402
 
 @pytest_asyncio.fixture
 async def subtask_mgr(db):
+    # Clean up any pending subtasks left by previous tests to avoid hitting the limit
+    async with db.session() as session:
+        await session.execute(delete(Subtask).where(Subtask.agent_id == "test-agent"))
+        await session.commit()
     return SubtaskManager(db, "test-agent")
 
 
@@ -1236,6 +1241,7 @@ class TestRunTurnErrorPropagation:
         mock_turn_ctx.recalled_decision_ids = []
         mock_turn_ctx.active_censors = []
         mock_turn_ctx.decision_id = None
+        mock_turn_ctx.censor_blocked = False
         mock_cognitive.pre_turn = AsyncMock(return_value=mock_turn_ctx)
         mock_cognitive.post_turn = AsyncMock()
         mock_brain = MagicMock()
@@ -1277,6 +1283,7 @@ class TestRunTurnErrorPropagation:
         mock_turn_ctx.recalled_decision_ids = []
         mock_turn_ctx.active_censors = []
         mock_turn_ctx.decision_id = None
+        mock_turn_ctx.censor_blocked = False
         mock_cognitive.pre_turn = AsyncMock(return_value=mock_turn_ctx)
         mock_cognitive.post_turn = AsyncMock()
         mock_brain = MagicMock()

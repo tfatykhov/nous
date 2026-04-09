@@ -55,6 +55,7 @@ class MockCognitiveLayer:
         user_id=None,
         user_display_name=None,
         skip_episode=False,
+        is_subtask=False,
     ):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context

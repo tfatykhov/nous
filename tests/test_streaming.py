@@ -308,6 +308,7 @@ def _make_mock_cognitive():
     turn_context.recalled_decision_ids = []
     turn_context.recalled_fact_ids = []
     turn_context.recalled_episode_ids = []
+    turn_context.censor_blocked = False
     cognitive.pre_turn.return_value = turn_context
     cognitive.post_turn.return_value = MagicMock()
     return cognitive, turn_context
