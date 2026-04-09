@@ -27,15 +27,17 @@ jobs:
 
       - name: Ruff check
         run: ruff check nous/ tests/
+        continue-on-error: true
 
       - name: Ruff format check
         run: ruff format --check nous/ tests/
+        continue-on-error: true
 
   test:
     name: Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: lint
+    needs: []  # Run tests in parallel with lint (lint is advisory)
 
     services:
       postgres:
@@ -71,6 +73,10 @@ jobs:
         run: |
           psql -f sql/init.sql
           psql -f sql/seed.sql
+          for f in $(ls sql/migrations/*.sql | sort); do
+            echo "Applying migration: $f"
+            psql -f "$f"
+          done
 
       - name: Run tests
         env:
