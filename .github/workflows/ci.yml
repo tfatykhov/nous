@@ -71,6 +71,10 @@ jobs:
         run: |
           psql -f sql/init.sql
           psql -f sql/seed.sql
+          for f in $(ls sql/migrations/*.sql | sort); do
+            echo "Applying migration: $f"
+            psql -f "$f"
+          done
 
       - name: Run tests
         env:
