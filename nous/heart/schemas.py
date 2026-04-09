@@ -209,6 +209,17 @@ class ProcedureSummary(BaseModel):
     score: float | None = None
 
 
+class EvolutionCandidate(BaseModel):
+    """A procedure flagged for rewriting, retirement, or investigation (F037)."""
+
+    id: UUID
+    name: str
+    category: Literal["retire", "rewrite", "investigate", "star"]
+    effectiveness: float
+    activation_count: int
+    reason: str
+
+
 # --- Censors ---
 
 

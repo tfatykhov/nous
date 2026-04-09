@@ -487,7 +487,7 @@ class ContextEngine:
 
                 q_text = _query_texts.get("procedure", _default_query)
                 embedding_procedures = await self._heart.search_procedures(
-                    q_text, limit=embedding_limit, session=session,
+                    q_text, limit=embedding_limit, frame_type=frame.frame_id, session=session,
                 )
 
                 if embedding_procedures:

@@ -10,14 +10,20 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
-from nous.heart.schemas import ProcedureDetail, ProcedureInput, ProcedureOutcome, ProcedureSummary
+from nous.heart.schemas import (
+    EvolutionCandidate,
+    ProcedureDetail,
+    ProcedureInput,
+    ProcedureOutcome,
+    ProcedureSummary,
+)
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
-from nous.storage.models import Event, Procedure
+from nous.storage.models import Event, Procedure, ProcedureTaskAffinity
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +59,19 @@ class ProcedureManager:
         db: Database,
         embeddings: EmbeddingProvider | None,
         agent_id: str,
+        *,
+        utility_boost: bool = True,
+        utility_alpha: float = 0.15,
+        affinity_beta: float = 0.10,
+        min_activations_for_boost: int = 5,
     ) -> None:
         self.db = db
         self.embeddings = embeddings
         self.agent_id = agent_id
+        self._utility_boost = utility_boost
+        self._utility_alpha = utility_alpha
+        self._affinity_beta = affinity_beta
+        self._min_activations_for_boost = min_activations_for_boost
 
     # ------------------------------------------------------------------
     # Event helper
@@ -155,18 +170,34 @@ class ProcedureManager:
     _VALID_OUTCOMES: set[str] = {"success", "failure", "neutral"}
 
     async def record_outcome(
-        self, procedure_id: UUID, outcome: ProcedureOutcome, session: AsyncSession | None = None
+        self,
+        procedure_id: UUID,
+        outcome: ProcedureOutcome,
+        frame_type: str | None = None,
+        session: AsyncSession | None = None,
     ) -> ProcedureDetail:
-        """Record procedure activation outcome."""
+        """Record procedure activation outcome.
+
+        Args:
+            procedure_id: The procedure to record outcome for.
+            outcome: 'success', 'failure', or 'neutral'.
+            frame_type: Optional cognitive frame type (e.g. 'task', 'conversation').
+                        When provided, also upserts the procedure_task_affinity row (F037).
+            session: Optional existing session.
+        """
         if session is None:
             async with self.db.session() as session:
-                result = await self._record_outcome(procedure_id, outcome, session)
+                result = await self._record_outcome(procedure_id, outcome, frame_type, session)
                 await session.commit()
                 return result
-        return await self._record_outcome(procedure_id, outcome, session)
+        return await self._record_outcome(procedure_id, outcome, frame_type, session)
 
     async def _record_outcome(
-        self, procedure_id: UUID, outcome: ProcedureOutcome, session: AsyncSession
+        self,
+        procedure_id: UUID,
+        outcome: ProcedureOutcome,
+        frame_type: str | None,
+        session: AsyncSession,
     ) -> ProcedureDetail:
         if outcome not in self._VALID_OUTCOMES:
             raise ValueError(f"Invalid outcome {outcome!r}; must be one of {sorted(self._VALID_OUTCOMES)}")
@@ -184,6 +215,10 @@ class ProcedureManager:
             procedure.neutral_count = (procedure.neutral_count or 0) + 1
 
         await session.flush()
+
+        # F037: Upsert task affinity row when frame_type is known
+        if frame_type:
+            await self._upsert_task_affinity(procedure_id, frame_type, outcome, session)
 
         await self._emit_event(
             session,
@@ -219,19 +254,25 @@ class ProcedureManager:
         query: str,
         limit: int = 10,
         domain: str | None = None,
+        frame_type: str | None = None,
         session: AsyncSession | None = None,
     ) -> list[ProcedureSummary]:
-        """Hybrid search over procedures. Optional domain filter."""
+        """Hybrid search over procedures. Optional domain filter.
+
+        When utility boost is enabled (F037), applies an effectiveness-weighted
+        score boost: final_score = hybrid_score * (1 + α*utility + β*affinity).
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, domain, session)
-        return await self._search(query, limit, domain, session)
+                return await self._search(query, limit, domain, frame_type, session)
+        return await self._search(query, limit, domain, frame_type, session)
 
     async def _search(
         self,
         query: str,
         limit: int,
         domain: str | None,
+        frame_type: str | None,
         session: AsyncSession,
     ) -> list[ProcedureSummary]:
         embedding = None
@@ -267,19 +308,156 @@ class ProcedureManager:
         proc_result = await session.execute(select(Procedure).where(Procedure.id.in_(ids)))
         procedures = {p.id: p for p in proc_result.scalars().all()}
 
-        return [
-            ProcedureSummary(
-                id=p.id,
-                name=p.name,
-                domain=p.domain,
-                description=p.description,
-                activation_count=p.activation_count or 0,
-                effectiveness=self._compute_effectiveness(p),
-                score=scores.get(p.id),
+        # F037: Load affinity data for current frame_type if provided
+        affinity_map: dict[UUID, tuple[int, int]] = {}
+        if frame_type and self._utility_boost:
+            affinity_rows = await session.execute(
+                select(ProcedureTaskAffinity)
+                .where(ProcedureTaskAffinity.procedure_id.in_(ids))
+                .where(ProcedureTaskAffinity.frame_type == frame_type)
+                .where(ProcedureTaskAffinity.agent_id == self.agent_id)
             )
-            for pid in ids
-            if (p := procedures.get(pid)) is not None
-        ]
+            for row in affinity_rows.scalars().all():
+                affinity_map[row.procedure_id] = (row.success_count, row.failure_count)
+
+        summaries = []
+        for pid in ids:
+            p = procedures.get(pid)
+            if p is None:
+                continue
+
+            hybrid_score = scores.get(p.id, 0.0)
+            effectiveness = self._compute_effectiveness(p)
+
+            # F037: Apply utility boost when enabled and procedure has sufficient history
+            final_score = hybrid_score
+            if self._utility_boost and effectiveness is not None:
+                activation_count = p.activation_count or 0
+                if activation_count >= self._min_activations_for_boost:
+                    utility_signal = effectiveness - 0.5
+                    boost = self._utility_alpha * utility_signal
+
+                    # Apply frame-type affinity boost if data is available
+                    if pid in affinity_map:
+                        aff_success, aff_failure = affinity_map[pid]
+                        aff_total = aff_success + aff_failure
+                        if aff_total >= self._min_activations_for_boost:
+                            frame_eff = (aff_success + 1) / (aff_total + 2)
+                            boost += self._affinity_beta * (frame_eff - 0.5)
+
+                    final_score = hybrid_score * (1.0 + boost)
+
+            summaries.append(
+                ProcedureSummary(
+                    id=p.id,
+                    name=p.name,
+                    domain=p.domain,
+                    description=p.description,
+                    activation_count=p.activation_count or 0,
+                    effectiveness=effectiveness,
+                    score=final_score,
+                )
+            )
+
+        # Re-sort by final_score descending (boost may have changed order)
+        summaries.sort(key=lambda s: s.score or 0.0, reverse=True)
+        return summaries
+
+    # ------------------------------------------------------------------
+    # get_evolution_candidates() — F037 Part 3
+    # ------------------------------------------------------------------
+
+    async def get_evolution_candidates(
+        self, session: AsyncSession | None = None
+    ) -> list[EvolutionCandidate]:
+        """Return procedures that should be rewritten, retired, or investigated.
+
+        Categories:
+        - 'retire': effectiveness < 0.3 AND activation_count >= 10
+        - 'rewrite': effectiveness < 0.5 AND activation_count >= 15
+        - 'investigate': activation_count >= 30 but effectiveness < 0.6
+        - 'star': effectiveness >= 0.85 AND activation_count >= 10 (candidates for templates)
+
+        A procedure can match multiple categories; the highest-priority one wins
+        (retire > rewrite > investigate > star).
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_evolution_candidates(session)
+        return await self._get_evolution_candidates(session)
+
+    async def _get_evolution_candidates(self, session: AsyncSession) -> list[EvolutionCandidate]:
+        result = await session.execute(
+            select(Procedure)
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == True)  # noqa: E712
+        )
+        procedures = list(result.scalars().all())
+
+        candidates: list[EvolutionCandidate] = []
+        for p in procedures:
+            eff = self._compute_effectiveness(p)
+            if eff is None:
+                continue  # No outcome data yet
+            activation_count = p.activation_count or 0
+
+            if eff < 0.3 and activation_count >= 10:
+                candidates.append(EvolutionCandidate(
+                    id=p.id,
+                    name=p.name,
+                    category="retire",
+                    effectiveness=eff,
+                    activation_count=activation_count,
+                    reason=f"Effectiveness {eff:.2f} below retirement threshold (0.3) with {activation_count} activations",
+                ))
+            elif eff < 0.5 and activation_count >= 15:
+                candidates.append(EvolutionCandidate(
+                    id=p.id,
+                    name=p.name,
+                    category="rewrite",
+                    effectiveness=eff,
+                    activation_count=activation_count,
+                    reason=f"Effectiveness {eff:.2f} below rewrite threshold (0.5) with {activation_count} activations",
+                ))
+            elif activation_count >= 30 and eff < 0.6:
+                candidates.append(EvolutionCandidate(
+                    id=p.id,
+                    name=p.name,
+                    category="investigate",
+                    effectiveness=eff,
+                    activation_count=activation_count,
+                    reason=f"High activation count ({activation_count}) but effectiveness {eff:.2f} below 0.6 — may be declining",
+                ))
+            elif eff >= 0.85 and activation_count >= 10:
+                candidates.append(EvolutionCandidate(
+                    id=p.id,
+                    name=p.name,
+                    category="star",
+                    effectiveness=eff,
+                    activation_count=activation_count,
+                    reason=f"Effectiveness {eff:.2f} with {activation_count} activations — candidate for template",
+                ))
+
+        return candidates
+
+    # ------------------------------------------------------------------
+    # get_effectiveness() — F037 diagnostic helper
+    # ------------------------------------------------------------------
+
+    async def get_effectiveness(
+        self, procedure_id: UUID, session: AsyncSession | None = None
+    ) -> float | None:
+        """Return Laplace-smoothed effectiveness for a procedure, or None if no outcome data."""
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_effectiveness(procedure_id, session)
+        return await self._get_effectiveness(procedure_id, session)
+
+    async def _get_effectiveness(self, procedure_id: UUID, session: AsyncSession) -> float | None:
+        procedure = await self._get_procedure_orm(procedure_id, session)
+        if procedure is None:
+            return None
+        return self._compute_effectiveness(procedure)
 
     # ------------------------------------------------------------------
     # list_all() — F021 dashboard browse mode
@@ -518,6 +696,46 @@ class ProcedureManager:
         if total == 0:
             return None
         return (success + 1) / (success + failure + 2)
+
+    async def _upsert_task_affinity(
+        self,
+        procedure_id: UUID,
+        frame_type: str,
+        outcome: str,
+        session: AsyncSession,
+    ) -> None:
+        """Upsert a procedure_task_affinity row for the given frame_type (F037)."""
+        now = datetime.now(UTC)
+        success_inc = 1 if outcome == "success" else 0
+        failure_inc = 1 if outcome == "failure" else 0
+
+        # Try to find existing row
+        result = await session.execute(
+            select(ProcedureTaskAffinity)
+            .where(ProcedureTaskAffinity.procedure_id == procedure_id)
+            .where(ProcedureTaskAffinity.frame_type == frame_type)
+            .where(ProcedureTaskAffinity.agent_id == self.agent_id)
+        )
+        row = result.scalars().first()
+
+        if row is not None:
+            row.activation_count += 1
+            row.success_count += success_inc
+            row.failure_count += failure_inc
+            row.last_activated_at = now
+        else:
+            row = ProcedureTaskAffinity(
+                procedure_id=procedure_id,
+                frame_type=frame_type,
+                activation_count=1,
+                success_count=success_inc,
+                failure_count=failure_inc,
+                last_activated_at=now,
+                agent_id=self.agent_id,
+            )
+            session.add(row)
+
+        await session.flush()
 
     def _to_detail(self, procedure: Procedure) -> ProcedureDetail:
         """Convert ORM Procedure to ProcedureDetail DTO."""
