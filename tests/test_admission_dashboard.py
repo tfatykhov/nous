@@ -192,11 +192,11 @@ async def test_get_admission_data_with_facts(heart_with_shadow_admission, db, se
                 ),
                 session=session,
             )
-        # Insert a bypassed fact (unique content to avoid dedup)
+        # Insert a bypassed fact (completely different topic to avoid dedup)
         await heart.learn(
             FactInput(
-                content=f"Bypassed preference fact for dashboard aggregation test {uuid.uuid4().hex[:8]}",
-                category="preference",
+                content=f"System architecture uses microservices pattern {uuid.uuid4().hex[:8]}",
+                category="technical",
                 confidence=1.0,
                 source="user_stated",
             ),

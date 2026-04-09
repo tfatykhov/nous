@@ -381,33 +381,35 @@ async def test_unified_recall_type_filter(heart, session):
 # ---------------------------------------------------------------------------
 
 
-async def test_events_emitted(heart, session):
+async def test_events_emitted(heart, db):
     """Verify events logged to nous_system.events."""
     import uuid as _uuid
     # Start an episode — use unique summary to avoid dedup with other tests
     unique_tag = _uuid.uuid4().hex[:8]
-    episode = await heart.start_episode(
-        _episode_input(
-            title=f"Event emission test {unique_tag}",
-            summary=f"Testing event emission uniquely {unique_tag}",
-        ),
-        session=session,
-    )
-    await session.flush()  # Ensure event is flushed to DB
-
-    # Check for the event
-    result = await session.execute(
-        select(Event).where(
-            Event.agent_id == heart.agent_id,
-            Event.event_type == "episode_started",
+    async with db.session() as session:
+        episode = await heart.start_episode(
+            _episode_input(
+                title=f"Event emission test {unique_tag}",
+                summary=f"Testing event emission uniquely {unique_tag}",
+            ),
+            session=session,
         )
-    )
-    events = result.scalars().all()
-    assert len(events) >= 1
+        await session.commit()
 
-    # The event data should contain the episode_id
-    found = any(e.data.get("episode_id") == str(episode.id) for e in events)
-    assert found, "episode_started event not found with correct episode_id"
+    # Check for the event in a fresh session
+    async with db.session() as session:
+        result = await session.execute(
+            select(Event).where(
+                Event.agent_id == heart.agent_id,
+                Event.event_type == "episode_started",
+            )
+        )
+        events = result.scalars().all()
+        assert len(events) >= 1
+
+        # The event data should contain the episode_id
+        found = any(e.data.get("episode_id") == str(episode.id) for e in events)
+        assert found, "episode_started event not found with correct episode_id"
 
     # Learn a fact — should emit fact_learned
     await heart.learn(
