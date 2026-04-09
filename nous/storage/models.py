@@ -448,6 +448,9 @@ class Procedure(Base):
     episode_procedures: Mapped[list["EpisodeProcedure"]] = relationship(
         back_populates="procedure", cascade="all, delete-orphan"
     )
+    task_affinities: Mapped[list["ProcedureTaskAffinity"]] = relationship(
+        back_populates="procedure", cascade="all, delete-orphan"
+    )
 
 
 class EpisodeProcedure(Base):
@@ -475,6 +478,33 @@ class EpisodeProcedure(Base):
     # Relationships
     episode: Mapped["Episode"] = relationship(back_populates="episode_procedures")
     procedure: Mapped["Procedure"] = relationship(back_populates="episode_procedures")
+
+
+class ProcedureTaskAffinity(Base):
+    """Tracks per-frame-type activation and outcome counts for a procedure (F037)."""
+
+    __tablename__ = "procedure_task_affinity"
+    __table_args__ = (
+        UniqueConstraint("procedure_id", "frame_type", "agent_id", name="uq_proc_affinity"),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    procedure_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("heart.procedures.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    frame_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    activation_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    success_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    active: Mapped[bool | None] = mapped_column(Boolean, server_default="true")
+
+    # Relationship
+    procedure: Mapped["Procedure"] = relationship(back_populates="task_affinities")
 
 
 class RubricVersion(Base):

@@ -856,7 +856,12 @@ class CognitiveLayer:
                     from uuid import UUID as _UUID
                     pid = _UUID(proc_id_str)
                     await self._heart.activate_procedure(pid, session=session)
-                    await self._heart.record_procedure_outcome(pid, proc_outcome, session=session)
+                    await self._heart.record_procedure_outcome(
+                        pid,
+                        proc_outcome,
+                        frame_type=turn_context.frame.frame_id if turn_context.frame else None,
+                        session=session,
+                    )
                 except Exception:
                     logger.debug("Failed to reinforce procedure %s", proc_id_str)
 

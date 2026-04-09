@@ -98,7 +98,15 @@ class Heart:
         # Initialize managers
         self.episodes = EpisodeManager(database, embedding_provider, settings.agent_id)
         self.facts = FactManager(database, embedding_provider, settings.agent_id, admission_controller)
-        self.procedures = ProcedureManager(database, embedding_provider, settings.agent_id)
+        self.procedures = ProcedureManager(
+            database,
+            embedding_provider,
+            settings.agent_id,
+            utility_boost=settings.procedure_utility_boost,
+            utility_alpha=settings.procedure_utility_alpha,
+            affinity_beta=settings.procedure_affinity_beta,
+            min_activations_for_boost=settings.procedure_min_activations_for_boost,
+        )
         self.censors = CensorManager(database, embedding_provider, settings.agent_id)
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
         self.subtasks = SubtaskManager(database, settings.agent_id)
@@ -392,10 +400,11 @@ class Heart:
         self,
         procedure_id: UUID,
         outcome: ProcedureOutcome,
+        frame_type: str | None = None,
         session: AsyncSession | None = None,
     ) -> ProcedureDetail:
         """Record procedure activation outcome."""
-        return await self.procedures.record_outcome(procedure_id, outcome, session)
+        return await self.procedures.record_outcome(procedure_id, outcome, frame_type, session)
 
     async def get_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Fetch a single procedure. Raises ValueError if not found (P2-7)."""
@@ -409,10 +418,11 @@ class Heart:
         query: str,
         limit: int = 10,
         domain: str | None = None,
+        frame_type: str | None = None,
         session: AsyncSession | None = None,
     ) -> list[ProcedureSummary]:
         """Hybrid search over procedures."""
-        return await self.procedures.search(query, limit, domain, session)
+        return await self.procedures.search(query, limit, domain, frame_type, session)
 
     async def list_procedures(
         self,
@@ -447,6 +457,12 @@ class Heart:
     async def reembed_procedures(self, session: AsyncSession | None = None) -> int:
         """Recompute embeddings for all active procedures (issue #197 backfill)."""
         return await self.procedures.reembed_all(session=session)
+
+    async def get_evolution_candidates(
+        self, session: AsyncSession | None = None
+    ) -> list:
+        """Return procedures flagged for rewrite, retirement, investigation, or star status (F037)."""
+        return await self.procedures.get_evolution_candidates(session)
 
     # ==================================================================
     # Censors

@@ -284,6 +284,12 @@ class Settings(BaseSettings):
     procedure_staleness_days: int = 30
     procedure_weakness_threshold: float = 0.30
 
+    # F037: Utility-Boosted Procedure Retrieval
+    procedure_utility_boost: bool = True
+    procedure_utility_alpha: float = 0.15
+    procedure_affinity_beta: float = 0.10
+    procedure_min_activations_for_boost: int = 5
+
     # F023: Memory Admission Control (A-MAC)
     admission_control_enabled: bool = True
     admission_shadow_mode: bool = True
