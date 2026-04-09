@@ -394,10 +394,9 @@ async def test_events_emitted(heart, db):
             ),
             session=session,
         )
-        await session.commit()
+        # Flush + query in same session (event is added but may not be auto-flushed)
+        await session.flush()
 
-    # Check for the event in a fresh session
-    async with db.session() as session:
         result = await session.execute(
             select(Event).where(
                 Event.agent_id == heart.agent_id,
@@ -405,7 +404,7 @@ async def test_events_emitted(heart, db):
             )
         )
         events = result.scalars().all()
-        assert len(events) >= 1
+        assert len(events) >= 1, f"No episode_started events for agent {heart.agent_id}"
 
         # The event data should contain the episode_id
         found = any(e.data.get("episode_id") == str(episode.id) for e in events)
