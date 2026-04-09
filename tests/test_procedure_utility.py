@@ -15,15 +15,12 @@ from __future__ import annotations
 import pytest
 
 from nous.config import Settings
-from nous.heart import Heart
 from nous.heart.procedures import ProcedureManager
 from nous.heart.schemas import (
     EvolutionCandidate,
     ProcedureInput,
-    ProcedureSummary,
 )
 from nous.storage.models import Procedure, ProcedureTaskAffinity
-
 
 # ===========================================================================
 # UNIT TESTS — No database required

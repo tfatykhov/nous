@@ -12,7 +12,8 @@ import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func as sa_func, select
+from sqlalchemy import func as sa_func
+from sqlalchemy import select
 
 from nous.cognitive.correlation import (
     correlate_dimensions_with_outcomes,

@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from nous.identity.manager import IdentityManager, VALID_SECTIONS, SECTIONS
-from nous.identity.protocol import STORE_IDENTITY_SCHEMA, COMPLETE_INITIATION_SCHEMA
 from nous.api.tools import ToolDispatcher
+from nous.identity.manager import SECTIONS, IdentityManager
+from nous.identity.protocol import COMPLETE_INITIATION_SCHEMA, STORE_IDENTITY_SCHEMA
 
 logger = logging.getLogger(__name__)
 

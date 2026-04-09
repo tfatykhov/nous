@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import httpx
@@ -25,7 +25,6 @@ import pytest
 from nous.cognitive.schemas import SessionMetadata
 from nous.events import Event, EventBus
 from nous.heart.schemas import EpisodeInput, FactInput, FactSummary
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -448,7 +447,11 @@ class TestEpisodeSummarizer:
             "outcome_rationale": "User's question was fully answered with a concrete decision",
             "topics": ["architecture", "database"],
             "candidate_facts": [
-                {"subject": "project_database", "content": "Project uses PostgreSQL 17 with pgvector for embeddings", "category": "technical"},
+                {
+                    "subject": "project_database",
+                    "content": "Project uses PostgreSQL 17 with pgvector for embeddings",
+                    "category": "technical",
+                },
             ],
         }
         summarizer, heart, bus, llm_client = self._make_summarizer()
@@ -465,7 +468,9 @@ class TestEpisodeSummarizer:
             "session_ended",
             data={
                 "episode_id": episode_id,
-                "transcript": "User: What database should we use?\n\nAssistant: I recommend PostgreSQL with pgvector." * 3,
+                "transcript": (
+                    "User: What database should we use?\n\nAssistant: I recommend PostgreSQL with pgvector." * 3
+                ),
             },
         )
         await summarizer.handle(event)
@@ -473,14 +478,14 @@ class TestEpisodeSummarizer:
         # Verify summary stored with new fields
         heart.update_episode_summary.assert_called_once()
         stored_summary = heart.update_episode_summary.call_args[0][1]
-        assert stored_summary["outcome_rationale"] == "User's question was fully answered with a concrete decision"
-        assert stored_summary["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        assert stored_summary["outcome_rationale"] == "User's question was fully answered with a concrete decision"  # noqa: E501
+        assert stored_summary["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"  # noqa: E501
         assert stored_summary["candidate_facts"][0]["category"] == "technical"
 
         # Verify candidate_facts passed through in emitted event
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
-        assert emitted.data["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        assert emitted.data["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"  # noqa: E501
 
     @pytest.mark.asyncio
     async def test_build_decision_context_with_decisions(self):
@@ -539,7 +544,11 @@ class TestEpisodeSummarizer:
     async def test_truncate_preserves_first_last(self):
         """008.4: First and last turns always kept."""
         summarizer, _, _, _llm = self._make_summarizer()
-        turns = ["User: First turn"] + [f"Assistant: Middle turn {i} " + "x" * 500 for i in range(20)] + ["User: Last turn"]
+        turns = (
+            ["User: First turn"]
+            + [f"Assistant: Middle turn {i} " + "x" * 500 for i in range(20)]
+            + ["User: Last turn"]
+        )
         transcript = "\n\n".join(turns)
         result = summarizer._truncate_transcript(transcript, max_chars=2000)
         assert result.startswith("User: First turn")
@@ -798,8 +807,16 @@ class TestFactExtractor:
                     "key_points": ["chose PostgreSQL"],
                 },
                 "candidate_facts": [
-                    {"subject": "project_database", "content": "Project uses PostgreSQL 17 with pgvector", "category": "technical"},
-                    {"subject": "Tim", "content": "Tim prefers direct architecture decisions", "category": "preference"},
+                    {
+                        "subject": "project_database",
+                        "content": "Project uses PostgreSQL 17 with pgvector",
+                        "category": "technical",
+                    },
+                    {
+                        "subject": "Tim",
+                        "content": "Tim prefers direct architecture decisions",
+                        "category": "preference",
+                    },
                 ],
             },
         )
@@ -833,7 +850,9 @@ class TestFactExtractor:
             data={
                 "episode_id": str(uuid4()),
                 "summary": {"summary": "Already known.", "key_points": []},
-                "candidate_facts": [{"subject": "project", "content": "Project uses PostgreSQL", "category": "technical"}],
+                "candidate_facts": [
+                    {"subject": "project", "content": "Project uses PostgreSQL", "category": "technical"},
+                ],
             },
         )
         await extractor.handle(event)
@@ -880,7 +899,10 @@ class TestFactExtractor:
             data={
                 "episode_id": str(uuid4()),
                 "summary": {"summary": "Many facts.", "key_points": []},
-                "candidate_facts": [{"subject": f"topic_{i}", "content": f"Fact number {i}", "category": "technical"} for i in range(8)],
+                "candidate_facts": [
+                    {"subject": f"topic_{i}", "content": f"Fact number {i}", "category": "technical"}
+                    for i in range(8)
+                ],
             },
         )
         await extractor.handle(event)
@@ -1273,7 +1295,11 @@ class TestSleepHandler:
             "gaps": [],
             "summary": "The agent primarily assists with Python development.",
             "facts": [
-                {"subject": "user_workflow", "content": "User primarily works with Python development", "category": "preference"},
+                {
+                    "subject": "user_workflow",
+                    "content": "User primarily works with Python development",
+                    "category": "preference",
+                },
                 {"subject": "testing_practice", "content": "Always write tests first", "category": "rule"},
             ],
         }
@@ -1349,8 +1375,7 @@ class TestReviewFixes:
     async def test_bus_none_backward_compat(self):
         """42. bus=None backward compat -- events still go to Brain.emit_event."""
         from nous.cognitive.layer import CognitiveLayer
-        from nous.cognitive.schemas import TurnContext, TurnResult
-        from nous.cognitive.schemas import FrameSelection
+        from nous.cognitive.schemas import FrameSelection, TurnResult
 
         brain = AsyncMock()
         brain.db = MagicMock()
@@ -1417,7 +1442,6 @@ class TestReviewFixes:
         handler = SleepHandler(brain, heart, settings, bus)
 
         # Make _run_sleep take some time
-        original_run_sleep = handler._run_sleep
         run_sleep_started = asyncio.Event()
         run_sleep_finished = asyncio.Event()
 

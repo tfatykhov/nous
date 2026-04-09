@@ -14,7 +14,6 @@ import httpx
 import pytest
 
 from nous.api.tools import ToolDispatcher
-from nous.config import Settings
 
 
 def _extract_text(result: dict) -> str:
@@ -280,7 +279,8 @@ class TestWebSearch:
         response = _mock_response(
             status_code=200,
             json_data=_brave_search_response([
-                {"title": "Python Docs", "url": "https://docs.python.org", "description": "Official Python documentation"},
+                {"title": "Python Docs", "url": "https://docs.python.org",
+                 "description": "Official Python documentation"},
                 {"title": "PyPI", "url": "https://pypi.org", "description": "Python Package Index"},
             ]),
         )

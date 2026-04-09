@@ -11,7 +11,6 @@ import pytest
 
 from nous.api.builtin_tools import (
     _MAX_FILE_SIZE,
-    _MAX_OUTPUT_CHARS,
     bash_tool,
     read_file_tool,
     write_file_tool,

@@ -1,12 +1,11 @@
 """Tests for ReversibleCache — Postgres-backed tool result cache."""
 
 import json
-import pytest
 
 from nous.api.tool_cache import (
-    compute_hash_key,
-    _keyword_filter,
     NON_REFETCHABLE_TOOLS,
+    _keyword_filter,
+    compute_hash_key,
 )
 from nous.api.tools import CACHE_RETRIEVE_TOOL_DEF
 

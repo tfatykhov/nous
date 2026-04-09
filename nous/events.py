@@ -13,9 +13,10 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable
+from typing import Any
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,10 @@ class EventBusStats:
     def total_dropped(self) -> int:
         return self._total_dropped
 
-    def record_event(self, event_type: str, handlers_invoked: int, handlers_failed: int, duration_ms: float, session_id: str | None = None) -> None:
+    def record_event(
+        self, event_type: str, handlers_invoked: int, handlers_failed: int,
+        duration_ms: float, session_id: str | None = None,
+    ) -> None:
         self._total_processed += 1
         self._event_counts[event_type] += 1
         self._recent.append(RecentEvent(
@@ -219,7 +223,7 @@ class EventBus:
             try:
                 event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 await self._dispatch(event)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break

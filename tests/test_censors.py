@@ -618,10 +618,13 @@ async def test_execute_rejects_malformed_action(heart, session):
 
 def test_turn_context_has_censor_injected_context():
     """TurnContext schema includes censor_injected_context field."""
-    from nous.cognitive.schemas import TurnContext, FrameSelection
+    from nous.cognitive.schemas import FrameSelection, TurnContext
     ctx = TurnContext(
         system_prompt="test",
-        frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
+        frame=FrameSelection(
+            frame_id="conversation", frame_name="Conversation",
+            description="test", confidence=1.0, match_method="pattern",
+        ),
         censor_injected_context={"censor-id-1": "[Censor recall: 3 results]..."},
     )
     assert ctx.censor_injected_context == {"censor-id-1": "[Censor recall: 3 results]..."}
@@ -629,10 +632,13 @@ def test_turn_context_has_censor_injected_context():
 
 def test_turn_context_censor_injected_context_default_empty():
     """censor_injected_context defaults to empty dict."""
-    from nous.cognitive.schemas import TurnContext, FrameSelection
+    from nous.cognitive.schemas import FrameSelection, TurnContext
     ctx = TurnContext(
         system_prompt="test",
-        frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
+        frame=FrameSelection(
+            frame_id="conversation", frame_name="Conversation",
+            description="test", confidence=1.0, match_method="pattern",
+        ),
     )
     assert ctx.censor_injected_context == {}
 
@@ -707,7 +713,10 @@ async def test_block_censor_with_action_enriches_reason(heart, session):
     """Block censor with trigger_action enriches the block reason with evidence."""
     from nous.heart.schemas import FactInput
     await heart.learn(
-        FactInput(content="Production database was accidentally deleted on 2025-12-01", category="incident", subject="production"),
+        FactInput(
+            content="Production database was accidentally deleted on 2025-12-01",
+            category="incident", subject="production",
+        ),
         session=session,
     )
 
@@ -753,8 +762,9 @@ async def test_block_censor_conditional_unblock(heart, session):
     detail = await heart.add_censor(inp, session=session)
     assert detail.unblock_pattern is not None
 
-    from nous.heart.censor_actions import CensorActionExecutor
     import re
+
+    from nous.heart.censor_actions import CensorActionExecutor
     executor = CensorActionExecutor(heart)
     matches = await heart.check_censors("delete production database", session=session)
     block_match = [m for m in matches if m.trigger_pattern == "delete.*production"][0]
@@ -898,6 +908,7 @@ async def test_update_censor_add_unblock_pattern(heart, session):
 def test_pre_turn_accepts_is_subtask_param():
     """pre_turn signature includes is_subtask parameter."""
     import inspect
+
     from nous.cognitive.layer import CognitiveLayer
     sig = inspect.signature(CognitiveLayer.pre_turn)
     assert "is_subtask" in sig.parameters
@@ -925,7 +936,10 @@ async def test_spawn_task_allows_unblocked_subtask(heart, session):
     """spawn_task censor check allows subtask when unblock_pattern matches."""
     from nous.heart.schemas import FactInput
     await heart.learn(
-        FactInput(content="Subtask-authorized operations: log-analysis, report-generation", category="access", subject="subtask-perms"),
+        FactInput(
+            content="Subtask-authorized operations: log-analysis, report-generation",
+            category="access", subject="subtask-perms",
+        ),
         session=session,
     )
 
@@ -943,8 +957,9 @@ async def test_spawn_task_allows_unblocked_subtask(heart, session):
     assert len(block_matches) >= 1
 
     # Verify unblock would work
-    from nous.heart.censor_actions import CensorActionExecutor
     import re
+
+    from nous.heart.censor_actions import CensorActionExecutor
     executor = CensorActionExecutor(heart)
     for match in block_matches:
         if match.trigger_action and match.unblock_pattern:

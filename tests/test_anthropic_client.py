@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from nous.api.anthropic_client import SdkAnthropicClient
 
 
@@ -18,7 +16,8 @@ class TestPayloadToKwargs:
             "max_tokens": 1000,
             "system": [{"type": "text", "text": "test"}],
             "messages": [{"role": "user", "content": "test"}],
-            "tools": [{"name": "test_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}}],
+            "tools": [{"name": "test_tool", "description": "test",
+                        "input_schema": {"type": "object", "properties": {}}}],
             "tool_choice": {"type": "tool", "name": "test_tool"},
         }
         kwargs = client._payload_to_kwargs(payload)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -11,8 +10,7 @@ import pytest
 
 from nous.config import Settings
 from nous.heart.schemas import RecallResult
-from nous.heart.search import cosine_similarity, mmr_rerank, batch_fetch_embeddings
-
+from nous.heart.search import batch_fetch_embeddings, cosine_similarity, mmr_rerank
 
 # --- Helpers ---
 

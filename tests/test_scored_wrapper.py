@@ -1,6 +1,6 @@
 """Tests for _ScoredWrapper and boost writeback."""
 
-from nous.heart.search import apply_frame_boost, _ScoredWrapper, _wrap_with_score
+from nous.heart.search import _ScoredWrapper, _wrap_with_score, apply_frame_boost
 
 
 class FakeItem:

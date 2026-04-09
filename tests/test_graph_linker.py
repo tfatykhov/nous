@@ -1,16 +1,15 @@
 """Tests for F022 Phase 2 — cross-type graph linking."""
-import pytest
-import pytest_asyncio
 from uuid import uuid4
 
+import pytest
+import pytest_asyncio
 from sqlalchemy import select, text
 
 from nous.brain.brain import Brain
-from nous.brain.graph_linker import common_template_text, GraphLinker
+from nous.brain.graph_linker import GraphLinker, common_template_text
 from nous.brain.schemas import RecordInput
 from nous.config import Settings
 from nous.storage.models import GraphEdge
-
 
 # ---------------------------------------------------------------------------
 # Unit tests (no DB required)

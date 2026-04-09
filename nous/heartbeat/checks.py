@@ -13,7 +13,6 @@ import imaplib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from typing import Any
 
 from nous.brain import Brain
@@ -237,7 +236,6 @@ class SelfInitiatedCheck(BaseCheck):
 
         findings: list[Finding] = []
         threshold = self.get_param_value("similarity_threshold")
-        lookback_days = int(self.get_param_value("lookback_days"))
         max_items = int(self.get_param_value("max_pending_items"))
 
         # Search facts using each prototype query
@@ -340,7 +338,6 @@ class SelfInitiatedCheck(BaseCheck):
             return findings
 
         max_items = int(self.get_param_value("max_pending_items"))
-        lookback_days = int(self.get_param_value("lookback_days"))
 
         # Search for facts with temporal language
         temporal_queries = ["by Friday", "next week", "deadline", "due date", "end of week", "before Monday"]
@@ -936,7 +933,6 @@ class BehaviorDriftCheck(BaseCheck):
         self.interval = getattr(settings, 'drift_detection_interval', 3600)
 
     async def run(self) -> CheckResult:
-        from nous.observability.snapshots import BehaviorSnapshot
         findings: list[Finding] = []
         try:
             snapshot = await self._capture_snapshot()
@@ -956,7 +952,10 @@ class BehaviorDriftCheck(BaseCheck):
                         summary=f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})",
                         urgency="high" if a.severity == "alert" else "normal",
                         needs_action=a.severity == "alert",
-                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score},
+                        raw_data={
+                            "metric": a.metric, "current": a.current,
+                            "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score,
+                        },
                     ))
             await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
@@ -981,7 +980,9 @@ class BehaviorDriftCheck(BaseCheck):
                     ))
                     row = result.fetchone()
                     if row:
-                        fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
+                        fact_count, episode_count, censor_count, procedure_count = (
+                            row.facts, row.episodes, row.censors, row.procedures
+                        )
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
 
@@ -994,9 +995,12 @@ class BehaviorDriftCheck(BaseCheck):
         prev = self._last_snapshot
         return BehaviorSnapshot(
             timestamp=now,
-            fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
-            episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
-            active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
+            fact_count=fact_count,
+            fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
+            episode_count=episode_count,
+            episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
+            active_censor_count=censor_count,
+            active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
             procedure_count=procedure_count, decision_count=0,
             events_processed=bus_data.get("total_processed", 0),
             events_dropped=bus_data.get("total_dropped", 0),
@@ -1026,6 +1030,7 @@ class BehaviorDriftCheck(BaseCheck):
             return []
         try:
             import json as _json
+
             from nous.observability.snapshots import BehaviorSnapshot
             async with self._db.session() as session:
                 from sqlalchemy import text

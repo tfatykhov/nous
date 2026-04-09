@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from nous.handlers import parse_llm_json, _extract_braces
+from nous.handlers import _extract_braces, parse_llm_json
 
 
 class TestExtractBraces:

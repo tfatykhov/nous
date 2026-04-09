@@ -254,7 +254,7 @@ def apply_frame_boost(
 
 # --- F030: MMR Diversity Re-Ranking ---
 
-import logging
+import logging  # noqa: E402
 
 _mmr_logger = logging.getLogger(__name__)
 

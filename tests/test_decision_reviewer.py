@@ -9,14 +9,13 @@ All tests use mocks (no real DB) to verify the public contract.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
 from nous.brain.schemas import (
-    CalibrationReport,
     DecisionDetail,
     DecisionSummary,
     RecordInput,
@@ -24,16 +23,13 @@ from nous.brain.schemas import (
 )
 from nous.config import Settings
 from nous.handlers.decision_reviewer import (
-    CONFIDENCE_THRESHOLD,
     DecisionReviewer,
     EpisodeSignal,
     ErrorSignal,
     FileExistsSignal,
     GitHubSignal,
-    ReviewResult,
 )
 from nous.storage.models import Decision
-
 
 # ---------------------------------------------------------------------------
 # Task 2: ORM Model — Decision accepts session_id and reviewer
@@ -98,9 +94,9 @@ class TestDecisionDetailReviewer:
 
     def test_decision_detail_includes_reviewer(self):
         """DecisionDetail should have a reviewer field."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         dd = DecisionDetail(
             id="00000000-0000-0000-0000-000000000001",
             agent_id="test",
@@ -209,7 +205,7 @@ class TestConfigAdditions:
 # Helpers for Tasks 9-15
 # ===========================================================================
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 
 def _make_decision(
@@ -558,8 +554,9 @@ class TestReviewEndpoint:
 
     def test_review_input_validates_outcome(self):
         """ReviewInput rejects invalid outcomes."""
-        from nous.brain.schemas import ReviewInput
         import pytest
+
+        from nous.brain.schemas import ReviewInput
 
         with pytest.raises(Exception):
             ReviewInput(outcome="invalid_value")
@@ -622,10 +619,10 @@ class TestRouteOrdering:
 
     def test_unreviewed_before_parameterized(self):
         """The /decisions/unreviewed route must come before /decisions/{id}."""
-        from starlette.routing import Route
 
         # Import and inspect the create_app function source
         import inspect
+
         from nous.api.rest import create_app
 
         source = inspect.getsource(create_app)

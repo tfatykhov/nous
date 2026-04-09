@@ -1,6 +1,6 @@
 """Unit tests for IntentClassifier — pure pattern matching, no DB needed."""
 
-from nous.cognitive.intent import IntentClassifier, RetrievalPlan
+from nous.cognitive.intent import IntentClassifier
 from nous.cognitive.schemas import FrameSelection
 
 

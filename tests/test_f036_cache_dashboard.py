@@ -4,13 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 from starlette.testclient import TestClient
 
 from nous.api.rest import create_app
 from nous.config import Settings
 from nous.observability.context_logger import ContextLogEntry
-
 
 # ---------------------------------------------------------------------------
 # Helpers

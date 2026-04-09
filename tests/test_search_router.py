@@ -1,9 +1,9 @@
 """Unit tests for SearchRouter — query classification and fallback chain."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
 
 
 def _make_provider(name: str, available: bool = True, results: list | None = None, fail: bool = False):
@@ -110,8 +110,8 @@ class TestProviderOrdering:
 class TestSearchWithFallback:
     @pytest.mark.asyncio
     async def test_primary_succeeds(self):
-        from nous.api.search_router import SearchRouter
         from nous.api.search_providers import SearchResult
+        from nous.api.search_router import SearchRouter
         results = [SearchResult(title="R1", url="https://x.com", snippet="S1", provider="tavily")]
         tavily = _make_provider("tavily", results=results)
         brave = _make_provider("brave")
@@ -125,8 +125,8 @@ class TestSearchWithFallback:
 
     @pytest.mark.asyncio
     async def test_fallback_on_primary_failure(self):
-        from nous.api.search_router import SearchRouter
         from nous.api.search_providers import SearchResult
+        from nous.api.search_router import SearchRouter
         results = [SearchResult(title="Brave R1", url="https://b.com", snippet="S", provider="brave")]
         tavily = _make_provider("tavily", fail=True)
         brave = _make_provider("brave", results=results)
@@ -151,8 +151,8 @@ class TestSearchWithFallback:
     @pytest.mark.asyncio
     async def test_fallback_on_empty_results(self):
         """If primary returns empty results, fall through to next provider."""
-        from nous.api.search_router import SearchRouter
         from nous.api.search_providers import SearchResult
+        from nous.api.search_router import SearchRouter
         tavily = _make_provider("tavily", results=[])  # empty
         results = [SearchResult(title="B", url="https://b.com", snippet="S", provider="brave")]
         brave = _make_provider("brave", results=results)

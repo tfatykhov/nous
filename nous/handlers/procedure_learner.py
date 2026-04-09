@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Prompts
 # ---------------------------------------------------------------------------
 
-_DECISION_CLUSTER_PROMPT = """You are analyzing a cluster of similar successful decisions to extract a reusable procedure.
+_DECISION_CLUSTER_PROMPT = """You are analyzing a cluster of similar successful decisions
+to extract a reusable procedure.
 
 Decisions in this cluster:
 {decisions}
@@ -49,7 +50,8 @@ Output ONLY valid JSON:
   "implementation_notes": ["<edge cases, caveats>"]
 }}"""
 
-_EPISODE_LESSON_PROMPT = """You are analyzing a cluster of similar lessons learned from episodes to extract a reusable procedure.
+_EPISODE_LESSON_PROMPT = """You are analyzing a cluster of similar lessons learned from episodes
+to extract a reusable procedure.
 
 Lessons in this cluster:
 {lessons}
@@ -468,7 +470,8 @@ class ProcedureLearner:
 
                 # Check weakness criteria
                 is_weak = False
-                if proc_detail.effectiveness is not None and proc_detail.effectiveness < self._settings.procedure_weakness_threshold:
+                if (proc_detail.effectiveness is not None
+                        and proc_detail.effectiveness < self._settings.procedure_weakness_threshold):
                     is_weak = True
                 if proc_detail.last_activated and proc_detail.last_activated < staleness_cutoff:
                     is_weak = True

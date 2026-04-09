@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,7 +19,6 @@ from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import (
     CheckResult,
-    EscalationConfig,
     Finding,
     FindingState,
     OutcomeSignal,
@@ -29,7 +27,6 @@ from nous.heartbeat.schemas import (
     TuningReport,
 )
 from nous.heartbeat.tuner import HeartbeatTuner
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -218,7 +215,7 @@ class TestParameterBounds:
         registry.register(check)
 
         tuner = HeartbeatTuner()
-        report = await tuner.tune(store, registry)
+        await tuner.tune(store, registry)
 
         # The param should still be at max (clamped)
         p = check.get_param("threshold")
@@ -235,7 +232,6 @@ class TestParameterBounds:
         check = TunableDummyCheck(param_value=5.0)
         registry.register(check)
 
-        old_value = check.get_param_value("threshold")
         tuner = HeartbeatTuner()
         report = await tuner.tune(store, registry)
 
@@ -305,7 +301,7 @@ class TestCrossCycleRollback:
         registry.register(check)
 
         tuner = HeartbeatTuner()
-        report1 = await tuner.tune(store, registry)
+        await tuner.tune(store, registry)
         adjusted_value = check.get_param_value("threshold")
         assert adjusted_value > 5.0  # was relaxed
 

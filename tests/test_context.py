@@ -241,7 +241,10 @@ async def test_build_includes_censors(context_engine, brain, heart, session):
     result = await context_engine.build("nous-default", sid, "do something dangerous", frame, session=session)
 
     # Censor should appear somewhere in the prompt
-    assert "dangerous operation" in result.system_prompt.lower() or any("censor" in s.label.lower() for s in result.sections)
+    assert (
+        "dangerous operation" in result.system_prompt.lower()
+        or any("censor" in s.label.lower() for s in result.sections)
+    )
 
 
 # ---------------------------------------------------------------------------

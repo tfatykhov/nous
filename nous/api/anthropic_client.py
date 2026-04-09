@@ -38,7 +38,8 @@ _HEADER_DELAY_MAX = 60.0
 # StreamEvent (moved from runner.py — used by both clients)
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: E402
+from datetime import UTC  # noqa: E402
 
 
 @dataclass
@@ -124,9 +125,9 @@ def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
                     return delay
             except ValueError:
                 try:
-                    from datetime import datetime, timezone
+                    from datetime import datetime
                     target = parsedate_to_datetime(retry_after)
-                    delay = (target - datetime.now(timezone.utc)).total_seconds()
+                    delay = (target - datetime.now(UTC)).total_seconds()
                     if 0 <= delay <= _HEADER_DELAY_MAX:
                         logger.info("Using Retry-After (date): %.1fs", delay)
                         return delay
@@ -451,7 +452,10 @@ class HttpxAnthropicClient:
             except httpx.TimeoutException as e:
                 if attempt < _MAX_RETRIES:
                     delay = _retry_delay(attempt)
-                    logger.warning("Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
+                    logger.warning(
+                        "Streaming API timeout, retry %d/%d in %.1fs: %s",
+                        attempt + 1, _MAX_RETRIES, delay, e,
+                    )
                     await asyncio.sleep(delay)
                     continue
                 yield StreamEvent(type="error", text=f"Stream timeout: {e}")

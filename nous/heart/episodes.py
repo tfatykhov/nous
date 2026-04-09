@@ -14,13 +14,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from nous.utils import text_overlap
-
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
 from nous.storage.models import Episode, EpisodeDecision, EpisodeProcedure, Event
+from nous.utils import text_overlap
 
 logger = logging.getLogger(__name__)
 

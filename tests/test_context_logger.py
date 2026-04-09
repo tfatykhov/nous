@@ -7,7 +7,6 @@ from nous.observability.context_logger import (
     parse_system_sections,
 )
 
-
 # ------------------------------------------------------------------
 # parse_system_sections
 # ------------------------------------------------------------------

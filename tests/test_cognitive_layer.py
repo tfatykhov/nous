@@ -738,7 +738,7 @@ async def test_task_synthesis_empty_current_task_fallback(cognitive, heart, sess
     sid = f"test-task-synth-{uuid.uuid4().hex[:8]}"
 
     # First turn with substantive input sets the task
-    ctx1 = await cognitive.pre_turn(
+    await cognitive.pre_turn(
         "nous-default", sid, "Help me design a database schema for users",
         session=session,
     )
@@ -759,7 +759,7 @@ async def test_task_synthesis_empty_current_task_fallback(cognitive, heart, sess
     assert not wm_empty.current_task
 
     # Second turn with short "yes" and conversation history
-    ctx2 = await cognitive.pre_turn(
+    await cognitive.pre_turn(
         "nous-default", sid, "yes",
         session=session,
         conversation_messages=[

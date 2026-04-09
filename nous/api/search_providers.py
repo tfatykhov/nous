@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
@@ -233,7 +233,7 @@ class ExaProvider:
             days_map = {"day": 1, "week": 7, "month": 30}
             days = days_map.get(freshness)
             if days:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                cutoff = datetime.now(UTC) - timedelta(days=days)
                 payload["start_published_date"] = cutoff.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         response = await http.post(

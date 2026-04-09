@@ -3,11 +3,9 @@
 Tests use mocks to verify wiring without requiring Postgres.
 """
 
-from dataclasses import dataclass, field
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fix 1: Brain._emit_event session_id
@@ -87,8 +85,9 @@ class TestTelegramUserIdentity:
 
     def test_chat_streaming_accepts_user_params(self):
         """_chat_streaming signature accepts user_id and user_display_name."""
-        from nous.telegram_bot import NousTelegramBot
         import inspect
+
+        from nous.telegram_bot import NousTelegramBot
 
         sig = inspect.signature(NousTelegramBot._chat_streaming)
         params = list(sig.parameters.keys())
@@ -160,7 +159,6 @@ class TestLastActiveUpdate:
 
     def test_layer_imports_agent_model(self):
         """layer.py imports Agent model for last_active update."""
-        from nous.cognitive.layer import CognitiveLayer
         from nous.storage.models import Agent
         # If import works, the wiring is in place
         assert Agent is not None

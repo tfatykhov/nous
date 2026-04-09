@@ -13,12 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
 from nous.utils import text_overlap
-
 
 # ---------------------------------------------------------------
 # text_overlap utility
@@ -534,8 +533,6 @@ class TestInformationalDetection:
         """Minimal CognitiveLayer for testing _is_informational."""
         from nous.cognitive.layer import CognitiveLayer
 
-        brain = MagicMock()
-        heart = MagicMock()
         settings = MagicMock()
         settings.agent_id = "test"
         settings.identity_prompt = ""
@@ -633,14 +630,20 @@ class TestInformationalDetection:
     def test_list_dominated_detected(self, layer):
         """Response that is mostly a list -> informational."""
         result = MockTurnResult(
-            response_text="Available endpoints:\n- GET /status\n- POST /chat\n- DELETE /chat/{id}\n- GET /health\n- GET /facts",
+            response_text=(
+                "Available endpoints:\n- GET /status\n- POST /chat"
+                "\n- DELETE /chat/{id}\n- GET /health\n- GET /facts"
+            ),
         )
         assert layer._is_informational(result) is True
 
     def test_real_decision_not_filtered(self, layer):
         """Response with decision language -> NOT informational."""
         result = MockTurnResult(
-            response_text="I decided to use PostgreSQL over Redis because it supports complex queries and we need ACID guarantees for the decision log.",
+            response_text=(
+                "I decided to use PostgreSQL over Redis because it supports"
+                " complex queries and we need ACID guarantees for the decision log."
+            ),
         )
         assert layer._is_informational(result) is False
 
@@ -719,8 +722,14 @@ class TestDecisionRecallDedup:
     def test_different_outcomes_preserved(self, context_engine):
         """Same description, different outcomes -> both kept."""
         decisions = [
-            MockDecision(description="Deploy service to production", outcome="success", created_at="2026-02-25T02:00:00"),
-            MockDecision(description="Deploy service to production", outcome="failure", created_at="2026-02-25T01:00:00"),
+            MockDecision(
+                description="Deploy service to production", outcome="success",
+                created_at="2026-02-25T02:00:00",
+            ),
+            MockDecision(
+                description="Deploy service to production", outcome="failure",
+                created_at="2026-02-25T01:00:00",
+            ),
         ]
         result = context_engine._dedup_decisions(decisions)
         assert len(result) == 2

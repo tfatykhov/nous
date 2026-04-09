@@ -136,7 +136,7 @@ async def test_send_with_caption(tmp_png, mock_settings, mock_http):
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_png, caption="Weekly chart")
+    await send_file(file_path=tmp_png, caption="Weekly chart")
 
     call_args = mock_http.post.call_args
     assert call_args.kwargs["data"]["caption"] == "Weekly chart"
@@ -148,7 +148,7 @@ async def test_send_custom_chat_id(tmp_png, mock_settings, mock_http):
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_png, chat_id="99999")
+    await send_file(file_path=tmp_png, chat_id="99999")
 
     call_args = mock_http.post.call_args
     assert call_args.kwargs["data"]["chat_id"] == "99999"
@@ -193,7 +193,7 @@ async def test_send_svg_as_document(tmp_svg, mock_settings, mock_http):
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_svg)
+    await send_file(file_path=tmp_svg)
 
     call_args = mock_http.post.call_args
     assert "sendDocument" in call_args[0][0]
@@ -219,7 +219,7 @@ async def test_send_file_no_cleanup_by_default(tmp_png, mock_settings, mock_http
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_png)
+    await send_file(file_path=tmp_png)
 
     assert os.path.exists(tmp_png)
 

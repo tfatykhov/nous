@@ -6,8 +6,8 @@ import asyncio
 from unittest.mock import AsyncMock
 
 from nous.api.compaction import (
-    ConversationCompactor,
     _SECTION_PATTERNS,
+    ConversationCompactor,
 )
 from nous.api.models import ApiResponse, Conversation, Message
 from nous.config import Settings
@@ -377,9 +377,9 @@ class TestSerializeForSummary:
 class TestFormatMessages:
     def test_compaction_disabled_uses_cap(self):
         """When compaction disabled, uses MAX_HISTORY_MESSAGES cap."""
-        from nous.api.runner import AgentRunner, MAX_HISTORY_MESSAGES
+        from nous.api.runner import MAX_HISTORY_MESSAGES
 
-        settings = _make_settings(NOUS_COMPACTION_ENABLED="false")
+        _make_settings(NOUS_COMPACTION_ENABLED="false")
         # Can't fully instantiate AgentRunner without deps, so test the method directly
         conv = _make_conversation(20)  # 40 messages
         # Simulate: would return last MAX_HISTORY_MESSAGES

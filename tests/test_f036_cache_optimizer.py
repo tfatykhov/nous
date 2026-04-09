@@ -1,6 +1,6 @@
 """Tests for F036 CacheBreakDetector."""
 
-from nous.api.cache_optimizer import CacheBreakDetector, CacheBreakInfo, _hash
+from nous.api.cache_optimizer import CacheBreakDetector, _hash
 
 
 def test_first_call_returns_none() -> None:

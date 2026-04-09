@@ -88,13 +88,19 @@ class TestOutcomeDetector:
         )
 
         with patch("nous.handlers.outcome_detector.call_background_llm", new_callable=AsyncMock) as mock_llm:
-            mock_llm.return_value = '{"signals": [{"type": "corrected", "confidence": 0.9, "evidence": "User said no actually"}]}'
+            mock_llm.return_value = (
+                '{"signals": [{"type": "corrected", "confidence": 0.9,'
+                ' "evidence": "User said no actually"}]}'
+            )
 
             event = Event(
                 type="session_ended", agent_id="test",
                 data={
                     "episode_id": str(uuid.uuid4()),
-                    "transcript": "User: Do X\nAssistant: Did Y\nUser: No, actually I meant X not Y\nAssistant: Sorry, doing X now",
+                    "transcript": (
+                        "User: Do X\nAssistant: Did Y"
+                        "\nUser: No, actually I meant X not Y\nAssistant: Sorry, doing X now"
+                    ),
                 },
             )
             await detector.handle(event)

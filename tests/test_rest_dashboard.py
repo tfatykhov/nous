@@ -1,6 +1,5 @@
 """Integration tests for F021 dashboard endpoint extensions."""
 
-import uuid
 
 import pytest
 import pytest_asyncio
@@ -9,7 +8,6 @@ from httpx import ASGITransport, AsyncClient
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.layer import CognitiveLayer
-from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.heart import CensorInput, FactInput
 
 

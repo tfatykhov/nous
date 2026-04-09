@@ -11,14 +11,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nous.heart.admission import (
-    DEFAULT_TYPE_PRIORS,
     DEFAULT_WEIGHTS,
     AdmissionConfig,
     AdmissionController,
-    AdmissionResult,
 )
 from nous.heart.schemas import FactInput
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -336,7 +333,7 @@ class TestUtilityLLM:
         )
         await ctrl._score_utility(_fact())
         call_args = mock_client.complete.call_args
-        prompt = call_args.kwargs.get("prompt", "") or call_args.args[0] if call_args.args else ""
+        _ = call_args.kwargs.get("prompt", "") or call_args.args[0] if call_args.args else ""
         # Check for calibration anchors
         assert "0.9" in str(call_args) or "birthday" in str(call_args)
 

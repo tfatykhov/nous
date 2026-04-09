@@ -11,15 +11,12 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nous.events import Event, EventBus
-from nous.heart.schemas import FactInput
-
 
 # ---------------------------------------------------------------------------
 # Helpers (same patterns as test_event_bus.py)
@@ -415,15 +412,17 @@ class TestExcInfo:
         """Prune is a stub so it's hard to make it fail — but we test the structure."""
         # The prune phase is a stub that just logs debug, so it won't fail normally.
         # We verify the code path exists by checking the handler has the right pattern.
-        from nous.handlers.sleep_handler import SleepHandler
         import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
         source = inspect.getsource(SleepHandler._phase_prune)
         assert "exc_info=True" in source
 
     @pytest.mark.asyncio
     async def test_compress_logs_with_exc_info(self):
-        from nous.handlers.sleep_handler import SleepHandler
         import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
         source = inspect.getsource(SleepHandler._phase_compress)
         assert "exc_info=True" in source
 
@@ -458,8 +457,9 @@ class TestExcInfo:
     @pytest.mark.asyncio
     async def test_reflect_exception_simplified(self):
         """Verify the except clause is 'except Exception:' not 'except (json.JSONDecodeError, Exception):'."""
-        from nous.handlers.sleep_handler import SleepHandler
         import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
         source = inspect.getsource(SleepHandler._phase_reflect)
         assert "json.JSONDecodeError" not in source
 

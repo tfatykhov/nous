@@ -5,7 +5,7 @@ against a real Postgres database via the session fixture.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -42,7 +42,7 @@ async def _insert_decision(session, *, category="architecture", stakes="low",
                            confidence=0.8, outcome="success", days_ago=0):
     """Insert a test decision and return its id."""
     did = uuid.uuid4()
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO brain.decisions (id, agent_id, description, confidence,
@@ -61,7 +61,7 @@ async def _insert_decision(session, *, category="architecture", stakes="low",
 async def _insert_fact(session, *, category="preference", days_ago=0):
     """Insert a test fact and return its id."""
     fid = uuid.uuid4()
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO heart.facts (id, agent_id, content, category, created_at)
@@ -78,7 +78,7 @@ async def _insert_fact(session, *, category="preference", days_ago=0):
 async def _insert_episode(session, *, frame="task", days_ago=0):
     """Insert a test episode and return its id."""
     eid = uuid.uuid4()
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO heart.episodes (id, agent_id, summary, frame_used, created_at, started_at)
@@ -96,7 +96,7 @@ async def _insert_edge(session, source_id, target_id, *,
                        source_type="decision", target_type="fact",
                        relation="related_to", days_ago=0):
     """Insert a graph edge."""
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO brain.graph_edges
@@ -115,7 +115,7 @@ async def _insert_edge(session, source_id, target_id, *,
 async def _insert_event(session, event_type="turn_completed", days_ago=0, data=None):
     """Insert an event."""
     import json as _json
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO nous_system.events (id, agent_id, event_type, data, created_at)
@@ -377,7 +377,7 @@ class TestGetActivityData:
 
     @pytest.mark.asyncio
     async def test_next_fires(self, session):
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         await _insert_schedule(session, task="task-a",
                                next_fire_at=now + timedelta(hours=2))
         await _insert_schedule(session, task="task-b",

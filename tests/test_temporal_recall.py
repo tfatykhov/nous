@@ -16,8 +16,6 @@ import pytest
 from nous.heart.schemas import EpisodeSummary
 from nous.storage.models import Episode as EpisodeORM
 
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -403,11 +401,12 @@ class TestRecallRecentTool:
 
     @pytest.mark.asyncio
     async def test_recall_recent_returns_formatted_episodes(self):
+        from datetime import UTC, datetime
         from unittest.mock import AsyncMock, MagicMock
-        from nous.heart.schemas import EpisodeSummary
-        from nous.api.tools import create_nous_tools
-        from datetime import datetime, UTC
         from uuid import uuid4
+
+        from nous.api.tools import create_nous_tools
+        from nous.heart.schemas import EpisodeSummary
 
         mock_brain = MagicMock()
         mock_heart = MagicMock()
@@ -436,6 +435,7 @@ class TestRecallRecentTool:
     @pytest.mark.asyncio
     async def test_recall_recent_empty(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from nous.api.tools import create_nous_tools
 
         mock_brain = MagicMock()
@@ -451,6 +451,7 @@ class TestRecallRecentTool:
     @pytest.mark.asyncio
     async def test_recall_recent_passes_hours_and_limit(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from nous.api.tools import create_nous_tools
 
         mock_brain = MagicMock()
@@ -533,8 +534,8 @@ class TestTemporalRecencyWiring:
 
     def test_bare_recap_without_temporal_words_still_boosts(self):
         """Bare 'recap' or 'catch me up' should trigger budget boost even without temporal words."""
-        from nous.cognitive.layer import _is_recap_query
         from nous.cognitive.intent import IntentClassifier
+        from nous.cognitive.layer import _is_recap_query
         from nous.cognitive.schemas import FrameSelection
 
         # "recap" has no temporal signal words like "recently"
@@ -603,6 +604,7 @@ class TestBudgetBoost:
     @pytest.mark.asyncio
     async def test_temporal_boost_includes_summaries(self, mock_heart, mock_brain, settings, frame):
         from unittest.mock import AsyncMock
+
         from nous.cognitive.context import ContextEngine
 
         episodes = [
@@ -631,6 +633,7 @@ class TestBudgetBoost:
     @pytest.mark.asyncio
     async def test_no_boost_excludes_summaries(self, mock_heart, mock_brain, settings, frame):
         from unittest.mock import AsyncMock
+
         from nous.cognitive.context import ContextEngine
 
         episodes = [

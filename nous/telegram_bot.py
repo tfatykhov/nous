@@ -37,8 +37,8 @@ SESSION_TTL_SECONDS = 1800
 TG_MAX_LEN = 4096
 
 # Regex patterns for markdown sanitization
-import html as html_module
-import re
+import html as html_module  # noqa: E402
+import re  # noqa: E402
 
 _FENCED_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)  # |---|---|
@@ -554,7 +554,11 @@ class NousTelegramBot:
 
         # Forward to Nous (streaming) — 007.4: pass user identity
         user_display_name = message.get("from", {}).get("first_name")
-        await self._chat_streaming(chat_id, text, user_id=str(user_id) if user_id else None, user_display_name=user_display_name)
+        await self._chat_streaming(
+            chat_id, text,
+            user_id=str(user_id) if user_id else None,
+            user_display_name=user_display_name,
+        )
 
     async def _show_identity(self, chat_id: int) -> None:
         """Show current agent identity via REST API."""

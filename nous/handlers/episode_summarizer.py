@@ -14,11 +14,11 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from nous.brain.brain import Brain
+from nous.brain.graph_linker import GraphLinker
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, parse_llm_json
-from nous.brain.brain import Brain
-from nous.brain.graph_linker import GraphLinker
 from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
@@ -153,6 +153,7 @@ class EpisodeSummarizer:
 
                         # Get facts extracted from this episode
                         from sqlalchemy import select as sa_select
+
                         from nous.storage.models import Fact
                         fact_result = await link_session.execute(
                             sa_select(Fact.id).where(Fact.source_episode_id == UUID(episode_id))

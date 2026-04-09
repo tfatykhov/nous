@@ -23,7 +23,6 @@ import pytest
 from nous.cognitive.action_gate import ActionGate, GateResult
 from nous.cognitive.execution_ledger import ExecutedAction, ExecutionLedger
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

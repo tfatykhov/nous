@@ -35,10 +35,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nous.heartbeat.dynamic import ALLOWED_TOOLS, DynamicCheck, DynamicCheckLoader
+from nous.heartbeat.dynamic import DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.registry import CheckRegistry
-from nous.heartbeat.schemas import CheckResult, Finding
-
+from nous.heartbeat.schemas import CheckResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -374,7 +373,10 @@ class TestDynamicCheckParsing:
     def test_parse_valid_json(self):
         """20. Clean JSON response yields findings list."""
         check = _make_dynamic_check(name="parser_test")
-        response = '{"has_findings": true, "findings": [{"summary": "Issue found", "urgency": "high", "needs_action": true}]}'
+        response = (
+            '{"has_findings": true, "findings": [{"summary": "Issue found",'
+            ' "urgency": "high", "needs_action": true}]}'
+        )
         findings = check._parse_findings(response)
 
         assert len(findings) == 1
@@ -401,7 +403,10 @@ class TestDynamicCheckParsing:
     def test_parse_urgency_validation(self):
         """23. Invalid urgency defaults to 'normal'."""
         check = _make_dynamic_check()
-        response = '{"has_findings": true, "findings": [{"summary": "Test", "urgency": "critical", "needs_action": false}]}'
+        response = (
+            '{"has_findings": true, "findings": [{"summary": "Test",'
+            ' "urgency": "critical", "needs_action": false}]}'
+        )
         findings = check._parse_findings(response)
 
         assert len(findings) == 1
@@ -536,7 +541,7 @@ class TestDynamicCheckLoader:
         rows = [_mock_db_row(id="id-1", name="health", prompt="Overlapping check")]
         loader._fetch_enabled = AsyncMock(return_value=rows)
 
-        count = await loader.sync()
+        await loader.sync()
 
         # The permanent check should still be the original
         assert registry.get_check("health") is permanent_check
@@ -939,7 +944,6 @@ class TestHeartbeatRunnerDynamic:
         # Simulate being at tick count that's a multiple of sync_ticks
         runner._tick_count = 4  # _tick increments to 5
 
-        reg = runner._registry
         # No due checks, just test the sync path
         await runner._tick()
 

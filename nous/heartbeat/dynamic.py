@@ -180,7 +180,11 @@ class DynamicCheck(BaseCheck):
 
     def signature(self) -> str:
         """Return a signature string for change detection."""
-        return f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"
+        return (
+            f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}"
+            f"|{self.urgent_override}|{self._cron_expr}"
+            f"|{self.on_complete_prompt}|{self.on_complete_tools}"
+        )
 
 
 class DynamicCheckLoader:

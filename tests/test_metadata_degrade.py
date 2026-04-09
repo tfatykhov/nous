@@ -1,6 +1,7 @@
 """Tests for 4-tier pruning with metadata degradation (F016 Phase 1)."""
 
 import pytest
+
 from nous.api.compaction import ConversationCompactor
 from nous.config import Settings
 
@@ -80,7 +81,7 @@ class TestFourTierPruning:
         for i in range(n_tool_msgs):
             asst, user = _make_tool_msg(
                 tool_name, {"command": f"cmd_{i}"},
-                f"import os\n" + f"line {i}\n" * (content_size // 10),
+                "import os\n" + f"line {i}\n" * (content_size // 10),
                 tool_use_id=f"tu_{i}",
             )
             messages.extend([asst, user])

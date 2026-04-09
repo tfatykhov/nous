@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
 
-class OutcomeSignalType(str, Enum):
+class OutcomeSignalType(StrEnum):
     CORRECTED = "corrected"
     COMPLETED = "completed"
     PRAISED = "praised"
@@ -27,7 +27,7 @@ class RubricDimension(BaseModel):
     max_weight: float = 0.40
 
     @model_validator(mode="after")
-    def weight_in_bounds(self) -> "RubricDimension":
+    def weight_in_bounds(self) -> RubricDimension:
         if self.weight < self.min_weight or self.weight > self.max_weight:
             raise ValueError(
                 f"weight {self.weight} outside [{self.min_weight}, {self.max_weight}]"

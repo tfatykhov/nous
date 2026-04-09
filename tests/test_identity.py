@@ -10,19 +10,15 @@ Tests cover:
 - Protocol constants
 """
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from nous.identity.manager import IdentityManager, SECTIONS, VALID_SECTIONS
+from nous.identity.manager import SECTIONS, VALID_SECTIONS, IdentityManager
 from nous.identity.protocol import (
-    INITIATION_PROMPT,
-    UPGRADE_INITIATION_PROMPT,
-    STORE_IDENTITY_SCHEMA,
     COMPLETE_INITIATION_SCHEMA,
+    INITIATION_PROMPT,
+    STORE_IDENTITY_SCHEMA,
+    UPGRADE_INITIATION_PROMPT,
 )
-
 
 # ---------------------------------------------------------------------------
 # IdentityManager unit tests (no DB)

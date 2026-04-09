@@ -2,7 +2,7 @@
 
 from unittest.mock import AsyncMock
 
-from nous.cognitive.context import ContextEngine, RELEVANCE_MIN_RESULTS, RELEVANCE_MAX_RESULTS
+from nous.cognitive.context import RELEVANCE_MAX_RESULTS, RELEVANCE_MIN_RESULTS, ContextEngine
 from nous.config import Settings
 
 

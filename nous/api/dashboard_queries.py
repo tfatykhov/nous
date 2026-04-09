@@ -7,10 +7,9 @@ for JSON serialisation.  They never manage sessions themselves.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any
-
 from collections import Counter, defaultdict
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
     """Return dashboard-level aggregates: deltas, distributions, timeseries, density."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     seven_days_ago = now - timedelta(days=7)
     thirty_days_ago = now - timedelta(days=30)
 
@@ -361,7 +360,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
 
     # Brier score over time: compute running Brier from reviewed decisions
     # Brier score = mean of (confidence - outcome)^2 where outcome is 1 for success, 0 otherwise
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
     result = await session.execute(
         text("""
@@ -442,7 +441,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
 
 async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 168) -> dict:
     """Return activity events + censor/schedule/sleep stats for the dashboard."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(hours=hours)
     seven_days_ago = now - timedelta(days=7)
 
@@ -607,7 +606,7 @@ async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 1
 
 async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
     """Return graph health metrics: edge creation, degree distribution, density, orphans."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
 
     # Daily edge creation with auto/manual split (last 30 days)
@@ -859,7 +858,7 @@ async def get_admission_data(
     category: str | None = None,
 ) -> dict:
     """Return admission analytics: summary, histogram, dimensions, breakdowns, trends."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(days=days)
 
     # Base filter — all queries add active=true to exclude superseded facts
@@ -876,9 +875,17 @@ async def get_admission_data(
     result = await session.execute(
         text(f"""
             SELECT
-                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL) AS total_scored,
-                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL AND admission_score >= :threshold) AS admitted,
-                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL AND admission_score < :threshold) AS would_reject,
+                COUNT(*) FILTER (
+                    WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL
+                ) AS total_scored,
+                COUNT(*) FILTER (
+                    WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL
+                      AND admission_score >= :threshold
+                ) AS admitted,
+                COUNT(*) FILTER (
+                    WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL
+                      AND admission_score < :threshold
+                ) AS would_reject,
                 COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NULL) AS bypassed,
                 AVG(admission_score) FILTER (WHERE admission_scores IS NOT NULL) AS avg_score
             FROM heart.facts
@@ -896,8 +903,14 @@ async def get_admission_data(
         "rejection_rate": round(
             (row.would_reject or 0) / max(row.total_scored or 1, 1), 3
         ),
-        "threshold_note": f"Counts based on current threshold ({threshold}). Actual scores were computed at admission time.",
-        "_pre_migration_note": "Facts scored before migration 019 have admission_scores=NULL and are excluded from dimension/bypass stats.",
+        "threshold_note": (
+            f"Counts based on current threshold ({threshold})."
+            " Actual scores were computed at admission time."
+        ),
+        "_pre_migration_note": (
+            "Facts scored before migration 019 have admission_scores=NULL"
+            " and are excluded from dimension/bypass stats."
+        ),
     }
 
     # ── Score distribution (0.05 buckets, cap at 0.95 for score=1.0) ──
@@ -926,7 +939,10 @@ async def get_admission_data(
     # ── Per-dimension stats (JSONB extraction) ──
     dimensions = ["utility", "confidence", "novelty", "recency", "type_prior"]
     dimension_stats: dict = {
-        "_note": "Excludes bypassed facts (admission_scores IS NULL). Only available for facts scored after JSONB migration.",
+        "_note": (
+            "Excludes bypassed facts (admission_scores IS NULL)."
+            " Only available for facts scored after JSONB migration."
+        ),
     }
     for dim in dimensions:
         result = await session.execute(
@@ -1012,7 +1028,10 @@ async def get_admission_data(
     }
 
     # ── Daily trend (respects source/category filters) ──
-    trend_join = "ON CAST(f.created_at AS date) = CAST(d AS date) AND f.agent_id = :agent_id AND f.admission_score IS NOT NULL AND f.active = true"
+    trend_join = (
+        "ON CAST(f.created_at AS date) = CAST(d AS date)"
+        " AND f.agent_id = :agent_id AND f.admission_score IS NOT NULL AND f.active = true"
+    )
     trend_params: dict = {"agent_id": agent_id, "since": since, "now": now, "threshold": threshold}
     if source:
         trend_join += " AND f.source = :source"
@@ -1026,8 +1045,12 @@ async def get_admission_data(
             SELECT
                 CAST(d AS date) AS day,
                 COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL) AS scored,
-                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL AND f.admission_score >= :threshold) AS admitted,
-                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL AND f.admission_score < :threshold) AS rejected,
+                COUNT(f.id) FILTER (
+                    WHERE f.admission_scores IS NOT NULL AND f.admission_score >= :threshold
+                ) AS admitted,
+                COUNT(f.id) FILTER (
+                    WHERE f.admission_scores IS NOT NULL AND f.admission_score < :threshold
+                ) AS rejected,
                 COUNT(f.id) FILTER (WHERE f.admission_scores IS NULL AND f.admission_score IS NOT NULL) AS bypassed,
                 AVG(f.admission_score) FILTER (WHERE f.admission_scores IS NOT NULL) AS avg_score
             FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
@@ -1090,7 +1113,7 @@ async def get_admission_rejected(
     order: str = "asc",
 ) -> dict:
     """Return paginated list of facts below admission threshold."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(days=days)
 
     # Sort allowlist — includes spec alias "composite_score"
@@ -1163,7 +1186,7 @@ async def get_rubric_dashboard_data(
     session: AsyncSession, agent_id: str, settings: Any = None,
 ) -> dict:
     """Return rubric dashboard data: active rubric, signals, history, correlations, config."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
 
     # Active rubric
@@ -1334,7 +1357,7 @@ async def get_heartbeat_dashboard_data(
     session: AsyncSession, agent_id: str, hours: int = 24
 ) -> dict:
     """Return heartbeat tick history, cognitive sessions, and findings aggregates."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(hours=hours)
     seven_days_ago = now - timedelta(days=7)
 

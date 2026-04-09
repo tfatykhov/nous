@@ -1,12 +1,12 @@
 """Tests for dual-track procedure loading (issue #229)."""
-import pytest
-import pytest_asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import pytest
+
 from nous.cognitive.context import ContextEngine
-from nous.cognitive.schemas import BuildResult, ContextBudget, FrameSelection
+from nous.cognitive.schemas import BuildResult, FrameSelection
 from nous.config import Settings
 from nous.heart.schemas import ProcedureDetail, ProcedureSummary
 
@@ -38,7 +38,7 @@ def _make_procedure_detail(name: str, domain: str = "test") -> ProcedureDetail:
         effectiveness=None,
         tags=[],
         active=True,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -304,7 +304,7 @@ class TestDualTrackLogOnly:
         # get_procedure_by_name WAS called (resolves)
         heart.get_procedure_by_name.assert_called_once()
         # But the skill should NOT appear in recalled IDs (not injected)
-        proc_ids = result.recalled_ids.get("procedure", [])
+        _ = result.recalled_ids.get("procedure", [])
         proc_names_in_map = [
             v for v in result.recalled_content_map.values()
             if v == "log-only-skill"

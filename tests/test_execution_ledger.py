@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from nous.cognitive.execution_ledger import (
     EXTERNAL_TOOLS,
     IRREVERSIBLE_TOOLS,
@@ -37,7 +35,6 @@ from nous.cognitive.execution_ledger import (
     classify_side_effect,
     redact_key_args,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

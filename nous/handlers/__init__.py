@@ -11,8 +11,6 @@ import logging
 import re
 from typing import Any, Protocol, runtime_checkable
 
-from nous.config import Settings
-
 logger = logging.getLogger(__name__)
 
 

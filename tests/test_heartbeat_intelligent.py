@@ -1,25 +1,27 @@
 """Tests for F034.2 Intelligent Checks — embedding search, LLM email, drive context.
 
 20 test cases across 6 test classes:
-- TestHealthCheckTunableParams (3): params initialized, get_param returns TunableParam, set_param respects bounds
-- TestSelfInitiatedEmbedding (4): with embeddings uses cosine, without embeddings falls back, prototype caching, max_pending_items limit
+- TestHealthCheckTunableParams (3): params initialized, get_param returns TunableParam,
+  set_param respects bounds
+- TestSelfInitiatedEmbedding (4): with embeddings uses cosine, without embeddings falls back,
+  prototype caching, max_pending_items limit
 - TestSelfInitiatedPromiseTracking (2): finds ongoing episodes, skips completed
-- TestEmailLLMClassification (4): LLM available classifies correctly, LLM unavailable falls back, sender reputation bypasses LLM, budget check gates LLM
-- TestEmailSenderReputation (3): builds reputation over time, reputation decays after 30 days, unknown senders get full classification
+- TestEmailLLMClassification (4): LLM available classifies correctly, LLM unavailable falls back,
+  sender reputation bypasses LLM, budget check gates LLM
+- TestEmailSenderReputation (3): builds reputation over time, reputation decays after 30 days,
+  unknown senders get full classification
 - TestDriveSignificance (3): new file=high, own edit=normal, folder mapping enriches summary
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nous.heartbeat.checks import DriveCheck, EmailCheck, HealthCheck, SelfInitiatedCheck
-from nous.heartbeat.registry import BaseCheck
-from nous.heartbeat.schemas import CheckResult, Finding, TunableParam
-
+from nous.heartbeat.schemas import TunableParam
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -332,7 +334,8 @@ class TestEmailLLMClassification:
         """When budget_check returns False, LLM is not called."""
         settings = _mock_settings(email_user="test@example.com", email_password="pass")
         llm_callable = AsyncMock(return_value="actionable")
-        budget_check = lambda: False
+        def budget_check():
+            return False
         check = EmailCheck(settings, llm_callable=llm_callable, budget_check=budget_check)
 
         result = await check._classify_email("Some email", "someone@example.com")

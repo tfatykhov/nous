@@ -23,9 +23,9 @@ from nous.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import CheckRegistry
-from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -239,7 +239,7 @@ class HeartbeatRunner:
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 check.mark_failure()
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
@@ -754,6 +754,7 @@ class HeartbeatRunner:
         try:
             # Query last heartbeat event from DB
             from sqlalchemy import select
+
             from nous.storage.models import Event as EventModel
 
             async with self._heart.db.session() as session:

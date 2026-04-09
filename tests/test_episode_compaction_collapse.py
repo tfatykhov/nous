@@ -4,9 +4,10 @@ Unit tests for EpisodeManager.bump_compaction_count().
 CognitiveLayer.pre_compaction tests live in test_compaction_phase3.py::TestEpisodeBoundary.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
+
+import pytest
 
 from nous.heart.episodes import EpisodeManager
 

@@ -1,6 +1,6 @@
 """Tests for F024 Phase 3b rubric schemas and models."""
 import uuid
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 import pytest
 
@@ -60,7 +60,7 @@ class TestRubricDimension:
 
 class TestRubricVersionDetail:
     def test_version_detail(self):
-        from nous.cognitive.rubric_schemas import RubricVersionDetail, RubricDimension
+        from nous.cognitive.rubric_schemas import RubricDimension, RubricVersionDetail
         dim = RubricDimension(
             name="Recall", weight=0.25,
             description="test", scoring_criteria="test",
@@ -80,7 +80,7 @@ class TestRubricVersionDetail:
 
 class TestOutcomeSignalDetail:
     def test_signal_types(self):
-        from nous.cognitive.rubric_schemas import OutcomeSignalDetail, OutcomeSignalType
+        from nous.cognitive.rubric_schemas import OutcomeSignalType
         assert "corrected" in [e.value for e in OutcomeSignalType]
         assert "praised" in [e.value for e in OutcomeSignalType]
 

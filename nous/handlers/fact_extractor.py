@@ -119,7 +119,8 @@ class FactExtractor:
                 # F025 P2-D: threshold now configurable (default 0.92, raised from 0.85).
                 # heart.learn() has its own dedup (>0.95 cosine) and
                 # subject-based supersession (same subject + >0.80 cosine).
-                if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
+                if (existing and existing[0].score is not None
+                        and existing[0].score > self._settings.fact_dedup_threshold):
                     logger.debug("Skipping duplicate fact: %s", content[:50])
                     continue
 
@@ -148,7 +149,9 @@ class FactExtractor:
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))
 
-    async def _store_candidate_facts(self, candidates: list[str | dict], episode_id: str, transcript: str | None = None) -> None:
+    async def _store_candidate_facts(
+        self, candidates: list[str | dict], episode_id: str, transcript: str | None = None,
+    ) -> None:
         """008.4: Store pre-extracted candidate facts directly, with dedup.
 
         Accepts both structured dicts (with subject/category/content) and

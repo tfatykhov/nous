@@ -224,7 +224,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             parsed.latency_ms = elapsed
             return parsed
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed = int(time.time() * 1000) - start_ms
             logger.warning("CriticAgent classification timed out after %dms (limit=%dms)",
                            elapsed, self._settings.critic_max_latency_ms)

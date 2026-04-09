@@ -37,6 +37,7 @@ from nous.storage.models import Agent
 
 if TYPE_CHECKING:
     from nous.cognitive.critic import CriticAgent
+    from nous.identity.manager import IdentityManager
 
 logger = logging.getLogger(__name__)
 
@@ -150,8 +151,8 @@ class CognitiveLayer:
         identity_prompt: str = "",
         *,
         bus: EventBus | None = None,
-        identity_manager: "IdentityManager | None" = None,
-        critic: "CriticAgent | None" = None,
+        identity_manager: IdentityManager | None = None,
+        critic: CriticAgent | None = None,
     ) -> None:
         self._brain = brain
         self._heart = heart
@@ -685,7 +686,10 @@ class CognitiveLayer:
         # F031: Append censor-injected context to system prompt
         if censor_injected:
             injected_section = "\n\n## Censor-Injected Context\n"
-            injected_section += "The following information was automatically retrieved by active censors. Use it to inform your response:\n\n"
+            injected_section += (
+                "The following information was automatically retrieved by active censors."
+                " Use it to inform your response:\n\n"
+            )
             for censor_id, result_text in censor_injected.items():
                 injected_section += f"{result_text}\n\n"
             system_prompt += injected_section

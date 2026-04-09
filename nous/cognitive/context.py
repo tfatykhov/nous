@@ -7,12 +7,10 @@ and concatenates them in priority order within per-section token budgets.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from nous.utils import text_overlap
 
 from nous.brain.brain import Brain
 from nous.cognitive.dedup import ConversationDeduplicator
@@ -21,7 +19,8 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.search import apply_frame_boost, _wrap_with_score
+from nous.heart.search import _wrap_with_score, apply_frame_boost
+from nous.utils import text_overlap
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +172,7 @@ class ContextEngine:
             _conv_msgs = _conv_msgs[-budget.conversation_window :]
 
         # Tier 0: Current date/time — always injected
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         datetime_text = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
         sections.append(
             ContextSection(
@@ -338,7 +337,10 @@ class ContextEngine:
             _default_query = f"{current_topic}: {input_text}"
         else:
             _default_query = input_text
-        logger.info("Context build query: topic=%r, input=%r, default_query=%r", current_topic, input_text, _default_query)
+        logger.info(
+            "Context build query: topic=%r, input=%r, default_query=%r",
+            current_topic, input_text, _default_query,
+        )
 
         # 5. Decisions (F26: skip_types is primary skip mechanism)
         if budget.decisions > 0 and "decision" not in skip_types:
@@ -777,7 +779,7 @@ class ContextEngine:
         if not self._settings.staleness_penalty_enabled:
             return results
         half_life = self._settings.staleness_half_life_days
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         adjusted = []
         for r in results:
             score = getattr(r, "score", None)
@@ -807,7 +809,7 @@ class ContextEngine:
         final_score = score * max(0.5, 1.0 - (age_days / 60))
         Episodes >60 days old get 0.5x penalty, recent ones ~1.0x.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         adjusted = []
         for ep in episodes:
             score = getattr(ep, "score", None)

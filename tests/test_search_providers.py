@@ -3,10 +3,10 @@
 All HTTP calls are mocked via unittest.mock.AsyncMock.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
 
 
 def _mock_http(response: MagicMock) -> AsyncMock:

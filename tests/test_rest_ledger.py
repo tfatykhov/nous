@@ -1,6 +1,5 @@
 """Tests for F032 execution ledger dashboard endpoint."""
 
-from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -8,7 +7,6 @@ from httpx import ASGITransport, AsyncClient
 
 from nous.brain.brain import Brain
 from nous.cognitive.execution_ledger import (
-    ExecutedAction,
     ExecutionLedger,
     redact_key_args,
 )

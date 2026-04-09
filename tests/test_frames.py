@@ -21,7 +21,6 @@ import pytest
 from nous.cognitive.frames import FRAME_PRIORITY, FrameEngine
 from nous.cognitive.schemas import FrameSelection
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -55,9 +54,18 @@ class FakeFrame:
 
 # Seed frames that mirror the production seed.sql defaults
 SEED_FRAMES = [
-    FakeFrame("task", "Task Execution", ["build", "fix", "create", "implement", "deploy", "run", "execute", "check", "show", "list", "install", "update", "delete", "move", "copy"], "tooling", "medium"),
+    FakeFrame(
+        "task", "Task Execution",
+        ["build", "fix", "create", "implement", "deploy", "run", "execute",
+         "check", "show", "list", "install", "update", "delete", "move", "copy"],
+        "tooling", "medium",
+    ),
     FakeFrame("question", "Question Answering", ["what", "how", "why", "explain", "tell me"], "process", "low"),
-    FakeFrame("decision", "Decision Making", ["should", "choose", "decide", "compare", "trade-off"], "architecture", "high"),
+    FakeFrame(
+        "decision", "Decision Making",
+        ["should", "choose", "decide", "compare", "trade-off"],
+        "architecture", "high",
+    ),
     FakeFrame("creative", "Creative", ["imagine", "brainstorm", "what if", "design", "explore"], "architecture", "low"),
     FakeFrame("conversation", "Conversation", ["hello", "hi", "thanks", "how are you"], "process", "low"),
     FakeFrame("debug", "Debug", ["error", "bug", "broken", "failing", "crash", "wrong"], "tooling", "medium"),

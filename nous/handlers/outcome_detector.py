@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 from uuid import UUID
 
 from nous.config import Settings

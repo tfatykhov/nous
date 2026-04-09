@@ -10,9 +10,8 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
-
 
 # ------------------------------------------------------------------
 # Core check/finding types (F034)
@@ -60,7 +59,7 @@ class HeartbeatResult:
 # ------------------------------------------------------------------
 
 
-class FindingState(str, Enum):
+class FindingState(StrEnum):
     """State machine for tracked findings."""
 
     NEW = "new"
@@ -69,7 +68,7 @@ class FindingState(str, Enum):
     RESOLVED = "resolved"
 
 
-class FindingAction(str, Enum):
+class FindingAction(StrEnum):
     """Action returned by FindingStore.ingest()."""
 
     TRIAGE = "triage"
@@ -77,7 +76,7 @@ class FindingAction(str, Enum):
     ESCALATE = "escalate"
 
 
-class OutcomeSignal(str, Enum):
+class OutcomeSignal(StrEnum):
     """Outcome signal for tuner feedback (F034.3)."""
 
     STRONG_POSITIVE = "strong_positive"

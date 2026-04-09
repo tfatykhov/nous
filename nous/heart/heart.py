@@ -18,11 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
+from nous.events import Event, EventBus
+from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
 from nous.heart.facts import FactManager
 from nous.heart.procedures import ProcedureManager
-from nous.heart.admission import AdmissionConfig, AdmissionController
+from nous.heart.schedules import ScheduleManager
 from nous.heart.schemas import (
     CensorDetail,
     CensorInput,
@@ -43,11 +45,9 @@ from nous.heart.schemas import (
     WorkingMemoryItem,
     WorkingMemoryState,
 )
-from nous.heart.schedules import ScheduleManager
+from nous.heart.search import batch_fetch_embeddings, mmr_rerank
 from nous.heart.subtasks import SubtaskManager
 from nous.heart.working_memory import WorkingMemoryManager
-from nous.heart.search import batch_fetch_embeddings, mmr_rerank
-from nous.events import Event, EventBus
 from nous.storage.database import Database
 from nous.storage.models import ConversationState
 

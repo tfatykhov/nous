@@ -1,6 +1,5 @@
 """Tests for F035.2 Causal Chain Tracing."""
 
-import pytest
 
 from nous.events import Event
 

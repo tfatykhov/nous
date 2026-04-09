@@ -234,9 +234,15 @@ class IdentityManager:
         # Check for existing user facts
         try:
             # P2-3: Use descriptive queries instead of empty string for meaningful embeddings
-            pref_facts = await heart.search_facts("user preferences and settings", category="preference", limit=20, session=session)
-            person_facts = await heart.search_facts("user personal information", category="person", limit=20, session=session)
-            rule_facts = await heart.search_facts("behavior rules and constraints", category="rule", limit=20, session=session)
+            pref_facts = await heart.search_facts(
+                "user preferences and settings", category="preference", limit=20, session=session
+            )
+            person_facts = await heart.search_facts(
+                "user personal information", category="person", limit=20, session=session
+            )
+            rule_facts = await heart.search_facts(
+                "behavior rules and constraints", category="rule", limit=20, session=session
+            )
         except Exception:
             logger.warning("Failed to search facts for auto-seed")
             return False

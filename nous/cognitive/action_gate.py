@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from nous.cognitive.execution_ledger import classify_side_effect
 
@@ -46,7 +47,7 @@ class GateResult:
             if stripped.startswith("```"):
                 lines = stripped.splitlines()
                 # Drop opening and closing fence lines
-                inner = [l for l in lines[1:] if not l.startswith("```")]
+                inner = [ln for ln in lines[1:] if not ln.startswith("```")]
                 stripped = "\n".join(inner).strip()
 
             data = json.loads(stripped)

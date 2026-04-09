@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
+from nous.observability.drift import DriftDetector
 from nous.observability.snapshots import BehaviorSnapshot
-from nous.observability.drift import Anomaly, DriftDetector
-
 
 # ------------------------------------------------------------------
 # BehaviorSnapshot tests
@@ -157,6 +154,7 @@ class TestBehaviorDriftCheck:
     def test_initialization_and_name(self):
         """Check can be instantiated with minimal args."""
         from unittest.mock import MagicMock
+
         from nous.heartbeat.checks import BehaviorDriftCheck
 
         mock_heart = MagicMock()
@@ -176,6 +174,7 @@ class TestBehaviorDriftCheck:
     def test_default_interval(self):
         """Falls back to 3600 if setting is missing."""
         from unittest.mock import MagicMock
+
         from nous.heartbeat.checks import BehaviorDriftCheck
 
         mock_settings = MagicMock(spec=[])  # No attributes

@@ -21,10 +21,11 @@ from nous.api.anthropic_client import (
     _parse_sse_event,  # noqa: F401 — re-exported for backward compat (tests)
     create_client,
 )
-from nous.api.cache_optimizer import CacheBreakDetector, _hash as cache_hash
+from nous.api.cache_optimizer import CacheBreakDetector
+from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.compaction import ConversationCompactor
-from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
+from nous.api.smart_compress import smart_compress
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
@@ -49,12 +50,34 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage"],
-    "question": ["recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "write_file", "record_decision", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python"],
-    "decision": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task"],
-    "creative": ["learn_fact", "recall_deep", "recall_recent", "get_procedure", "write_file", "web_search", "cache_retrieve"],
+    "conversation": [
+        "record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent",
+        "get_procedure", "create_censor", "bash", "read_file", "write_file",
+        "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task",
+        "list_tasks", "cancel_task", "run_python", "send_file",
+        "heartbeat_check_create", "heartbeat_check_manage",
+    ],
+    "question": [
+        "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "write_file",
+        "record_decision", "learn_fact", "learn_skill", "create_censor",
+        "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python",
+    ],
+    "decision": [
+        "record_decision", "recall_deep", "recall_recent", "get_procedure", "create_censor",
+        "bash", "read_file", "web_search", "web_fetch", "cache_retrieve",
+        "list_tasks", "cancel_task",
+    ],
+    "creative": [
+        "learn_fact", "recall_deep", "recall_recent", "get_procedure",
+        "write_file", "web_search", "cache_retrieve",
+    ],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage"],
+    "debug": [
+        "record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file",
+        "learn_fact", "web_search", "web_fetch", "cache_retrieve",
+        "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file",
+        "heartbeat_check_create", "heartbeat_check_manage",
+    ],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -159,7 +182,7 @@ class AgentRunner:
             self._api = create_client(self._settings)
             await self._api.start()
 
-    def fork(self, api_client: "AnthropicClient") -> "AgentRunner":
+    def fork(self, api_client: AnthropicClient) -> AgentRunner:
         """Create a sibling runner sharing cognitive layer and dispatcher.
 
         The forked runner uses its own API client (isolated connection pool)
@@ -1256,7 +1279,7 @@ class AgentRunner:
                         try:
                             from nous.api.tool_cache import cache_compressed_result
                             async with self._heart.db.session() as db_sess:
-                                hash_key = await cache_compressed_result(
+                                await cache_compressed_result(
                                     db_sess,
                                     agent_id=self._settings.agent_id,
                                     session_id=session_id,
@@ -1338,7 +1361,10 @@ class AgentRunner:
                 total_usage["output_tokens"] += final_response.usage.get("output_tokens", 0)
             return self._extract_text(final_response.content), all_tool_results, total_usage, all_thinking_blocks
         except Exception:
-            return "I reached the maximum number of tool iterations. Please try again.", all_tool_results, total_usage, all_thinking_blocks
+            return (
+                "I reached the maximum number of tool iterations. Please try again.",
+                all_tool_results, total_usage, all_thinking_blocks,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers

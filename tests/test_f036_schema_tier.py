@@ -5,7 +5,6 @@ from __future__ import annotations
 from nous.cognitive.context import SECTION_TIERS
 from nous.cognitive.schemas import BuildResult, ContextSection, TurnContext
 
-
 # --- ContextSection tier field ---
 
 

@@ -1,6 +1,6 @@
 """Tests for F024 Critic Agent Phase 0."""
 import json
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -227,7 +227,10 @@ class TestCriticClassification:
         mock_api = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = [
-            {"type": "text", "text": '```json\n{"complexity":"simple","routing":"single","frames":["question"],"skills":[],"rationale":"Simple question","per_frame_instructions":{}}\n```'}
+            {"type": "text", "text": (
+                '```json\n{"complexity":"simple","routing":"single","frames":["question"],'
+                '"skills":[],"rationale":"Simple question","per_frame_instructions":{}}\n```'
+            )}
         ]
         mock_api.call = AsyncMock(return_value=mock_response)
         agent.set_api_client(mock_api)
@@ -447,7 +450,7 @@ class TestSkillCatalog:
         catalog, valid_names = await agent._build_skill_catalog()
         # Should not raise when used in .format()
         test_template = "Skills:\n{skill_catalog}"
-        formatted = test_template.format(skill_catalog=catalog)
+        _ = test_template.format(skill_catalog=catalog)
         assert "{{variable}}" in catalog
         assert "template-skill" in valid_names
 

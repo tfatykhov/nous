@@ -17,7 +17,6 @@ from nous.api.tools import ToolDispatcher
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.config import Settings
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

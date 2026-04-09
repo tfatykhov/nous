@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
 
 import httpx
 
@@ -115,7 +114,7 @@ class SubtaskWorkerPool:
                 self._execute_subtask(subtask),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             error_msg = f"Subtask timed out after {timeout}s"
             logger.warning(
                 "Subtask %s timed out after %ds",

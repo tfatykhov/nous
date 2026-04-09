@@ -503,8 +503,13 @@ def create_app(
         active_param = request.query_params.get("active")
         active_only = active_param != "false" if active_param else True
         try:
-            procs, total = await heart.list_procedures(limit=limit, offset=offset, domain=domain, active_only=active_only)
-            return JSONResponse({"procedures": [p.model_dump(mode="json") for p in procs], "total": total, "limit": limit, "offset": offset})
+            procs, total = await heart.list_procedures(
+                limit=limit, offset=offset, domain=domain, active_only=active_only
+            )
+            return JSONResponse({
+                "procedures": [p.model_dump(mode="json") for p in procs],
+                "total": total, "limit": limit, "offset": offset,
+            })
         except Exception as e:
             logger.error("List procedures error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -598,7 +603,10 @@ def create_app(
             return JSONResponse({"error": "Identity manager not initialized"}, status_code=503)
         try:
             await identity_manager.reset_identity()
-            return JSONResponse({"status": "reset", "message": "Identity cleared. Next conversation will trigger initiation."})
+            return JSONResponse({
+                "status": "reset",
+                "message": "Identity cleared. Next conversation will trigger initiation.",
+            })
         except Exception as e:
             logger.error("POST /reinitiate failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -2033,7 +2041,14 @@ def create_app(
             return JSONResponse({"events": [], "source": "memory", "count": 0})
         events = bus.stats.recent_events(limit=limit)
         return JSONResponse({
-            "events": [{"type": e.type, "timestamp": e.timestamp, "handlers_invoked": e.handlers_invoked, "handlers_failed": e.handlers_failed, "duration_ms": round(e.duration_ms, 2), "session_id": e.session_id} for e in events],
+            "events": [
+                {
+                    "type": e.type, "timestamp": e.timestamp,
+                    "handlers_invoked": e.handlers_invoked, "handlers_failed": e.handlers_failed,
+                    "duration_ms": round(e.duration_ms, 2), "session_id": e.session_id,
+                }
+                for e in events
+            ],
             "source": "memory", "count": len(events),
         })
 
@@ -2215,11 +2230,15 @@ def create_app(
             row = result.fetchone()
         if not row:
             return JSONResponse({"snapshot": None})
-        return JSONResponse({"snapshot": {"timestamp": row.timestamp.isoformat(), "metrics": row.metrics, "anomalies": row.anomalies or []}})
+        return JSONResponse({"snapshot": {
+            "timestamp": row.timestamp.isoformat(),
+            "metrics": row.metrics,
+            "anomalies": row.anomalies or [],
+        }})
 
     async def behavior_trends(request: Request) -> JSONResponse:
-        from datetime import UTC, datetime, timedelta
         import statistics as st
+        from datetime import UTC, datetime, timedelta
         metric = request.query_params.get("metric", "fact_count_delta")
         hours = int(request.query_params.get("hours", "168"))
         async with database.session() as session:
@@ -2274,13 +2293,15 @@ def create_app(
         if not row:
             return JSONResponse({"report": "No snapshots yet.", "anomalies": []})
         anomalies = row.anomalies or []
-        metrics = row.metrics if isinstance(row.metrics, dict) else {}
         if not anomalies:
             report = f"System behavior is within normal parameters. Last snapshot: {row.timestamp.isoformat()}"
         else:
             lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
             for a in anomalies:
-                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+                lines.append(
+                    f"  - {a.get('metric', '?')}: {a.get('current', '?')}"
+                    f" ({a.get('direction', '?')} from baseline)"
+                )
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 

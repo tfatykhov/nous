@@ -10,7 +10,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
@@ -316,7 +316,7 @@ class ProcedureManager:
                 .where(ProcedureTaskAffinity.procedure_id.in_(ids))
                 .where(ProcedureTaskAffinity.frame_type == frame_type)
                 .where(ProcedureTaskAffinity.agent_id == self.agent_id)
-                .where(ProcedureTaskAffinity.active == True)
+                .where(ProcedureTaskAffinity.active)
             )
             for row in affinity_rows.scalars().all():
                 affinity_map[row.procedure_id] = (row.success_count, row.failure_count)
@@ -409,7 +409,10 @@ class ProcedureManager:
                     category="retire",
                     effectiveness=eff,
                     activation_count=activation_count,
-                    reason=f"Effectiveness {eff:.2f} below retirement threshold (0.3) with {activation_count} activations",
+                    reason=(
+                        f"Effectiveness {eff:.2f} below retirement threshold (0.3)"
+                        f" with {activation_count} activations"
+                    ),
                 ))
             elif eff < 0.5 and activation_count >= 15:
                 candidates.append(EvolutionCandidate(
@@ -427,7 +430,10 @@ class ProcedureManager:
                     category="investigate",
                     effectiveness=eff,
                     activation_count=activation_count,
-                    reason=f"High activation count ({activation_count}) but effectiveness {eff:.2f} below 0.6 — may be declining",
+                    reason=(
+                        f"High activation count ({activation_count}) but effectiveness"
+                        f" {eff:.2f} below 0.6 — may be declining"
+                    ),
                 ))
             elif eff >= 0.85 and activation_count >= 10:
                 candidates.append(EvolutionCandidate(

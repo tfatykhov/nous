@@ -7,11 +7,11 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from nous.config import Settings
+import pytest
 
+from nous.config import Settings
 
 # ---------------------------------------------------------------------------
 # Fixtures

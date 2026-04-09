@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import event, inspect
@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-
 
 # ---------------------------------------------------------------------------
 # 0. sqlite3 type adapters
@@ -51,9 +50,9 @@ sqlite3.register_adapter(uuid.UUID, _adapt_uuid)
 # 1. Type compilation overrides
 # ---------------------------------------------------------------------------
 
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.dialects.postgresql import JSONB, ARRAY
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # noqa: E402
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB  # noqa: E402
+from sqlalchemy.ext.compiler import compiles  # noqa: E402
 
 
 @compiles(Vector, "sqlite")
@@ -174,13 +173,16 @@ async def create_test_engine():
 
         # Register aggregates/functions via raw connection
         # Use check_same_thread=False workaround
+        def _power(base, exp):
+            return float(base) ** float(exp) if base is not None and exp is not None else None
+
         try:
             raw_conn = dbapi_connection._connection._conn
             raw_conn.create_aggregate("stddev", 1, StddevAggregate)
-            raw_conn.create_function("power", 2, lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None)
+            raw_conn.create_function("power", 2, _power)
         except Exception:
             # Fallback: register via the adapter which proxies create_function
-            dbapi_connection.create_function("power", 2, lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None)
+            dbapi_connection.create_function("power", 2, _power)
         cursor.close()
 
     @event.listens_for(engine.sync_engine, "before_cursor_execute", retval=True)
@@ -313,8 +315,9 @@ def install_array_deserializer():
     When read back, SQLAlchemy returns raw strings instead of lists because
     ARRAY type has no result_processor for SQLite. This listener fixes that.
     """
-    from nous.storage.models import Base
     from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+
+    from nous.storage.models import Base
 
     @event.listens_for(Base, "load", propagate=True)
     def _deserialize_arrays(target, context):
@@ -354,8 +357,8 @@ def install_array_deserializer():
 # 8. TypeDecorator wrappers for transparent ARRAY/Vector serialization
 # ---------------------------------------------------------------------------
 
-from sqlalchemy import TypeDecorator, Text as SAText_TD
-from sqlalchemy.types import JSON as SA_JSON
+from sqlalchemy import Text as SAText_TD  # noqa: E402
+from sqlalchemy import TypeDecorator  # noqa: E402
 
 
 class JSONEncodedList(TypeDecorator):

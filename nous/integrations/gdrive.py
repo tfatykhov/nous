@@ -25,19 +25,17 @@ Usage:
 from __future__ import annotations
 
 import base64
-import io
 import json
 import logging
 import mimetypes
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 

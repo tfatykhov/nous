@@ -9,7 +9,7 @@ Tests cover:
 
 import pytest
 
-from nous.telegram_bot import format_telegram_html, sanitize_telegram, _strip_html_tags, StreamingMessage
+from nous.telegram_bot import StreamingMessage, _strip_html_tags, format_telegram_html, sanitize_telegram
 
 
 class TestSanitizeTelegram:

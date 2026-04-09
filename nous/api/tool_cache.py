@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert

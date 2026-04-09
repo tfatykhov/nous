@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from nous.config import Settings
 
 
@@ -31,7 +30,10 @@ class TestTruncateTranscript:
     def test_long_transcript_truncated_near_limit(self):
         from nous.handlers.episode_summarizer import EpisodeSummarizer
         summarizer = EpisodeSummarizer.__new__(EpisodeSummarizer)
-        turns = [f"User: Question {i} {'detail ' * 20}\n\nAssistant: Answer {i} {'explanation ' * 20}" for i in range(200)]
+        turns = [
+            f"User: Question {i} {'detail ' * 20}\n\nAssistant: Answer {i} {'explanation ' * 20}"
+            for i in range(200)
+        ]
         transcript = "\n\n".join(turns)
         assert len(transcript) > 16000
         result = summarizer._truncate_transcript(transcript, max_chars=16000)
@@ -53,7 +55,8 @@ class TestTruncateTranscript:
 
     def test_default_param_is_16000(self):
         """Method default should be 16000, not 8000."""
-        from nous.handlers.episode_summarizer import EpisodeSummarizer
         import inspect
+
+        from nous.handlers.episode_summarizer import EpisodeSummarizer
         sig = inspect.signature(EpisodeSummarizer._truncate_transcript)
         assert sig.parameters["max_chars"].default == 16000

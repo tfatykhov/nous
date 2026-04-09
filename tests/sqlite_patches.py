@@ -10,11 +10,10 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.sqlite_compat import cosine_similarity, keyword_match_score, _parse_embedding
-
+from tests.sqlite_compat import _parse_embedding, cosine_similarity, keyword_match_score
 
 # ============================================================================
 # hybrid_search replacement (nous.heart.search)
@@ -84,7 +83,7 @@ async def sqlite_hybrid_search(
 
 
 def _table_to_model(table: str):
-    from nous.storage.models import Episode, Fact, Procedure, Censor
+    from nous.storage.models import Censor, Episode, Fact, Procedure
     mapping = {
         "heart.episodes": Episode,
         "heart.facts": Fact,
@@ -123,7 +122,7 @@ async def sqlite_batch_fetch_embeddings(
     type_ids: dict[str, list[UUID]],
     agent_id: str,
 ) -> dict[UUID, list[float]]:
-    from nous.storage.models import Episode, Fact, Procedure, Censor
+    from nous.storage.models import Censor, Episode, Fact, Procedure
 
     type_to_model = {
         "fact": Fact,
@@ -192,8 +191,8 @@ async def sqlite_find_contradiction(
     session: AsyncSession,
 ):
     """Pure-Python contradiction detection."""
-    from nous.storage.models import Fact
     from nous.heart.schemas import ContradictionWarning
+    from nous.storage.models import Fact
 
     if not embedding:
         return None
@@ -264,9 +263,9 @@ async def sqlite_search_all(
     session: AsyncSession,
 ):
     """Pure-Python fact search replacement (for _search_all including inactive)."""
-    from nous.storage.models import Fact
     from nous.heart.schemas import FactSummary
     from nous.heart.search import _rrf_merge
+    from nous.storage.models import Fact
 
     stmt = select(Fact).where(Fact.agent_id == self.agent_id)
     if category:
@@ -449,9 +448,10 @@ async def sqlite_censor_semantic_search(
     session: AsyncSession,
 ):
     """Pure-Python censor semantic search."""
-    from nous.storage.models import Censor
-    from nous.heart.schemas import CensorMatch
     from sqlalchemy import or_
+
+    from nous.heart.schemas import CensorMatch
+    from nous.storage.models import Censor
 
     query = select(Censor).where(
         Censor.agent_id == self.agent_id,
@@ -564,8 +564,6 @@ def patch_pg_insert():
     import nous.heart.working_memory as wm_mod
     from nous.storage.models import WorkingMemory
 
-    original_get_or_create = wm_mod.WorkingMemoryManager._get_or_create
-
     async def _sqlite_get_or_create(self, session_id, session):
         """SQLite-compatible upsert for working_memory."""
         # Check if exists first
@@ -628,8 +626,6 @@ def patch_brain():
 
     # Patch _query to use pure-Python search
     if hasattr(brain_mod.Brain, '_query'):
-        original_query = brain_mod.Brain._query
-
         async def _sqlite_query_inner(self, query_text, limit, category, stakes, outcome, bridge_side, session):
             """Pure-Python decision search replacing PG vector + text search."""
             from nous.brain.schemas import DecisionSummary
@@ -709,8 +705,6 @@ def patch_brain():
 
     # Patch _auto_link to avoid pg_insert and <=> operator
     if hasattr(brain_mod.Brain, '_auto_link'):
-        original_auto_link = brain_mod.Brain._auto_link
-
         async def _sqlite_auto_link(self, decision_id, session, threshold=0.7, max_links=5):
             """Pure-Python auto-linking without PG vector operators."""
             # Get the decision
@@ -778,12 +772,11 @@ def patch_brain():
 
     # Patch _delete_inner (raw SQL with schema refs)
     if hasattr(brain_mod.Brain, '_delete_inner'):
-        original_delete = brain_mod.Brain._delete_inner
-
         async def _sqlite_delete_inner(self, decision_id, session):
             """SQLite-compatible decision deletion."""
-            from nous.storage.models import Fact, Censor, DecisionReason, DecisionTag, DecisionBridge
-            from sqlalchemy import update, delete
+            from sqlalchemy import delete, update
+
+            from nous.storage.models import Censor, DecisionBridge, DecisionReason, DecisionTag, Fact
 
             # Unlink facts
             await session.execute(
@@ -813,11 +806,11 @@ def patch_brain():
 
 def install_all_patches():
     """Monkey-patch all PG-specific methods with SQLite-compatible versions."""
-    import nous.heart.search as search_mod
-    import nous.heart.facts as facts_mod
     import nous.heart.censors as censors_mod
     import nous.heart.episodes as episodes_mod
+    import nous.heart.facts as facts_mod
     import nous.heart.procedures as procedures_mod
+    import nous.heart.search as search_mod
 
     # Patch hybrid_search in ALL modules that imported it
     search_mod.hybrid_search = sqlite_hybrid_search

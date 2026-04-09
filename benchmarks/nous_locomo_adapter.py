@@ -16,13 +16,13 @@ Flow:
     Phase 3 (Score):   Compare answers to gold labels (BLEU, ROUGE-L, F1)
 """
 
+import argparse
 import json
 import time
-import argparse
-import requests
 import uuid
 from pathlib import Path
-from datetime import datetime
+
+import requests
 
 # ---------------------------------------------------------------------------
 # Scoring helpers (lightweight, no heavy deps needed)
@@ -124,7 +124,7 @@ class NousClient:
 
 def load_locomo(data_path: str) -> list[dict]:
     """Load LoCoMo dataset (locomo10.json)."""
-    with open(data_path, "r") as f:
+    with open(data_path) as f:
         data = json.load(f)
     # locomo10.json is a list of 10 conversation samples
     if isinstance(data, dict):
@@ -308,7 +308,7 @@ def main():
 
     # Init
     client = NousClient(args.nous_url)
-    print(f"🧠 Nous LoCoMo Benchmark Adapter")
+    print("🧠 Nous LoCoMo Benchmark Adapter")
     print(f"   API: {args.nous_url}")
     print(f"   Data: {args.data}")
     print()
@@ -342,7 +342,7 @@ def main():
 
         # Phase 1: Ingest
         print("\n🔄 Phase 1: Ingesting conversation...")
-        n_turns = ingest_conversation(client, sample, session_id,
+        ingest_conversation(client, sample, session_id,
                                        delay=args.delay, verbose=args.verbose)
 
         # Phase 2 & 3: QA + Scoring
@@ -361,7 +361,7 @@ def main():
 
     # Final aggregate scores
     print(f"\n{'='*60}")
-    print(f"🏆 FINAL RESULTS")
+    print("🏆 FINAL RESULTS")
     print(f"{'='*60}")
 
     aggregate = compute_aggregate_scores(all_results)
@@ -371,9 +371,9 @@ def main():
     print(f"   BLEU-1:  {aggregate['overall']['bleu1']}")
     print(f"   ROUGE-L: {aggregate['overall']['rouge_l']}")
 
-    print(f"\n📊 By Category:")
+    print("\n📊 By Category:")
     for cat, scores in aggregate.get("by_category", {}).items():
-        print(f"   {cat} (n={scores['n_questions']}): F1={scores['f1']} BLEU={scores['bleu1']} ROUGE-L={scores['rouge_l']}")
+        print(f"   {cat} (n={scores['n_questions']}): F1={scores['f1']} BLEU={scores['bleu1']} ROUGE-L={scores['rouge_l']}")  # noqa: E501
 
     # Save aggregate
     agg_path = output_path.with_suffix(".aggregate.json")

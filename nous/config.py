@@ -96,7 +96,10 @@ class Settings(BaseSettings):
     fact_extraction_enabled: bool = True
     sleep_enabled: bool = True
     decision_review_enabled: bool = True
-    decision_sweep_interval: int = Field(default=3600, description="Seconds between periodic decision review sweeps (default: 1 hour)")
+    decision_sweep_interval: int = Field(
+        default=3600,
+        description="Seconds between periodic decision review sweeps (default: 1 hour)",
+    )
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(
         default="",

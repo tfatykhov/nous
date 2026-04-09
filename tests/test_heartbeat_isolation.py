@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.schemas import Finding
 
 

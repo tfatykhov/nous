@@ -84,7 +84,7 @@ async def bash_tool(
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=effective_timeout
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
             return _mcp_response(

@@ -14,7 +14,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
-from uuid import UUID
 
 if TYPE_CHECKING:
     from nous.brain.schemas import DecisionSummary

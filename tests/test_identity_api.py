@@ -16,8 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from nous.brain.brain import Brain
 from nous.cognitive import CognitiveLayer
-from nous.identity.manager import IdentityManager, VALID_SECTIONS
-
+from nous.identity.manager import IdentityManager
 
 # ---------------------------------------------------------------------------
 # Fixtures

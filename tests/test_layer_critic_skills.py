@@ -3,9 +3,10 @@
 Tests exercise the activation logic from layer.py lines 377-396 (#216),
 and the critic_skills -> context.build() wiring (#229).
 """
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
+
+import pytest
 
 from nous.cognitive.critic_schemas import CriticResult, RoutingMode
 from nous.cognitive.schemas import BuildResult, FrameSelection

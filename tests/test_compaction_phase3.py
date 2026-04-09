@@ -23,18 +23,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
 
-from nous.api.models import ApiResponse, Conversation, Message
+from nous.api.models import Conversation, Message
 from nous.events import Event, EventBus
 from nous.handlers.knowledge_extractor import KnowledgeExtractor
-from nous.heart.schemas import EpisodeDetail, EpisodeInput, FactInput, FactSummary
+from nous.heart.schemas import FactInput
 from nous.storage.models import ConversationState
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -952,6 +950,7 @@ class TestRunnerSaveRestore:
     async def test_get_or_create_is_async(self):
         """_get_or_create_conversation is now async (Phase 3 change)."""
         import inspect
+
         from nous.api.runner import AgentRunner
 
         assert inspect.iscoroutinefunction(AgentRunner._get_or_create_conversation)

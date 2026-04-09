@@ -9,15 +9,12 @@ Covers:
 from __future__ import annotations
 
 import json
-import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from nous.events import Event, EventBus
-from nous.heart.schemas import FactInput, FactRejected
-
 
 # ---------------------------------------------------------------------------
 # Helpers

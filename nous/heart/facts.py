@@ -223,7 +223,8 @@ class FactManager:
             encoded_censors=encoded_censors,
             admission_score=admission_result.composite_score if admission_result else None,
             admission_scores=(
-                admission_result.scores if admission_result and not admission_result.bypassed and admission_result.scores
+                admission_result.scores
+                if admission_result and not admission_result.bypassed and admission_result.scores
                 else None
             ),
         )
@@ -837,7 +838,7 @@ class FactManager:
         as hybrid_search() but intentionally omits the active=true filter so
         superseded/inactive facts are included.
         """
-        from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+        from nous.heart.search import _resolve_rrf_k, _resolve_vector_weight, _rrf_merge
 
         vw = _resolve_vector_weight()
         rrf_k = _resolve_rrf_k()

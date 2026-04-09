@@ -1,12 +1,12 @@
 """Pydantic models for F024 Critic Agent."""
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class RoutingMode(str, Enum):
+class RoutingMode(StrEnum):
     """Critic routing decision for the current turn."""
     PASSTHROUGH = "passthrough"
     SINGLE_ADVISED = "single_advised"

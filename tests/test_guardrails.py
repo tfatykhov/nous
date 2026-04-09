@@ -23,7 +23,6 @@ from nous.brain.guardrails import (
 from nous.brain.schemas import GuardrailResult
 from nous.storage.models import Guardrail
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

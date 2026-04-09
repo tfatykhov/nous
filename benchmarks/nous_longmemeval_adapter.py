@@ -25,13 +25,14 @@ Notes:
     - For official results, always use the LongMemEval evaluator
 """
 
+import argparse
 import json
 import time
-import argparse
-import requests
 import uuid
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+
+import requests
 
 # ---------------------------------------------------------------------------
 # Lightweight scoring (for quick local feedback — official eval uses GPT-4o)
@@ -116,7 +117,7 @@ class NousClient:
 
 def load_longmemeval(data_path: str) -> list[dict]:
     """Load LongMemEval dataset (json — list of 500 question instances)."""
-    with open(data_path, "r") as f:
+    with open(data_path) as f:
         data = json.load(f)
     if isinstance(data, dict):
         data = list(data.values())
@@ -229,7 +230,7 @@ def main():
 
     # Init
     client = NousClient(args.nous_url)
-    print(f"🧠 Nous LongMemEval Benchmark Adapter")
+    print("🧠 Nous LongMemEval Benchmark Adapter")
     print(f"   API: {args.nous_url}")
     print(f"   Data: {args.data}")
     print(f"   Output: {args.output}")
@@ -326,7 +327,7 @@ def main():
     # Summary
     # ---------------------------------------------------------------------------
     print(f"\n{'='*60}")
-    print(f"🏆 RESULTS SUMMARY (local scoring — use official evaluator for final)")
+    print("🏆 RESULTS SUMMARY (local scoring — use official evaluator for final)")
     print(f"{'='*60}")
 
     def avg(lst):
@@ -339,7 +340,7 @@ def main():
     print(f"   F1:      {avg(all_f1):.4f}")
     print(f"   ROUGE-L: {avg(all_rouge):.4f}")
 
-    print(f"\n📊 By Question Type:")
+    print("\n📊 By Question Type:")
     for qtype, scores in sorted(scores_by_type.items()):
         n = scores["count"]
         f1_avg = avg(scores["f1"])
@@ -368,8 +369,8 @@ def main():
 
     print(f"\n💾 Results: {output_path}")
     print(f"💾 Summary: {summary_path}")
-    print(f"\n📌 For official scores, run LongMemEval's evaluator:")
-    print(f"   cd LongMemEval/src/evaluation")
+    print("\n📌 For official scores, run LongMemEval's evaluator:")
+    print("   cd LongMemEval/src/evaluation")
     print(f"   python evaluate_qa.py gpt-4o {output_path} ./data/longmemeval_oracle.json")
 
 

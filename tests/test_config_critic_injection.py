@@ -1,6 +1,7 @@
 """Tests for critic skill injection config settings (issue #229)."""
 import pytest
 from pydantic import ValidationError
+
 from nous.config import Settings
 
 

@@ -12,20 +12,16 @@ All tests use mocks — no real database needed.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nous.brain.schemas import ReasonInput
-from nous.cognitive.schemas import FrameSelection, TurnContext
-
 
 # ---------------------------------------------------------------------------
 # SessionMetadata — imported from the real module (005.5 landed).
 # ---------------------------------------------------------------------------
-from nous.cognitive.schemas import SessionMetadata
-
+from nous.cognitive.schemas import FrameSelection, SessionMetadata, TurnContext
 
 # ---------------------------------------------------------------------------
 # Constants from the spec (module-level in layer.py)

@@ -36,7 +36,6 @@ from nous.heartbeat.checks import EmailCheck, HealthCheck, SelfInitiatedCheck
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding, HeartbeatResult
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -794,7 +793,7 @@ class TestEmailCheck:
         messages = [("msg-1", "Hello", "alice@co.com")]
 
         with patch.object(check, "_fetch_unseen", return_value=messages):
-            result1 = await asyncio.to_thread(check._fetch_unseen)
+            await asyncio.to_thread(check._fetch_unseen)
             # Simulate first run
             r1 = await check.run()
             assert r1.has_updates is True
@@ -943,7 +942,9 @@ class TestHeartbeatEventEnrichment:
         bus.emit = AsyncMock()
 
         runner_mock = AsyncMock()
-        runner_mock.run_turn = AsyncMock(return_value=("Response text", None, {"input_tokens": 100, "output_tokens": 50}))
+        runner_mock.run_turn = AsyncMock(
+            return_value=("Response text", None, {"input_tokens": 100, "output_tokens": 50})
+        )
         runner_mock.end_conversation = AsyncMock()
 
         runner = HeartbeatRunner(

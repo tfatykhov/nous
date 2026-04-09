@@ -6,9 +6,9 @@ Stores raw results with all scores to F025-sweep-raw-results.json
 
 import json
 import time
-import urllib.request
 import urllib.error
-from datetime import datetime, timezone
+import urllib.request
+from datetime import UTC, datetime
 
 API_BASE = "http://localhost:8000"
 WEIGHTS = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
@@ -102,7 +102,8 @@ def search_facts(query, limit=LIMIT):
     encoded_q = urllib.parse.quote(query)
     return api_get(f"/facts?q={encoded_q}&limit={limit}")
 
-import urllib.parse
+import urllib.parse  # noqa: E402
+
 
 def run_sweep():
     """Run the full sweep and return results dict."""
@@ -112,7 +113,7 @@ def run_sweep():
 
     results = {
         "metadata": {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "description": "F025 Retrieval Self-Optimization Weight Sweep — REAL DATA",
             "method": "50 queries x 7 weight ratios via /facts?q= and /admin/search-weights API",
             "api_base": API_BASE,
@@ -160,7 +161,7 @@ def run_sweep():
                             for f in facts
                         ],
                     }
-                    print(f"  [{category}] '{query}' -> {len(facts)} results, top score: {facts[0]['score'] if facts else 'N/A'}")
+                    print(f"  [{category}] '{query}' -> {len(facts)} results, top score: {facts[0]['score'] if facts else 'N/A'}")  # noqa: E501
                 except Exception as e:
                     sweep_data["query_results"][query] = {
                         "query_category": category,
@@ -216,7 +217,7 @@ def run_sweep():
 
     # Summary stats
     stable_count = sum(1 for qa in query_analysis.values() if qa["top1_stable"])
-    avg_jaccard = sum(qa["top5_jaccard_0.3_vs_0.9"] for qa in query_analysis.values()) / len(query_analysis) if query_analysis else 0
+    avg_jaccard = sum(qa["top5_jaccard_0.3_vs_0.9"] for qa in query_analysis.values()) / len(query_analysis) if query_analysis else 0  # noqa: E501
     unstable_queries = [q for q, qa in query_analysis.items() if not qa["top1_stable"]]
 
     results["analysis"] = {
@@ -231,7 +232,7 @@ def run_sweep():
         "per_query": query_analysis,
     }
 
-    print(f"\n=== SUMMARY ===")
+    print("\n=== SUMMARY ===")
     print(f"Top-1 stable: {stable_count}/{len(all_queries)} ({results['analysis']['summary']['top1_stability_pct']}%)")
     print(f"Avg Top-5 Jaccard (0.3 vs 0.9): {avg_jaccard:.4f}")
     print(f"Unstable queries: {unstable_queries}")

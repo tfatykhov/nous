@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -277,7 +277,7 @@ class TestGreedyCluster:
 # ---------------------------------------------------------------------------
 
 
-def _build_learner(settings: Settings | None = None):
+def _build_learner(settings=None):
     """Build a ProcedureLearner with mocked dependencies."""
     brain = AsyncMock()
     heart = AsyncMock()
@@ -355,12 +355,6 @@ async def test_success_rate_gate():
     learner, brain, heart, embeddings, llm_client = _build_learner()
 
     # 2 success + 2 failure (all reviewed) = 50% success rate
-    summaries = [
-        _make_decision_summary(outcome="success"),
-        _make_decision_summary(outcome="success"),
-        _make_decision_summary(outcome="failure"),
-        _make_decision_summary(outcome="failure"),
-    ]
     # list_decisions returns all — but only "success" + reviewed pass the filter
     # Actually the learner filters for outcome=="success" first, so failures won't
     # make it into the cluster. Let's test differently: all "success" but the

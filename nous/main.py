@@ -324,7 +324,7 @@ async def create_components(settings: Settings) -> dict:
         limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
     )
     # F033: Multi-tier search router
-    from nous.api.search_providers import TavilyProvider, ExaProvider, BraveProvider
+    from nous.api.search_providers import BraveProvider, ExaProvider, TavilyProvider
     from nous.api.search_router import SearchRouter
 
     search_router = SearchRouter(
@@ -436,13 +436,16 @@ async def create_components(settings: Settings) -> dict:
     heartbeat_runner = None
     if settings.heartbeat_enabled:
         try:
-            from nous.heartbeat.finding_store import FindingStore
-            from nous.heartbeat.runner import HeartbeatRunner
-            from nous.heartbeat.registry import CheckRegistry
-            from nous.heartbeat.schemas import EscalationConfig
             from nous.heartbeat.checks import (
-                HealthCheck, SelfInitiatedCheck, EmailCheck, DriveCheck,
+                DriveCheck,
+                EmailCheck,
+                HealthCheck,
+                SelfInitiatedCheck,
             )
+            from nous.heartbeat.finding_store import FindingStore
+            from nous.heartbeat.registry import CheckRegistry
+            from nous.heartbeat.runner import HeartbeatRunner
+            from nous.heartbeat.schemas import EscalationConfig
 
             escalation_config = EscalationConfig(
                 low_to_normal_hours=settings.heartbeat_escalation_low_to_normal_hours,

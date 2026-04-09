@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 
 
 @dataclass
@@ -64,7 +64,7 @@ class UsageTracker:
         overlap_score: float = 0.0,
     ) -> None:
         """Record that a memory was retrieved and whether it was referenced."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         record = UsageRecord(
             memory_id=memory_id,
             memory_type=memory_type,
@@ -125,7 +125,7 @@ class UsageTracker:
         if not records:
             return 0.0
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         score = 0.0
         for record in records:
             age_days = (now - record.retrieved_at).total_seconds() / 86400
@@ -136,7 +136,7 @@ class UsageTracker:
 
     def _prune_old_records(self) -> None:
         """Remove records older than PRUNE_AGE_DAYS (F11)."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         cutoff_seconds = self.PRUNE_AGE_DAYS * 86400
         pruned_total = 0
 

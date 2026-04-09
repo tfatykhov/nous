@@ -7,11 +7,8 @@ All versions are immutable. Rollback = reactivate previous version.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
-from typing import Any
-from uuid import UUID
 
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.cognitive.rubric_schemas import (
@@ -30,7 +27,10 @@ _DEFAULT_DIMENSIONS = [
         "name": "Recall",
         "weight": 0.25,
         "description": "Accuracy and completeness of memory retrieval",
-        "scoring_criteria": "1: No relevant memories retrieved. 5: Some relevant, some missed. 10: All relevant memories retrieved with high precision.",
+        "scoring_criteria": (
+            "1: No relevant memories retrieved. 5: Some relevant, some missed."
+            " 10: All relevant memories retrieved with high precision."
+        ),
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -38,7 +38,10 @@ _DEFAULT_DIMENSIONS = [
         "name": "Tool Selection",
         "weight": 0.25,
         "description": "Choosing the right tool for the task and using it efficiently",
-        "scoring_criteria": "1: Wrong tools or excessive calls. 5: Right tools, some inefficiency. 10: Optimal tool choice and call efficiency.",
+        "scoring_criteria": (
+            "1: Wrong tools or excessive calls. 5: Right tools, some inefficiency."
+            " 10: Optimal tool choice and call efficiency."
+        ),
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -46,7 +49,10 @@ _DEFAULT_DIMENSIONS = [
         "name": "Confidence Calibration",
         "weight": 0.25,
         "description": "Accuracy of confidence estimates vs actual outcomes",
-        "scoring_criteria": "1: Confidence wildly mismatched to outcomes. 5: Some calibration. 10: Confidence closely tracks actual success rates.",
+        "scoring_criteria": (
+            "1: Confidence wildly mismatched to outcomes. 5: Some calibration."
+            " 10: Confidence closely tracks actual success rates."
+        ),
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -54,7 +60,10 @@ _DEFAULT_DIMENSIONS = [
         "name": "Proactivity",
         "weight": 0.25,
         "description": "Anticipating needs without being asked",
-        "scoring_criteria": "1: Purely reactive. 5: Some anticipation. 10: Consistently anticipates and prepares for user needs.",
+        "scoring_criteria": (
+            "1: Purely reactive. 5: Some anticipation."
+            " 10: Consistently anticipates and prepares for user needs."
+        ),
         "min_weight": 0.10,
         "max_weight": 0.40,
     },

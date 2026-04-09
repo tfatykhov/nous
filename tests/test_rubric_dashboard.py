@@ -1,7 +1,5 @@
 """Tests for rubric dashboard query and endpoint."""
 
-import uuid
-from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio

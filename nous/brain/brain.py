@@ -678,7 +678,7 @@ class Brain:
 
         if query_embedding is not None:
             # Full hybrid search using RRF (F025)
-            from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+            from nous.heart.search import _resolve_rrf_k, _resolve_vector_weight, _rrf_merge
 
             vw = _resolve_vector_weight()
             rrf_k = _resolve_rrf_k()
@@ -988,7 +988,7 @@ class Brain:
         return await self._get_episode_for_decision(decision_id, session)
 
     async def _get_episode_for_decision(self, decision_id: UUID, session: AsyncSession):
-        from nous.storage.models import EpisodeDecision, Episode
+        from nous.storage.models import Episode, EpisodeDecision
         stmt = (
             select(Episode)
             .join(EpisodeDecision, Episode.id == EpisodeDecision.episode_id)
@@ -1026,7 +1026,9 @@ class Brain:
         """Create a graph edge between two nodes."""
         if session is None:
             async with self.db.session() as session:
-                result = await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
+                result = await self._link(
+                    source_id, target_id, relation, weight, False, source_type, target_type, session
+                )
                 await session.commit()
                 return result
         return await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)

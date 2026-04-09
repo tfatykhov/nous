@@ -1,5 +1,4 @@
 """Tests for F024 Phase 3b correlation engine."""
-import pytest
 
 
 class TestPearsonCorrelation:
@@ -64,12 +63,12 @@ class TestWeightSuggestion:
         from nous.cognitive.rubric_schemas import CorrelationResult
 
         correlations = [
-            CorrelationResult(dimension="Recall", signal_type="completed", pearson_r=0.7, spearman_rho=0.65, sample_size=50),
-            CorrelationResult(dimension="Tool Selection", signal_type="completed", pearson_r=0.3, spearman_rho=0.25, sample_size=50),
-            CorrelationResult(dimension="Confidence Calibration", signal_type="completed", pearson_r=0.5, spearman_rho=0.45, sample_size=50),
-            CorrelationResult(dimension="Proactivity", signal_type="completed", pearson_r=0.2, spearman_rho=0.15, sample_size=50),
+            CorrelationResult(dimension="Recall", signal_type="completed", pearson_r=0.7, spearman_rho=0.65, sample_size=50),  # noqa: E501
+            CorrelationResult(dimension="Tool Selection", signal_type="completed", pearson_r=0.3, spearman_rho=0.25, sample_size=50),  # noqa: E501
+            CorrelationResult(dimension="Confidence Calibration", signal_type="completed", pearson_r=0.5, spearman_rho=0.45, sample_size=50),  # noqa: E501
+            CorrelationResult(dimension="Proactivity", signal_type="completed", pearson_r=0.2, spearman_rho=0.15, sample_size=50),  # noqa: E501
         ]
-        current_weights = {"Recall": 0.25, "Tool Selection": 0.25, "Confidence Calibration": 0.25, "Proactivity": 0.25}
+        current_weights = {"Recall": 0.25, "Tool Selection": 0.25, "Confidence Calibration": 0.25, "Proactivity": 0.25}  # noqa: E501
         suggested = suggest_weights(correlations, current_weights, cap=0.05)
         assert abs(sum(suggested.values()) - 1.0) < 0.01
         assert suggested["Recall"] >= 0.25
@@ -83,8 +82,8 @@ class TestSplitDetection:
         from nous.cognitive.rubric_schemas import CorrelationResult
 
         correlations = [
-            CorrelationResult(dimension="Tool Selection", signal_type="completed", pearson_r=0.8, spearman_rho=0.75, sample_size=50),
-            CorrelationResult(dimension="Tool Selection", signal_type="corrected", pearson_r=0.2, spearman_rho=0.15, sample_size=50),
+            CorrelationResult(dimension="Tool Selection", signal_type="completed", pearson_r=0.8, spearman_rho=0.75, sample_size=50),  # noqa: E501
+            CorrelationResult(dimension="Tool Selection", signal_type="corrected", pearson_r=0.2, spearman_rho=0.15, sample_size=50),  # noqa: E501
         ]
         candidates = detect_split_candidates(correlations, threshold=0.3)
         assert "Tool Selection" in candidates

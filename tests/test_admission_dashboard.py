@@ -1,6 +1,5 @@
 """Tests for F021.1 Admission Control Dashboard."""
 
-import uuid
 
 import pytest
 import pytest_asyncio
@@ -10,8 +9,6 @@ from sqlalchemy import text
 from nous.brain.brain import Brain
 from nous.cognitive.layer import CognitiveLayer
 from nous.heart import FactInput
-from nous.storage.models import Fact
-
 
 # ---------------------------------------------------------------------------
 # Task 1: Schema tests
@@ -46,7 +43,7 @@ async def test_fact_persists_admission_scores(heart_with_shadow_admission, db):
     """Fact created with shadow admission stores per-dimension scores."""
     heart = heart_with_shadow_admission
     async with db.session() as session:
-        result = await heart.learn(
+        await heart.learn(
             FactInput(
                 content="Test fact for admission scores persistence",
                 category="technical",
@@ -82,7 +79,7 @@ async def test_bypassed_fact_has_null_scores(heart_with_shadow_admission, db):
     """Bypassed facts get admission_scores=NULL, not empty dict."""
     heart = heart_with_shadow_admission
     async with db.session() as session:
-        result = await heart.learn(
+        await heart.learn(
             FactInput(
                 content="User stated fact for bypass test",
                 category="preference",
@@ -112,7 +109,7 @@ async def test_bypassed_fact_has_null_scores(heart_with_shadow_admission, db):
 # ---------------------------------------------------------------------------
 
 
-from nous.api.dashboard_queries import get_admission_data
+from nous.api.dashboard_queries import get_admission_data  # noqa: E402
 
 
 @pytest.mark.asyncio
@@ -174,7 +171,7 @@ async def test_get_admission_data_with_facts(heart_with_shadow_admission, db, se
 # ---------------------------------------------------------------------------
 
 
-from nous.api.dashboard_queries import get_admission_rejected
+from nous.api.dashboard_queries import get_admission_rejected  # noqa: E402
 
 
 @pytest.mark.asyncio

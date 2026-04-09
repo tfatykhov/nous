@@ -12,16 +12,15 @@ from datetime import UTC, datetime
 
 import pytest
 
+from nous.cognitive.action_gate import ActionGate, GateResult
+from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
 from nous.cognitive.execution_ledger import (
-    ExecutionLedger,
-    ExecutedAction,
-    classify_side_effect,
     READ_TOOLS,
     WRITE_TOOLS,
+    ExecutedAction,
+    ExecutionLedger,
+    classify_side_effect,
 )
-from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
-from nous.cognitive.action_gate import ActionGate, GateResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
