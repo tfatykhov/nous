@@ -8,12 +8,12 @@ via the conftest.py SAVEPOINT fixture.
 import uuid
 
 import pytest_asyncio
+from conftest import MockEmbeddingProvider
 
 from nous.brain.brain import Brain
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import TurnContext
 from nous.heart import FactInput
-from conftest import MockEmbeddingProvider
 
 # ---------------------------------------------------------------------------
 # Fixtures

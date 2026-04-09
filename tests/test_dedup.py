@@ -1,9 +1,9 @@
 """Unit tests for ConversationDeduplicator — async, uses MockEmbeddingProvider."""
 
 import pytest
+from conftest import MockEmbeddingProvider
 
 from nous.cognitive.dedup import ConversationDeduplicator
-from conftest import MockEmbeddingProvider
 
 # ---------------------------------------------------------------------------
 # No conversation messages
