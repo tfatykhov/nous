@@ -383,11 +383,13 @@ async def test_unified_recall_type_filter(heart, session):
 
 async def test_events_emitted(heart, session):
     """Verify events logged to nous_system.events."""
-    # Start an episode — should emit episode_started
+    import uuid as _uuid
+    # Start an episode — use unique summary to avoid dedup with other tests
+    unique_tag = _uuid.uuid4().hex[:8]
     episode = await heart.start_episode(
         _episode_input(
-            title="Event emission test",
-            summary="Testing event emission",
+            title=f"Event emission test {unique_tag}",
+            summary=f"Testing event emission uniquely {unique_tag}",
         ),
         session=session,
     )

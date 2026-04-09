@@ -159,10 +159,12 @@ from nous.api.dashboard_queries import get_admission_data
 
 
 @pytest.mark.asyncio
-async def test_get_admission_data_empty(db, settings):
+async def test_get_admission_data_empty(db):
     """get_admission_data returns valid structure with no data."""
+    # Use a fresh agent_id that has no facts at all
+    empty_agent = f"test-admission-empty-{uuid.uuid4().hex[:8]}"
     async with db.session() as session:
-        data = await get_admission_data(session, settings.agent_id, days=30, threshold=0.55)
+        data = await get_admission_data(session, empty_agent, days=30, threshold=0.55)
 
     assert "summary" in data
     assert "score_distribution" in data
@@ -190,10 +192,10 @@ async def test_get_admission_data_with_facts(heart_with_shadow_admission, db, se
                 ),
                 session=session,
             )
-        # Insert a bypassed fact
+        # Insert a bypassed fact (unique content to avoid dedup)
         await heart.learn(
             FactInput(
-                content="Bypassed fact for admission test",
+                content=f"Bypassed preference fact for dashboard aggregation test {uuid.uuid4().hex[:8]}",
                 category="preference",
                 confidence=1.0,
                 source="user_stated",

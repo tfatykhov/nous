@@ -40,7 +40,11 @@ async def seed_rubric(db, settings):
             text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
             {"id": settings.agent_id, "name": "Test Rubric Agent"},
         )
-        # Remove any existing active rubric for this agent
+        # Clean up any existing data for this agent
+        await session.execute(
+            text("DELETE FROM heart.outcome_signals WHERE agent_id = :aid"),
+            {"aid": settings.agent_id},
+        )
         await session.execute(
             text("DELETE FROM heart.rubric_versions WHERE agent_id = :aid"),
             {"aid": settings.agent_id},
