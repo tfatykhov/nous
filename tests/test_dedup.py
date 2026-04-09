@@ -2,7 +2,7 @@
 
 import pytest
 
-from tests.conftest import MockEmbeddingProvider
+from conftest import MockEmbeddingProvider
 from nous.cognitive.dedup import ConversationDeduplicator
 
 

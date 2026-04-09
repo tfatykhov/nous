@@ -13,7 +13,7 @@ from nous.brain.brain import Brain
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import TurnContext, TurnResult
 from nous.heart import FactInput
-from tests.conftest import MockEmbeddingProvider
+from conftest import MockEmbeddingProvider
 
 
 # ---------------------------------------------------------------------------
