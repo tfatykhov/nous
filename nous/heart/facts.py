@@ -227,7 +227,6 @@ class FactManager:
         2. Graduated confidence penalty: score *= confidence for facts with
            confidence < 0.5 (makes confidence meaningful at retrieval time).
         """
-        superseder_ids = {r.superseded_by for r in results if r.superseded_by is not None}
         result_ids = {r.id for r in results}
 
         filtered: list[FactSummary] = []
@@ -375,7 +374,8 @@ class FactManager:
             encoded_censors=encoded_censors,
             admission_score=admission_result.composite_score if admission_result else None,
             admission_scores=(
-                admission_result.scores if admission_result and not admission_result.bypassed and admission_result.scores
+                admission_result.scores
+                if admission_result and not admission_result.bypassed and admission_result.scores
                 else None
             ),
         )
@@ -1127,7 +1127,7 @@ class FactManager:
         as hybrid_search() but intentionally omits the active=true filter so
         superseded/inactive facts are included.
         """
-        from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+        from nous.heart.search import _resolve_rrf_k, _resolve_vector_weight, _rrf_merge
 
         vw = _resolve_vector_weight()
         rrf_k = _resolve_rrf_k()
@@ -1301,7 +1301,6 @@ class FactManager:
         return await self._count_stale(older_than_days, session)
 
     async def _count_stale(self, older_than_days: int, session: AsyncSession) -> int:
-        from datetime import timedelta
         cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
         result = await session.execute(
             select(func.count())

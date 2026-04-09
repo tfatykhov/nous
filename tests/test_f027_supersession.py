@@ -13,13 +13,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nous.heart.schemas import FactSummary
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -437,8 +435,8 @@ class TestPhaseStaleScam:
     @pytest.mark.asyncio
     async def test_returns_true_no_stale_facts(self):
         """No stale facts → True, stats set to 0."""
-        from nous.handlers.sleep_handler import SleepHandler
         from nous.events import EventBus
+        from nous.handlers.sleep_handler import SleepHandler
 
         # Mock heart with db that returns no stale facts
         mock_session = AsyncMock()
@@ -469,8 +467,8 @@ class TestPhaseStaleScam:
     @pytest.mark.asyncio
     async def test_deactivates_stale_facts(self):
         """Stale facts get active=False and stat is incremented."""
-        from nous.handlers.sleep_handler import SleepHandler
         from nous.events import EventBus
+        from nous.handlers.sleep_handler import SleepHandler
         from nous.storage.models import Fact
 
         # Build a mock fact that is active
@@ -508,8 +506,8 @@ class TestPhaseStaleScam:
     @pytest.mark.asyncio
     async def test_returns_false_on_exception(self):
         """DB error → returns False."""
-        from nous.handlers.sleep_handler import SleepHandler
         from nous.events import EventBus
+        from nous.handlers.sleep_handler import SleepHandler
 
         mock_db = MagicMock()
         mock_db.session = MagicMock(side_effect=RuntimeError("db error"))
@@ -603,8 +601,8 @@ class TestPhaseClusterConsolidation:
     @pytest.mark.asyncio
     async def test_merges_cluster_and_deactivates_originals(self):
         """Happy path: 3 facts merged, originals deactivated."""
-        from nous.handlers.sleep_handler import SleepHandler
         from nous.events import EventBus
+        from nous.handlers.sleep_handler import SleepHandler
         from nous.storage.models import Fact
 
         merged_content = "Comprehensive merged fact about the subject"
@@ -747,8 +745,8 @@ class TestSleepPhaseRegistration:
     @pytest.mark.asyncio
     async def test_stale_scan_phase_in_completed(self):
         """_phase_stale_scan is called and its name appears in phases_completed."""
-        from nous.handlers.sleep_handler import SleepHandler
         from nous.events import Event, EventBus
+        from nous.handlers.sleep_handler import SleepHandler
 
         bus = MagicMock(spec=EventBus)
         bus.on = MagicMock()
@@ -796,8 +794,8 @@ class TestSleepPhaseRegistration:
     @pytest.mark.asyncio
     async def test_cluster_consolidation_phase_in_completed(self):
         """_phase_cluster_consolidation is called and its name appears in phases_completed."""
-        from nous.handlers.sleep_handler import SleepHandler
         from nous.events import Event, EventBus
+        from nous.handlers.sleep_handler import SleepHandler
 
         bus = MagicMock(spec=EventBus)
         bus.on = MagicMock()
