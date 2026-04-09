@@ -3,9 +3,11 @@
 Tests exercise the activation logic from layer.py lines 377-396 (#216),
 and the critic_skills -> context.build() wiring (#229).
 """
-import pytest
+
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
+
+import pytest
 
 from nous.cognitive.critic_schemas import CriticResult, RoutingMode
 from nous.cognitive.schemas import BuildResult, FrameSelection
@@ -23,11 +25,13 @@ async def _run_activation_logic(
         for skill_name in critic_result.skills:
             try:
                 proc = await mock_heart.get_procedure_by_name(
-                    skill_name, session=session,
+                    skill_name,
+                    session=session,
                 )
                 if proc:
                     await mock_heart.activate_procedure(
-                        proc.id, session=session,
+                        proc.id,
+                        session=session,
                     )
                     activated_skill_ids.append(str(proc.id))
             except Exception:
@@ -186,6 +190,7 @@ def _frame(frame_id="conversation", confidence=0.5, method="default"):
 
 def _settings(**overrides):
     from nous.config import Settings
+
     return Settings(_env_file=None, **overrides)
 
 
@@ -206,7 +211,9 @@ def _mock_layer(settings):
     heart.focus = AsyncMock()
 
     layer = CognitiveLayer(
-        brain=brain, heart=heart, settings=settings,
+        brain=brain,
+        heart=heart,
+        settings=settings,
     )
 
     # Mock context build

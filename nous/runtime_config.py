@@ -97,9 +97,7 @@ class RuntimeConfig:
     async def load_from_db(self, session: AsyncSession) -> None:
         """Load all persisted overrides from nous_system.config."""
         try:
-            result = await session.execute(
-                text("SELECT key, value FROM nous_system.config")
-            )
+            result = await session.execute(text("SELECT key, value FROM nous_system.config"))
             for row in result:
                 key, value = row[0], row[1]
                 if key == _KEY_VECTOR_WEIGHT and value is not None:

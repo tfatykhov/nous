@@ -268,8 +268,8 @@ Calibration examples:
 - "It was raining during our conversation" -> 0.1 (irrelevant ephemeral context)
 
 Fact: {fact_input.content}
-Category: {fact_input.category or 'unknown'}
-Subject: {fact_input.subject or 'none'}
+Category: {fact_input.category or "unknown"}
+Subject: {fact_input.subject or "none"}
 
 Respond with ONLY a number between 0.0 and 1.0."""
 

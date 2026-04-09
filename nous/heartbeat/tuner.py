@@ -70,9 +70,7 @@ class HeartbeatTuner:
                 continue
 
             # Snapshot current params BEFORE adjusting
-            self._snapshots[check.name] = {
-                name: p.value for name, p in check.tunable_params().items()
-            }
+            self._snapshots[check.name] = {name: p.value for name, p in check.tunable_params().items()}
 
             adjustments = self._compute_adjustments(check, outcomes)
 
@@ -83,16 +81,18 @@ class HeartbeatTuner:
                     break
                 old_val, new_val = self._apply_adjustment(check, param_name, direction)
                 if old_val != new_val:
-                    report.adjustments.append(TuningAdjustment(
-                        check_name=check.name,
-                        param_name=param_name,
-                        old_value=old_val,
-                        new_value=new_val,
-                        direction=direction,
-                        sample_count=len(outcomes),
-                        positive_rate=self._positive_rate(outcomes),
-                        negative_rate=self._negative_rate(outcomes),
-                    ))
+                    report.adjustments.append(
+                        TuningAdjustment(
+                            check_name=check.name,
+                            param_name=param_name,
+                            old_value=old_val,
+                            new_value=new_val,
+                            direction=direction,
+                            sample_count=len(outcomes),
+                            positive_rate=self._positive_rate(outcomes),
+                            negative_rate=self._negative_rate(outcomes),
+                        )
+                    )
                     applied += 1
 
         self._last_tune = datetime.now(UTC)
@@ -122,7 +122,10 @@ class HeartbeatTuner:
         return adjustments
 
     def _apply_adjustment(
-        self, check: object, param_name: str, direction: str,
+        self,
+        check: object,
+        param_name: str,
+        direction: str,
     ) -> tuple[float, float]:
         """Apply a single parameter adjustment. Returns (old_value, new_value)."""
         param = check.get_param(param_name)  # type: ignore[union-attr]
@@ -148,7 +151,10 @@ class HeartbeatTuner:
         return (old_val, actual.value if actual else old_val)
 
     def _check_and_rollback(
-        self, check: object, finding_store: object, report: TuningReport,
+        self,
+        check: object,
+        finding_store: object,
+        report: TuningReport,
     ) -> None:
         """Check if previous adjustment degraded outcomes. Rollback if so.
 
@@ -171,16 +177,18 @@ class HeartbeatTuner:
                 p = check.get_param(param_name)  # type: ignore[union-attr]
                 if p and not p.pinned:
                     check.set_param(param_name, old_value)  # type: ignore[union-attr]
-                    report.adjustments.append(TuningAdjustment(
-                        check_name=check.name,  # type: ignore[union-attr]
-                        param_name=param_name,
-                        old_value=p.value,
-                        new_value=old_value,
-                        direction="rollback",
-                        sample_count=len(outcomes),
-                        positive_rate=self._positive_rate(outcomes),
-                        negative_rate=neg_rate,
-                    ))
+                    report.adjustments.append(
+                        TuningAdjustment(
+                            check_name=check.name,  # type: ignore[union-attr]
+                            param_name=param_name,
+                            old_value=p.value,
+                            new_value=old_value,
+                            direction="rollback",
+                            sample_count=len(outcomes),
+                            positive_rate=self._positive_rate(outcomes),
+                            negative_rate=neg_rate,
+                        )
+                    )
             del self._snapshots[check.name]  # type: ignore[union-attr]
 
     @staticmethod
@@ -189,7 +197,8 @@ class HeartbeatTuner:
         if not outcomes:
             return 0
         return sum(
-            1 for o in outcomes
+            1
+            for o in outcomes
             if getattr(o, "outcome", None) in (OutcomeSignal.STRONG_POSITIVE, OutcomeSignal.POSITIVE)
         ) / len(outcomes)
 
@@ -199,7 +208,8 @@ class HeartbeatTuner:
         if not outcomes:
             return 0
         return sum(
-            1 for o in outcomes
+            1
+            for o in outcomes
             if getattr(o, "outcome", None) in (OutcomeSignal.STRONG_NEGATIVE, OutcomeSignal.NEGATIVE)
         ) / len(outcomes)
 
@@ -221,9 +231,7 @@ class HeartbeatTuner:
         for check_name, adjs in by_check.items():
             lines.append(f"{check_name}:")
             for adj in adjs:
-                lines.append(
-                    f"  - {adj.param_name}: {adj.old_value:.2f} -> {adj.new_value:.2f} ({adj.direction})"
-                )
+                lines.append(f"  - {adj.param_name}: {adj.old_value:.2f} -> {adj.new_value:.2f} ({adj.direction})")
             lines.append("")
 
         if report.skipped_checks:

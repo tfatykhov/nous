@@ -196,6 +196,7 @@ async def hybrid_search(
 
 class _ScoredWrapper:
     """Lightweight proxy that overrides .score without mutating the ORM object."""
+
     __slots__ = ("_item", "_score")
 
     def __init__(self, item, score: float) -> None:
@@ -254,7 +255,7 @@ def apply_frame_boost(
 
 # --- F030: MMR Diversity Re-Ranking ---
 
-import logging
+import logging  # noqa: E402
 
 _mmr_logger = logging.getLogger(__name__)
 
@@ -325,9 +326,7 @@ def mmr_rerank(
             relevance = query_sims[c.id]
 
             if selected_embs:
-                max_sim = max(
-                    cosine_similarity(emb, s_emb) for s_emb in selected_embs
-                )
+                max_sim = max(cosine_similarity(emb, s_emb) for s_emb in selected_embs)
             else:
                 max_sim = 0.0
 

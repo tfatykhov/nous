@@ -191,7 +191,10 @@ async def test_get_recent_decisions_returns_recent(brain, session):
 
     cutoff = datetime.now(UTC) - timedelta(minutes=5)
     results = await brain.get_recent_decisions(
-        "nous-default", since=cutoff, session_id="session-alpha", session=session,
+        "nous-default",
+        since=cutoff,
+        session_id="session-alpha",
+        session=session,
     )
     assert len(results) >= 1
     assert any(r.id == detail.id for r in results)
@@ -229,7 +232,10 @@ async def test_get_recent_decisions_filters_by_session(brain, session):
 
     cutoff = datetime.now(UTC) - timedelta(minutes=5)
     results = await brain.get_recent_decisions(
-        "nous-default", since=cutoff, session_id="session-B", session=session,
+        "nous-default",
+        since=cutoff,
+        session_id="session-B",
+        session=session,
     )
     assert len(results) == 1
     assert results[0].id == detail_b.id
@@ -244,14 +250,20 @@ async def test_start_dedup_blocks_duplicate(delib, brain, session):
     """009.5: start() returns None when a similar decision was recently recorded."""
     frame = _frame()
     id1 = await delib.start(
-        "nous-default", "evaluate database options", frame,
-        session_id="test-session", session=session,
+        "nous-default",
+        "evaluate database options",
+        frame,
+        session_id="test-session",
+        session=session,
     )
     assert id1 is not None
 
     id2 = await delib.start(
-        "nous-default", "evaluate database options", frame,
-        session_id="test-session", session=session,
+        "nous-default",
+        "evaluate database options",
+        frame,
+        session_id="test-session",
+        session=session,
     )
     assert id2 is None
 
@@ -265,13 +277,19 @@ async def test_start_dedup_allows_different(delib, brain, session):
     """009.5: start() allows decisions with different descriptions."""
     frame = _frame()
     await delib.start(
-        "nous-default", "evaluate database options", frame,
-        session_id="test-session", session=session,
+        "nous-default",
+        "evaluate database options",
+        frame,
+        session_id="test-session",
+        session=session,
     )
 
     id2 = await delib.start(
-        "nous-default", "choose frontend framework for dashboard", frame,
-        session_id="test-session", session=session,
+        "nous-default",
+        "choose frontend framework for dashboard",
+        frame,
+        session_id="test-session",
+        session=session,
     )
     assert id2 is not None
 

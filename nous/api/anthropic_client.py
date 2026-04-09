@@ -38,7 +38,8 @@ _HEADER_DELAY_MAX = 60.0
 # StreamEvent (moved from runner.py — used by both clients)
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: E402
+from datetime import UTC  # noqa: E402
 
 
 @dataclass
@@ -124,9 +125,10 @@ def _retry_delay(attempt: int, response: httpx.Response | None = None) -> float:
                     return delay
             except ValueError:
                 try:
-                    from datetime import datetime, timezone
+                    from datetime import datetime
+
                     target = parsedate_to_datetime(retry_after)
-                    delay = (target - datetime.now(timezone.utc)).total_seconds()
+                    delay = (target - datetime.now(UTC)).total_seconds()
                     if 0 <= delay <= _HEADER_DELAY_MAX:
                         logger.info("Using Retry-After (date): %.1fs", delay)
                         return delay
@@ -272,10 +274,7 @@ class HttpxAnthropicClient:
             else:
                 headers["x-api-key"] = api_key
         else:
-            logger.warning(
-                "Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set -- "
-                "API calls will fail"
-            )
+            logger.warning("Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set -- API calls will fail")
 
         beta_features: list[str] = [
             "claude-code-20250219",
@@ -327,7 +326,8 @@ class HttpxAnthropicClient:
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 response = await self._http.post(
-                    "/v1/messages", json=payload,
+                    "/v1/messages",
+                    json=payload,
                     headers={"X-Stainless-Retry-Count": str(attempt)},
                 )
 
@@ -374,10 +374,7 @@ class HttpxAnthropicClient:
                     await asyncio.sleep(delay)
                     continue
 
-                last_error = RuntimeError(
-                    f"Anthropic API error ({response.status_code}): "
-                    f"{error_type} - {error_msg}"
-                )
+                last_error = RuntimeError(f"Anthropic API error ({response.status_code}): {error_type} - {error_msg}")
 
             except httpx.TimeoutException as e:
                 last_error = RuntimeError(f"API request timed out: {e}")
@@ -403,7 +400,9 @@ class HttpxAnthropicClient:
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 async with self._http.stream(
-                    "POST", "/v1/messages", json=payload,
+                    "POST",
+                    "/v1/messages",
+                    json=payload,
                     headers={"X-Stainless-Retry-Count": str(attempt)},
                 ) as response:
                     if response.status_code != 200:
@@ -451,7 +450,9 @@ class HttpxAnthropicClient:
             except httpx.TimeoutException as e:
                 if attempt < _MAX_RETRIES:
                     delay = _retry_delay(attempt)
-                    logger.warning("Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
+                    logger.warning(
+                        "Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e
+                    )
                     await asyncio.sleep(delay)
                     continue
                 yield StreamEvent(type="error", text=f"Stream timeout: {e}")
@@ -484,10 +485,7 @@ class SdkAnthropicClient:
         try:
             from anthropic import AsyncAnthropic
         except ImportError:
-            raise RuntimeError(
-                "anthropic package not installed. "
-                "Install with: uv add anthropic"
-            )
+            raise RuntimeError("anthropic package not installed. Install with: uv add anthropic")
 
         settings = self._settings
         api_key = settings.anthropic_api_key or ""
@@ -513,10 +511,7 @@ class SdkAnthropicClient:
             else:
                 kwargs["api_key"] = api_key
         else:
-            logger.warning(
-                "Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set -- "
-                "API calls will fail"
-            )
+            logger.warning("Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set -- API calls will fail")
             kwargs["api_key"] = "missing"
 
         # Beta headers + OAT browser access header
@@ -640,7 +635,10 @@ class SdkAnthropicClient:
 
             logger.error(
                 "Anthropic SDK %d %s: %s (request_id=%s)",
-                status, error_type, error_msg, request_id or "n/a",
+                status,
+                error_type,
+                error_msg,
+                request_id or "n/a",
             )
             if status >= 500 and response is not None:
                 logger.info(

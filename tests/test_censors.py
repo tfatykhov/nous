@@ -336,13 +336,10 @@ async def test_keyword_fallback_for_null_embeddings(heart, session):
     )
 
     # Null out the embedding to simulate a censor created without embeddings
-    await session.execute(
-        select(Censor).where(Censor.id == censor.id)
-    )
+    await session.execute(select(Censor).where(Censor.id == censor.id))
     from sqlalchemy import update
-    await session.execute(
-        update(Censor).where(Censor.id == censor.id).values(embedding=None)
-    )
+
+    await session.execute(update(Censor).where(Censor.id == censor.id).values(embedding=None))
     await session.flush()
 
     # Semantic match will skip this censor (embedding IS NULL),
@@ -374,9 +371,7 @@ async def test_keyword_match_pipe_separated_pattern(heart, session):
     )
 
     # Null out embedding so only keyword matching is used
-    await session.execute(
-        update(Censor).where(Censor.id == censor.id).values(embedding=None)
-    )
+    await session.execute(update(Censor).where(Censor.id == censor.id).values(embedding=None))
     await session.flush()
 
     # Should match "token" from the pipe-separated pattern
@@ -406,9 +401,7 @@ async def test_keyword_match_regex_wildcard_pattern(heart, session):
         session=session,
     )
 
-    await session.execute(
-        update(Censor).where(Censor.id == censor.id).values(embedding=None)
-    )
+    await session.execute(update(Censor).where(Censor.id == censor.id).values(embedding=None))
     await session.flush()
 
     matches = await heart.check_censors(
@@ -449,9 +442,7 @@ async def test_keyword_match_invalid_regex_skipped(heart, session):
     )
 
     # Null out embeddings so only keyword matching is used
-    await session.execute(
-        update(Censor).where(Censor.id.in_([bad_censor.id, good_censor.id])).values(embedding=None)
-    )
+    await session.execute(update(Censor).where(Censor.id.in_([bad_censor.id, good_censor.id])).values(embedding=None))
     await session.flush()
 
     # The bad regex should be skipped, but "password" should still match
@@ -482,9 +473,7 @@ async def test_keyword_match_no_false_positive(heart, session):
         session=session,
     )
 
-    await session.execute(
-        update(Censor).where(Censor.id == censor.id).values(embedding=None)
-    )
+    await session.execute(update(Censor).where(Censor.id == censor.id).values(embedding=None))
     await session.flush()
 
     matches = await heart.check_censors(
@@ -618,10 +607,17 @@ async def test_execute_rejects_malformed_action(heart, session):
 
 def test_turn_context_has_censor_injected_context():
     """TurnContext schema includes censor_injected_context field."""
-    from nous.cognitive.schemas import TurnContext, FrameSelection
+    from nous.cognitive.schemas import FrameSelection, TurnContext
+
     ctx = TurnContext(
         system_prompt="test",
-        frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
+        frame=FrameSelection(
+            frame_id="conversation",
+            frame_name="Conversation",
+            description="test",
+            confidence=1.0,
+            match_method="pattern",
+        ),
         censor_injected_context={"censor-id-1": "[Censor recall: 3 results]..."},
     )
     assert ctx.censor_injected_context == {"censor-id-1": "[Censor recall: 3 results]..."}
@@ -629,10 +625,17 @@ def test_turn_context_has_censor_injected_context():
 
 def test_turn_context_censor_injected_context_default_empty():
     """censor_injected_context defaults to empty dict."""
-    from nous.cognitive.schemas import TurnContext, FrameSelection
+    from nous.cognitive.schemas import FrameSelection, TurnContext
+
     ctx = TurnContext(
         system_prompt="test",
-        frame=FrameSelection(frame_id="conversation", frame_name="Conversation", description="test", confidence=1.0, match_method="pattern"),
+        frame=FrameSelection(
+            frame_id="conversation",
+            frame_name="Conversation",
+            description="test",
+            confidence=1.0,
+            match_method="pattern",
+        ),
     )
     assert ctx.censor_injected_context == {}
 
@@ -645,6 +648,7 @@ def test_turn_context_censor_injected_context_default_empty():
 def test_check_censor_compliance_used():
     """Compliance check detects when agent referenced injected context."""
     from nous.cognitive.layer import _check_censor_compliance
+
     injected = {"censor-1": "[Censor recall for 'citations': 2 results]\n  1. [fact] Source Alpha from research paper"}
     response = "Based on Source Alpha from the research paper, the data shows significant improvement."
     result = _check_censor_compliance(injected, response)
@@ -654,6 +658,7 @@ def test_check_censor_compliance_used():
 def test_check_censor_compliance_not_used():
     """Compliance check detects when agent did NOT reference injected context."""
     from nous.cognitive.layer import _check_censor_compliance
+
     injected = {"censor-1": "[Censor recall for 'citations': 2 results]\n  1. [fact] Source Alpha from research paper"}
     response = "I think the answer is 42."
     result = _check_censor_compliance(injected, response)
@@ -663,6 +668,7 @@ def test_check_censor_compliance_not_used():
 def test_check_censor_compliance_empty_injected():
     """Empty injected context returns empty results."""
     from nous.cognitive.layer import _check_censor_compliance
+
     result = _check_censor_compliance({}, "Some response")
     assert result == {}
 
@@ -675,6 +681,7 @@ def test_check_censor_compliance_empty_injected():
 async def test_censor_action_end_to_end(heart, session):
     """Full flow: create censor with action -> check -> execute -> get results."""
     from nous.heart.schemas import FactInput
+
     await heart.learn(
         FactInput(content="Paris is the capital of France", category="geography", subject="France"),
         session=session,
@@ -697,6 +704,7 @@ async def test_censor_action_end_to_end(heart, session):
     assert warn_match[0].trigger_action is not None
 
     from nous.heart.censor_actions import CensorActionExecutor
+
     executor = CensorActionExecutor(heart)
     result = await executor.execute(warn_match[0].trigger_action, session=session)
     assert result is not None
@@ -706,8 +714,13 @@ async def test_censor_action_end_to_end(heart, session):
 async def test_block_censor_with_action_enriches_reason(heart, session):
     """Block censor with trigger_action enriches the block reason with evidence."""
     from nous.heart.schemas import FactInput
+
     await heart.learn(
-        FactInput(content="Production database was accidentally deleted on 2025-12-01", category="incident", subject="production"),
+        FactInput(
+            content="Production database was accidentally deleted on 2025-12-01",
+            category="incident",
+            subject="production",
+        ),
         session=session,
     )
 
@@ -729,6 +742,7 @@ async def test_block_censor_with_action_enriches_reason(heart, session):
     assert block_matches[0].action_instruction == "Contact the infrastructure team for production changes."
 
     from nous.heart.censor_actions import CensorActionExecutor
+
     executor = CensorActionExecutor(heart)
     result = await executor.execute(block_matches[0].trigger_action, session=session)
     assert result is not None
@@ -737,6 +751,7 @@ async def test_block_censor_with_action_enriches_reason(heart, session):
 async def test_block_censor_conditional_unblock(heart, session):
     """Block censor with unblock_pattern downgrades to warn when pattern matches action results."""
     from nous.heart.schemas import FactInput
+
     await heart.learn(
         FactInput(content="Allowed admin: admin@company.com, ops@company.com", category="access", subject="admin-list"),
         session=session,
@@ -753,8 +768,10 @@ async def test_block_censor_conditional_unblock(heart, session):
     detail = await heart.add_censor(inp, session=session)
     assert detail.unblock_pattern is not None
 
-    from nous.heart.censor_actions import CensorActionExecutor
     import re
+
+    from nous.heart.censor_actions import CensorActionExecutor
+
     executor = CensorActionExecutor(heart)
     matches = await heart.check_censors("delete production database", session=session)
     block_match = [m for m in matches if m.trigger_pattern == "delete.*production"][0]
@@ -784,6 +801,7 @@ async def test_block_censor_no_unblock_when_pattern_missing(heart, session):
 async def test_multiple_censor_actions_all_injected(heart, session):
     """When multiple warn censors with trigger_action fire, all results are collected."""
     from nous.heart.schemas import FactInput
+
     await heart.learn(
         FactInput(content="Python is a programming language", category="tech", subject="Python"),
         session=session,
@@ -813,6 +831,7 @@ async def test_multiple_censor_actions_all_injected(heart, session):
     assert len(warn_matches) >= 2
 
     from nous.heart.censor_actions import CensorActionExecutor
+
     executor = CensorActionExecutor(heart)
     results = {}
     for m in warn_matches:
@@ -898,7 +917,9 @@ async def test_update_censor_add_unblock_pattern(heart, session):
 def test_pre_turn_accepts_is_subtask_param():
     """pre_turn signature includes is_subtask parameter."""
     import inspect
+
     from nous.cognitive.layer import CognitiveLayer
+
     sig = inspect.signature(CognitiveLayer.pre_turn)
     assert "is_subtask" in sig.parameters
     param = sig.parameters["is_subtask"]
@@ -924,8 +945,13 @@ async def test_spawn_task_rejects_blocked_subtask(heart, session):
 async def test_spawn_task_allows_unblocked_subtask(heart, session):
     """spawn_task censor check allows subtask when unblock_pattern matches."""
     from nous.heart.schemas import FactInput
+
     await heart.learn(
-        FactInput(content="Subtask-authorized operations: log-analysis, report-generation", category="access", subject="subtask-perms"),
+        FactInput(
+            content="Subtask-authorized operations: log-analysis, report-generation",
+            category="access",
+            subject="subtask-perms",
+        ),
         session=session,
     )
 
@@ -943,8 +969,10 @@ async def test_spawn_task_allows_unblocked_subtask(heart, session):
     assert len(block_matches) >= 1
 
     # Verify unblock would work
-    from nous.heart.censor_actions import CensorActionExecutor
     import re
+
+    from nous.heart.censor_actions import CensorActionExecutor
+
     executor = CensorActionExecutor(heart)
     for match in block_matches:
         if match.trigger_action and match.unblock_pattern:

@@ -9,19 +9,17 @@ Covers:
 from __future__ import annotations
 
 import json
-import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from nous.events import Event, EventBus
-from nous.heart.schemas import FactInput, FactRejected
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_event(
     event_type: str = "sleep_started",
@@ -73,6 +71,7 @@ def _make_sleep_handler(brain=None, heart=None, settings=None, bus=None, llm_cli
 # Task 1: find_contradiction_candidates
 # ===========================================================================
 
+
 class TestFindContradictionCandidates:
     """FactManager.find_contradiction_candidates() returns same-subject, high-similarity pairs."""
 
@@ -88,15 +87,19 @@ class TestFindContradictionCandidates:
     async def test_returns_dict_structure(self):
         """Results should have the expected dict keys."""
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": uuid4(),
-            "fact2_id": uuid4(),
-            "content1": "Tim's timezone is EST",
-            "content2": "Tim's timezone is PST",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.88,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": uuid4(),
+                    "fact2_id": uuid4(),
+                    "content1": "Tim's timezone is EST",
+                    "content2": "Tim's timezone is PST",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.88,
+                }
+            ]
+        )
         result = await heart.find_contradiction_candidates(limit=10)
         assert len(result) == 1
         pair = result[0]
@@ -113,10 +116,19 @@ class TestFindContradictionCandidates:
     async def test_respects_limit(self):
         """Should return at most `limit` pairs."""
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[
-            {"fact1_id": uuid4(), "fact2_id": uuid4(), "content1": "A", "content2": "B",
-             "date1": "2026-03-01", "date2": "2026-03-15", "similarity": 0.88},
-        ])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": uuid4(),
+                    "fact2_id": uuid4(),
+                    "content1": "A",
+                    "content2": "B",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.88,
+                },
+            ]
+        )
         result = await heart.find_contradiction_candidates(limit=1)
         assert len(result) <= 1
 
@@ -132,6 +144,7 @@ class TestFindContradictionCandidates:
 # ===========================================================================
 # Task 2: Orient context in sleep reflection
 # ===========================================================================
+
 
 class TestOrientContext:
     """Sleep reflection injects existing facts into the prompt."""
@@ -149,14 +162,17 @@ class TestOrientContext:
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock(return_value=MagicMock())
 
-        llm_response = json.dumps({
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
-            "summary": "Productive day",
-            "facts": [{"subject": "test", "content": "test fact", "category": "concept"}],
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "patterns": [],
+                "lessons": [],
+                "connections": [],
+                "gaps": [],
+                "summary": "Productive day",
+                "facts": [{"subject": "test", "content": "test fact", "category": "concept"}],
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_reflect(sleep_stats)
 
@@ -179,13 +195,25 @@ class TestOrientContext:
         heart.learn = AsyncMock(return_value=MagicMock())
 
         captured_payloads = []
+
         async def capture_call(payload):
             captured_payloads.append(payload)
             response = MagicMock()
-            response.content = [{"type": "text", "text": json.dumps({
-                "patterns": [], "lessons": [], "connections": [], "gaps": [],
-                "summary": "Day summary", "facts": [],
-            })}]
+            response.content = [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "patterns": [],
+                            "lessons": [],
+                            "connections": [],
+                            "gaps": [],
+                            "summary": "Day summary",
+                            "facts": [],
+                        }
+                    ),
+                }
+            ]
             return response
 
         llm_client = AsyncMock()
@@ -212,13 +240,25 @@ class TestOrientContext:
         heart.learn = AsyncMock(return_value=MagicMock())
 
         captured_payloads = []
+
         async def capture_call(payload):
             captured_payloads.append(payload)
             response = MagicMock()
-            response.content = [{"type": "text", "text": json.dumps({
-                "patterns": [], "lessons": [], "connections": [], "gaps": [],
-                "summary": "Novel day", "facts": [],
-            })}]
+            response.content = [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "patterns": [],
+                            "lessons": [],
+                            "connections": [],
+                            "gaps": [],
+                            "summary": "Novel day",
+                            "facts": [],
+                        }
+                    ),
+                }
+            ]
             return response
 
         llm_client = AsyncMock()
@@ -251,18 +291,23 @@ class TestOrientContext:
         heart.supersede_fact = AsyncMock(return_value=MagicMock())
         heart.learn = AsyncMock(return_value=MagicMock())
 
-        llm_response = json.dumps({
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
-            "summary": "Timezone update",
-            "facts": [{
-                "subject": "UPDATES: Tim's timezone is EST",
-                "content": "Tim's timezone is PST",
-                "category": "person",
-            }],
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "patterns": [],
+                "lessons": [],
+                "connections": [],
+                "gaps": [],
+                "summary": "Timezone update",
+                "facts": [
+                    {
+                        "subject": "UPDATES: Tim's timezone is EST",
+                        "content": "Tim's timezone is PST",
+                        "category": "person",
+                    }
+                ],
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_reflect(sleep_stats)
 
@@ -289,18 +334,23 @@ class TestOrientContext:
         heart.supersede_fact = AsyncMock(return_value=MagicMock())
         heart.learn = AsyncMock(return_value=MagicMock())
 
-        llm_response = json.dumps({
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
-            "summary": "Test",
-            "facts": [{
-                "subject": "updates: Old fact",
-                "content": "New fact content",
-                "category": "concept",
-            }],
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "patterns": [],
+                "lessons": [],
+                "connections": [],
+                "gaps": [],
+                "summary": "Test",
+                "facts": [
+                    {
+                        "subject": "updates: Old fact",
+                        "content": "New fact content",
+                        "category": "concept",
+                    }
+                ],
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_reflect(sleep_stats)
 
@@ -325,18 +375,23 @@ class TestOrientContext:
         heart.supersede_fact = AsyncMock()
         heart.learn = AsyncMock(return_value=MagicMock())
 
-        llm_response = json.dumps({
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
-            "summary": "Test",
-            "facts": [{
-                "subject": "UPDATES: Barely related fact",
-                "content": "New fact content",
-                "category": "concept",
-            }],
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "patterns": [],
+                "lessons": [],
+                "connections": [],
+                "gaps": [],
+                "summary": "Test",
+                "facts": [
+                    {
+                        "subject": "UPDATES: Barely related fact",
+                        "content": "New fact content",
+                        "category": "concept",
+                    }
+                ],
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_reflect(sleep_stats)
 
@@ -348,6 +403,7 @@ class TestOrientContext:
 # Task 3: Contradiction resolution phase
 # ===========================================================================
 
+
 class TestContradictionResolution:
     """Phase 4.5: resolve accumulated contradictions during sleep."""
 
@@ -358,26 +414,30 @@ class TestContradictionResolution:
         fact2_id = uuid4()
 
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": fact2_id,
-            "content1": "Tim's timezone is EST",
-            "content2": "Tim's timezone is PST",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.88,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": fact1_id,
+                    "fact2_id": fact2_id,
+                    "content1": "Tim's timezone is EST",
+                    "content2": "Tim's timezone is PST",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.88,
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
-        llm_response = json.dumps({
-            "action": "SUPERSEDE_A",
-            "confidence": 0.9,
-            "reason": "Fact B is newer",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": "SUPERSEDE_A",
+                "confidence": 0.9,
+                "reason": "Fact B is newer",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         result = await handler._phase_resolve_contradictions(sleep_stats)
         assert result is True
@@ -392,26 +452,30 @@ class TestContradictionResolution:
         fact2_id = uuid4()
 
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": fact2_id,
-            "content1": "Correct info",
-            "content2": "Outdated info",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.85,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": fact1_id,
+                    "fact2_id": fact2_id,
+                    "content1": "Correct info",
+                    "content2": "Outdated info",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.85,
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
-        llm_response = json.dumps({
-            "action": "SUPERSEDE_B",
-            "confidence": 0.85,
-            "reason": "Fact A is correct",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": "SUPERSEDE_B",
+                "confidence": 0.85,
+                "reason": "Fact A is correct",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
         heart.deactivate_fact.assert_called_once_with(fact2_id)
@@ -423,28 +487,32 @@ class TestContradictionResolution:
         fact2_id = uuid4()
 
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": fact2_id,
-            "content1": "Tim uses EST",
-            "content2": "Tim's hours are 9-5",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.82,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": fact1_id,
+                    "fact2_id": fact2_id,
+                    "content1": "Tim uses EST",
+                    "content2": "Tim's hours are 9-5",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.82,
+                }
+            ]
+        )
         heart.learn = AsyncMock(return_value=MagicMock())
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
-        llm_response = json.dumps({
-            "action": "MERGE",
-            "confidence": 0.85,
-            "reason": "Complementary timezone info",
-            "merged_content": "Tim works in EST timezone, hours 9-5",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": "MERGE",
+                "confidence": 0.85,
+                "reason": "Complementary timezone info",
+                "merged_content": "Tim works in EST timezone, hours 9-5",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
 
@@ -456,27 +524,31 @@ class TestContradictionResolution:
     async def test_keep_both_takes_no_action(self):
         """KEEP_BOTH should not modify any facts."""
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": uuid4(),
-            "fact2_id": uuid4(),
-            "content1": "Python is a language",
-            "content2": "Python is for data science",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.80,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": uuid4(),
+                    "fact2_id": uuid4(),
+                    "content1": "Python is a language",
+                    "content2": "Python is for data science",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.80,
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
         heart.learn = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
-        llm_response = json.dumps({
-            "action": "KEEP_BOTH",
-            "confidence": 0.95,
-            "reason": "Different information",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": "KEEP_BOTH",
+                "confidence": 0.95,
+                "reason": "Different information",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
 
@@ -491,26 +563,30 @@ class TestContradictionResolution:
         fact1_id = uuid4()
 
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": uuid4(),
-            "content1": "Wrong fact",
-            "content2": "Correct fact",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.85,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": fact1_id,
+                    "fact2_id": uuid4(),
+                    "content1": "Wrong fact",
+                    "content2": "Correct fact",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.85,
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
-        llm_response = json.dumps({
-            "action": "REMOVE_A",
-            "confidence": 0.9,
-            "reason": "Fact A is stale",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": "REMOVE_A",
+                "confidence": 0.9,
+                "reason": "Fact A is stale",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
         heart.deactivate_fact.assert_called_once_with(fact1_id)
@@ -519,26 +595,30 @@ class TestContradictionResolution:
     async def test_low_confidence_treated_as_keep_both(self):
         """Resolution with confidence < 0.7 should be treated as KEEP_BOTH."""
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": uuid4(),
-            "fact2_id": uuid4(),
-            "content1": "A",
-            "content2": "B",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.85,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": uuid4(),
+                    "fact2_id": uuid4(),
+                    "content1": "A",
+                    "content2": "B",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.85,
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
-        llm_response = json.dumps({
-            "action": "SUPERSEDE_A",
-            "confidence": 0.5,
-            "reason": "Not sure",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": "SUPERSEDE_A",
+                "confidence": 0.5,
+                "reason": "Not sure",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
         heart.deactivate_fact.assert_not_called()
@@ -568,10 +648,19 @@ class TestContradictionResolution:
     async def test_respects_interrupted(self):
         """Phase stops processing when interrupted."""
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[
-            {"fact1_id": uuid4(), "fact2_id": uuid4(), "content1": "A", "content2": "B",
-             "date1": "2026-03-01", "date2": "2026-03-15", "similarity": 0.85},
-        ])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": uuid4(),
+                    "fact2_id": uuid4(),
+                    "content1": "A",
+                    "content2": "B",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.85,
+                },
+            ]
+        )
         heart.search_facts = AsyncMock(return_value=[])
 
         handler, _, _, bus, _ = _make_sleep_handler(heart=heart)
@@ -597,27 +686,31 @@ class TestContradictionResolution:
         """Action string should be normalized (uppercase, stripped)."""
         fact1_id = uuid4()
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": uuid4(),
-            "content1": "A",
-            "content2": "B",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.85,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": fact1_id,
+                    "fact2_id": uuid4(),
+                    "content1": "A",
+                    "content2": "B",
+                    "date1": "2026-03-01",
+                    "date2": "2026-03-15",
+                    "similarity": 0.85,
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
 
         # Lowercase action with whitespace
-        llm_response = json.dumps({
-            "action": " supersede_a ",
-            "confidence": 0.9,
-            "reason": "test",
-        })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        llm_response = json.dumps(
+            {
+                "action": " supersede_a ",
+                "confidence": 0.9,
+                "reason": "test",
+            }
         )
+        handler, _, _, bus, _ = _make_sleep_handler(heart=heart, llm_client=_mock_llm_client(llm_response))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
         heart.deactivate_fact.assert_called_once_with(fact1_id)
@@ -626,6 +719,7 @@ class TestContradictionResolution:
 # ===========================================================================
 # Task 3b: Sleep cycle integration
 # ===========================================================================
+
 
 class TestSleepCycleWithF031:
     """Full sleep cycle includes F031 phases."""
@@ -654,10 +748,18 @@ class TestSleepCycleWithF031:
         ep1.summary = "Test episode for ordering"
 
         handler, brain, heart, bus, _ = _make_sleep_handler(
-            llm_client=_mock_llm_client(json.dumps({
-                "patterns": [], "lessons": [], "connections": [], "gaps": [],
-                "summary": "Test", "facts": [],
-            }))
+            llm_client=_mock_llm_client(
+                json.dumps(
+                    {
+                        "patterns": [],
+                        "lessons": [],
+                        "connections": [],
+                        "gaps": [],
+                        "summary": "Test",
+                        "facts": [],
+                    }
+                )
+            )
         )
         brain.list_decisions = AsyncMock(return_value=([], 0))
         heart.list_episodes = AsyncMock(return_value=[ep1, ep1])

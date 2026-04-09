@@ -35,10 +35,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nous.heartbeat.dynamic import ALLOWED_TOOLS, DynamicCheck, DynamicCheckLoader
+from nous.heartbeat.dynamic import DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.registry import CheckRegistry
-from nous.heartbeat.schemas import CheckResult, Finding
-
+from nous.heartbeat.schemas import CheckResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -254,11 +253,13 @@ class TestDynamicCheckRun:
     async def test_successful_run_with_findings(self):
         """13. Run returns findings when LLM responds with JSON."""
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": true, "findings": [{"summary": "Found issue", "urgency": "high", "needs_action": true}]}',
-            MagicMock(),
-            {"input_tokens": 100, "output_tokens": 50},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                '{"has_findings": true, "findings": [{"summary": "Found issue", "urgency": "high", "needs_action": true}]}',  # noqa: E501
+                MagicMock(),
+                {"input_tokens": 100, "output_tokens": 50},
+            )
+        )
         runner.end_conversation = AsyncMock()
 
         check = _make_dynamic_check(runner=runner)
@@ -273,11 +274,13 @@ class TestDynamicCheckRun:
     async def test_successful_run_no_findings(self):
         """14. Run returns empty when LLM says no findings."""
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": false, "findings": []}',
-            MagicMock(),
-            {"input_tokens": 80, "output_tokens": 20},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                '{"has_findings": false, "findings": []}',
+                MagicMock(),
+                {"input_tokens": 80, "output_tokens": 20},
+            )
+        )
         runner.end_conversation = AsyncMock()
 
         check = _make_dynamic_check(runner=runner)
@@ -299,11 +302,13 @@ class TestDynamicCheckRun:
     async def test_run_passes_tool_filter(self):
         """16. run_turn called with tool_filter matching check tools."""
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": false, "findings": []}',
-            MagicMock(),
-            {"input_tokens": 50, "output_tokens": 20},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                '{"has_findings": false, "findings": []}',
+                MagicMock(),
+                {"input_tokens": 50, "output_tokens": 20},
+            )
+        )
         runner.end_conversation = AsyncMock()
 
         check = _make_dynamic_check(tools=["web_search", "bash"], runner=runner)
@@ -316,11 +321,13 @@ class TestDynamicCheckRun:
     async def test_run_tracks_tokens(self):
         """17. tokens_used populated from usage dict."""
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": false, "findings": []}',
-            MagicMock(),
-            {"input_tokens": 300, "output_tokens": 200},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                '{"has_findings": false, "findings": []}',
+                MagicMock(),
+                {"input_tokens": 300, "output_tokens": 200},
+            )
+        )
         runner.end_conversation = AsyncMock()
 
         check = _make_dynamic_check(runner=runner)
@@ -332,11 +339,13 @@ class TestDynamicCheckRun:
     async def test_run_cleans_up_session(self):
         """18. end_conversation called in finally block."""
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": false, "findings": []}',
-            MagicMock(),
-            {"input_tokens": 50, "output_tokens": 20},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                '{"has_findings": false, "findings": []}',
+                MagicMock(),
+                {"input_tokens": 50, "output_tokens": 20},
+            )
+        )
         runner.end_conversation = AsyncMock()
 
         check = _make_dynamic_check(runner=runner)
@@ -374,7 +383,9 @@ class TestDynamicCheckParsing:
     def test_parse_valid_json(self):
         """20. Clean JSON response yields findings list."""
         check = _make_dynamic_check(name="parser_test")
-        response = '{"has_findings": true, "findings": [{"summary": "Issue found", "urgency": "high", "needs_action": true}]}'
+        response = (
+            '{"has_findings": true, "findings": [{"summary": "Issue found", "urgency": "high", "needs_action": true}]}'
+        )
         findings = check._parse_findings(response)
 
         assert len(findings) == 1
@@ -401,7 +412,9 @@ class TestDynamicCheckParsing:
     def test_parse_urgency_validation(self):
         """23. Invalid urgency defaults to 'normal'."""
         check = _make_dynamic_check()
-        response = '{"has_findings": true, "findings": [{"summary": "Test", "urgency": "critical", "needs_action": false}]}'
+        response = (
+            '{"has_findings": true, "findings": [{"summary": "Test", "urgency": "critical", "needs_action": false}]}'
+        )
         findings = check._parse_findings(response)
 
         assert len(findings) == 1
@@ -536,7 +549,7 @@ class TestDynamicCheckLoader:
         rows = [_mock_db_row(id="id-1", name="health", prompt="Overlapping check")]
         loader._fetch_enabled = AsyncMock(return_value=rows)
 
-        count = await loader.sync()
+        count = await loader.sync()  # noqa: F841
 
         # The permanent check should still be the original
         assert registry.get_check("health") is permanent_check
@@ -769,7 +782,8 @@ class TestDynamicCheckLoaderCRUD:
         mock_session.commit = AsyncMock()
 
         result = await loader.manage_check(
-            action="update", name="check_a",
+            action="update",
+            name="check_a",
             updates={"prompt": "New prompt"},
         )
 
@@ -794,7 +808,8 @@ class TestDynamicCheckLoaderStats:
         mock_session.commit = AsyncMock()
 
         loader = DynamicCheckLoader(
-            db=db, registry=CheckRegistry(),
+            db=db,
+            registry=CheckRegistry(),
             agent_id="test-agent",
         )
 
@@ -811,7 +826,8 @@ class TestDynamicCheckLoaderStats:
         mock_session.commit = AsyncMock()
 
         loader = DynamicCheckLoader(
-            db=db, registry=CheckRegistry(),
+            db=db,
+            registry=CheckRegistry(),
             agent_id="test-agent",
         )
 
@@ -876,9 +892,12 @@ class TestHeartbeatRunnerDynamic:
         reg = CheckRegistry()
         check = _make_dynamic_check(name="dyn_1")
         # Override run to return tokens
-        check.run = AsyncMock(return_value=CheckResult(
-            has_updates=False, tokens_used=500,
-        ))
+        check.run = AsyncMock(
+            return_value=CheckResult(
+                has_updates=False,
+                tokens_used=500,
+            )
+        )
         reg.register(check)
 
         runner = self._make_runner(registry=reg)
@@ -903,7 +922,8 @@ class TestHeartbeatRunnerDynamic:
         await runner._tick()
 
         loader.update_run_stats.assert_called_once_with(
-            "check-uuid-001", success=True,
+            "check-uuid-001",
+            success=True,
         )
 
     @pytest.mark.asyncio
@@ -939,7 +959,7 @@ class TestHeartbeatRunnerDynamic:
         # Simulate being at tick count that's a multiple of sync_ticks
         runner._tick_count = 4  # _tick increments to 5
 
-        reg = runner._registry
+        reg = runner._registry  # noqa: F841
         # No due checks, just test the sync path
         await runner._tick()
 
@@ -1066,7 +1086,10 @@ class TestSelfDisabledFlag:
         db, mock_session = _mock_db()
         registry = CheckRegistry()
         loader = DynamicCheckLoader(
-            db=db, registry=registry, runner=AsyncMock(), agent_id="test-agent",
+            db=db,
+            registry=registry,
+            runner=AsyncMock(),
+            agent_id="test-agent",
         )
 
         # Register a check in the registry
@@ -1094,11 +1117,13 @@ class TestSelfDisabledFlag:
     async def test_self_disabled_in_check_result(self):
         """57. When _self_disabled is True, run() sets result.self_disabled=True."""
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            '{"has_findings": false, "findings": []}',
-            MagicMock(),
-            {"input_tokens": 50, "output_tokens": 20},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                '{"has_findings": false, "findings": []}',
+                MagicMock(),
+                {"input_tokens": 50, "output_tokens": 20},
+            )
+        )
         runner.end_conversation = AsyncMock()
 
         check = _make_dynamic_check(runner=runner)
@@ -1140,16 +1165,20 @@ class TestOnCompleteExecution:
         """58. _execute_callback runs prompt, tracks tokens, cleans up session."""
         runner = self._make_runner_for_callback()
         triage_runner = AsyncMock()
-        triage_runner.run_turn = AsyncMock(return_value=(
-            "Callback completed successfully",
-            MagicMock(),
-            {"input_tokens": 200, "output_tokens": 100},
-        ))
+        triage_runner.run_turn = AsyncMock(
+            return_value=(
+                "Callback completed successfully",
+                MagicMock(),
+                {"input_tokens": 200, "output_tokens": 100},
+            )
+        )
         triage_runner.end_conversation = AsyncMock()
         runner._get_triage_runner = MagicMock(return_value=triage_runner)
 
         check = DynamicCheck(
-            check_id="cb-001", name="cb_check", prompt="Check X",
+            check_id="cb-001",
+            name="cb_check",
+            prompt="Check X",
             tools=["web_search"],
             on_complete_prompt="Send summary",
             on_complete_tools=["web_search"],
@@ -1168,15 +1197,19 @@ class TestOnCompleteExecution:
         runner = self._make_runner_for_callback()
         triage_runner = AsyncMock()
         # First call fails, second succeeds
-        triage_runner.run_turn = AsyncMock(side_effect=[
-            RuntimeError("API timeout"),
-            ("Retry success", MagicMock(), {"input_tokens": 100, "output_tokens": 50}),
-        ])
+        triage_runner.run_turn = AsyncMock(
+            side_effect=[
+                RuntimeError("API timeout"),
+                ("Retry success", MagicMock(), {"input_tokens": 100, "output_tokens": 50}),
+            ]
+        )
         triage_runner.end_conversation = AsyncMock()
         runner._get_triage_runner = MagicMock(return_value=triage_runner)
 
         check = DynamicCheck(
-            check_id="cb-002", name="retry_check", prompt="Check Y",
+            check_id="cb-002",
+            name="retry_check",
+            prompt="Check Y",
             tools=["web_search"],
             on_complete_prompt="Retry me",
             on_complete_tools=["web_search"],
@@ -1203,7 +1236,9 @@ class TestOnCompleteExecution:
         runner._send_telegram = AsyncMock()
 
         check = DynamicCheck(
-            check_id="cb-003", name="fail_check", prompt="Check Z",
+            check_id="cb-003",
+            name="fail_check",
+            prompt="Check Z",
             tools=["web_search"],
             on_complete_prompt="Will fail",
             on_complete_tools=[],
@@ -1231,7 +1266,9 @@ class TestOnCompleteExecution:
         runner._finding_store = mock_store
 
         check = DynamicCheck(
-            check_id="cb-004", name="find_check", prompt="Check W",
+            check_id="cb-004",
+            name="find_check",
+            prompt="Check W",
             tools=["web_search"],
             on_complete_prompt="Will fail and create finding",
             on_complete_tools=[],
@@ -1261,7 +1298,9 @@ class TestOnCompleteExecution:
         runner._has_budget = MagicMock(return_value=False)
 
         check = DynamicCheck(
-            check_id="cb-005", name="budget_check", prompt="Check B",
+            check_id="cb-005",
+            name="budget_check",
+            prompt="Check B",
             tools=["web_search"],
             on_complete_prompt="No budget callback",
             on_complete_tools=[],
@@ -1285,8 +1324,11 @@ class TestOnCompleteValidation:
         db, mock_session = _mock_db()
         registry = registry or CheckRegistry()
         loader = DynamicCheckLoader(
-            db=db, registry=registry, runner=AsyncMock(),
-            agent_id="test-agent", max_checks=max_checks,
+            db=db,
+            registry=registry,
+            runner=AsyncMock(),
+            agent_id="test-agent",
+            max_checks=max_checks,
         )
         return loader, registry, mock_session
 
@@ -1337,7 +1379,8 @@ class TestOnCompleteValidation:
         # Remove bash from tools, but on_complete_tools still has it
         with pytest.raises(ValueError, match="on_complete_tools must be a subset"):
             await loader.manage_check(
-                action="update", name="check_a",
+                action="update",
+                name="check_a",
                 updates={"tools": ["web_search"]},
             )
 
@@ -1360,7 +1403,8 @@ class TestOnCompleteValidation:
         # Try to set on_complete_tools with a tool not in check tools
         with pytest.raises(ValueError, match="on_complete_tools must be a subset"):
             await loader.manage_check(
-                action="update", name="check_a",
+                action="update",
+                name="check_a",
                 updates={"on_complete_tools": ["web_search", "bash"]},
             )
 
@@ -1377,8 +1421,11 @@ class TestOnCompleteCRUD:
         db, mock_session = _mock_db()
         registry = registry or CheckRegistry()
         loader = DynamicCheckLoader(
-            db=db, registry=registry, runner=AsyncMock(),
-            agent_id="test-agent", max_checks=max_checks,
+            db=db,
+            registry=registry,
+            runner=AsyncMock(),
+            agent_id="test-agent",
+            max_checks=max_checks,
         )
         return loader, registry, mock_session
 
@@ -1455,7 +1502,8 @@ class TestOnCompleteCRUD:
         mock_session.commit = AsyncMock()
 
         result = await loader.manage_check(
-            action="update", name="oc_update",
+            action="update",
+            name="oc_update",
             updates={
                 "on_complete_prompt": "New callback prompt",
                 "on_complete_tools": ["web_search"],
@@ -1501,15 +1549,19 @@ class TestRunnerCallback:
         """69. _tick detects self_disabled check and creates background task."""
         reg = CheckRegistry()
         check = DynamicCheck(
-            check_id="cb-tick-001", name="self_disable_check",
+            check_id="cb-tick-001",
+            name="self_disable_check",
             prompt="Check and disable",
             tools=["web_search"],
             on_complete_prompt="Run callback after disable",
             on_complete_tools=["web_search"],
         )
-        check.run = AsyncMock(return_value=CheckResult(
-            has_updates=False, self_disabled=True,
-        ))
+        check.run = AsyncMock(
+            return_value=CheckResult(
+                has_updates=False,
+                self_disabled=True,
+            )
+        )
         reg.register(check)
 
         runner, _ = self._make_runner(registry=reg)
@@ -1527,14 +1579,18 @@ class TestRunnerCallback:
         """70. self_disabled but no on_complete_prompt -> no callback."""
         reg = CheckRegistry()
         check = DynamicCheck(
-            check_id="cb-tick-002", name="no_prompt_check",
+            check_id="cb-tick-002",
+            name="no_prompt_check",
             prompt="Check without callback",
             tools=["web_search"],
             # No on_complete_prompt
         )
-        check.run = AsyncMock(return_value=CheckResult(
-            has_updates=False, self_disabled=True,
-        ))
+        check.run = AsyncMock(
+            return_value=CheckResult(
+                has_updates=False,
+                self_disabled=True,
+            )
+        )
         reg.register(check)
 
         runner, _ = self._make_runner(registry=reg)
@@ -1549,15 +1605,19 @@ class TestRunnerCallback:
         """71. trigger_check detects self_disabled and creates background task."""
         reg = CheckRegistry()
         check = DynamicCheck(
-            check_id="cb-trig-001", name="trigger_cb_check",
+            check_id="cb-trig-001",
+            name="trigger_cb_check",
             prompt="Trigger me",
             tools=["web_search"],
             on_complete_prompt="Callback on trigger",
             on_complete_tools=["web_search"],
         )
-        check.run = AsyncMock(return_value=CheckResult(
-            has_updates=False, self_disabled=True,
-        ))
+        check.run = AsyncMock(
+            return_value=CheckResult(
+                has_updates=False,
+                self_disabled=True,
+            )
+        )
         reg.register(check)
 
         runner, _ = self._make_runner(registry=reg)

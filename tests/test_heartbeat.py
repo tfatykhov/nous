@@ -36,7 +36,6 @@ from nous.heartbeat.checks import EmailCheck, HealthCheck, SelfInitiatedCheck
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding, HeartbeatResult
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -72,9 +71,12 @@ class DummyCheck(BaseCheck):
     interval = 60
 
     async def run(self) -> CheckResult:
-        return CheckResult(has_updates=True, findings=[
-            Finding(source="test", summary="test finding"),
-        ])
+        return CheckResult(
+            has_updates=True,
+            findings=[
+                Finding(source="test", summary="test finding"),
+            ],
+        )
 
 
 class FailingCheck(BaseCheck):
@@ -107,9 +109,12 @@ class UrgentDummyCheck(BaseCheck):
     urgent_override = True
 
     async def run(self) -> CheckResult:
-        return CheckResult(has_updates=True, findings=[
-            Finding(source="test", summary="urgent finding", urgency="high"),
-        ])
+        return CheckResult(
+            has_updates=True,
+            findings=[
+                Finding(source="test", summary="urgent finding", urgency="high"),
+            ],
+        )
 
 
 # ===========================================================================
@@ -551,11 +556,13 @@ class TestHeartbeatRunner:
     async def test_cognitive_triage_updates_budget(self):
         """41. _cognitive_triage increments tokens_used_today."""
         runner = self._make_runner()
-        runner._runner.run_turn = AsyncMock(return_value=(
-            "Reviewed items.",
-            MagicMock(),
-            {"input_tokens": 500, "output_tokens": 300},
-        ))
+        runner._runner.run_turn = AsyncMock(
+            return_value=(
+                "Reviewed items.",
+                MagicMock(),
+                {"input_tokens": 500, "output_tokens": 300},
+            )
+        )
         runner._runner.end_conversation = AsyncMock()
 
         findings = [
@@ -794,7 +801,7 @@ class TestEmailCheck:
         messages = [("msg-1", "Hello", "alice@co.com")]
 
         with patch.object(check, "_fetch_unseen", return_value=messages):
-            result1 = await asyncio.to_thread(check._fetch_unseen)
+            result1 = await asyncio.to_thread(check._fetch_unseen)  # noqa: F841
             # Simulate first run
             r1 = await check.run()
             assert r1.has_updates is True
@@ -884,17 +891,26 @@ class TestHeartbeatEventEnrichment:
 
         settings = _mock_settings()
         registry = CheckRegistry()
-        registry.register(_CustomFindingsCheck([
-            Finding(source="brain", summary="3 decisions pending", urgency="normal", needs_action=True),
-            Finding(source="facts", summary="10 stale facts", urgency="low", needs_action=False),
-        ]))
+        registry.register(
+            _CustomFindingsCheck(
+                [
+                    Finding(source="brain", summary="3 decisions pending", urgency="normal", needs_action=True),
+                    Finding(source="facts", summary="10 stale facts", urgency="low", needs_action=False),
+                ]
+            )
+        )
 
         bus = AsyncMock()
         bus.emit = AsyncMock()
 
         runner = HeartbeatRunner(
-            settings=settings, registry=registry, runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=bus, http_client=AsyncMock(),
+            settings=settings,
+            registry=registry,
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=bus,
+            http_client=AsyncMock(),
         )
 
         await runner._tick()
@@ -923,8 +939,13 @@ class TestHeartbeatEventEnrichment:
         bus.emit = AsyncMock()
 
         runner = HeartbeatRunner(
-            settings=settings, registry=registry, runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=bus, http_client=AsyncMock(),
+            settings=settings,
+            registry=registry,
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=bus,
+            http_client=AsyncMock(),
         )
 
         await runner._tick()
@@ -943,12 +964,19 @@ class TestHeartbeatEventEnrichment:
         bus.emit = AsyncMock()
 
         runner_mock = AsyncMock()
-        runner_mock.run_turn = AsyncMock(return_value=("Response text", None, {"input_tokens": 100, "output_tokens": 50}))
+        runner_mock.run_turn = AsyncMock(
+            return_value=("Response text", None, {"input_tokens": 100, "output_tokens": 50})
+        )
         runner_mock.end_conversation = AsyncMock()
 
         runner = HeartbeatRunner(
-            settings=settings, registry=registry, runner=runner_mock,
-            brain=AsyncMock(), heart=AsyncMock(), bus=bus, http_client=AsyncMock(),
+            settings=settings,
+            registry=registry,
+            runner=runner_mock,
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=bus,
+            http_client=AsyncMock(),
         )
 
         findings = [
@@ -975,8 +1003,13 @@ class TestHeartbeatPublicProperties:
 
         settings = _mock_settings()
         runner = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
         assert runner.is_running is False
 
@@ -986,8 +1019,13 @@ class TestHeartbeatPublicProperties:
 
         settings = _mock_settings()
         runner = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
         await runner.start()
         assert runner.is_running is True
@@ -998,7 +1036,12 @@ class TestHeartbeatPublicProperties:
 
         settings = _mock_settings()
         runner = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
         assert runner.tokens_used_today == 0

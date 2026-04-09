@@ -291,8 +291,9 @@ async def test_dedup_exclude_ids(heart, session):
 
 async def test_contradict_creates_graph_edge(heart, session):
     """facts.contradict() also creates a 'contradicts' graph edge."""
-    from nous.storage.models import GraphEdge
     from sqlalchemy import select
+
+    from nous.storage.models import GraphEdge
 
     f1 = await heart.learn(
         _fact_input(content="Tim prefers Celsius", subject="Tim"),
@@ -319,8 +320,9 @@ async def test_contradict_creates_graph_edge(heart, session):
 
 async def test_supersede_creates_graph_edge(heart, session):
     """facts.supersede() also creates a 'supersedes' graph edge."""
-    from nous.storage.models import GraphEdge
     from sqlalchemy import select
+
+    from nous.storage.models import GraphEdge
 
     f1 = await heart.learn(
         _fact_input(content="Python 3.11 is latest", subject="Python"),

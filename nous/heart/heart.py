@@ -18,11 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
+from nous.events import Event, EventBus
+from nous.heart.admission import AdmissionConfig, AdmissionController
 from nous.heart.censors import CensorManager
 from nous.heart.episodes import EpisodeManager
 from nous.heart.facts import FactManager
 from nous.heart.procedures import ProcedureManager
-from nous.heart.admission import AdmissionConfig, AdmissionController
+from nous.heart.schedules import ScheduleManager
 from nous.heart.schemas import (
     CensorDetail,
     CensorInput,
@@ -43,11 +45,9 @@ from nous.heart.schemas import (
     WorkingMemoryItem,
     WorkingMemoryState,
 )
-from nous.heart.schedules import ScheduleManager
+from nous.heart.search import batch_fetch_embeddings, mmr_rerank
 from nous.heart.subtasks import SubtaskManager
 from nous.heart.working_memory import WorkingMemoryManager
-from nous.heart.search import batch_fetch_embeddings, mmr_rerank
-from nous.events import Event, EventBus
 from nous.storage.database import Database
 from nous.storage.models import ConversationState
 
@@ -192,7 +192,15 @@ class Heart:
     ) -> tuple[list[EpisodeSummary], int]:
         """List episodes with pagination and filters (F021)."""
         return await self.episodes.list_all(
-            limit, offset, outcome, frame, date_from, date_to, sort, order, session,
+            limit,
+            offset,
+            outcome,
+            frame,
+            date_from,
+            date_to,
+            sort,
+            order,
+            session,
         )
 
     async def link_decision_to_episode(
@@ -224,9 +232,7 @@ class Heart:
         """Store structured summary on episode."""
         await self.episodes.update_summary(episode_id, summary, session=session)
 
-    async def bump_episode_compaction_count(
-        self, episode_id: UUID, session: AsyncSession | None = None
-    ) -> None:
+    async def bump_episode_compaction_count(self, episode_id: UUID, session: AsyncSession | None = None) -> None:
         """Increment compaction counter on episode."""
         await self.episodes.bump_compaction_count(episode_id, session=session)
 
@@ -284,17 +290,19 @@ class Heart:
         # F022 Phase 2: Emit on in-process EventBus for cross-type graph linking.
         # The DB audit event (via FactManager._emit_event) does NOT reach the bus.
         if self._bus is not None:
-            await self._bus.emit(Event(
-                type="fact_learned",
-                agent_id=self.agent_id,
-                data={
-                    "fact_id": str(result.id),
-                    "content": result.content,
-                    "category": result.category,
-                    "subject": result.subject,
-                    "modifies": "memory",
-                },
-            ))
+            await self._bus.emit(
+                Event(
+                    type="fact_learned",
+                    agent_id=self.agent_id,
+                    data={
+                        "fact_id": str(result.id),
+                        "content": result.content,
+                        "category": result.category,
+                        "subject": result.subject,
+                        "modifies": "memory",
+                    },
+                )
+            )
 
         return result
 
@@ -368,8 +376,16 @@ class Heart:
     ) -> tuple[list[FactSummary], int]:
         """List facts with pagination and filters (F021 browse mode)."""
         return await self.facts.list_all(
-            limit, offset, category, active_only,
-            confidence_min, date_from, date_to, sort, order, session,
+            limit,
+            offset,
+            category,
+            active_only,
+            confidence_min,
+            date_from,
+            date_to,
+            sort,
+            order,
+            session,
         )
 
     async def deactivate_fact(self, fact_id: UUID, session: AsyncSession | None = None) -> None:
@@ -435,7 +451,12 @@ class Heart:
     ) -> tuple[list[ProcedureSummary], int]:
         """List procedures with pagination and filters (F021)."""
         return await self.procedures.list_all(
-            limit, offset, domain, active_only, min_activations, session,
+            limit,
+            offset,
+            domain,
+            active_only,
+            min_activations,
+            session,
         )
 
     async def retire_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
@@ -458,9 +479,7 @@ class Heart:
         """Recompute embeddings for all active procedures (issue #197 backfill)."""
         return await self.procedures.reembed_all(session=session)
 
-    async def get_evolution_candidates(
-        self, session: AsyncSession | None = None
-    ) -> list:
+    async def get_evolution_candidates(self, session: AsyncSession | None = None) -> list:
         """Return procedures flagged for rewrite, retirement, investigation, or star status (F037)."""
         return await self.procedures.get_evolution_candidates(session)
 
@@ -498,9 +517,13 @@ class Heart:
         return await self.censors.list_active(domain, session)
 
     async def list_censors_paginated(
-        self, limit: int = 50, offset: int = 0,
-        action: str | None = None, active_only: bool = True,
-        domain: str | None = None, session: AsyncSession | None = None,
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        action: str | None = None,
+        active_only: bool = True,
+        domain: str | None = None,
+        session: AsyncSession | None = None,
     ) -> tuple[list[CensorDetail], int]:
         """List censors with pagination and filters (F021)."""
         return await self.censors.list_all(limit, offset, action, active_only, domain, session)
@@ -801,11 +824,7 @@ class Heart:
                     merged.append(recall_result)
 
         # F030: MMR diversity re-ranking
-        if (
-            self.settings.mmr_enabled
-            and len(merged) > 1
-            and self._embeddings is not None
-        ):
+        if self.settings.mmr_enabled and len(merged) > 1 and self._embeddings is not None:
             try:
                 # Group IDs by type for batch fetch
                 type_ids: dict[str, list[UUID]] = {}
@@ -813,12 +832,12 @@ class Heart:
                     type_ids.setdefault(r.type, []).append(r.id)
 
                 # Batch-fetch embeddings for candidates
-                embeddings = await batch_fetch_embeddings(
-                    session, type_ids, self.agent_id
-                )
+                embeddings = await batch_fetch_embeddings(session, type_ids, self.agent_id)
                 logger.info(
                     "MMR: fetched %d/%d embeddings for reranking (λ=%.2f)",
-                    len(embeddings), len(merged), self.settings.mmr_diversity_weight,
+                    len(embeddings),
+                    len(merged),
+                    self.settings.mmr_diversity_weight,
                 )
 
                 # Generate query embedding for MMR relevance term
@@ -837,7 +856,9 @@ class Heart:
                 types_in_result = set(r.type for r in merged)
                 logger.info(
                     "MMR: selected %d results across %d types, reordered=%s",
-                    len(merged), len(types_in_result), reordered,
+                    len(merged),
+                    len(types_in_result),
+                    reordered,
                 )
             except Exception as exc:
                 logger.warning("MMR reranking failed, falling back to score sort: %s", exc)

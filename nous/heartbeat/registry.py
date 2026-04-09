@@ -54,7 +54,8 @@ class BaseCheck(ABC):
         if self.consecutive_failures >= self.max_failures:
             logger.warning(
                 "Check '%s' circuit breaker opened after %d consecutive failures",
-                self.name, self.consecutive_failures,
+                self.name,
+                self.consecutive_failures,
             )
 
     def reset_circuit_breaker(self) -> None:
@@ -83,9 +84,12 @@ class BaseCheck(ABC):
             return False
         clamped = max(p.min_val, min(p.max_val, value))
         self._params[name] = TunableParam(
-            name=p.name, value=clamped,
-            min_val=p.min_val, max_val=p.max_val,
-            step=p.step, pinned=p.pinned,
+            name=p.name,
+            value=clamped,
+            min_val=p.min_val,
+            max_val=p.max_val,
+            step=p.step,
+            pinned=p.pinned,
         )
         return True
 

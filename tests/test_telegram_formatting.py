@@ -9,7 +9,7 @@ Tests cover:
 
 import pytest
 
-from nous.telegram_bot import format_telegram_html, sanitize_telegram, _strip_html_tags, StreamingMessage
+from nous.telegram_bot import StreamingMessage, _strip_html_tags, format_telegram_html, sanitize_telegram
 
 
 class TestSanitizeTelegram:
@@ -336,6 +336,7 @@ class TestDebugSystemPromptEncoding:
     def _encode_debug_prompt(self, prompt: str) -> str:
         """Replicate the debug encoding path: html.escape(prompt, quote=False)."""
         import html as html_module
+
         return f"<pre>{html_module.escape(prompt, quote=False)}</pre>"
 
     def test_single_quotes_not_escaped(self):

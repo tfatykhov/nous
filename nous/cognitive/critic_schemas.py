@@ -1,19 +1,22 @@
 """Pydantic models for F024 Critic Agent."""
+
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class RoutingMode(str, Enum):
+class RoutingMode(StrEnum):
     """Critic routing decision for the current turn."""
+
     PASSTHROUGH = "passthrough"
     SINGLE_ADVISED = "single_advised"
 
 
 class DiagnosticResult(BaseModel):
     """Result from a single diagnostic critic."""
+
     critic_name: str
     intervention: str
     fired: bool = False
@@ -21,6 +24,7 @@ class DiagnosticResult(BaseModel):
 
 class CriticResult(BaseModel):
     """Output from CriticAgent classification."""
+
     routing: RoutingMode
     recommended_frame: str
     rationale: str

@@ -1,7 +1,7 @@
 """Tests for content-type-aware pruning profiles (F016 Phase 4)."""
 
-from nous.cognitive.schemas import TOOL_DECAY_PROFILES, DECAY_PROFILE_AGES
 from nous.api.compaction import ConversationCompactor
+from nous.cognitive.schemas import DECAY_PROFILE_AGES, TOOL_DECAY_PROFILES
 from nous.config import Settings
 
 
@@ -65,9 +65,7 @@ class TestProfileAwarePruning:
         """
         messages = []
         for i, (name, content) in enumerate(tool_configs):
-            asst, user = _make_tool_pair(
-                name, {"arg": f"val_{i}"}, content, f"tu_{i}"
-            )
+            asst, user = _make_tool_pair(name, {"arg": f"val_{i}"}, content, f"tu_{i}")
             messages.extend([asst, user])
         return messages
 

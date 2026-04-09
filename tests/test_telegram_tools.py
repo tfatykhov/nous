@@ -57,27 +57,33 @@ def _ok_response():
 
 # --- File type detection ---
 
+
 def test_detect_photo_extensions():
     from nous.api.telegram_tools import _detect_send_method
+
     for ext in ("png", "jpg", "jpeg", "gif", "webp"):
         assert _detect_send_method(f"file.{ext}") == "sendPhoto"
 
 
 def test_detect_document_extensions():
     from nous.api.telegram_tools import _detect_send_method
+
     for ext in ("docx", "pdf", "xlsx", "pptx", "csv", "txt", "svg", "zip"):
         assert _detect_send_method(f"file.{ext}") == "sendDocument"
 
 
 def test_detect_no_extension_is_document():
     from nous.api.telegram_tools import _detect_send_method
+
     assert _detect_send_method("Makefile") == "sendDocument"
 
 
 # --- Size validation ---
 
+
 def test_validate_size_ok(tmp_png):
     from nous.api.telegram_tools import _validate_file_size
+
     ok, msg = _validate_file_size(tmp_png)
     assert ok is True
     assert msg == ""
@@ -85,6 +91,7 @@ def test_validate_size_ok(tmp_png):
 
 def test_validate_size_too_large(tmp_path):
     from nous.api.telegram_tools import _validate_file_size
+
     big = tmp_path / "huge.bin"
     big.write_bytes(b"\x00" * (50 * 1024 * 1024 + 1))
     ok, msg = _validate_file_size(str(big))
@@ -94,6 +101,7 @@ def test_validate_size_too_large(tmp_path):
 
 def test_validate_size_photo_downgrade(tmp_path):
     from nous.api.telegram_tools import _validate_file_size
+
     big_img = tmp_path / "big.png"
     big_img.write_bytes(b"\x00" * (10 * 1024 * 1024 + 1))
     ok, msg = _validate_file_size(str(big_img))
@@ -103,9 +111,11 @@ def test_validate_size_photo_downgrade(tmp_path):
 
 # --- send_file tool ---
 
+
 @pytest.mark.asyncio
 async def test_send_photo(tmp_png, mock_settings, mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
@@ -120,6 +130,7 @@ async def test_send_photo(tmp_png, mock_settings, mock_http):
 @pytest.mark.asyncio
 async def test_send_document(tmp_docx, mock_settings, mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
@@ -133,10 +144,11 @@ async def test_send_document(tmp_docx, mock_settings, mock_http):
 @pytest.mark.asyncio
 async def test_send_with_caption(tmp_png, mock_settings, mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_png, caption="Weekly chart")
+    result = await send_file(file_path=tmp_png, caption="Weekly chart")  # noqa: F841
 
     call_args = mock_http.post.call_args
     assert call_args.kwargs["data"]["caption"] == "Weekly chart"
@@ -145,10 +157,11 @@ async def test_send_with_caption(tmp_png, mock_settings, mock_http):
 @pytest.mark.asyncio
 async def test_send_custom_chat_id(tmp_png, mock_settings, mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_png, chat_id="99999")
+    result = await send_file(file_path=tmp_png, chat_id="99999")  # noqa: F841
 
     call_args = mock_http.post.call_args
     assert call_args.kwargs["data"]["chat_id"] == "99999"
@@ -157,6 +170,7 @@ async def test_send_custom_chat_id(tmp_png, mock_settings, mock_http):
 @pytest.mark.asyncio
 async def test_send_file_not_found(mock_settings, mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     send_file = create_send_file_tool(mock_settings, mock_http)
     result = await send_file(file_path="/nonexistent/file.png")
 
@@ -166,6 +180,7 @@ async def test_send_file_not_found(mock_settings, mock_http):
 @pytest.mark.asyncio
 async def test_send_file_no_token(mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     s = MagicMock()
     s.telegram_bot_token = None
     s.telegram_chat_id = "12345"
@@ -179,6 +194,7 @@ async def test_send_file_no_token(mock_http):
 @pytest.mark.asyncio
 async def test_send_file_no_chat_id(mock_settings, mock_http, tmp_png):
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_settings.telegram_chat_id = None
 
     send_file = create_send_file_tool(mock_settings, mock_http)
@@ -190,10 +206,11 @@ async def test_send_file_no_chat_id(mock_settings, mock_http, tmp_png):
 @pytest.mark.asyncio
 async def test_send_svg_as_document(tmp_svg, mock_settings, mock_http):
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_svg)
+    result = await send_file(file_path=tmp_svg)  # noqa: F841
 
     call_args = mock_http.post.call_args
     assert "sendDocument" in call_args[0][0]
@@ -203,6 +220,7 @@ async def test_send_svg_as_document(tmp_svg, mock_settings, mock_http):
 async def test_send_file_cleanup(tmp_png, mock_settings, mock_http):
     """File is deleted after successful send when cleanup=True."""
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
@@ -216,10 +234,11 @@ async def test_send_file_cleanup(tmp_png, mock_settings, mock_http):
 async def test_send_file_no_cleanup_by_default(tmp_png, mock_settings, mock_http):
     """File is NOT deleted by default."""
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
-    result = await send_file(file_path=tmp_png)
+    result = await send_file(file_path=tmp_png)  # noqa: F841
 
     assert os.path.exists(tmp_png)
 
@@ -228,6 +247,7 @@ async def test_send_file_no_cleanup_by_default(tmp_png, mock_settings, mock_http
 async def test_send_file_telegram_error(tmp_png, mock_settings, mock_http):
     """Telegram API error is reported in tool result."""
     from nous.api.telegram_tools import create_send_file_tool
+
     err_resp = MagicMock()
     err_resp.json.return_value = {"ok": False, "description": "Bad Request: file too big"}
     err_resp.status_code = 400
@@ -242,6 +262,7 @@ async def test_send_file_telegram_error(tmp_png, mock_settings, mock_http):
 
 # --- Registration ---
 
+
 def test_register_telegram_tools(mock_settings, mock_http):
     from nous.api.telegram_tools import register_telegram_tools
     from nous.api.tools import ToolDispatcher
@@ -255,6 +276,7 @@ def test_register_telegram_tools(mock_settings, mock_http):
 
 # --- Integration tests ---
 
+
 @pytest.mark.asyncio
 async def test_dispatch_send_file(tmp_png, mock_settings, mock_http):
     """Test send_file works through ToolDispatcher.dispatch()."""
@@ -266,9 +288,7 @@ async def test_dispatch_send_file(tmp_png, mock_settings, mock_http):
     dispatcher = ToolDispatcher()
     register_telegram_tools(dispatcher, mock_settings, mock_http)
 
-    result_text, is_error = await dispatcher.dispatch(
-        "send_file", {"file_path": tmp_png, "caption": "Test"}
-    )
+    result_text, is_error = await dispatcher.dispatch("send_file", {"file_path": tmp_png, "caption": "Test"})
 
     assert not is_error
     assert "sent successfully" in result_text.lower()
@@ -278,6 +298,7 @@ async def test_dispatch_send_file(tmp_png, mock_settings, mock_http):
 async def test_send_oversized_photo_downgrades_to_document(tmp_path, mock_settings, mock_http):
     """Photos >10MB are sent via sendDocument instead of sendPhoto."""
     from nous.api.telegram_tools import create_send_file_tool
+
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     big_img = tmp_path / "big.png"
@@ -294,6 +315,7 @@ async def test_send_oversized_photo_downgrades_to_document(tmp_path, mock_settin
 def test_send_file_in_frame_tools():
     """send_file is available in conversation and debug frames."""
     from nous.api.runner import FRAME_TOOLS
+
     assert "send_file" in FRAME_TOOLS["conversation"]
     assert "send_file" in FRAME_TOOLS["debug"]
     # task uses "*" wildcard, so it implicitly includes all tools

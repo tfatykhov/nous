@@ -1,10 +1,9 @@
 """Unit tests for UsageTracker — in-memory feedback tracking, no DB needed."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 from nous.cognitive.usage_tracker import UsageTracker
-
 
 # ---------------------------------------------------------------------------
 # record + score tests
@@ -25,7 +24,7 @@ def test_decay_over_time():
     tracker = UsageTracker()
 
     # Record at a known time
-    base_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    base_time = datetime(2026, 1, 1, tzinfo=UTC)
     with patch("nous.cognitive.usage_tracker.datetime") as mock_dt:
         mock_dt.now.return_value = base_time
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)

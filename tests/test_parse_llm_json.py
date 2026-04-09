@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from nous.handlers import parse_llm_json, _extract_braces
+from nous.handlers import _extract_braces, parse_llm_json
 
 
 class TestExtractBraces:
@@ -14,7 +14,7 @@ class TestExtractBraces:
         assert _extract_braces('{"a": 1}', "{", "}") == '{"a": 1}'
 
     def test_simple_array(self):
-        assert _extract_braces('[1, 2]', "[", "]") == '[1, 2]'
+        assert _extract_braces("[1, 2]", "[", "]") == "[1, 2]"
 
     def test_nested_braces(self):
         text = '{"a": {"b": 1}}'
@@ -54,7 +54,7 @@ class TestParseLlmJson:
         assert result == {"key": "value"}
 
     def test_direct_parse_array(self):
-        result = parse_llm_json('[1, 2, 3]')
+        result = parse_llm_json("[1, 2, 3]")
         assert result == [1, 2, 3]
 
     # --- Tier 2: Markdown fence stripping ---
@@ -81,7 +81,7 @@ class TestParseLlmJson:
         assert result == {"a": 1}
 
     def test_unclosed_fence_with_preamble(self):
-        text = 'Here is my analysis:\n```json\n[1, 2, 3]\n'
+        text = "Here is my analysis:\n```json\n[1, 2, 3]\n"
         result = parse_llm_json(text)
         assert result == [1, 2, 3]
 
@@ -115,15 +115,15 @@ class TestParseLlmJson:
     def test_fenced_json_with_braces_in_strings(self):
         """Reproduces the production bug: fenced JSON with } inside string values."""
         text = (
-            '```json\n'
-            '{\n'
+            "```json\n"
+            "{\n"
             '  "patterns": [\n'
             '    "Heavy focus on system introspection — the agent examined its own {codebase}"\n'
-            '  ],\n'
+            "  ],\n"
             '  "summary": "Session involved self-analysis",\n'
             '  "lessons": ["Don\'t nest } braces in output"]\n'
-            '}\n'
-            '```'
+            "}\n"
+            "```"
         )
         result = parse_llm_json(text)
         assert isinstance(result, dict)
@@ -133,14 +133,7 @@ class TestParseLlmJson:
 
     def test_unclosed_fence_with_braces_in_strings(self):
         """Unclosed fence + braces in strings — the worst case."""
-        text = (
-            '```json\n'
-            '{\n'
-            '  "patterns": ["pattern with } inside"],\n'
-            '  "summary": "ok",\n'
-            '  "lessons": []\n'
-            '}\n'
-        )
+        text = '```json\n{\n  "patterns": ["pattern with } inside"],\n  "summary": "ok",\n  "lessons": []\n}\n'
         result = parse_llm_json(text)
         assert isinstance(result, dict)
         assert result["summary"] == "ok"

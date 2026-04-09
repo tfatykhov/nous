@@ -27,14 +27,10 @@ class ContentType(Enum):
 
 
 # Error keywords — hard-preserved during compression
-_ERROR_PATTERNS = re.compile(
-    r"\b(error|exception|failed|critical|traceback|fatal|panic)\b", re.IGNORECASE
-)
+_ERROR_PATTERNS = re.compile(r"\b(error|exception|failed|critical|traceback|fatal|panic)\b", re.IGNORECASE)
 
 # Log timestamp pattern
-_LOG_TIMESTAMP = re.compile(
-    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
-)
+_LOG_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
 
 # Score field detection in JSON
 _SCORE_FIELDS = {"score", "relevance", "confidence", "similarity", "rank", "rating"}
@@ -124,6 +120,7 @@ def extract_preserved_lines(lines: list[str]) -> list[str]:
 @dataclass
 class CompressResult:
     """Result of compression — kept items + preserved items + marker."""
+
     kept: list[str] = field(default_factory=list)
     preserved: list[str] = field(default_factory=list)
     marker: str = ""
@@ -154,7 +151,9 @@ def _score_line(line: str) -> float:
 
 
 def compress_string_array(
-    lines: list[str], max_k: int = 50, elbow_threshold: float = 0.3,
+    lines: list[str],
+    max_k: int = 50,
+    elbow_threshold: float = 0.3,
 ) -> CompressResult:
     """Compress newline-separated output (bash, grep, file listings).
 
@@ -162,7 +161,10 @@ def compress_string_array(
     """
     if len(lines) <= max_k:
         return CompressResult(
-            kept=lines, preserved=[], marker="", original_count=len(lines),
+            kept=lines,
+            preserved=[],
+            marker="",
+            original_count=len(lines),
         )
 
     # 1. Extract hard-preserved lines
@@ -170,11 +172,7 @@ def compress_string_array(
     preserved_set = set(preserved)
 
     # 2. Score remaining lines
-    scored = [
-        (i, ln, _score_line(ln))
-        for i, ln in enumerate(lines)
-        if ln not in preserved_set
-    ]
+    scored = [(i, ln, _score_line(ln)) for i, ln in enumerate(lines) if ln not in preserved_set]
     scored.sort(key=lambda x: x[2], reverse=True)
 
     # 3. Find elbow (score cliff)
@@ -204,10 +202,7 @@ def compress_string_array(
     kept = head + mid + tail
 
     total_kept = len(kept) + len(preserved)
-    marker = (
-        f"[SmartCompressed: {len(lines)}\u2192{total_kept} lines, "
-        f"{len(preserved)} error/outlier preserved]"
-    )
+    marker = f"[SmartCompressed: {len(lines)}\u2192{total_kept} lines, {len(preserved)} error/outlier preserved]"
 
     return CompressResult(
         kept=kept,
@@ -223,6 +218,7 @@ def compress_string_array(
 @dataclass
 class DictCompressResult:
     """Result of dict_array compression."""
+
     kept: list[dict] = field(default_factory=list)
     preserved: list[dict] = field(default_factory=list)
     marker: str = ""
@@ -273,13 +269,13 @@ def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResul
 
     total = len(kept) + len(preserved)
     score_info = f"K={len(kept)} by {score_field}" if score_field else f"first {len(kept)}"
-    marker = (
-        f"[SmartCompressed: {len(items)}\u2192{total} items, "
-        f"{score_info}, {len(preserved)} outliers]"
-    )
+    marker = f"[SmartCompressed: {len(items)}\u2192{total} items, {score_info}, {len(preserved)} outliers]"
 
     return DictCompressResult(
-        kept=kept, preserved=preserved, marker=marker, original_count=len(items),
+        kept=kept,
+        preserved=preserved,
+        marker=marker,
+        original_count=len(items),
     )
 
 
@@ -289,6 +285,7 @@ def compress_dict_array(items: list[dict], max_k: int = 50) -> DictCompressResul
 @dataclass
 class SmartCompressResult:
     """Result of smart_compress — text + optional cache info."""
+
     text: str
     was_compressed: bool = False
     original_text: str | None = None  # Only set for non-re-fetchable tools
@@ -360,11 +357,16 @@ async def smart_compress(
     ratio = (1 - compressed_len / original_len) * 100 if original_len else 0
     logger.info(
         "SmartCompress %s [%s]: %d→%d chars (%.0f%% reduction, %s items)",
-        tool_name, content_type.value, original_len, compressed_len, ratio,
+        tool_name,
+        content_type.value,
+        original_len,
+        compressed_len,
+        ratio,
         item_count or "n/a",
     )
 
     from nous.api.tool_cache import NON_REFETCHABLE_TOOLS
+
     cacheable = tool_name in NON_REFETCHABLE_TOOLS
     if cacheable:
         logger.info("SmartCompress %s: original queued for cache (non-refetchable)", tool_name)

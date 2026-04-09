@@ -219,9 +219,7 @@ def test_system_prompt_prefix_prepends_to_static_tier() -> None:
     # Simulate the prefix logic from run()/stream() in runner.py
     prefix = "Custom system prefix"
     existing = system_prompt.get("static", "")
-    system_prompt["static"] = (
-        prefix + "\n\n" + existing if existing else prefix
-    )
+    system_prompt["static"] = prefix + "\n\n" + existing if existing else prefix
 
     assert system_prompt["static"].startswith("Custom system prefix")
     assert "## Identity" in system_prompt["static"]

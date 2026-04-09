@@ -175,7 +175,7 @@ class SkillParser:
             )
 
         fm_text = fm_match.group(1)
-        body = text[fm_match.end():]
+        body = text[fm_match.end() :]
 
         data = _parse_frontmatter(fm_text)
 

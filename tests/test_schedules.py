@@ -29,7 +29,6 @@ async def schedule_mgr(db):
 
 
 class TestScheduleManager:
-
     async def test_create_once_schedule(self, schedule_mgr: ScheduleManager):
         fire_at = datetime.now(UTC) + timedelta(hours=2)
         schedule = await schedule_mgr.create(
@@ -146,10 +145,13 @@ class TestScheduleManager:
 
     async def test_list_all_schedules(self, schedule_mgr: ScheduleManager):
         await schedule_mgr.create(
-            task="A", schedule_type="recurring", interval_seconds=3600,
+            task="A",
+            schedule_type="recurring",
+            interval_seconds=3600,
         )
         s2 = await schedule_mgr.create(
-            task="B", schedule_type="once",
+            task="B",
+            schedule_type="once",
             fire_at=datetime.now(UTC) + timedelta(hours=1),
         )
         await schedule_mgr.deactivate(s2.id)
@@ -169,6 +171,7 @@ class TestScheduleManager:
 
     async def test_get_nonexistent_schedule(self, schedule_mgr: ScheduleManager):
         import uuid
+
         result = await schedule_mgr.get(uuid.uuid4())
         assert result is None
 
@@ -187,6 +190,7 @@ class TestScheduleManager:
 
     async def test_schedule_notify_defaults_false(self, schedule_mgr: ScheduleManager):
         from datetime import UTC, datetime, timedelta
+
         fire_at = datetime.now(UTC) + timedelta(hours=1)
         schedule = await schedule_mgr.create(
             task="Check status",
@@ -283,6 +287,7 @@ class TestTaskScheduler:
         # Manually set next_fire_at to the past
         async with scheduler_heart.db.session() as sess:
             from sqlalchemy import update as sql_update
+
             await sess.execute(
                 sql_update(Schedule)
                 .where(Schedule.id == schedule.id)

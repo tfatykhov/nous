@@ -128,9 +128,7 @@ class SessionTimeoutMonitor:
                             reflection=None,
                         )
                     except Exception:
-                        logger.exception(
-                            "Failed to end timed-out session %s", session_id
-                        )
+                        logger.exception("Failed to end timed-out session %s", session_id)
 
                 expired.append(session_id)
 
@@ -153,15 +151,12 @@ class SessionTimeoutMonitor:
         # handles both the normal case (dict already empty after session
         # timeouts) and the edge case where sleep_timeout <= session_idle_timeout.
         global_idle = now - self._global_last_activity
-        all_sessions_sleeping = all(
-            (now - last) > self._settings.sleep_timeout
-            for last in self._last_activity.values()
-        ) if self._last_activity else True
-        if (
-            global_idle > self._settings.sleep_timeout
-            and not self._sleep_emitted
-            and all_sessions_sleeping
-        ):
+        all_sessions_sleeping = (
+            all((now - last) > self._settings.sleep_timeout for last in self._last_activity.values())
+            if self._last_activity
+            else True
+        )
+        if global_idle > self._settings.sleep_timeout and not self._sleep_emitted and all_sessions_sleeping:
             logger.info("Global idle for %ds, emitting sleep_started", int(global_idle))
             _sleep_event = Event(
                 type="sleep_started",

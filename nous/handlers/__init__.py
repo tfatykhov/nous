@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Any, Protocol, runtime_checkable
 
-from nous.config import Settings
+from nous.config import Settings  # noqa: F401 — re-exported
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Background LLM helper — shared by all handlers that need LLM calls
 # ---------------------------------------------------------------------------
+
 
 @runtime_checkable
 class LLMClient(Protocol):
@@ -193,7 +194,7 @@ def _repair_json(text: str) -> str:
     Handles: trailing commas before } or ], control characters in strings.
     """
     # Strip trailing commas before } or ] (common LLM mistake)
-    repaired = re.sub(r',\s*([}\]])', r'\1', text)
+    repaired = re.sub(r",\s*([}\]])", r"\1", text)
     # Replace bare control characters (tabs, newlines inside strings break json.loads)
     # Only replace control chars that aren't \n or \r at the structural level
     # This is a best-effort repair
@@ -205,8 +206,9 @@ def _try_parse_json(candidate: str, context: str) -> Any | None:
     try:
         return json.loads(candidate)
     except json.JSONDecodeError as e:
-        logger.debug("json.loads failed (%s) on %s candidate (%d chars): %s",
-                     e.msg, context, len(candidate), candidate[:300])
+        logger.debug(
+            "json.loads failed (%s) on %s candidate (%d chars): %s", e.msg, context, len(candidate), candidate[:300]
+        )
     # Try with repairs
     repaired = _repair_json(candidate)
     if repaired != candidate:
@@ -234,8 +236,7 @@ def parse_llm_json(text: str) -> Any:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        logger.debug("Direct JSON parse failed, attempting extraction from: %s",
-                      text[:200])
+        logger.debug("Direct JSON parse failed, attempting extraction from: %s", text[:200])
 
     # Try direct parse with repairs
     repaired = _repair_json(text)
@@ -251,13 +252,15 @@ def parse_llm_json(text: str) -> Any:
     # Also handles unclosed fences (LLM stopped without closing ```)
     fence_match = re.search(
         r"```(?:json)?\s*\n?(.*?)\n?\s*```",
-        text, re.DOTALL,
+        text,
+        re.DOTALL,
     )
     if not fence_match:
         # Fallback: unclosed fence — take everything after ```json
         fence_match = re.search(
             r"```(?:json)?\s*\n?(.*)",
-            text, re.DOTALL,
+            text,
+            re.DOTALL,
         )
     if fence_match:
         extracted = fence_match.group(1).strip()
@@ -277,7 +280,8 @@ def parse_llm_json(text: str) -> Any:
             logger.warning(
                 "fence+brace {} extraction found candidate (%d chars) but "
                 "json.loads failed even after repair. Candidate: %s",
-                len(dict_candidate), dict_candidate[:500],
+                len(dict_candidate),
+                dict_candidate[:500],
             )
 
         list_candidate = _extract_braces(extracted, "[", "]")
@@ -290,7 +294,8 @@ def parse_llm_json(text: str) -> Any:
                         "JSON extraction fell back to array ([...]) because dict "
                         "extraction failed. This may indicate malformed JSON in "
                         "the LLM response. Full fence content (%d chars): %s",
-                        len(extracted), extracted[:1000],
+                        len(extracted),
+                        extracted[:1000],
                     )
                 logger.info("JSON extraction succeeded via fence + brace-matching ([...])")
                 return result
@@ -304,9 +309,9 @@ def parse_llm_json(text: str) -> Any:
             logger.info("JSON extraction succeeded via brace-matching ({...})")
             return result
         logger.warning(
-            "raw-brace {} extraction found candidate (%d chars) but json.loads "
-            "failed even after repair. Candidate: %s",
-            len(dict_candidate), dict_candidate[:500],
+            "raw-brace {} extraction found candidate (%d chars) but json.loads failed even after repair. Candidate: %s",
+            len(dict_candidate),
+            dict_candidate[:500],
         )
 
     list_candidate = _extract_braces(text, "[", "]")
@@ -317,12 +322,11 @@ def parse_llm_json(text: str) -> Any:
                 logger.warning(
                     "JSON extraction fell back to array ([...]) because dict "
                     "extraction failed. Full text (%d chars): %s",
-                    len(text), text[:1000],
+                    len(text),
+                    text[:1000],
                 )
             logger.info("JSON extraction succeeded via brace-matching ([...])")
             return result
 
     logger.warning("No valid JSON found in LLM response (%d chars): %s", len(text), text[:1000])
     raise json.JSONDecodeError("No JSON object found in response", text, 0)
-
-

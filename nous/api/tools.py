@@ -27,7 +27,7 @@ from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.schemas import CensorInput, FactInput, FactRejected, ProcedureInput
+from nous.heart.schemas import CensorInput, FactInput, FactRejected
 from nous.skills.parser import SkillParser
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,10 @@ class ToolDispatcher:
         self._tool_schema_cache.clear()  # F036: invalidate on registration
 
     async def dispatch(
-        self, name: str, args: dict[str, Any], session_id: str | None = None,
+        self,
+        name: str,
+        args: dict[str, Any],
+        session_id: str | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -354,9 +357,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     if heart_results:
                         results_text.append("=== Heart Memory ===")
                         for i, result in enumerate(heart_results, 1):
-                            results_text.append(
-                                f"{i}. [{result.type}] {result.summary} (score: {result.score:.3f})"
-                            )
+                            results_text.append(f"{i}. [{result.type}] {result.summary} (score: {result.score:.3f})")
                     else:
                         results_text.append("=== Heart Memory ===\nNo results found.")
 
@@ -383,9 +384,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     results_text.append("\n=== Graph-Connected Decisions ===")
                     for i, n in enumerate(heart_graph_decisions, 1):
                         decayed = n.edge_weight * settings.graph_recall_decay
-                        results_text.append(
-                            f"{i}. [via {n.edge_relation}] {n.description} (score: {decayed:.3f})"
-                        )
+                        results_text.append(f"{i}. [via {n.edge_relation}] {n.description} (score: {decayed:.3f})")
 
             # Search Brain decisions
             if search_all or "decision" in search_types:
@@ -405,6 +404,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                                 should_use_spreading_activation,
                                 spreading_activation_search,
                             )
+
                             async with brain.db.session() as sa_session:
                                 density = await compute_graph_density(sa_session, brain.agent_id)
                                 use_spreading = should_use_spreading_activation(settings, density)
@@ -417,7 +417,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             async with brain.db.session() as sa_session:
                                 seeds = [
                                     (d.id, "decision", d.score or 0.5)
-                                    for d in decision_results[:settings.graph_recall_max_expand]
+                                    for d in decision_results[: settings.graph_recall_max_expand]
                                 ]
                                 activated = await spreading_activation_search(
                                     sa_session, brain.agent_id, seeds, settings
@@ -425,16 +425,20 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                                 seed_ids = {s[0] for s in seeds}
                                 for nid, ntype, activation in activated:
                                     if nid not in seed_ids and nid not in seen_ids and activation > 0.1:
-                                        from nous.brain.schemas import NeighborResult
                                         from datetime import UTC, datetime
-                                        graph_expanded.append(NeighborResult(
-                                            id=nid,
-                                            node_type=ntype,
-                                            description=f"[{ntype}] {str(nid)[:8]}",
-                                            edge_relation="spreading_activation",
-                                            edge_weight=activation,
-                                            created_at=datetime.now(UTC),
-                                        ))
+
+                                        from nous.brain.schemas import NeighborResult
+
+                                        graph_expanded.append(
+                                            NeighborResult(
+                                                id=nid,
+                                                node_type=ntype,
+                                                description=f"[{ntype}] {str(nid)[:8]}",
+                                                edge_relation="spreading_activation",
+                                                edge_weight=activation,
+                                                created_at=datetime.now(UTC),
+                                            )
+                                        )
                                         seen_ids.add(nid)
                         except Exception:
                             logger.debug("Spreading activation failed, falling back to 1-hop")
@@ -442,7 +446,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
                     if not use_spreading:
                         # Fall back to 1-hop expansion
-                        for dec in decision_results[:settings.graph_recall_max_expand]:
+                        for dec in decision_results[: settings.graph_recall_max_expand]:
                             if dec.score is None:
                                 continue
                             try:
@@ -469,8 +473,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     for j, n in enumerate(graph_expanded, len(decision_results) + 1):
                         decayed_score = n.edge_weight * settings.graph_recall_decay
                         results_text.append(
-                            f"{j}. [via graph: {n.edge_relation}] {n.description} "
-                            f"(score: {decayed_score:.3f})"
+                            f"{j}. [via graph: {n.edge_relation}] {n.description} (score: {decayed_score:.3f})"
                         )
                 else:
                     results_text.append("\n=== Brain Decisions ===\nNo results found.")
@@ -481,13 +484,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     # Collect all decision IDs from results (including graph-expanded)
                     all_ids: set = set()
                     if search_all or "decision" in search_types:
-                        for d in (decision_results or []):
+                        for d in decision_results or []:
                             all_ids.add(d.id)
                         for n in graph_expanded:
                             all_ids.add(n.id)
 
                     if len(all_ids) >= 2:
                         from nous.storage.models import GraphEdge as GE
+
                         async with brain.db.session() as cs:
                             cr = await cs.execute(
                                 select(GE).where(
@@ -630,11 +634,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # 1. Fetch content
             if source == "inline":
                 if not content:
-                    return {"content": [{"type": "text", "text": "Error: 'content' is required when source is 'inline'"}]}
+                    return {
+                        "content": [{"type": "text", "text": "Error: 'content' is required when source is 'inline'"}]
+                    }
                 markdown = content
             elif source.startswith(("http://", "https://")):
                 # Fetch from URL
                 import httpx as _httpx
+
                 async with _httpx.AsyncClient(timeout=30) as client:
                     resp = await client.get(source)
                     resp.raise_for_status()
@@ -642,6 +649,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             else:
                 # Local file path
                 import os
+
                 workspace = settings.workspace_dir if settings else "."
                 path = os.path.join(workspace, source) if not os.path.isabs(source) else source
                 if not os.path.exists(path):
@@ -654,6 +662,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             # 2b. Check requires (env var validation)
             import os as _os
+
             missing_requires = [var for var in manifest.requires if not _os.environ.get(var)]
             skill_active = len(missing_requires) == 0
 
@@ -717,6 +726,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         """
         try:
             from uuid import UUID as _UUID
+
             pid = _UUID(procedure_id)
             detail = await heart.get_procedure(pid)
 
@@ -733,7 +743,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 lines.append("")
                 for note in detail.implementation_notes:
                     lines.append(note)
-            lines.append(f"\nActivated: {detail.activation_count}x | Status: {'active' if detail.active else 'inactive'}")
+            lines.append(
+                f"\nActivated: {detail.activation_count}x | Status: {'active' if detail.active else 'inactive'}"
+            )
             if detail.effectiveness is not None:
                 lines.append(f"Effectiveness: {detail.effectiveness:.0%}")
 
@@ -897,7 +909,7 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
 
 _RECALL_RECENT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Recall recent episodes by time (not topic similarity). Use when the user asks what you discussed recently or you need a temporal overview.",
+    "description": "Recall recent episodes by time (not topic similarity). Use when the user asks what you discussed recently or you need a temporal overview.",  # noqa: E501
     "properties": {
         "hours": {
             "type": "integer",
@@ -923,10 +935,7 @@ _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "properties": {
         "source": {
             "type": "string",
-            "description": (
-                "URL (https://...), local file path relative to workspace, "
-                "or 'inline' for raw content"
-            ),
+            "description": ("URL (https://...), local file path relative to workspace, or 'inline' for raw content"),
         },
         "content": {
             "type": "string",
@@ -952,7 +961,9 @@ _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
+def register_nous_tools(
+    dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None
+) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
     This is the main wiring function called at startup to register
@@ -974,7 +985,7 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
 # ---------------------------------------------------------------------------
 
 _CACHE_RETRIEVE_SCHEMA = {
-    "description": "Retrieve original content from a previously compressed search or fetch result. Use when you see a [SmartCompressed] marker and need more detail.",
+    "description": "Retrieve original content from a previously compressed search or fetch result. Use when you see a [SmartCompressed] marker and need more detail.",  # noqa: E501
     "type": "object",
     "properties": {
         "hash_key": {
@@ -1004,7 +1015,10 @@ def register_cache_retrieve_tool(
     from nous.api.tool_cache import retrieve_cached_result
 
     async def _cache_retrieve(
-        hash_key: str, query: str | None = None, session_id: str | None = None, **kwargs,
+        hash_key: str,
+        query: str | None = None,
+        session_id: str | None = None,
+        **kwargs,
     ) -> dict:
         if not session_id:
             return {"content": [{"type": "text", "text": "Error: no active session for cache lookup."}]}
@@ -1012,7 +1026,7 @@ def register_cache_retrieve_tool(
             async with db_session_factory() as db_sess:
                 result = await retrieve_cached_result(db_sess, session_id, hash_key, query)
                 if result is None:
-                    text = f"No cached result found for hash key '{hash_key}'. It may have expired or the key may be incorrect."
+                    text = f"No cached result found for hash key '{hash_key}'. It may have expired or the key may be incorrect."  # noqa: E501
                 else:
                     text = result
                 return {"content": [{"type": "text", "text": text}]}
@@ -1036,10 +1050,7 @@ def build_subtask_prefix(task: str, frame_type: str | None = None) -> str:
     """
     from nous.api.runner import FRAME_TOOLS
 
-    base = (
-        "You are executing a background subtask.\n"
-        "Deliver a clear, complete result. Do not ask questions."
-    )
+    base = "You are executing a background subtask.\nDeliver a clear, complete result. Do not ask questions."
 
     frame_instruction = ""
     if frame_type and frame_type in FRAME_TOOLS:
@@ -1052,13 +1063,13 @@ def build_subtask_prefix(task: str, frame_type: str | None = None) -> str:
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
 
-def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = None) -> dict[str, Any]:
+
+def create_subtask_tools(heart: Heart, settings: Settings, runner: object = None) -> dict[str, Any]:
     """Create subtask/schedule tool closures with Heart captured in closure context.
 
     Returns a dict of async callables suitable for ToolDispatcher registration.
     The optional runner param enables inline (await_result) subtask execution.
     """
-    from nous.config import Settings as _Settings  # noqa: F811 — deferred to avoid circular
 
     async def spawn_task(
         task: str,
@@ -1109,6 +1120,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             # execution (pre_turn). We check here instead for immediate feedback.
             try:
                 from nous.heart.censor_actions import CensorActionExecutor
+
                 matches = await heart.check_censors(task)
                 for match in matches:
                     if match.action == "block":
@@ -1119,6 +1131,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                             action_result = await executor.execute(match.trigger_action)
                             if action_result:
                                 import re
+
                                 try:
                                     if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
                                         unblocked = True
@@ -1202,7 +1215,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     ]
                 }
 
-            except _asyncio.TimeoutError:
+            except TimeoutError:
                 await heart.subtasks.fail(subtask.id, f"Timeout after {effective_timeout}s")
                 return {
                     "content": [
@@ -1287,9 +1300,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     frame_type=frame_type,
                 )
 
-            next_fire = (
-                schedule.next_fire_at.isoformat() if schedule.next_fire_at else "N/A"
-            )
+            next_fire = schedule.next_fire_at.isoformat() if schedule.next_fire_at else "N/A"
             return {
                 "content": [
                     {
@@ -1341,14 +1352,8 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             if schedules:
                 lines.append("\n=== Schedules ===")
                 for sc in schedules:
-                    next_fire = (
-                        sc.next_fire_at.strftime("%Y-%m-%d %H:%M UTC")
-                        if sc.next_fire_at
-                        else "N/A"
-                    )
-                    lines.append(
-                        f"- [{sc.schedule_type}] {sc.id} | {sc.task[:80]} (next: {next_fire})"
-                    )
+                    next_fire = sc.next_fire_at.strftime("%Y-%m-%d %H:%M UTC") if sc.next_fire_at else "N/A"
+                    lines.append(f"- [{sc.schedule_type}] {sc.id} | {sc.task[:80]} (next: {next_fire})")
             else:
                 lines.append("\n=== Schedules ===\nNo active schedules.")
 
@@ -1376,26 +1381,16 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             # Try subtask cancel first
             cancelled = await heart.subtasks.cancel(uid)
             if cancelled:
-                return {
-                    "content": [
-                        {"type": "text", "text": f"Subtask {task_id} cancelled."}
-                    ]
-                }
+                return {"content": [{"type": "text", "text": f"Subtask {task_id} cancelled."}]}
 
             # Try schedule deactivation
             schedule = await heart.schedules.get(uid)
             if schedule:
                 await heart.schedules.deactivate(uid)
-                return {
-                    "content": [
-                        {"type": "text", "text": f"Schedule {task_id} deactivated."}
-                    ]
-                }
+                return {"content": [{"type": "text", "text": f"Schedule {task_id} deactivated."}]}
 
             return {
-                "content": [
-                    {"type": "text", "text": f"No pending subtask or active schedule found for {task_id}."}
-                ]
+                "content": [{"type": "text", "text": f"No pending subtask or active schedule found for {task_id}."}]
             }
         except ValueError:
             return {"content": [{"type": "text", "text": f"Invalid task ID: {task_id}"}]}
@@ -1417,7 +1412,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
 
 _SPAWN_TASK_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget background execution.",
+    "description": "Spawn a subtask. Use await_result=true to wait for the result inline, or leave false for fire-and-forget background execution.",  # noqa: E501
     "properties": {
         "task": {
             "type": "string",
@@ -1446,12 +1441,12 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
         },
         "await_result": {
             "type": "boolean",
-            "description": "If true, wait for subtask completion and return result inline. Default false (fire-and-forget).",
+            "description": "If true, wait for subtask completion and return result inline. Default false (fire-and-forget).",  # noqa: E501
             "default": False,
         },
         "model": {
             "type": "string",
-            "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks.",
+            "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks.",  # noqa: E501
         },
     },
     "required": ["task"],
@@ -1517,7 +1512,7 @@ _CANCEL_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "Settings", runner: object = None) -> None:
+def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: Settings, runner: object = None) -> None:
     """Create subtask/schedule tools and register them with the dispatcher.
 
     Called at startup when subtask_enabled is True.
@@ -1536,10 +1531,32 @@ def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "
 # ---------------------------------------------------------------------------
 
 SAFE_BUILTINS = {
-    "len", "list", "dict", "set", "str", "int", "float", "bool",
-    "print", "range", "enumerate", "zip", "sorted", "filter",
-    "map", "max", "min", "sum", "any", "all", "isinstance",
-    "repr", "round", "abs", "type", "tuple",
+    "len",
+    "list",
+    "dict",
+    "set",
+    "str",
+    "int",
+    "float",
+    "bool",
+    "print",
+    "range",
+    "enumerate",
+    "zip",
+    "sorted",
+    "filter",
+    "map",
+    "max",
+    "min",
+    "sum",
+    "any",
+    "all",
+    "isinstance",
+    "repr",
+    "round",
+    "abs",
+    "type",
+    "tuple",
 }
 
 _MAX_WRITES = 5
@@ -1549,7 +1566,7 @@ def create_programmatic_tools(
     brain: Brain,
     heart: Heart,
     settings: Settings,
-    episode_id_resolver: "Callable[[str], str | None] | None" = None,
+    episode_id_resolver: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Create run_python tool closure for client-side programmatic execution.
 
@@ -1625,13 +1642,20 @@ def create_programmatic_tools(
                 raise RuntimeError(f"learn_fact write cap ({_MAX_WRITES}) exceeded")
             write_count["n"] += 1
             from uuid import UUID as _UUID
+
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
-            result = _schedule(heart.learn(FactInput(
-                content=content, category=category,
-                subject=subject, confidence=confidence,
-                source="user_direct",  # F023/F038: +0.15 admission bonus
-                source_episode_id=ep_uuid,
-            )))
+            result = _schedule(
+                heart.learn(
+                    FactInput(
+                        content=content,
+                        category=category,
+                        subject=subject,
+                        confidence=confidence,
+                        source="user_direct",  # F023/F038: +0.15 admission bonus
+                        source_episode_id=ep_uuid,
+                    )
+                )
+            )
             # F023/F038: Handle FactRejected (user_direct gets +0.15 bonus
             # but very low-quality facts can still be rejected)
             if hasattr(result, "admitted") and not result.admitted:
@@ -1672,7 +1696,7 @@ def create_programmatic_tools(
             # await run_in_executor releases the event loop so DB coroutines
             # scheduled via run_coroutine_threadsafe can actually execute.
             await asyncio.wait_for(loop.run_in_executor(executor, _run), timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return {"content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}]}
         except Exception as e:
             return {"content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}]}
@@ -1714,7 +1738,7 @@ def register_programmatic_tools(
     brain: Brain,
     heart: Heart,
     settings: Settings,
-    cognitive: "Any | None" = None,
+    cognitive: Any | None = None,
 ) -> None:
     """Register run_python tool if programmatic tools are enabled.
 
@@ -1734,7 +1758,7 @@ def register_programmatic_tools(
 # ---------------------------------------------------------------------------
 
 
-def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
+def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: Any) -> None:
     """F034.5: Register dynamic heartbeat check management tools."""
 
     async def heartbeat_check_create(**kwargs) -> dict:
@@ -1770,31 +1794,66 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
         except Exception as e:
             return {"content": [{"type": "text", "text": f"Failed: {e}"}]}
 
-    dispatcher.register("heartbeat_check_create", heartbeat_check_create, {
-        "type": "object",
-        "description": "Create a new dynamic heartbeat check that runs on a schedule",
-        "properties": {
-            "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
-            "description": {"type": "string", "description": "Human-readable description of what this check monitors"},
-            "prompt": {"type": "string", "description": "Instruction for what to check and report on"},
-            "tools": {"type": "array", "items": {"type": "string"}, "description": "Tools the check can use (allowed: web_search, web_fetch, recall_deep, recall_recent, bash, read_file, heartbeat_check_create, heartbeat_check_manage)"},
-            "interval_seconds": {"type": "integer", "description": "Seconds between runs (min 300, default 3600)"},
-            "cron_expr": {"type": "string", "description": "Cron expression for scheduling (overrides interval_seconds)"},
-            "timeout_seconds": {"type": "integer", "description": "Max seconds per run (default from NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT)"},
-            "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
-            "on_complete_prompt": {"type": "string", "description": "Prompt to execute when check self-disables (callback)"},
-            "on_complete_tools": {"type": "array", "items": {"type": "string"}, "description": "Tools for callback (must be subset of check tools)"},
+    dispatcher.register(
+        "heartbeat_check_create",
+        heartbeat_check_create,
+        {
+            "type": "object",
+            "description": "Create a new dynamic heartbeat check that runs on a schedule",
+            "properties": {
+                "name": {"type": "string", "description": "Unique check name (slug, e.g. 'arxiv-agent-papers')"},
+                "description": {
+                    "type": "string",
+                    "description": "Human-readable description of what this check monitors",
+                },
+                "prompt": {"type": "string", "description": "Instruction for what to check and report on"},
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tools the check can use (allowed: web_search, web_fetch, recall_deep, recall_recent, bash, read_file, heartbeat_check_create, heartbeat_check_manage)",  # noqa: E501
+                },
+                "interval_seconds": {"type": "integer", "description": "Seconds between runs (min 300, default 3600)"},
+                "cron_expr": {
+                    "type": "string",
+                    "description": "Cron expression for scheduling (overrides interval_seconds)",
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "Max seconds per run (default from NOUS_HEARTBEAT_DEFAULT_CHECK_TIMEOUT)",
+                },
+                "urgent": {"type": "boolean", "description": "If true, runs during quiet hours too"},
+                "on_complete_prompt": {
+                    "type": "string",
+                    "description": "Prompt to execute when check self-disables (callback)",
+                },
+                "on_complete_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tools for callback (must be subset of check tools)",
+                },
+            },
+            "required": ["name", "description", "prompt"],
         },
-        "required": ["name", "description", "prompt"],
-    })
+    )
 
-    dispatcher.register("heartbeat_check_manage", heartbeat_check_manage, {
-        "type": "object",
-        "description": "List, enable, disable, delete, or update dynamic heartbeat checks",
-        "properties": {
-            "action": {"type": "string", "enum": ["list", "enable", "disable", "delete", "update"], "description": "Action to perform"},
-            "name": {"type": "string", "description": "Check name (required for enable/disable/delete/update)"},
-            "updates": {"type": "object", "description": "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, cron_expr, timeout_seconds, urgent, on_complete_prompt, on_complete_tools)"},
+    dispatcher.register(
+        "heartbeat_check_manage",
+        heartbeat_check_manage,
+        {
+            "type": "object",
+            "description": "List, enable, disable, delete, or update dynamic heartbeat checks",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "enable", "disable", "delete", "update"],
+                    "description": "Action to perform",
+                },
+                "name": {"type": "string", "description": "Check name (required for enable/disable/delete/update)"},
+                "updates": {
+                    "type": "object",
+                    "description": "Fields to update when action=update (allowed: description, prompt, tools, interval_seconds, cron_expr, timeout_seconds, urgent, on_complete_prompt, on_complete_tools)",  # noqa: E501
+                },
+            },
+            "required": ["action"],
         },
-        "required": ["action"],
-    })
+    )

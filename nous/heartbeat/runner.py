@@ -23,9 +23,9 @@ from nous.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import CheckRegistry
-from nous.heartbeat.dynamic import CALLBACK_RETRY_DELAY_SECONDS, DynamicCheck, DynamicCheckLoader
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -219,17 +219,14 @@ class HeartbeatRunner:
                 if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
                     try:
                         await self._dynamic_loader.update_run_stats(
-                            check.check_id, success=True,
+                            check.check_id,
+                            success=True,
                         )
                     except Exception:
                         logger.warning("F034.5: Failed to update run stats for '%s'", check.name)
 
                 # #273: Collect self-disabled checks with callbacks
-                if (
-                    isinstance(check, DynamicCheck)
-                    and result.self_disabled
-                    and check.on_complete_prompt
-                ):
+                if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                     callback_candidates.append(check)
 
                 if result.has_updates:
@@ -239,14 +236,16 @@ class HeartbeatRunner:
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 check.mark_failure()
                 logger.warning("Heartbeat check '%s' timed out", check.name)
                 # F034.5: Record timeout as error for dynamic checks
                 if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
                     try:
                         await self._dynamic_loader.update_run_stats(
-                            check.check_id, success=False, error_msg="timeout",
+                            check.check_id,
+                            success=False,
+                            error_msg="timeout",
                         )
                     except Exception:
                         pass
@@ -257,7 +256,9 @@ class HeartbeatRunner:
                 if isinstance(check, DynamicCheck) and self._dynamic_loader is not None:
                     try:
                         await self._dynamic_loader.update_run_stats(
-                            check.check_id, success=False, error_msg=str(exc)[:200],
+                            check.check_id,
+                            success=False,
+                            error_msg=str(exc)[:200],
                         )
                     except Exception:
                         pass
@@ -400,12 +401,12 @@ class HeartbeatRunner:
                     continue  # already time-escalated, skip accumulation
                 if self._finding_store.check_accumulation_escalation(check_name):
                     logger.info(
-                        "F034.1: Accumulation escalation for check '%s'", check_name,
+                        "F034.1: Accumulation escalation for check '%s'",
+                        check_name,
                     )
                     # Send accumulation alert via Telegram
                     ack_items = [
-                        t for t in self._finding_store.get_digest_items()
-                        if t.finding.check_name == check_name
+                        t for t in self._finding_store.get_digest_items() if t.finding.check_name == check_name
                     ]
                     if ack_items:
                         lines = [f"[Heartbeat] Accumulation alert: {check_name} ({len(ack_items)} findings)"]
@@ -436,14 +437,17 @@ class HeartbeatRunner:
         actionable = [f for f in findings if f.needs_action]
         logger.info(
             "Heartbeat triage: %d routed, %d actionable, budget=%s",
-            len(findings), len(actionable), "ok" if self._has_budget() else "exhausted",
+            len(findings),
+            len(actionable),
+            "ok" if self._has_budget() else "exhausted",
         )
         if actionable and self._has_budget():
             await self._cognitive_triage(actionable)
         elif actionable and not self._has_budget():
             logger.warning(
                 "Heartbeat budget exhausted (%d/%d tokens) — %d actionable finding(s) not triaged",
-                self._tokens_used_today, self._settings.heartbeat_daily_token_budget,
+                self._tokens_used_today,
+                self._settings.heartbeat_daily_token_budget,
                 len(actionable),
             )
 
@@ -481,7 +485,8 @@ class HeartbeatRunner:
         try:
             heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
             response_text, _context, usage = await triage_runner.run_turn(
-                session_id, message,
+                session_id,
+                message,
                 platform="heartbeat",
                 skip_episode=True,
                 is_subtask=True,
@@ -493,24 +498,27 @@ class HeartbeatRunner:
 
             logger.info(
                 "Heartbeat cognitive triage used %d tokens (daily: %d/%d)",
-                result.tokens_used, self._tokens_used_today,
+                result.tokens_used,
+                self._tokens_used_today,
                 self._settings.heartbeat_daily_token_budget,
             )
 
             if self._bus:
                 _parent = getattr(self, "_current_tick_event", None)
-                await self._bus.emit(Event(
-                    type="heartbeat_triage",
-                    agent_id=self._settings.agent_id,
-                    data={
-                        "session_id": session_id,
-                        "findings_count": len(findings),
-                        "tokens_used": result.tokens_used,
-                        "response_summary": result.response[:200],
-                    },
-                    trace_id=_parent.trace_id if _parent else None,
-                    caused_by=_parent.event_id if _parent else None,
-                ))
+                await self._bus.emit(
+                    Event(
+                        type="heartbeat_triage",
+                        agent_id=self._settings.agent_id,
+                        data={
+                            "session_id": session_id,
+                            "findings_count": len(findings),
+                            "tokens_used": result.tokens_used,
+                            "response_summary": result.response[:200],
+                        },
+                        trace_id=_parent.trace_id if _parent else None,
+                        caused_by=_parent.event_id if _parent else None,
+                    )
+                )
         except Exception:
             logger.exception("Heartbeat cognitive triage failed")
 
@@ -552,7 +560,8 @@ class HeartbeatRunner:
             if not self._has_budget():
                 logger.warning(
                     "#273: Skipping callback for '%s' — budget exhausted (attempt %d)",
-                    check.name, attempt + 1,
+                    check.name,
+                    attempt + 1,
                 )
                 break
             if attempt == 1:
@@ -561,7 +570,8 @@ class HeartbeatRunner:
 
             try:
                 response_text, _ctx, usage = await triage_runner.run_turn(
-                    session_id, instruction,
+                    session_id,
+                    instruction,
                     platform="heartbeat",
                     skip_episode=True,
                     is_subtask=True,
@@ -572,7 +582,9 @@ class HeartbeatRunner:
                 self._tokens_used_today += tokens
                 logger.info(
                     "#273: Callback for '%s' completed (tokens=%d, attempt=%d)",
-                    check.name, tokens, attempt + 1,
+                    check.name,
+                    tokens,
+                    attempt + 1,
                 )
                 # Success — clean up and return
                 try:
@@ -583,7 +595,8 @@ class HeartbeatRunner:
             except Exception:
                 logger.exception(
                     "#273: Callback for '%s' failed (attempt %d/2)",
-                    check.name, attempt + 1,
+                    check.name,
+                    attempt + 1,
                 )
                 # Clean up session before retry
                 try:
@@ -594,9 +607,7 @@ class HeartbeatRunner:
                 session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
 
         # Layer 2: Both attempts failed — send Telegram notification
-        await self._send_telegram(
-            f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed"
-        )
+        await self._send_telegram(f"[Heartbeat] Callback failed for check '{check.name}' — manual follow-up needed")
 
         # Layer 3: Create warning Finding
         failure_finding = Finding(
@@ -663,8 +674,7 @@ class HeartbeatRunner:
                     if age_h >= threshold * 0.75:
                         near_escalation = " \u2b06\ufe0f"
                 lines.append(
-                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]}"
-                    f" (x{item.seen_count}){near_escalation}"
+                    f"  - [{item.finding.urgency}] {item.finding.summary[:60]} (x{item.seen_count}){near_escalation}"
                 )
             if len(check_items) > 5:
                 lines.append(f"  ... and {len(check_items) - 5} more")
@@ -754,6 +764,7 @@ class HeartbeatRunner:
         try:
             # Query last heartbeat event from DB
             from sqlalchemy import select
+
             from nous.storage.models import Event as EventModel
 
             async with self._heart.db.session() as session:
@@ -770,7 +781,8 @@ class HeartbeatRunner:
                     if gap > self._settings.heartbeat_tick_interval * 10:
                         logger.warning(
                             "Heartbeat was offline for %.0f seconds (last tick: %s)",
-                            gap, row.isoformat(),
+                            gap,
+                            row.isoformat(),
                         )
         except Exception:
             logger.debug("Could not detect missed heartbeat checks (non-fatal)")
@@ -843,11 +855,7 @@ class HeartbeatRunner:
             if result.tokens_used:
                 self._tokens_used_today += result.tokens_used
             # #273: Fire callback if check self-disabled
-            if (
-                isinstance(check, DynamicCheck)
-                and result.self_disabled
-                and check.on_complete_prompt
-            ):
+            if isinstance(check, DynamicCheck) and result.self_disabled and check.on_complete_prompt:
                 if self._has_budget():
                     asyncio.create_task(
                         self._execute_callback(check),
@@ -865,7 +873,9 @@ class HeartbeatRunner:
             if isinstance(check, DynamicCheck) and self._dynamic_loader:
                 try:
                     await self._dynamic_loader.update_run_stats(
-                        check.check_id, success=False, error_msg=str(e)[:200],
+                        check.check_id,
+                        success=False,
+                        error_msg=str(e)[:200],
                     )
                 except Exception:
                     logger.debug("Failed to update run stats for %s", name, exc_info=True)

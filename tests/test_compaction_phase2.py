@@ -6,8 +6,8 @@ import asyncio
 from unittest.mock import AsyncMock
 
 from nous.api.compaction import (
-    ConversationCompactor,
     _SECTION_PATTERNS,
+    ConversationCompactor,
 )
 from nous.api.models import ApiResponse, Conversation, Message
 from nous.config import Settings
@@ -162,9 +162,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=10))
 
         assert conv.summary is not None
         assert "## Goal" in conv.summary
@@ -210,9 +208,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = AsyncMock(side_effect=RuntimeError("API down"))
 
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=10))
 
         # Should fall back to truncation
         assert conv.summary is None
@@ -224,9 +220,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api(summary_text="too short")
 
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=10))
 
         # Should fall back to truncation (summary too short)
         assert conv.summary is None
@@ -242,9 +236,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=12)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=12))
 
         assert conv.compaction_count == 2
         # Verify the UPDATE prompt was used (existing summary in input)
@@ -267,9 +259,7 @@ class TestCompact:
         mock_api = _mock_call_api()
 
         # Cut at index 4 (only assistant message remains)
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=4)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=4))
 
         # Recent should be empty (no user found), only synthetic prefix
         assert len(conv.messages) == 2
@@ -282,9 +272,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=10))
         assert conv.compaction_count == 1
 
     def test_turn_contexts_cleaned(self):
@@ -292,6 +280,7 @@ class TestCompact:
         conv = _make_conversation(10)
         # Add fake turn contexts
         from nous.cognitive.schemas import FrameSelection, TurnContext
+
         for i in range(10):
             conv.turn_contexts.append(
                 TurnContext(
@@ -303,9 +292,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
-            compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
-        )
+        asyncio.get_event_loop().run_until_complete(compactor.compact(conv, messages, call_api=mock_api, cut_point=10))
 
         # turn_contexts should be reduced
         assert len(conv.turn_contexts) < 10
@@ -332,20 +319,12 @@ class TestValidateSummary:
 
     def test_case_insensitive(self):
         compactor = ConversationCompactor(_make_settings())
-        text = (
-            "## goal\nSomething\n" + "x" * 200 + "\n"
-            "## PROGRESS\nMore stuff\n"
-            "## Critical context\nDetails\n"
-        )
+        text = "## goal\nSomething\n" + "x" * 200 + "\n## PROGRESS\nMore stuff\n## Critical context\nDetails\n"
         assert compactor._validate_summary(text) is True
 
     def test_goals_plural_accepted(self):
         compactor = ConversationCompactor(_make_settings())
-        text = (
-            "## Goals\nMultiple goals\n" + "x" * 200 + "\n"
-            "## Progress\nDone stuff\n"
-            "## Critical Context\nPaths\n"
-        )
+        text = "## Goals\nMultiple goals\n" + "x" * 200 + "\n## Progress\nDone stuff\n## Critical Context\nPaths\n"
         assert compactor._validate_summary(text) is True
 
 
@@ -377,9 +356,9 @@ class TestSerializeForSummary:
 class TestFormatMessages:
     def test_compaction_disabled_uses_cap(self):
         """When compaction disabled, uses MAX_HISTORY_MESSAGES cap."""
-        from nous.api.runner import AgentRunner, MAX_HISTORY_MESSAGES
+        from nous.api.runner import MAX_HISTORY_MESSAGES
 
-        settings = _make_settings(NOUS_COMPACTION_ENABLED="false")
+        settings = _make_settings(NOUS_COMPACTION_ENABLED="false")  # noqa: F841
         # Can't fully instantiate AgentRunner without deps, so test the method directly
         conv = _make_conversation(20)  # 40 messages
         # Simulate: would return last MAX_HISTORY_MESSAGES

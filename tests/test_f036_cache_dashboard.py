@@ -4,17 +4,16 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
 from starlette.testclient import TestClient
 
 from nous.api.rest import create_app
 from nous.config import Settings
 from nous.observability.context_logger import ContextLogEntry
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_entry(
     *,
@@ -80,6 +79,7 @@ def _make_client(entries: list[ContextLogEntry] | None = None, context_logger: M
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_empty_logger_returns_zeroes() -> None:
     """No entries -> all summary fields are 0, empty sessions/timeline."""
@@ -214,8 +214,7 @@ def test_per_session_grouping() -> None:
 def test_timeline_newest_first_max_50() -> None:
     """60 entries -> timeline has 50 (capped)."""
     entries = [
-        _make_entry(turn_number=i, timestamp=f"2026-04-05T{12 + i // 60:02d}:{i % 60:02d}:00Z")
-        for i in range(60)
+        _make_entry(turn_number=i, timestamp=f"2026-04-05T{12 + i // 60:02d}:{i % 60:02d}:00Z") for i in range(60)
     ]
     client = _make_client(entries=entries)
     resp = client.get("/dashboard/cache")

@@ -23,7 +23,6 @@ import pytest
 from nous.cognitive.action_gate import ActionGate, GateResult
 from nous.cognitive.execution_ledger import ExecutedAction, ExecutionLedger
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -129,13 +128,13 @@ class TestGateResultFromJson:
         assert r.approved is True
 
     def test_strips_markdown_fences(self):
-        text = "```json\n{\"approved\": false, \"reason\": \"bad\"}\n```"
+        text = '```json\n{"approved": false, "reason": "bad"}\n```'
         r = GateResult.from_json(text)
         assert r.approved is False
         assert r.reason == "bad"
 
     def test_strips_plain_code_fences(self):
-        text = "```\n{\"approved\": true, \"reason\": \"ok\"}\n```"
+        text = '```\n{"approved": true, "reason": "ok"}\n```'
         r = GateResult.from_json(text)
         assert r.approved is True
 
@@ -215,10 +214,13 @@ class TestArgsSimilar:
     def test_any_key_match_triggers_similar(self):
         # If path matches, result is True even if query differs
         gate = self._gate()
-        assert gate._args_similar(
-            {"path": "out.txt", "query": "a"},
-            {"path": "out.txt", "query": "b"},
-        ) is True
+        assert (
+            gate._args_similar(
+                {"path": "out.txt", "query": "a"},
+                {"path": "out.txt", "query": "b"},
+            )
+            is True
+        )
 
     def test_empty_dicts(self):
         gate = self._gate()
@@ -321,9 +323,7 @@ class TestBuildGatePrompt:
     def test_prompt_excludes_content_arg(self):
         gate = self._gate()
         ledger = _ledger()
-        prompt = gate._build_gate_prompt(
-            "write_file", {"path": "f.txt", "content": "private-data"}, ledger, ""
-        )
+        prompt = gate._build_gate_prompt("write_file", {"path": "f.txt", "content": "private-data"}, ledger, "")
         assert "private-data" not in prompt
 
     def test_prompt_is_a_string(self):
@@ -350,6 +350,7 @@ class TestActionGateCheckTier1:
     @pytest.mark.asyncio
     async def test_all_read_tools_approved(self):
         from nous.cognitive.execution_ledger import READ_TOOLS
+
         gate = ActionGate(_make_settings())
         ledger = _ledger()
         for tool in READ_TOOLS:
@@ -671,7 +672,5 @@ class TestConsistencyCheckDuplicateReport:
         gate = ActionGate(_make_settings())
         ledger = _ledger()
         ledger.record("write_file", {"path": "./output/report.txt/"}, "ok", "success")
-        result = gate._consistency_check(
-            "write_file", {"path": "output/report.txt"}, ledger
-        )
+        result = gate._consistency_check("write_file", {"path": "output/report.txt"}, ledger)
         assert result.approved is False

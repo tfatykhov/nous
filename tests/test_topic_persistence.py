@@ -7,6 +7,7 @@ from nous.cognitive.layer import CognitiveLayer
 
 class _Stub(CognitiveLayer):
     """Stub that skips __init__ but inherits class attrs and methods."""
+
     def __init__(self):
         pass  # skip real init
 
@@ -22,49 +23,61 @@ class TestTopicPersistence:
 
     # --- Should PRESERVE topic (return None) ---
 
-    @pytest.mark.parametrize("input_text", [
-        "yes",
-        "ok",
-        "no",
-        "hm",
-        "?",
-        "",
-        "   ",
-    ])
+    @pytest.mark.parametrize(
+        "input_text",
+        [
+            "yes",
+            "ok",
+            "no",
+            "hm",
+            "?",
+            "",
+            "   ",
+        ],
+    )
     def test_very_short_inputs_preserve_topic(self, resolve, input_text):
         assert resolve(input_text) is None
 
-    @pytest.mark.parametrize("input_text", [
-        "it works",
-        "that one",
-        "this please",
-        "them too",
-    ])
+    @pytest.mark.parametrize(
+        "input_text",
+        [
+            "it works",
+            "that one",
+            "this please",
+            "them too",
+        ],
+    )
     def test_pronoun_inputs_preserve_topic(self, resolve, input_text):
         assert resolve(input_text) is None
 
-    @pytest.mark.parametrize("input_text", [
-        "what about it?",
-        "how about that?",
-        "tell me more",
-        "what else?",
-        "anything else?",
-        "go on",
-        "continue",
-        "keep going",
-        "elaborate",
-        "and what happened?",
-    ])
+    @pytest.mark.parametrize(
+        "input_text",
+        [
+            "what about it?",
+            "how about that?",
+            "tell me more",
+            "what else?",
+            "anything else?",
+            "go on",
+            "continue",
+            "keep going",
+            "elaborate",
+            "and what happened?",
+        ],
+    )
     def test_followup_phrases_preserve_topic(self, resolve, input_text):
         assert resolve(input_text) is None
 
-    @pytest.mark.parametrize("input_text", [
-        "why?",
-        "how?",
-        "when?",
-        "where?",
-        "who?",
-    ])
+    @pytest.mark.parametrize(
+        "input_text",
+        [
+            "why?",
+            "how?",
+            "when?",
+            "where?",
+            "who?",
+        ],
+    )
     def test_bare_question_words_preserve_topic(self, resolve, input_text):
         assert resolve(input_text) is None
 
@@ -76,14 +89,17 @@ class TestTopicPersistence:
 
     # --- Should UPDATE topic (return text) ---
 
-    @pytest.mark.parametrize("input_text", [
-        "tell me about cognition-engines",
-        "let's talk about membrain",
-        "what do you know about the attractor dynamics?",
-        "explain the compaction algorithm",
-        "how does the CSTP server work?",
-        "I want to discuss the trading strategy",
-    ])
+    @pytest.mark.parametrize(
+        "input_text",
+        [
+            "tell me about cognition-engines",
+            "let's talk about membrain",
+            "what do you know about the attractor dynamics?",
+            "explain the compaction algorithm",
+            "how does the CSTP server work?",
+            "I want to discuss the trading strategy",
+        ],
+    )
     def test_clear_topic_updates(self, resolve, input_text):
         result = resolve(input_text)
         assert result is not None

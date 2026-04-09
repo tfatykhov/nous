@@ -14,7 +14,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
-from uuid import UUID
 
 if TYPE_CHECKING:
     from nous.brain.schemas import DecisionSummary
@@ -48,9 +47,7 @@ class ReviewSignal(Protocol):
 # ErrorSignal
 # ---------------------------------------------------------------------------
 
-_ERROR_KEYWORDS = re.compile(
-    r"\b(error|failed|failure|broken|crashed|bug)\b", re.IGNORECASE
-)
+_ERROR_KEYWORDS = re.compile(r"\b(error|failed|failure|broken|crashed|bug)\b", re.IGNORECASE)
 
 
 class ErrorSignal:
@@ -213,9 +210,7 @@ class DecisionReviewer:
             FileExistsSignal(),
         ]
         if getattr(settings, "github_token", ""):
-            self._signals.append(
-                GitHubSignal(http_client, settings.github_token)
-            )
+            self._signals.append(GitHubSignal(http_client, settings.github_token))
 
         self._sweep_task: asyncio.Task | None = None
 
@@ -224,9 +219,7 @@ class DecisionReviewer:
     async def start(self) -> None:
         """Start the periodic sweep loop."""
         interval = getattr(self._settings, "decision_sweep_interval", 3600)
-        self._sweep_task = asyncio.create_task(
-            self._sweep_loop(interval), name="decision-review-sweep"
-        )
+        self._sweep_task = asyncio.create_task(self._sweep_loop(interval), name="decision-review-sweep")
         logger.info("Decision review sweep started (interval=%ds)", interval)
 
     async def stop(self) -> None:

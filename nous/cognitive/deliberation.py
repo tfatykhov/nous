@@ -31,13 +31,25 @@ _DEDUP_KEYWORD_THRESHOLD = 0.5
 
 # 009.5: Chat pattern prefixes that indicate noise
 _QUALITY_CHAT_PREFIXES = (
-    "done", "on it", "here's", "got it", "sure",
-    "okay", "alright", "working on", "let me", "i'll",
+    "done",
+    "on it",
+    "here's",
+    "got it",
+    "sure",
+    "okay",
+    "alright",
+    "working on",
+    "let me",
+    "i'll",
 )
 
 
 def _validate_decision_quality(
-    description: str, confidence: float, stakes: str, *, has_tool_errors: bool = False,
+    description: str,
+    confidence: float,
+    stakes: str,
+    *,
+    has_tool_errors: bool = False,
 ) -> str | None:
     """Validate decision quality (009.5). Returns rejection reason or None if valid."""
     desc_stripped = description.strip()
@@ -99,7 +111,10 @@ class DeliberationEngine:
         """
         # 009.5: Dedup check before creating decision
         if session_id and await self._is_duplicate(
-            agent_id, description, session_id, session=session,
+            agent_id,
+            description,
+            session_id,
+            session=session,
         ):
             logger.debug("Skipping duplicate deliberation: %s", description[:80])
             return None
@@ -161,7 +176,10 @@ class DeliberationEngine:
 
         # 009.5: Quality gate
         rejection = _validate_decision_quality(
-            description, confidence, stakes, has_tool_errors=has_tool_errors,
+            description,
+            confidence,
+            stakes,
+            has_tool_errors=has_tool_errors,
         )
         if rejection:
             logger.info("Quality gate rejected decision %s: %s", decision_id, rejection)
@@ -218,7 +236,10 @@ class DeliberationEngine:
         """
         cutoff = datetime.now(UTC) - timedelta(minutes=_DEDUP_WINDOW_MINUTES)
         recent = await self._brain.get_recent_decisions(
-            agent_id, since=cutoff, session_id=session_id, session=session,
+            agent_id,
+            since=cutoff,
+            session_id=session_id,
+            session=session,
         )
         if not recent:
             return False
@@ -255,7 +276,9 @@ class DeliberationEngine:
         return False
 
     async def _get_decision_embedding(
-        self, decision_id: UUID, session: AsyncSession | None = None,
+        self,
+        decision_id: UUID,
+        session: AsyncSession | None = None,
     ) -> list[float] | None:
         """Fetch stored embedding for a decision."""
         if session is None:
@@ -264,9 +287,7 @@ class DeliberationEngine:
                     sa_select(DecisionModel.embedding).where(DecisionModel.id == decision_id)
                 )
                 return result.scalar_one_or_none()
-        result = await session.execute(
-            sa_select(DecisionModel.embedding).where(DecisionModel.id == decision_id)
-        )
+        result = await session.execute(sa_select(DecisionModel.embedding).where(DecisionModel.id == decision_id))
         return result.scalar_one_or_none()
 
     @staticmethod

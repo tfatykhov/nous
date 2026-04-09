@@ -1,4 +1,5 @@
 """Tests for F022 Phase 4 — spreading activation."""
+
 import pytest
 import pytest_asyncio
 
@@ -9,7 +10,6 @@ from nous.brain.spreading_activation import (
     spreading_activation_search,
 )
 from nous.config import Settings
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

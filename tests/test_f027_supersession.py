@@ -51,9 +51,7 @@ def _mock_llm_structured(tool_input: dict, tool_name: str = "classify_fact_relat
     """Create a mock LLM client returning a structured tool_use response."""
     client = AsyncMock()
     response = MagicMock()
-    response.content = [
-        {"type": "tool_use", "id": "toolu_mock", "name": tool_name, "input": tool_input}
-    ]
+    response.content = [{"type": "tool_use", "id": "toolu_mock", "name": tool_name, "input": tool_input}]
     client.call = AsyncMock(return_value=response)
     return client
 
@@ -100,6 +98,7 @@ class TestApplySupersessionFilter:
 
     def _filter(self, results):
         from nous.heart.facts import FactManager
+
         return FactManager.apply_supersession_filter(results)
 
     def test_no_superseded_facts_unchanged(self):
@@ -236,9 +235,7 @@ class TestClassifyFactPair:
     async def test_returns_classification_dict(self):
         from nous.heart.facts import FactManager
 
-        mock_llm = _mock_llm_structured(
-            {"relation": "UPDATE", "current_fact": "new", "confidence": 0.92}
-        )
+        mock_llm = _mock_llm_structured({"relation": "UPDATE", "current_fact": "new", "confidence": 0.92})
         fm = FactManager(MagicMock(), None, "test-agent")
         fm._llm = mock_llm
 
@@ -292,9 +289,7 @@ class TestFindContradictionLLMRouting:
         mock_result.first = MagicMock(return_value=None)
         mock_session.execute = AsyncMock(return_value=mock_result)
 
-        result = await fm._find_contradiction(
-            [0.1] * 1536, "new content here for testing", [], mock_session
-        )
+        result = await fm._find_contradiction([0.1] * 1536, "new content here for testing", [], mock_session)
         assert result is None
 
     @pytest.mark.asyncio
@@ -418,9 +413,7 @@ class TestFindContradictionLLMRouting:
         mock_result.first = MagicMock(return_value=mock_row)
         mock_session.execute = AsyncMock(return_value=mock_result)
 
-        result = await fm._find_contradiction(
-            [0.1] * 1536, "somewhat different content here", [], mock_session
-        )
+        result = await fm._find_contradiction([0.1] * 1536, "somewhat different content here", [], mock_session)
         assert isinstance(result, ContradictionWarning)
 
 
@@ -479,9 +472,7 @@ class TestPhaseStaleScam:
         mock_session.__aenter__ = AsyncMock(return_value=mock_session)
         mock_session.__aexit__ = AsyncMock(return_value=False)
         mock_result = MagicMock()
-        mock_result.scalars = MagicMock(
-            return_value=MagicMock(all=MagicMock(return_value=[mock_fact]))
-        )
+        mock_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[mock_fact])))
         mock_session.execute = AsyncMock(return_value=mock_result)
 
         mock_db = MagicMock()
@@ -547,9 +538,7 @@ class TestPhaseClusterConsolidation:
     @pytest.mark.asyncio
     async def test_returns_true_no_clusters(self):
         """No clusters found → True, clusters_merged=0."""
-        mock_llm = _mock_llm_structured(
-            {"merged_content": "Merged", "confidence": 0.8}, "merge_facts"
-        )
+        mock_llm = _mock_llm_structured({"merged_content": "Merged", "confidence": 0.8}, "merge_facts")
 
         # Mock heart.db to return empty clusters
         mock_session = AsyncMock()
@@ -592,6 +581,7 @@ class TestPhaseClusterConsolidation:
         bus.emit = AsyncMock()
 
         from nous.handlers.sleep_handler import SleepHandler
+
         handler = SleepHandler(MagicMock(), mock_heart, _mock_settings(), bus, mock_llm)
 
         sleep_stats: dict = {}
@@ -634,17 +624,13 @@ class TestPhaseClusterConsolidation:
 
         # Second DB call: fetch facts for that subject
         facts_result = MagicMock()
-        facts_result.scalars = MagicMock(
-            return_value=MagicMock(all=MagicMock(return_value=facts))
-        )
+        facts_result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=facts)))
 
         # Third DB call: deactivate originals (each session.get returns the fact)
         deactivation_session = AsyncMock()
         deactivation_session.__aenter__ = AsyncMock(return_value=deactivation_session)
         deactivation_session.__aexit__ = AsyncMock(return_value=False)
-        deactivation_session.get = AsyncMock(side_effect=lambda model, id: next(
-            (f for f in facts if f.id == id), None
-        ))
+        deactivation_session.get = AsyncMock(side_effect=lambda model, id: next((f for f in facts if f.id == id), None))
 
         call_count = 0
 

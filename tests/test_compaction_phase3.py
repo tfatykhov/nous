@@ -23,18 +23,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
-import pytest_asyncio
 
-from nous.api.models import ApiResponse, Conversation, Message
+from nous.api.models import Conversation, Message
 from nous.events import Event, EventBus
 from nous.handlers.knowledge_extractor import KnowledgeExtractor
-from nous.heart.schemas import EpisodeDetail, EpisodeInput, FactInput, FactSummary
+from nous.heart.schemas import FactInput
 from nous.storage.models import ConversationState
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -212,9 +210,7 @@ class TestConversationStatePersistence:
             compaction_count=1,
             session=session,
         )
-        loaded = await heart.load_conversation_state(
-            agent_id=TEST_AGENT, session_id="summary-test", session=session
-        )
+        loaded = await heart.load_conversation_state(agent_id=TEST_AGENT, session_id="summary-test", session=session)
         assert loaded is not None
         assert "## Goal" in loaded["summary"]
 
@@ -228,9 +224,7 @@ class TestConversationStatePersistence:
             compaction_count=0,
             session=session,
         )
-        loaded2 = await heart.load_conversation_state(
-            agent_id=TEST_AGENT, session_id="summary-test", session=session
-        )
+        loaded2 = await heart.load_conversation_state(agent_id=TEST_AGENT, session_id="summary-test", session=session)
         assert loaded2 is not None
         assert loaded2["summary"] is None
 
@@ -247,20 +241,14 @@ class TestConversationStatePersistence:
             session=session,
         )
         # Verify exists
-        loaded = await heart.load_conversation_state(
-            agent_id=TEST_AGENT, session_id="delete-test", session=session
-        )
+        loaded = await heart.load_conversation_state(agent_id=TEST_AGENT, session_id="delete-test", session=session)
         assert loaded is not None
 
         # Delete
-        await heart.delete_conversation_state(
-            agent_id=TEST_AGENT, session_id="delete-test", session=session
-        )
+        await heart.delete_conversation_state(agent_id=TEST_AGENT, session_id="delete-test", session=session)
 
         # Verify gone
-        loaded2 = await heart.load_conversation_state(
-            agent_id=TEST_AGENT, session_id="delete-test", session=session
-        )
+        loaded2 = await heart.load_conversation_state(agent_id=TEST_AGENT, session_id="delete-test", session=session)
         assert loaded2 is None
 
 
@@ -276,9 +264,15 @@ class TestConversationStateModel:
         """Model has all expected columns."""
         cols = {c.name for c in ConversationState.__table__.columns}
         expected = {
-            "id", "agent_id", "session_id", "summary",
-            "messages", "turn_count", "compaction_count",
-            "created_at", "updated_at",
+            "id",
+            "agent_id",
+            "session_id",
+            "summary",
+            "messages",
+            "turn_count",
+            "compaction_count",
+            "created_at",
+            "updated_at",
         }
         assert expected.issubset(cols)
 
@@ -438,14 +432,18 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_llm = _mock_llm_client(json.dumps([
-            {
-                "subject": "user",
-                "content": "User prefers Python 3.12",
-                "category": "preference",
-                "confidence": 0.9,
-            }
-        ]))
+        mock_llm = _mock_llm_client(
+            json.dumps(
+                [
+                    {
+                        "subject": "user",
+                        "content": "User prefers Python 3.12",
+                        "category": "preference",
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
 
         extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
@@ -569,14 +567,18 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_llm = _mock_llm_client(json.dumps([
-            {
-                "subject": "user",
-                "content": "Duplicate fact that already exists",
-                "category": "preference",
-                "confidence": 0.9,
-            }
-        ]))
+        mock_llm = _mock_llm_client(
+            json.dumps(
+                [
+                    {
+                        "subject": "user",
+                        "content": "Duplicate fact that already exists",
+                        "category": "preference",
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
 
         extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
@@ -606,14 +608,18 @@ class TestKnowledgeExtractor:
         settings = _mock_settings()
         bus = EventBus()
 
-        mock_llm = _mock_llm_client(json.dumps([
-            {
-                "subject": "user",
-                "content": "Low confidence fact",
-                "category": "preference",
-                "confidence": 0.4,
-            }
-        ]))
+        mock_llm = _mock_llm_client(
+            json.dumps(
+                [
+                    {
+                        "subject": "user",
+                        "content": "Low confidence fact",
+                        "category": "preference",
+                        "confidence": 0.4,
+                    }
+                ]
+            )
+        )
 
         extractor = KnowledgeExtractor(heart, settings, bus, llm_client=mock_llm)
 
@@ -836,20 +842,22 @@ class TestRunnerSaveRestore:
     async def test_restore_from_db_on_session_resume(self):
         """_get_or_create_conversation restores persisted state."""
         heart = MagicMock()
-        heart.load_conversation_state = AsyncMock(return_value={
-            "id": str(uuid4()),
-            "agent_id": TEST_AGENT,
-            "session_id": TEST_SESSION,
-            "summary": "Restored summary",
-            "messages": [
-                {"role": "user", "content": "previous user msg"},
-                {"role": "assistant", "content": "previous assistant reply"},
-            ],
-            "turn_count": 2,
-            "compaction_count": 1,
-            "created_at": "2026-01-01T00:00:00",
-            "updated_at": "2026-01-01T00:00:00",
-        })
+        heart.load_conversation_state = AsyncMock(
+            return_value={
+                "id": str(uuid4()),
+                "agent_id": TEST_AGENT,
+                "session_id": TEST_SESSION,
+                "summary": "Restored summary",
+                "messages": [
+                    {"role": "user", "content": "previous user msg"},
+                    {"role": "assistant", "content": "previous assistant reply"},
+                ],
+                "turn_count": 2,
+                "compaction_count": 1,
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        )
 
         runner = self._make_runner(heart=heart)
 
@@ -911,22 +919,24 @@ class TestRunnerSaveRestore:
     async def test_restore_handles_malformed_messages(self):
         """_restore_conversation filters out malformed message dicts."""
         heart = MagicMock()
-        heart.load_conversation_state = AsyncMock(return_value={
-            "id": str(uuid4()),
-            "agent_id": TEST_AGENT,
-            "session_id": TEST_SESSION,
-            "summary": None,
-            "messages": [
-                {"role": "user", "content": "valid"},
-                {"bad": "no role key"},  # Missing role
-                "not a dict",  # Not a dict
-                {"role": "assistant", "content": "also valid"},
-            ],
-            "turn_count": 0,
-            "compaction_count": 0,
-            "created_at": None,
-            "updated_at": None,
-        })
+        heart.load_conversation_state = AsyncMock(
+            return_value={
+                "id": str(uuid4()),
+                "agent_id": TEST_AGENT,
+                "session_id": TEST_SESSION,
+                "summary": None,
+                "messages": [
+                    {"role": "user", "content": "valid"},
+                    {"bad": "no role key"},  # Missing role
+                    "not a dict",  # Not a dict
+                    {"role": "assistant", "content": "also valid"},
+                ],
+                "turn_count": 0,
+                "compaction_count": 0,
+                "created_at": None,
+                "updated_at": None,
+            }
+        )
 
         runner = self._make_runner(heart=heart)
 
@@ -952,6 +962,7 @@ class TestRunnerSaveRestore:
     async def test_get_or_create_is_async(self):
         """_get_or_create_conversation is now async (Phase 3 change)."""
         import inspect
+
         from nous.api.runner import AgentRunner
 
         assert inspect.iscoroutinefunction(AgentRunner._get_or_create_conversation)
@@ -1000,17 +1011,19 @@ class TestRunnerSaveRestore:
     async def test_restore_sets_compaction_count(self):
         """Restored conversation preserves compaction_count."""
         heart = MagicMock()
-        heart.load_conversation_state = AsyncMock(return_value={
-            "id": str(uuid4()),
-            "agent_id": TEST_AGENT,
-            "session_id": TEST_SESSION,
-            "summary": "After 3 compactions",
-            "messages": [{"role": "user", "content": "latest"}],
-            "turn_count": 20,
-            "compaction_count": 3,
-            "created_at": "2026-01-01T00:00:00",
-            "updated_at": "2026-01-01T00:00:00",
-        })
+        heart.load_conversation_state = AsyncMock(
+            return_value={
+                "id": str(uuid4()),
+                "agent_id": TEST_AGENT,
+                "session_id": TEST_SESSION,
+                "summary": "After 3 compactions",
+                "messages": [{"role": "user", "content": "latest"}],
+                "turn_count": 20,
+                "compaction_count": 3,
+                "created_at": "2026-01-01T00:00:00",
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        )
 
         runner = self._make_runner(heart=heart)
 

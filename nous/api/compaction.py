@@ -197,9 +197,7 @@ class ConversationCompactor:
             and content[0].get("type") == "tool_result"
         )
 
-    def _build_tool_use_index(
-        self, messages: list[dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
+    def _build_tool_use_index(self, messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Build tool_use_id -> tool_use block index. O(N) once."""
         index: dict[str, dict[str, Any]] = {}
         for msg in messages:
@@ -215,9 +213,7 @@ class ConversationCompactor:
                         index[tool_id] = block
         return index
 
-    def _metadata_degrade(
-        self, item: dict[str, Any], tool_use_block: dict[str, Any] | None
-    ) -> None:
+    def _metadata_degrade(self, item: dict[str, Any], tool_use_block: dict[str, Any] | None) -> None:
         """Replace tool result with descriptive metadata trace."""
         text = item.get("content", "")
         if not isinstance(text, str):
@@ -229,7 +225,7 @@ class ConversationCompactor:
         tool_input = tool_use_block.get("input", {}) if tool_use_block else {}
 
         args_parts = []
-        for k, v in (tool_input.items() if isinstance(tool_input, dict) else []):
+        for k, v in tool_input.items() if isinstance(tool_input, dict) else []:
             v_str = str(v)[:80]
             args_parts.append(f"{k}={v_str}")
         args_summary = ", ".join(args_parts[:3])
@@ -246,8 +242,7 @@ class ConversationCompactor:
         refetch_hint = " | re-fetchable" if refetchable else ""
 
         item["content"] = (
-            f"[{tool_name}({args_summary}): {line_count} lines, "
-            f"{len(text)} chars | first: {first_line}{refetch_hint}]"
+            f"[{tool_name}({args_summary}): {line_count} lines, {len(text)} chars | first: {first_line}{refetch_hint}]"
         )
 
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
@@ -256,9 +251,9 @@ class ConversationCompactor:
         # URLs
         facts.extend(re.findall(r'https?://[^\s\'"<>]+', content))
         # File paths
-        facts.extend(re.findall(r'(?:/[\w.-]+){2,}', content))
+        facts.extend(re.findall(r"(?:/[\w.-]+){2,}", content))
         # Key-value patterns
-        facts.extend(re.findall(r'\b\w+:\s+[\w.-]+', content)[:5])
+        facts.extend(re.findall(r"\b\w+:\s+[\w.-]+", content)[:5])
         return facts[:10]
 
     def prune_tool_results(self, messages: list[dict[str, Any]]) -> list[str]:
@@ -278,14 +273,11 @@ class ConversationCompactor:
         if not self._settings.tool_pruning_enabled:
             return []
 
-        tool_indices = [
-            i for i, msg in enumerate(messages)
-            if self.is_tool_result_message(msg)
-        ]
+        tool_indices = [i for i, msg in enumerate(messages) if self.is_tool_result_message(msg)]
         if not tool_indices:
             return []
 
-        protected = set(tool_indices[-self._settings.keep_last_tool_results:])
+        protected = set(tool_indices[-self._settings.keep_last_tool_results :])
         tool_use_index = self._build_tool_use_index(messages)
 
         extracted: list[str] = []
@@ -312,9 +304,7 @@ class ConversationCompactor:
                         break
 
             profile_name = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
-            _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
-                profile_name, (3, 8, 12)
-            )
+            _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(profile_name, (3, 8, 12))
 
             # Tier 4: Hard-clear (age >= clear_age)
             if age >= clear_age:
@@ -325,9 +315,7 @@ class ConversationCompactor:
                     # Extract facts from conservative tools before clearing
                     if isinstance(text, str) and text and profile_name == "conservative":
                         extracted.extend(self._extract_facts_before_clear(tool_name or "unknown", text))
-                    item["content"] = (
-                        "[Tool output cleared - content was processed in earlier turns]"
-                    )
+                    item["content"] = "[Tool output cleared - content was processed in earlier turns]"
                 hard_cleared += 1
                 continue
 
@@ -363,10 +351,12 @@ class ConversationCompactor:
 
         if soft_trimmed or hard_cleared or metadata_degraded:
             logger.info(
-                "Pruned tool results: soft_trimmed=%d, metadata_degraded=%d, "
-                "hard_cleared=%d (total=%d, protected=%d)",
-                soft_trimmed, metadata_degraded, hard_cleared,
-                len(tool_indices), len(protected),
+                "Pruned tool results: soft_trimmed=%d, metadata_degraded=%d, hard_cleared=%d (total=%d, protected=%d)",
+                soft_trimmed,
+                metadata_degraded,
+                hard_cleared,
+                len(tool_indices),
+                len(protected),
             )
 
         return extracted
@@ -376,10 +366,7 @@ class ConversationCompactor:
         """Check if a tool result item contains image content."""
         content = item.get("content")
         if isinstance(content, list):
-            return any(
-                isinstance(block, dict) and block.get("type") == "image"
-                for block in content
-            )
+            return any(isinstance(block, dict) and block.get("type") == "image" for block in content)
         return False
 
     # ------------------------------------------------------------------
@@ -393,9 +380,7 @@ class ConversationCompactor:
         total = system_tokens + history_tokens
         return total > self._settings.effective_compaction_threshold
 
-    def find_cut_point(
-        self, messages: list[dict[str, Any]], keep_recent_tokens: int
-    ) -> int:
+    def find_cut_point(self, messages: list[dict[str, Any]], keep_recent_tokens: int) -> int:
         """Walk backwards accumulating tokens. Returns index of old/recent split.
 
         Returns 0 if all messages fit (no compaction needed).
@@ -426,10 +411,7 @@ class ConversationCompactor:
         if cut_point <= 0:
             raise ValueError("cut_point must be > 0; caller should guard")
         if len(messages) != len(conversation.messages):
-            raise ValueError(
-                f"Index alignment required: {len(messages)} != "
-                f"{len(conversation.messages)}"
-            )
+            raise ValueError(f"Index alignment required: {len(messages)} != {len(conversation.messages)}")
 
         old_messages = messages[:cut_point]
         start_time = time.monotonic()
@@ -440,20 +422,14 @@ class ConversationCompactor:
             serialize_start = 2
 
         try:
-            checkpoint_text = await self._summarize(
-                old_messages[serialize_start:], conversation.summary, call_api
-            )
+            checkpoint_text = await self._summarize(old_messages[serialize_start:], conversation.summary, call_api)
             if not self._validate_summary(checkpoint_text):
                 raise ValueError("Summary failed validation")
         except Exception as e:
-            logger.error(
-                "Compaction failed: %s - falling back to truncation", e
-            )
+            logger.error("Compaction failed: %s - falling back to truncation", e)
             conversation.messages = conversation.messages[cut_point:]
             conversation.summary = None
-            conversation.compaction_count = max(
-                0, conversation.compaction_count - 1
-            )
+            conversation.compaction_count = max(0, conversation.compaction_count - 1)
             return
 
         # Rebuild messages with summary prefix
@@ -490,8 +466,7 @@ class ConversationCompactor:
 
         duration_ms = int((time.monotonic() - start_time) * 1000)
         logger.info(
-            "Compacted conversation %s: %d messages -> %d + summary "
-            "(%d chars, %d ms, compaction #%d)",
+            "Compacted conversation %s: %d messages -> %d + summary (%d chars, %d ms, compaction #%d)",
             conversation.session_id,
             len(messages),
             len(conversation.messages),
@@ -563,13 +538,7 @@ class ConversationCompactor:
             elif isinstance(content, list):
                 # Defensive: handle list content if it ever appears
                 parts = [
-                    (
-                        item.get("content")
-                        or item.get("text")
-                        or str(item)
-                    )
-                    if isinstance(item, dict)
-                    else str(item)
+                    (item.get("content") or item.get("text") or str(item)) if isinstance(item, dict) else str(item)
                     for item in content
                 ]
                 lines.append(f"**{role}:** {chr(10).join(parts)}")
@@ -582,8 +551,4 @@ class ConversationCompactor:
     @staticmethod
     def extract_text(content: list[dict[str, Any]]) -> str:
         """Extract text from API response content blocks."""
-        return "".join(
-            block.get("text", "")
-            for block in content
-            if block.get("type") == "text"
-        )
+        return "".join(block.get("text", "") for block in content if block.get("type") == "text")

@@ -134,9 +134,7 @@ class TestApplyFrameBoost:
             name="high_score",
         )
         item.score = 0.95  # High base score + 1.3x frame boost = 1.235 unclamped
-        results = apply_frame_boost(
-            [item], current_frame="task", current_censors=["censor-a"]
-        )
+        results = apply_frame_boost([item], current_frame="task", current_censors=["censor-a"])
         assert results[0].score <= 1.0
 
     def test_empty_list(self):

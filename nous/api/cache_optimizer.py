@@ -17,6 +17,7 @@ def _hash(text: str) -> str:
 @dataclass
 class CacheHashState:
     """Hashes from one API call for comparison."""
+
     static_hash: str = ""
     semi_stable_hash: str = ""
     dynamic_hash: str = ""
@@ -27,6 +28,7 @@ class CacheHashState:
 @dataclass
 class CacheBreakInfo:
     """Detected cache invalidation between consecutive API calls."""
+
     components_changed: list[str] = field(default_factory=list)
     estimated_tokens_lost: int = 0
     previous_hashes: dict[str, str] = field(default_factory=dict)
@@ -93,7 +95,8 @@ class CacheBreakDetector:
 
         logger.info(
             "F036: Cache break detected — changed: %s, tokens_lost: %d",
-            changed, tokens_lost,
+            changed,
+            tokens_lost,
         )
 
         return CacheBreakInfo(

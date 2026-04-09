@@ -70,7 +70,9 @@ class FactGraphLinker:
                     await link_session.commit()
                     logger.debug(
                         "F022: Linked fact %s to %d decisions + %d facts",
-                        fact_id, len(decision_edges), len(fact_edges),
+                        fact_id,
+                        len(decision_edges),
+                        len(fact_edges),
                     )
         except asyncio.CancelledError:
             raise  # Let the EventBus handle cancellation for clean shutdown

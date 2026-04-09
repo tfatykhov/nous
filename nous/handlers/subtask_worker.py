@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
 
 import httpx
 
@@ -59,9 +58,7 @@ class SubtaskWorkerPool:
         num_workers = self._settings.subtask_workers
         for i in range(num_workers):
             worker_id = f"worker-{i}"
-            task = asyncio.create_task(
-                self._worker_loop(worker_id), name=f"subtask-{worker_id}"
-            )
+            task = asyncio.create_task(self._worker_loop(worker_id), name=f"subtask-{worker_id}")
             self._workers.append(task)
         logger.info(
             "Subtask worker pool started (%d workers, poll=%.1fs)",
@@ -115,7 +112,7 @@ class SubtaskWorkerPool:
                 self._execute_subtask(subtask),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             error_msg = f"Subtask timed out after {timeout}s"
             logger.warning(
                 "Subtask %s timed out after %ds",
@@ -192,14 +189,16 @@ class SubtaskWorkerPool:
         if error is not None:
             data["error"] = error[:500]
 
-        await self._bus.emit(Event(
-            type=event_type,
-            agent_id=self._settings.agent_id,
-            session_id=f"subtask-{subtask.id.hex[:8]}",
-            data=data,
-            trace_id=getattr(subtask, "_trace_id", None),       # F035.2: propagate if set
-            caused_by=getattr(subtask, "_caused_by", None),     # F035.2: propagate if set
-        ))
+        await self._bus.emit(
+            Event(
+                type=event_type,
+                agent_id=self._settings.agent_id,
+                session_id=f"subtask-{subtask.id.hex[:8]}",
+                data=data,
+                trace_id=getattr(subtask, "_trace_id", None),  # F035.2: propagate if set
+                caused_by=getattr(subtask, "_caused_by", None),  # F035.2: propagate if set
+            )
+        )
 
     # ------------------------------------------------------------------
     # Telegram notifications

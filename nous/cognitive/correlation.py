@@ -3,6 +3,7 @@
 Computes Pearson and Spearman correlations between rubric dimension
 scores and outcome signals. No scipy/numpy dependency.
 """
+
 from __future__ import annotations
 
 import math
@@ -77,21 +78,20 @@ def correlate_dimensions_with_outcomes(
         dim_scores = [ep["scores"].get(dim, 0) for ep in episodes]
 
         for sig_type in sorted(all_signal_types):
-            sig_binary = [
-                1.0 if sig_type in ep.get("signals", []) else 0.0
-                for ep in episodes
-            ]
+            sig_binary = [1.0 if sig_type in ep.get("signals", []) else 0.0 for ep in episodes]
 
             r = pearson_r(dim_scores, sig_binary)
             rho = spearman_rho(dim_scores, sig_binary)
 
-            results.append(CorrelationResult(
-                dimension=dim,
-                signal_type=sig_type,
-                pearson_r=round(r, 4),
-                spearman_rho=round(rho, 4),
-                sample_size=len(episodes),
-            ))
+            results.append(
+                CorrelationResult(
+                    dimension=dim,
+                    signal_type=sig_type,
+                    pearson_r=round(r, 4),
+                    spearman_rho=round(rho, 4),
+                    sample_size=len(episodes),
+                )
+            )
 
     return results
 
@@ -149,10 +149,7 @@ def suggest_weights(
     if total_importance == 0:
         return dict(current_weights)
 
-    target_weights = {
-        dim: imp / total_importance
-        for dim, imp in dim_importance.items()
-    }
+    target_weights = {dim: imp / total_importance for dim, imp in dim_importance.items()}
 
     new_weights = {}
     for dim, current in current_weights.items():

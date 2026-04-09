@@ -11,10 +11,9 @@ import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.cognitive.layer import CognitiveLayer
-from nous.cognitive.schemas import TurnContext, TurnResult
+from nous.cognitive.schemas import TurnContext
 from nous.heart import FactInput
 from tests.conftest import MockEmbeddingProvider
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -33,9 +32,7 @@ async def brain_with_embeddings(db, settings):
 @pytest_asyncio.fixture
 async def cognitive(brain_with_embeddings, heart, settings):
     """CognitiveLayer wired with Brain (mock embeddings) and Heart."""
-    return CognitiveLayer(
-        brain_with_embeddings, heart, settings, identity_prompt="You are Nous."
-    )
+    return CognitiveLayer(brain_with_embeddings, heart, settings, identity_prompt="You are Nous.")
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +47,7 @@ async def test_greeting_minimal_context(cognitive, session):
     so the system prompt should only contain identity + frame sections.
     """
     sid = f"test-greet-{uuid.uuid4().hex[:8]}"
-    ctx = await cognitive.pre_turn(
-        "nous-default", sid, "hey", session=session
-    )
+    ctx = await cognitive.pre_turn("nous-default", sid, "hey", session=session)
 
     assert isinstance(ctx, TurnContext)
     # Should have a system prompt but no memory sections

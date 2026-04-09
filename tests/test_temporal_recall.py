@@ -16,8 +16,6 @@ import pytest
 from nous.heart.schemas import EpisodeSummary
 from nous.storage.models import Episode as EpisodeORM
 
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -266,9 +264,7 @@ class TestTemporalContextTier:
             match_method="pattern",
         )
 
-    async def test_temporal_tier_includes_recent_titles(
-        self, mock_brain, mock_heart, settings, frame
-    ):
+    async def test_temporal_tier_includes_recent_titles(self, mock_brain, mock_heart, settings, frame):
         """Temporal tier should include recent episode titles in context."""
         from nous.cognitive.context import ContextEngine
 
@@ -303,9 +299,7 @@ class TestTemporalContextTier:
         assert "Debugging the login flow" in result.system_prompt
         assert "Database migration planning" in result.system_prompt
 
-    async def test_temporal_tier_disabled_by_config(
-        self, mock_brain, mock_heart, settings_disabled, frame
-    ):
+    async def test_temporal_tier_disabled_by_config(self, mock_brain, mock_heart, settings_disabled, frame):
         """When temporal_context_enabled=False, no temporal tier should appear."""
         from nous.cognitive.context import ContextEngine
 
@@ -327,9 +321,7 @@ class TestTemporalContextTier:
         labels = [s.label for s in result.sections]
         assert "Recent Conversations" not in labels
 
-    async def test_temporal_tier_empty_when_no_recent(
-        self, mock_brain, mock_heart, settings, frame
-    ):
+    async def test_temporal_tier_empty_when_no_recent(self, mock_brain, mock_heart, settings, frame):
         """When list_episodes returns empty, no temporal section should appear."""
         from nous.cognitive.context import ContextEngine
 
@@ -341,9 +333,7 @@ class TestTemporalContextTier:
         labels = [s.label for s in result.sections]
         assert "Recent Conversations" not in labels
 
-    async def test_temporal_tier_deduplicates_with_semantic(
-        self, mock_brain, mock_heart, settings, frame
-    ):
+    async def test_temporal_tier_deduplicates_with_semantic(self, mock_brain, mock_heart, settings, frame):
         """Episode in temporal tier should be excluded from semantic episode results."""
         from nous.cognitive.context import ContextEngine
 
@@ -403,24 +393,31 @@ class TestRecallRecentTool:
 
     @pytest.mark.asyncio
     async def test_recall_recent_returns_formatted_episodes(self):
+        from datetime import UTC, datetime
         from unittest.mock import AsyncMock, MagicMock
-        from nous.heart.schemas import EpisodeSummary
-        from nous.api.tools import create_nous_tools
-        from datetime import datetime, UTC
         from uuid import uuid4
+
+        from nous.api.tools import create_nous_tools
+        from nous.heart.schemas import EpisodeSummary
 
         mock_brain = MagicMock()
         mock_heart = MagicMock()
         episodes = [
             EpisodeSummary(
-                id=uuid4(), title="Ski Trip Planning",
-                summary="Budget for Breckenridge", outcome="success",
-                started_at=datetime(2026, 2, 28, 12, 24, tzinfo=UTC), tags=["travel"],
+                id=uuid4(),
+                title="Ski Trip Planning",
+                summary="Budget for Breckenridge",
+                outcome="success",
+                started_at=datetime(2026, 2, 28, 12, 24, tzinfo=UTC),
+                tags=["travel"],
             ),
             EpisodeSummary(
-                id=uuid4(), title="Code Review",
-                summary="Reviewed PR #81", outcome="success",
-                started_at=datetime(2026, 2, 28, 11, 0, tzinfo=UTC), tags=["dev"],
+                id=uuid4(),
+                title="Code Review",
+                summary="Reviewed PR #81",
+                outcome="success",
+                started_at=datetime(2026, 2, 28, 11, 0, tzinfo=UTC),
+                tags=["dev"],
             ),
         ]
         mock_heart.list_episodes = AsyncMock(return_value=episodes)
@@ -436,6 +433,7 @@ class TestRecallRecentTool:
     @pytest.mark.asyncio
     async def test_recall_recent_empty(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from nous.api.tools import create_nous_tools
 
         mock_brain = MagicMock()
@@ -451,6 +449,7 @@ class TestRecallRecentTool:
     @pytest.mark.asyncio
     async def test_recall_recent_passes_hours_and_limit(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from nous.api.tools import create_nous_tools
 
         mock_brain = MagicMock()
@@ -480,32 +479,39 @@ class TestRecallRecentTool:
 
 
 class TestRecapDetection:
-
-    @pytest.mark.parametrize("query", [
-        "what did we talk about",
-        "What did we talk about recently?",
-        "what have we discussed",
-        "catch me up",
-        "recap",
-        "give me a recap of recent conversations",
-        "what happened recently",
-        "summary of recent discussions",
-        "what did we do yesterday",
-    ])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "what did we talk about",
+            "What did we talk about recently?",
+            "what have we discussed",
+            "catch me up",
+            "recap",
+            "give me a recap of recent conversations",
+            "what happened recently",
+            "summary of recent discussions",
+            "what did we do yesterday",
+        ],
+    )
     def test_recap_patterns_detected(self, query):
         from nous.cognitive.layer import _is_recap_query
+
         assert _is_recap_query(query) is True
 
-    @pytest.mark.parametrize("query", [
-        "how do I fix this bug",
-        "what is the capital of France",
-        "write a function to sort a list",
-        "hello",
-        "thanks",
-        "tell me about the architecture",
-    ])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "how do I fix this bug",
+            "what is the capital of France",
+            "write a function to sort a list",
+            "hello",
+            "thanks",
+            "tell me about the architecture",
+        ],
+    )
     def test_non_recap_not_detected(self, query):
         from nous.cognitive.layer import _is_recap_query
+
         assert _is_recap_query(query) is False
 
 
@@ -521,8 +527,10 @@ class TestTemporalRecencyWiring:
 
         classifier = IntentClassifier()
         frame = FrameSelection(
-            frame_id="conversation", frame_name="Conversation",
-            confidence=1.0, match_method="pattern",
+            frame_id="conversation",
+            frame_name="Conversation",
+            confidence=1.0,
+            match_method="pattern",
         )
         signals = classifier.classify("what did we talk about recently", frame)
         assert signals.temporal_recency > 0.5
@@ -533,8 +541,8 @@ class TestTemporalRecencyWiring:
 
     def test_bare_recap_without_temporal_words_still_boosts(self):
         """Bare 'recap' or 'catch me up' should trigger budget boost even without temporal words."""
-        from nous.cognitive.layer import _is_recap_query
         from nous.cognitive.intent import IntentClassifier
+        from nous.cognitive.layer import _is_recap_query
         from nous.cognitive.schemas import FrameSelection
 
         # "recap" has no temporal signal words like "recently"
@@ -542,8 +550,10 @@ class TestTemporalRecencyWiring:
 
         classifier = IntentClassifier()
         frame = FrameSelection(
-            frame_id="conversation", frame_name="Conversation",
-            confidence=1.0, match_method="pattern",
+            frame_id="conversation",
+            frame_name="Conversation",
+            confidence=1.0,
+            match_method="pattern",
         )
         signals = classifier.classify("recap", frame)
         # Without the layer.py fix, temporal_recency would be 0.0
@@ -565,6 +575,7 @@ class TestBudgetBoost:
     @pytest.fixture
     def mock_heart(self):
         from unittest.mock import AsyncMock, MagicMock
+
         heart = MagicMock()
         heart.list_episodes = AsyncMock(return_value=[])
         heart.search_episodes = AsyncMock(return_value=[])
@@ -580,6 +591,7 @@ class TestBudgetBoost:
     @pytest.fixture
     def mock_brain(self):
         from unittest.mock import AsyncMock, MagicMock
+
         brain = MagicMock()
         brain.query = AsyncMock(return_value=[])
         brain.embeddings = None
@@ -588,6 +600,7 @@ class TestBudgetBoost:
     @pytest.fixture
     def settings(self):
         from unittest.mock import MagicMock
+
         s = MagicMock()
         s.temporal_context_enabled = True
         return s
@@ -595,29 +608,38 @@ class TestBudgetBoost:
     @pytest.fixture
     def frame(self):
         from nous.cognitive.schemas import FrameSelection
+
         return FrameSelection(
-            frame_id="conversation", frame_name="Conversation",
-            confidence=1.0, match_method="pattern",
+            frame_id="conversation",
+            frame_name="Conversation",
+            confidence=1.0,
+            match_method="pattern",
         )
 
     @pytest.mark.asyncio
     async def test_temporal_boost_includes_summaries(self, mock_heart, mock_brain, settings, frame):
         from unittest.mock import AsyncMock
+
         from nous.cognitive.context import ContextEngine
 
         episodes = [
             EpisodeSummary(
-                id=uuid4(), title="Ski Trip Planning",
+                id=uuid4(),
+                title="Ski Trip Planning",
                 summary="Discussed budget and dates for Breckenridge ski trip in March 2026",
                 outcome="success",
-                started_at=datetime.now(UTC) - timedelta(hours=1), tags=["travel"],
+                started_at=datetime.now(UTC) - timedelta(hours=1),
+                tags=["travel"],
             ),
         ]
         mock_heart.list_episodes = AsyncMock(return_value=episodes)
 
         engine = ContextEngine(mock_brain, mock_heart, settings)
         result = await engine.build(
-            "test-agent", "session-1", "what did we talk about", frame,
+            "test-agent",
+            "session-1",
+            "what did we talk about",
+            frame,
             temporal_boost=True,
         )
 
@@ -631,21 +653,27 @@ class TestBudgetBoost:
     @pytest.mark.asyncio
     async def test_no_boost_excludes_summaries(self, mock_heart, mock_brain, settings, frame):
         from unittest.mock import AsyncMock
+
         from nous.cognitive.context import ContextEngine
 
         episodes = [
             EpisodeSummary(
-                id=uuid4(), title="Ski Trip Planning",
+                id=uuid4(),
+                title="Ski Trip Planning",
                 summary="Discussed budget and dates for Breckenridge ski trip in March 2026",
                 outcome="success",
-                started_at=datetime.now(UTC) - timedelta(hours=1), tags=["travel"],
+                started_at=datetime.now(UTC) - timedelta(hours=1),
+                tags=["travel"],
             ),
         ]
         mock_heart.list_episodes = AsyncMock(return_value=episodes)
 
         engine = ContextEngine(mock_brain, mock_heart, settings)
         result = await engine.build(
-            "test-agent", "session-1", "hello", frame,
+            "test-agent",
+            "session-1",
+            "hello",
+            frame,
             temporal_boost=False,
         )
 

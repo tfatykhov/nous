@@ -5,7 +5,7 @@ against a real Postgres database via the session fixture.
 """
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -38,11 +38,12 @@ async def _ensure_agent(session):
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
-async def _insert_decision(session, *, category="architecture", stakes="low",
-                           confidence=0.8, outcome="success", days_ago=0):
+async def _insert_decision(
+    session, *, category="architecture", stakes="low", confidence=0.8, outcome="success", days_ago=0
+):
     """Insert a test decision and return its id."""
     did = uuid.uuid4()
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO brain.decisions (id, agent_id, description, confidence,
@@ -50,9 +51,14 @@ async def _insert_decision(session, *, category="architecture", stakes="low",
             VALUES (:id, :agent_id, :desc, :conf, :cat, :stakes, :outcome, :created)
         """),
         {
-            "id": did, "agent_id": AGENT_ID, "desc": f"Test decision {did}",
-            "conf": confidence, "cat": category, "stakes": stakes,
-            "outcome": outcome, "created": created,
+            "id": did,
+            "agent_id": AGENT_ID,
+            "desc": f"Test decision {did}",
+            "conf": confidence,
+            "cat": category,
+            "stakes": stakes,
+            "outcome": outcome,
+            "created": created,
         },
     )
     return did
@@ -61,15 +67,18 @@ async def _insert_decision(session, *, category="architecture", stakes="low",
 async def _insert_fact(session, *, category="preference", days_ago=0):
     """Insert a test fact and return its id."""
     fid = uuid.uuid4()
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO heart.facts (id, agent_id, content, category, created_at)
             VALUES (:id, :agent_id, :content, :cat, :created)
         """),
         {
-            "id": fid, "agent_id": AGENT_ID,
-            "content": f"Test fact {fid}", "cat": category, "created": created,
+            "id": fid,
+            "agent_id": AGENT_ID,
+            "content": f"Test fact {fid}",
+            "cat": category,
+            "created": created,
         },
     )
     return fid
@@ -78,25 +87,28 @@ async def _insert_fact(session, *, category="preference", days_ago=0):
 async def _insert_episode(session, *, frame="task", days_ago=0):
     """Insert a test episode and return its id."""
     eid = uuid.uuid4()
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO heart.episodes (id, agent_id, summary, frame_used, created_at, started_at)
             VALUES (:id, :agent_id, :summary, :frame, :created, :created)
         """),
         {
-            "id": eid, "agent_id": AGENT_ID,
-            "summary": f"Test episode {eid}", "frame": frame, "created": created,
+            "id": eid,
+            "agent_id": AGENT_ID,
+            "summary": f"Test episode {eid}",
+            "frame": frame,
+            "created": created,
         },
     )
     return eid
 
 
-async def _insert_edge(session, source_id, target_id, *,
-                       source_type="decision", target_type="fact",
-                       relation="related_to", days_ago=0):
+async def _insert_edge(
+    session, source_id, target_id, *, source_type="decision", target_type="fact", relation="related_to", days_ago=0
+):
     """Insert a graph edge."""
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO brain.graph_edges
@@ -104,10 +116,14 @@ async def _insert_edge(session, source_id, target_id, *,
             VALUES (:id, :agent_id, :src, :tgt, :stype, :ttype, :rel, :created)
         """),
         {
-            "id": uuid.uuid4(), "agent_id": AGENT_ID,
-            "src": source_id, "tgt": target_id,
-            "stype": source_type, "ttype": target_type,
-            "rel": relation, "created": created,
+            "id": uuid.uuid4(),
+            "agent_id": AGENT_ID,
+            "src": source_id,
+            "tgt": target_id,
+            "stype": source_type,
+            "ttype": target_type,
+            "rel": relation,
+            "created": created,
         },
     )
 
@@ -115,15 +131,18 @@ async def _insert_edge(session, source_id, target_id, *,
 async def _insert_event(session, event_type="turn_completed", days_ago=0, data=None):
     """Insert an event."""
     import json as _json
-    created = datetime.now(timezone.utc) - timedelta(days=days_ago)
+
+    created = datetime.now(UTC) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO nous_system.events (id, agent_id, event_type, data, created_at)
             VALUES (:id, :agent_id, :etype, :data::jsonb, :created)
         """),
         {
-            "id": uuid.uuid4(), "agent_id": AGENT_ID,
-            "etype": event_type, "data": _json.dumps(data or {}),
+            "id": uuid.uuid4(),
+            "agent_id": AGENT_ID,
+            "etype": event_type,
+            "data": _json.dumps(data or {}),
             "created": created,
         },
     )
@@ -137,8 +156,10 @@ async def _insert_reason(session, decision_id, reason_type="analysis"):
             VALUES (:id, :did, :type, :text)
         """),
         {
-            "id": uuid.uuid4(), "did": decision_id,
-            "type": reason_type, "text": f"Test reason for {decision_id}",
+            "id": uuid.uuid4(),
+            "did": decision_id,
+            "type": reason_type,
+            "text": f"Test reason for {decision_id}",
         },
     )
 
@@ -243,10 +264,8 @@ class TestGetCalibrationData:
 
     @pytest.mark.asyncio
     async def test_with_decisions(self, session):
-        d1 = await _insert_decision(session, confidence=0.8, outcome="success",
-                                     category="architecture", stakes="high")
-        d2 = await _insert_decision(session, confidence=0.6, outcome="failure",
-                                     category="tooling", stakes="low")
+        d1 = await _insert_decision(session, confidence=0.8, outcome="success", category="architecture", stakes="high")
+        d2 = await _insert_decision(session, confidence=0.6, outcome="failure", category="tooling", stakes="low")
         await _insert_reason(session, d1, "analysis")
         await _insert_reason(session, d2, "pattern")
 
@@ -261,8 +280,9 @@ class TestGetCalibrationData:
 # ── Task 8: get_activity_data ───────────────────────────────────────────
 
 
-async def _insert_censor(session, *, trigger_pattern="test pattern",
-                         created_by="manual", activation_count=0, active=True):
+async def _insert_censor(
+    session, *, trigger_pattern="test pattern", created_by="manual", activation_count=0, active=True
+):
     """Insert a test censor and return its id."""
     cid = uuid.uuid4()
     await session.execute(
@@ -274,16 +294,18 @@ async def _insert_censor(session, *, trigger_pattern="test pattern",
                     :act_count, :active)
         """),
         {
-            "id": cid, "agent_id": AGENT_ID, "pattern": trigger_pattern,
-            "created_by": created_by, "act_count": activation_count,
+            "id": cid,
+            "agent_id": AGENT_ID,
+            "pattern": trigger_pattern,
+            "created_by": created_by,
+            "act_count": activation_count,
             "active": active,
         },
     )
     return cid
 
 
-async def _insert_schedule(session, *, task="test task", active=True,
-                           next_fire_at=None):
+async def _insert_schedule(session, *, task="test task", active=True, next_fire_at=None):
     """Insert a test schedule and return its id."""
     sid = uuid.uuid4()
     await session.execute(
@@ -295,8 +317,11 @@ async def _insert_schedule(session, *, task="test task", active=True,
                     COALESCE(:next_fire, now() + interval '1 day'))
         """),
         {
-            "id": sid, "agent_id": AGENT_ID, "task": task,
-            "active": active, "next_fire": next_fire_at,
+            "id": sid,
+            "agent_id": AGENT_ID,
+            "task": task,
+            "active": active,
+            "next_fire": next_fire_at,
         },
     )
     return sid
@@ -334,8 +359,7 @@ class TestGetActivityData:
     async def test_censor_stats(self, session):
         await _insert_censor(session, created_by="manual", activation_count=5)
         await _insert_censor(session, created_by="auto_failure", activation_count=3)
-        await _insert_censor(session, created_by="auto_escalation", activation_count=0,
-                             active=False)
+        await _insert_censor(session, created_by="auto_escalation", activation_count=0, active=False)
 
         data = await get_activity_data(session, AGENT_ID)
         cs = data["censor_stats"]
@@ -350,11 +374,13 @@ class TestGetActivityData:
         await _insert_censor(session, activation_count=2)
         # 3 events within 7 days
         for _ in range(3):
-            await _insert_event(session, "censor_triggered", days_ago=1,
-                                data={"censor_id": str(uuid.uuid4()), "matched_text": "test"})
+            await _insert_event(
+                session, "censor_triggered", days_ago=1, data={"censor_id": str(uuid.uuid4()), "matched_text": "test"}
+            )
         # 1 event outside 7-day window
-        await _insert_event(session, "censor_triggered", days_ago=10,
-                            data={"censor_id": str(uuid.uuid4()), "matched_text": "old"})
+        await _insert_event(
+            session, "censor_triggered", days_ago=10, data={"censor_id": str(uuid.uuid4()), "matched_text": "old"}
+        )
 
         data = await get_activity_data(session, AGENT_ID)
         assert data["censor_stats"]["total_activations_7d"] == 3
@@ -363,8 +389,9 @@ class TestGetActivityData:
     async def test_top_censors(self, session):
         # Insert censors with varying activation counts
         for i in range(7):
-            await _insert_censor(session, trigger_pattern=f"pattern-{i}",
-                                 activation_count=i * 10, created_by="auto_failure")
+            await _insert_censor(
+                session, trigger_pattern=f"pattern-{i}", activation_count=i * 10, created_by="auto_failure"
+            )
 
         data = await get_activity_data(session, AGENT_ID)
         top = data["censor_stats"]["top_censors"]
@@ -377,13 +404,10 @@ class TestGetActivityData:
 
     @pytest.mark.asyncio
     async def test_next_fires(self, session):
-        now = datetime.now(timezone.utc)
-        await _insert_schedule(session, task="task-a",
-                               next_fire_at=now + timedelta(hours=2))
-        await _insert_schedule(session, task="task-b",
-                               next_fire_at=now + timedelta(hours=1))
-        await _insert_schedule(session, task="task-c", active=False,
-                               next_fire_at=now + timedelta(minutes=30))
+        now = datetime.now(UTC)
+        await _insert_schedule(session, task="task-a", next_fire_at=now + timedelta(hours=2))
+        await _insert_schedule(session, task="task-b", next_fire_at=now + timedelta(hours=1))
+        await _insert_schedule(session, task="task-c", active=False, next_fire_at=now + timedelta(minutes=30))
 
         data = await get_activity_data(session, AGENT_ID)
         nf = data["schedule_stats"]["next_fires"]
@@ -397,12 +421,17 @@ class TestGetActivityData:
     async def test_sleep_stats(self, session):
         await _insert_event(session, "sleep_started", days_ago=1)
         await _insert_event(session, "sleep_started", days_ago=3)
-        await _insert_event(session, "sleep_completed", days_ago=1, data={
-            "phases_completed": ["reflect", "generalize"],
-            "facts_created": 5,
-            "procedures_created": 2,
-            "censors_retired": 0,
-        })
+        await _insert_event(
+            session,
+            "sleep_completed",
+            days_ago=1,
+            data={
+                "phases_completed": ["reflect", "generalize"],
+                "facts_created": 5,
+                "procedures_created": 2,
+                "censors_retired": 0,
+            },
+        )
 
         data = await get_activity_data(session, AGENT_ID)
         ss = data["sleep_stats"]
@@ -451,8 +480,7 @@ class TestGetHealthData:
         d2 = await _insert_decision(session)
         f1 = await _insert_fact(session)
         await _insert_edge(session, d1, f1)
-        await _insert_edge(session, d2, f1, source_type="decision", target_type="fact",
-                           relation="supports")
+        await _insert_edge(session, d2, f1, source_type="decision", target_type="fact", relation="supports")
 
         data = await get_health_data(session, AGENT_ID)
         assert data["total_edges"] == 2

@@ -67,9 +67,7 @@ class TestIsToolResultMessage:
     def test_positive_tool_result(self):
         msg = {
             "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "t1", "content": "output"}
-            ],
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "output"}],
         }
         assert ConversationCompactor.is_tool_result_message(msg) is True
 
@@ -108,9 +106,7 @@ class TestIsToolResultMessage:
 def _make_tool_result(content: str, tool_id: str = "t1") -> dict:
     return {
         "role": "user",
-        "content": [
-            {"type": "tool_result", "tool_use_id": tool_id, "content": content}
-        ],
+        "content": [{"type": "tool_result", "tool_use_id": tool_id, "content": content}],
     }
 
 
@@ -213,10 +209,12 @@ class TestPruneToolResults:
         # keep_last=2, so ages are 10,9,...,1. Ages >= 8 -> hard-cleared (first 3).
         messages = []
         for i in range(10):
-            messages.append({
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": f"t{i}", "name": "list_files", "input": {"path": "."}}],
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": f"t{i}", "name": "list_files", "input": {"path": "."}}],
+                }
+            )
             messages.append(_make_tool_result(f"result_{i}", f"t{i}"))
 
         compactor.prune_tool_results(messages)
@@ -273,9 +271,7 @@ class TestPruneToolResults:
                 {
                     "type": "tool_result",
                     "tool_use_id": "t1",
-                    "content": [
-                        {"type": "image", "source": {"data": "base64..."}}
-                    ],
+                    "content": [{"type": "image", "source": {"data": "base64..."}}],
                 }
             ],
         }

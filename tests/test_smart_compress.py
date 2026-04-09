@@ -1,19 +1,19 @@
 """Tests for SmartCompress ingestion-time compression."""
 
 import json
+
 import pytest
+
 from nous.api.smart_compress import (
-    classify_content,
-    is_crushable,
     ContentType,
-    extract_preserved_lines,
-    compress_string_array,
+    classify_content,
     compress_dict_array,
+    compress_string_array,
+    extract_preserved_lines,
+    is_crushable,
     smart_compress,
-    SmartCompressResult,
 )
 from nous.config import Settings
-
 
 # --- Task 1: Classification + Crushability ---
 
@@ -31,10 +31,7 @@ class TestContentTypeClassification:
         assert classify_content(text) == ContentType.STRING_ARRAY
 
     def test_log_format_detected(self):
-        lines = "\n".join(
-            f"2026-03-07T12:00:{i:02d}Z INFO processing item {i}"
-            for i in range(20)
-        )
+        lines = "\n".join(f"2026-03-07T12:00:{i:02d}Z INFO processing item {i}" for i in range(20))
         assert classify_content(lines) == ContentType.LOG_FORMAT
 
     def test_large_text_few_lines_classified_as_raw(self):
@@ -59,7 +56,9 @@ class TestCrushabilityCheck:
         assert is_crushable(lines) is True
 
     def test_score_field_makes_crushable(self):
-        data = json.dumps([{"id": i, "score": 0.9 - i * 0.01, "description": f"item number {i} with details"} for i in range(30)])
+        data = json.dumps(
+            [{"id": i, "score": 0.9 - i * 0.01, "description": f"item number {i} with details"} for i in range(30)]
+        )
         assert is_crushable(data) is True
 
     def test_small_content_not_crushable(self):

@@ -10,6 +10,7 @@ from typing import Any
 @dataclass
 class BehaviorSnapshot:
     """Point-in-time snapshot of key system metrics."""
+
     timestamp: datetime
 
     # Memory metrics
@@ -54,18 +55,31 @@ class BehaviorSnapshot:
 
     def to_metrics_dict(self) -> dict[str, Any]:
         return {
-            "fact_count": self.fact_count, "fact_count_delta": self.fact_count_delta,
-            "episode_count": self.episode_count, "episode_count_delta": self.episode_count_delta,
-            "active_censor_count": self.active_censor_count, "active_censor_delta": self.active_censor_delta,
-            "procedure_count": self.procedure_count, "decision_count": self.decision_count,
-            "facts_admitted": self.facts_admitted, "facts_rejected_dedup": self.facts_rejected_dedup,
-            "facts_rejected_admission": self.facts_rejected_admission, "admission_rate": self.admission_rate,
-            "checks_run": self.checks_run, "findings_created": self.findings_created,
-            "findings_resolved": self.findings_resolved, "triage_sessions_opened": self.triage_sessions_opened,
-            "sleep_ran": int(self.sleep_ran), "episodes_compacted": self.episodes_compacted,
-            "facts_pruned": self.facts_pruned, "contradictions_resolved": self.contradictions_resolved,
-            "events_processed": self.events_processed, "events_dropped": self.events_dropped,
-            "handler_error_count": self.handler_error_count, "handler_error_rate": self.handler_error_rate,
-            "turns_processed": self.turns_processed, "avg_turn_latency_ms": self.avg_turn_latency_ms,
+            "fact_count": self.fact_count,
+            "fact_count_delta": self.fact_count_delta,
+            "episode_count": self.episode_count,
+            "episode_count_delta": self.episode_count_delta,
+            "active_censor_count": self.active_censor_count,
+            "active_censor_delta": self.active_censor_delta,
+            "procedure_count": self.procedure_count,
+            "decision_count": self.decision_count,
+            "facts_admitted": self.facts_admitted,
+            "facts_rejected_dedup": self.facts_rejected_dedup,
+            "facts_rejected_admission": self.facts_rejected_admission,
+            "admission_rate": self.admission_rate,
+            "checks_run": self.checks_run,
+            "findings_created": self.findings_created,
+            "findings_resolved": self.findings_resolved,
+            "triage_sessions_opened": self.triage_sessions_opened,
+            "sleep_ran": int(self.sleep_ran),
+            "episodes_compacted": self.episodes_compacted,
+            "facts_pruned": self.facts_pruned,
+            "contradictions_resolved": self.contradictions_resolved,
+            "events_processed": self.events_processed,
+            "events_dropped": self.events_dropped,
+            "handler_error_count": self.handler_error_count,
+            "handler_error_rate": self.handler_error_rate,
+            "turns_processed": self.turns_processed,
+            "avg_turn_latency_ms": self.avg_turn_latency_ms,
             "tool_calls": self.tool_calls,
         }

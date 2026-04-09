@@ -44,9 +44,7 @@ async def run_migrations(engine: AsyncEngine) -> list[str]:
         await conn.execute(text(_BOOTSTRAP_SQL))
 
         # Get already-applied versions
-        result = await conn.execute(
-            text("SELECT version FROM nous_system.schema_migrations")
-        )
+        result = await conn.execute(text("SELECT version FROM nous_system.schema_migrations"))
         existing = {row[0] for row in result}
 
         for path in files:
@@ -63,10 +61,7 @@ async def run_migrations(engine: AsyncEngine) -> list[str]:
             # so split on semicolons and run each statement individually.
             for raw_stmt in sql.split(";"):
                 # Strip SQL comments (-- ...) before checking if empty
-                lines = [
-                    ln for ln in raw_stmt.splitlines()
-                    if ln.strip() and not ln.strip().startswith("--")
-                ]
+                lines = [ln for ln in raw_stmt.splitlines() if ln.strip() and not ln.strip().startswith("--")]
                 stmt = "\n".join(lines).strip()
                 if not stmt:
                     continue

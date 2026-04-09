@@ -137,7 +137,6 @@ class TestDispatchWithKeepalive:
             assert k.text == ""
             assert k.tool_name == ""
 
-
     @pytest.mark.asyncio
     async def test_generator_cleanup_cancels_task(self, runner):
         """Closing the generator cancels the underlying task."""

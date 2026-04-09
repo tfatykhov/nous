@@ -289,9 +289,7 @@ class ContextLogger:
         self._entries: deque[ContextLogEntry] = deque(maxlen=200)
         self._entries_by_id: dict[str, ContextLogEntry] = {}
         self._payload_store: FullPayloadStore | None = (
-            FullPayloadStore(max_per_session=ring_size, max_total=max_total)
-            if full_payload_enabled
-            else None
+            FullPayloadStore(max_per_session=ring_size, max_total=max_total) if full_payload_enabled else None
         )
 
     def _sync_entries_index(self) -> None:

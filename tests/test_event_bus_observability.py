@@ -11,13 +11,11 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
-import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from nous.events import Event, EventBus, EventBusStats, HandlerStat, RecentEvent
-
+from nous.events import Event, EventBus, EventBusStats, HandlerStat
 
 # ---------------------------------------------------------------------------
 # 1. HandlerStat unit tests

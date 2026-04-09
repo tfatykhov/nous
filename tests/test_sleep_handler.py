@@ -11,15 +11,12 @@ Covers:
 
 from __future__ import annotations
 
-import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nous.events import Event, EventBus
-from nous.heart.schemas import FactInput
-
 
 # ---------------------------------------------------------------------------
 # Helpers (same patterns as test_event_bus.py)
@@ -68,9 +65,7 @@ def _mock_llm_client_structured(tool_input: dict, tool_name: str = "store_reflec
     """Create a mock LLM client that returns tool_use structured response."""
     client = AsyncMock()
     response = MagicMock()
-    response.content = [
-        {"type": "tool_use", "id": "toolu_mock", "name": tool_name, "input": tool_input}
-    ]
+    response.content = [{"type": "tool_use", "id": "toolu_mock", "name": tool_name, "input": tool_input}]
     client.call = AsyncMock(return_value=response)
     return client
 
@@ -185,9 +180,7 @@ class TestPhaseBoolReturns:
     async def test_generalize_returns_false_on_exception(self):
         handler, *_ = _make_sleep_handler()
         handler._procedure_learner = AsyncMock()
-        handler._procedure_learner.run_sleep_learning = AsyncMock(
-            side_effect=RuntimeError("learner crash")
-        )
+        handler._procedure_learner.run_sleep_learning = AsyncMock(side_effect=RuntimeError("learner crash"))
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         result = await handler._phase_generalize(sleep_stats)
         assert result is False
@@ -282,16 +275,21 @@ class TestSleepStats:
         heart.search_facts = AsyncMock(return_value=[])
 
         reflection_json = {
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "patterns": [],
+            "lessons": [],
+            "connections": [],
+            "gaps": [],
             "summary": "Testing patterns",
             "facts": [
                 {"subject": "testing", "content": "Use pytest", "category": "tool"},
                 {"subject": "async", "content": "Use asyncio", "category": "technical"},
             ],
         }
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
-        ))
+        llm_client.call = AsyncMock(
+            return_value=MagicMock(
+                content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
+            )
+        )
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_reflect(sleep_stats)
@@ -330,13 +328,18 @@ class TestSleepStats:
         heart.learn = AsyncMock(return_value=MagicMock())
         heart.search_facts = AsyncMock(return_value=[])
         reflection_json = {
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "patterns": [],
+            "lessons": [],
+            "connections": [],
+            "gaps": [],
             "summary": "Reflection",
             "facts": [{"subject": "x", "content": "y", "category": "concept"}],
         }
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
-        ))
+        llm_client.call = AsyncMock(
+            return_value=MagicMock(
+                content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
+            )
+        )
 
         # Generalize: will create 2 procedures
         handler._procedure_learner = AsyncMock()
@@ -415,15 +418,19 @@ class TestExcInfo:
         """Prune is a stub so it's hard to make it fail — but we test the structure."""
         # The prune phase is a stub that just logs debug, so it won't fail normally.
         # We verify the code path exists by checking the handler has the right pattern.
-        from nous.handlers.sleep_handler import SleepHandler
         import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
         source = inspect.getsource(SleepHandler._phase_prune)
         assert "exc_info=True" in source
 
     @pytest.mark.asyncio
     async def test_compress_logs_with_exc_info(self):
-        from nous.handlers.sleep_handler import SleepHandler
         import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
         source = inspect.getsource(SleepHandler._phase_compress)
         assert "exc_info=True" in source
 
@@ -444,9 +451,7 @@ class TestExcInfo:
     async def test_generalize_logs_with_exc_info(self, caplog):
         handler, *_ = _make_sleep_handler()
         handler._procedure_learner = AsyncMock()
-        handler._procedure_learner.run_sleep_learning = AsyncMock(
-            side_effect=RuntimeError("learner error")
-        )
+        handler._procedure_learner.run_sleep_learning = AsyncMock(side_effect=RuntimeError("learner error"))
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         with caplog.at_level(logging.WARNING, logger="nous.handlers.sleep_handler"):
@@ -458,8 +463,10 @@ class TestExcInfo:
     @pytest.mark.asyncio
     async def test_reflect_exception_simplified(self):
         """Verify the except clause is 'except Exception:' not 'except (json.JSONDecodeError, Exception):'."""
-        from nous.handlers.sleep_handler import SleepHandler
         import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
         source = inspect.getsource(SleepHandler._phase_reflect)
         assert "json.JSONDecodeError" not in source
 
@@ -594,15 +601,15 @@ class TestStructuredReflection:
 
         # Mock the structured response (tool_use block)
         reflection = {
-            "patterns": ["Pattern 1"], "lessons": ["Lesson 1"],
-            "connections": [], "gaps": [],
+            "patterns": ["Pattern 1"],
+            "lessons": ["Lesson 1"],
+            "connections": [],
+            "gaps": [],
             "summary": "Test reflection",
             "facts": [{"subject": "test", "content": "Test fact", "category": "technical"}],
         }
         response = MagicMock()
-        response.content = [
-            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
-        ]
+        response.content = [{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}]
         llm_client.call = AsyncMock(return_value=response)
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -637,9 +644,7 @@ class TestStructuredReflection:
             "facts": [],
         }
         response = MagicMock()
-        response.content = [
-            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
-        ]
+        response.content = [{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}]
         llm_client.call = AsyncMock(return_value=response)
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -682,15 +687,15 @@ class TestStructuredReflection:
         heart.search_facts = AsyncMock(return_value=[])
 
         reflection = {
-            "patterns": ["P1"], "lessons": ["L1", "L2"],
-            "connections": [], "gaps": [],
+            "patterns": ["P1"],
+            "lessons": ["L1", "L2"],
+            "connections": [],
+            "gaps": [],
             "summary": "Day summary here",
             "facts": [],
         }
         response = MagicMock()
-        response.content = [
-            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
-        ]
+        response.content = [{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}]
         llm_client.call = AsyncMock(return_value=response)
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -720,16 +725,17 @@ class TestStructuredReflection:
         heart.supersede_fact = AsyncMock()
 
         reflection = {
-            "patterns": [], "lessons": [], "connections": [], "gaps": [],
+            "patterns": [],
+            "lessons": [],
+            "connections": [],
+            "gaps": [],
             "summary": "Updated knowledge",
             "facts": [
                 {"subject": "UPDATES: old fact content", "content": "New updated content", "category": "technical"}
             ],
         }
         response = MagicMock()
-        response.content = [
-            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
-        ]
+        response.content = [{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}]
         llm_client.call = AsyncMock(return_value=response)
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -751,21 +757,27 @@ class TestStructuredReflection:
 
         # All facts rejected by admission control
         from nous.heart.schemas import FactRejected
-        heart.learn = AsyncMock(return_value=FactRejected(
-            content="y", composite_score=0.1, threshold=0.5,
-            scores={"novelty": 0.1}, explanation="below threshold",
-        ))
+
+        heart.learn = AsyncMock(
+            return_value=FactRejected(
+                content="y",
+                composite_score=0.1,
+                threshold=0.5,
+                scores={"novelty": 0.1},
+                explanation="below threshold",
+            )
+        )
 
         reflection = {
-            "patterns": ["P1", "P2"], "lessons": ["L1"],
-            "connections": [], "gaps": [],
+            "patterns": ["P1", "P2"],
+            "lessons": ["L1"],
+            "connections": [],
+            "gaps": [],
             "summary": "Good day",
             "facts": [{"subject": "x", "content": "y", "category": "concept"}],
         }
         response = MagicMock()
-        response.content = [
-            {"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}
-        ]
+        response.content = [{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection}]
         llm_client.call = AsyncMock(return_value=response)
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -788,21 +800,25 @@ class TestStructuredContradictionResolution:
         """Contradiction resolution should use call_background_llm_structured."""
         handler, brain, heart, bus, llm_client = _make_sleep_handler()
 
-        heart.find_contradiction_candidates = AsyncMock(return_value=[
-            {
-                "fact1_id": "f1", "fact2_id": "f2",
-                "content1": "Python is slow", "content2": "Python is fast",
-                "date1": "2026-01-01", "date2": "2026-02-01",
-                "subject": "python", "category": "technical",
-            }
-        ])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": "f1",
+                    "fact2_id": "f2",
+                    "content1": "Python is slow",
+                    "content2": "Python is fast",
+                    "date1": "2026-01-01",
+                    "date2": "2026-02-01",
+                    "subject": "python",
+                    "category": "technical",
+                }
+            ]
+        )
         heart.deactivate_fact = AsyncMock()
 
         resolution = {"action": "SUPERSEDE_A", "confidence": 0.9, "reason": "Newer info"}
         response = MagicMock()
-        response.content = [
-            {"type": "tool_use", "id": "toolu_1", "name": "resolve_contradiction", "input": resolution}
-        ]
+        response.content = [{"type": "tool_use", "id": "toolu_1", "name": "resolve_contradiction", "input": resolution}]
         llm_client.call = AsyncMock(return_value=response)
 
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -821,13 +837,18 @@ class TestStructuredContradictionResolution:
         """If structured call returns None for a pair, skip it gracefully."""
         handler, brain, heart, bus, llm_client = _make_sleep_handler()
 
-        heart.find_contradiction_candidates = AsyncMock(return_value=[
-            {
-                "fact1_id": "f1", "fact2_id": "f2",
-                "content1": "A", "content2": "B",
-                "date1": "2026-01-01", "date2": "2026-02-01",
-            }
-        ])
+        heart.find_contradiction_candidates = AsyncMock(
+            return_value=[
+                {
+                    "fact1_id": "f1",
+                    "fact2_id": "f2",
+                    "content1": "A",
+                    "content2": "B",
+                    "date1": "2026-01-01",
+                    "date2": "2026-02-01",
+                }
+            ]
+        )
 
         llm_client.call = AsyncMock(side_effect=RuntimeError("API error"))
 

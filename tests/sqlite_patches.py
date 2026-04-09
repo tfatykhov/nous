@@ -10,11 +10,10 @@ import json
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.sqlite_compat import cosine_similarity, keyword_match_score, _parse_embedding
-
+from tests.sqlite_compat import _parse_embedding, cosine_similarity, keyword_match_score
 
 # ============================================================================
 # hybrid_search replacement (nous.heart.search)
@@ -66,7 +65,7 @@ async def sqlite_hybrid_search(
                 if sim > 0:
                     vector_results.append((row.id, sim))
         vector_results.sort(key=lambda x: x[1], reverse=True)
-        vector_results = vector_results[:limit * 3]
+        vector_results = vector_results[: limit * 3]
 
     keyword_results: list[tuple[UUID, float]] = []
     for row in rows:
@@ -75,7 +74,7 @@ async def sqlite_hybrid_search(
         if score > 0:
             keyword_results.append((row.id, score))
     keyword_results.sort(key=lambda x: x[1], reverse=True)
-    keyword_results = keyword_results[:limit * 3]
+    keyword_results = keyword_results[: limit * 3]
 
     if embedding is None:
         return keyword_results[:limit]
@@ -84,7 +83,8 @@ async def sqlite_hybrid_search(
 
 
 def _table_to_model(table: str):
-    from nous.storage.models import Episode, Fact, Procedure, Censor
+    from nous.storage.models import Censor, Episode, Fact, Procedure
+
     mapping = {
         "heart.episodes": Episode,
         "heart.facts": Fact,
@@ -96,8 +96,7 @@ def _table_to_model(table: str):
 
 def _get_searchable_text(row) -> str:
     parts = []
-    for attr in ("content", "summary", "description", "title", "name",
-                 "trigger_pattern", "reason"):
+    for attr in ("content", "summary", "description", "title", "name", "trigger_pattern", "reason"):
         val = getattr(row, attr, None)
         if val:
             parts.append(str(val))
@@ -123,7 +122,7 @@ async def sqlite_batch_fetch_embeddings(
     type_ids: dict[str, list[UUID]],
     agent_id: str,
 ) -> dict[UUID, list[float]]:
-    from nous.storage.models import Episode, Fact, Procedure, Censor
+    from nous.storage.models import Censor, Episode, Fact, Procedure
 
     type_to_model = {
         "fact": Fact,
@@ -192,8 +191,8 @@ async def sqlite_find_contradiction(
     session: AsyncSession,
 ):
     """Pure-Python contradiction detection."""
-    from nous.storage.models import Fact
     from nous.heart.schemas import ContradictionWarning
+    from nous.storage.models import Fact
 
     if not embedding:
         return None
@@ -264,9 +263,9 @@ async def sqlite_search_all(
     session: AsyncSession,
 ):
     """Pure-Python fact search replacement (for _search_all including inactive)."""
-    from nous.storage.models import Fact
     from nous.heart.schemas import FactSummary
     from nous.heart.search import _rrf_merge
+    from nous.storage.models import Fact
 
     stmt = select(Fact).where(Fact.agent_id == self.agent_id)
     if category:
@@ -320,17 +319,19 @@ async def sqlite_search_all(
                 tags = json.loads(tags)
             except (json.JSONDecodeError, ValueError):
                 tags = []
-        results.append(FactSummary(
-            id=f.id,
-            content=f.content,
-            category=f.category,
-            subject=f.subject,
-            confidence=f.confidence if f.confidence is not None else 1.0,
-            active=f.active if f.active is not None else True,
-            score=scores.get(fid, 0),
-            tags=tags or [],
-            learned_at=f.learned_at or f.created_at,
-        ))
+        results.append(
+            FactSummary(
+                id=f.id,
+                content=f.content,
+                category=f.category,
+                subject=f.subject,
+                confidence=f.confidence if f.confidence is not None else 1.0,
+                active=f.active if f.active is not None else True,
+                score=scores.get(fid, 0),
+                tags=tags or [],
+                learned_at=f.learned_at or f.created_at,
+            )
+        )
     return results
 
 
@@ -378,7 +379,7 @@ async def sqlite_find_contradiction_candidates(self, limit, session):
         f1_emb = _parse_embedding(f1.embedding)
         if not f1_emb:
             continue
-        for f2 in facts[i + 1:]:
+        for f2 in facts[i + 1 :]:
             if not f2.subject or not f1.subject:
                 continue
             if f1.subject.lower() != f2.subject.lower():
@@ -388,17 +389,19 @@ async def sqlite_find_contradiction_candidates(self, limit, session):
                 continue
             sim = cosine_similarity(f1_emb, f2_emb)
             if 0.75 < sim < 0.95:
-                candidates.append({
-                    "fact1_id": f1.id,
-                    "fact2_id": f2.id,
-                    "content1": f1.content,
-                    "content2": f2.content,
-                    "date1": f1.created_at,
-                    "date2": f2.created_at,
-                    "subject": f1.subject,
-                    "category": f1.category,
-                    "similarity": round(sim, 4),
-                })
+                candidates.append(
+                    {
+                        "fact1_id": f1.id,
+                        "fact2_id": f2.id,
+                        "content1": f1.content,
+                        "content2": f2.content,
+                        "date1": f1.created_at,
+                        "date2": f2.created_at,
+                        "subject": f1.subject,
+                        "category": f1.category,
+                        "similarity": round(sim, 4),
+                    }
+                )
     candidates.sort(key=lambda x: x["similarity"], reverse=True)
     return candidates[:limit]
 
@@ -412,7 +415,9 @@ async def sqlite_check_domain_threshold(
     from nous.storage.models import Fact
 
     result = await session.execute(
-        select(func.count()).select_from(Fact).where(
+        select(func.count())
+        .select_from(Fact)
+        .where(
             Fact.agent_id == self.agent_id,
             Fact.category == category,
             Fact.active == True,  # noqa: E712
@@ -449,9 +454,10 @@ async def sqlite_censor_semantic_search(
     session: AsyncSession,
 ):
     """Pure-Python censor semantic search."""
-    from nous.storage.models import Censor
-    from nous.heart.schemas import CensorMatch
     from sqlalchemy import or_
+
+    from nous.heart.schemas import CensorMatch
+    from nous.storage.models import Censor
 
     query = select(Censor).where(
         Censor.agent_id == self.agent_id,
@@ -564,7 +570,7 @@ def patch_pg_insert():
     import nous.heart.working_memory as wm_mod
     from nous.storage.models import WorkingMemory
 
-    original_get_or_create = wm_mod.WorkingMemoryManager._get_or_create
+    original_get_or_create = wm_mod.WorkingMemoryManager._get_or_create  # noqa: F841
 
     async def _sqlite_get_or_create(self, session_id, session):
         """SQLite-compatible upsert for working_memory."""
@@ -627,8 +633,8 @@ def patch_brain():
     from nous.storage.models import Decision, GraphEdge
 
     # Patch _query to use pure-Python search
-    if hasattr(brain_mod.Brain, '_query'):
-        original_query = brain_mod.Brain._query
+    if hasattr(brain_mod.Brain, "_query"):
+        original_query = brain_mod.Brain._query  # noqa: F841
 
         async def _sqlite_query_inner(self, query_text, limit, category, stakes, outcome, bridge_side, session):
             """Pure-Python decision search replacing PG vector + text search."""
@@ -642,9 +648,7 @@ def patch_brain():
                 except Exception:
                     pass
 
-            result = await session.execute(
-                select(Decision).where(Decision.agent_id == self.agent_id)
-            )
+            result = await session.execute(select(Decision).where(Decision.agent_id == self.agent_id))
             decisions = result.scalars().all()
 
             # Apply filters
@@ -686,30 +690,31 @@ def patch_brain():
             results = []
             for d, score in top:
                 from nous.storage.models import DecisionTag
-                tag_result = await session.execute(
-                    select(DecisionTag.tag).where(DecisionTag.decision_id == d.id)
-                )
+
+                tag_result = await session.execute(select(DecisionTag.tag).where(DecisionTag.decision_id == d.id))
                 tags = [row[0] for row in tag_result.all()]
-                results.append(DecisionSummary(
-                    id=d.id,
-                    description=d.description,
-                    context=d.context,
-                    category=d.category,
-                    stakes=d.stakes,
-                    confidence=d.confidence,
-                    outcome=d.outcome,
-                    pattern=d.pattern,
-                    created_at=d.created_at,
-                    tags=tags,
-                    score=score,
-                ))
+                results.append(
+                    DecisionSummary(
+                        id=d.id,
+                        description=d.description,
+                        context=d.context,
+                        category=d.category,
+                        stakes=d.stakes,
+                        confidence=d.confidence,
+                        outcome=d.outcome,
+                        pattern=d.pattern,
+                        created_at=d.created_at,
+                        tags=tags,
+                        score=score,
+                    )
+                )
             return results
 
         brain_mod.Brain._query = _sqlite_query_inner
 
     # Patch _auto_link to avoid pg_insert and <=> operator
-    if hasattr(brain_mod.Brain, '_auto_link'):
-        original_auto_link = brain_mod.Brain._auto_link
+    if hasattr(brain_mod.Brain, "_auto_link"):
+        original_auto_link = brain_mod.Brain._auto_link  # noqa: F841
 
         async def _sqlite_auto_link(self, decision_id, session, threshold=0.7, max_links=5):
             """Pure-Python auto-linking without PG vector operators."""
@@ -777,13 +782,14 @@ def patch_brain():
         brain_mod.Brain._auto_link = _sqlite_auto_link
 
     # Patch _delete_inner (raw SQL with schema refs)
-    if hasattr(brain_mod.Brain, '_delete_inner'):
-        original_delete = brain_mod.Brain._delete_inner
+    if hasattr(brain_mod.Brain, "_delete_inner"):
+        original_delete = brain_mod.Brain._delete_inner  # noqa: F841
 
         async def _sqlite_delete_inner(self, decision_id, session):
             """SQLite-compatible decision deletion."""
-            from nous.storage.models import Fact, Censor, DecisionReason, DecisionTag, DecisionBridge
-            from sqlalchemy import update, delete
+            from sqlalchemy import delete, update
+
+            from nous.storage.models import Censor, DecisionBridge, DecisionReason, DecisionTag, Fact
 
             # Unlink facts
             await session.execute(
@@ -796,9 +802,11 @@ def patch_brain():
             # Delete child records
             await session.execute(delete(DecisionTag).where(DecisionTag.decision_id == decision_id))
             await session.execute(delete(DecisionReason).where(DecisionReason.decision_id == decision_id))
-            await session.execute(delete(DecisionBridge).where(
-                (DecisionBridge.source_id == decision_id) | (DecisionBridge.target_id == decision_id)
-            ))
+            await session.execute(
+                delete(DecisionBridge).where(
+                    (DecisionBridge.source_id == decision_id) | (DecisionBridge.target_id == decision_id)
+                )
+            )
             # Delete the decision
             await session.execute(delete(Decision).where(Decision.id == decision_id))
             await session.flush()
@@ -813,11 +821,11 @@ def patch_brain():
 
 def install_all_patches():
     """Monkey-patch all PG-specific methods with SQLite-compatible versions."""
-    import nous.heart.search as search_mod
-    import nous.heart.facts as facts_mod
     import nous.heart.censors as censors_mod
     import nous.heart.episodes as episodes_mod
+    import nous.heart.facts as facts_mod
     import nous.heart.procedures as procedures_mod
+    import nous.heart.search as search_mod
 
     # Patch hybrid_search in ALL modules that imported it
     search_mod.hybrid_search = sqlite_hybrid_search

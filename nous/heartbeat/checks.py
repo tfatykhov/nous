@@ -13,7 +13,6 @@ import imaplib
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from typing import Any
 
 from nous.brain import Brain
@@ -64,13 +63,15 @@ class HealthCheck(BaseCheck):
             stale_days = int(self.get_param_value("stale_decision_days"))
             unreviewed = await self._brain.get_unreviewed(max_age_days=stale_days)
             if unreviewed and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="brain",
-                    summary=f"{len(unreviewed)} decisions pending review (oldest {stale_days} days)",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"count": len(unreviewed)},
-                ))
+                findings.append(
+                    Finding(
+                        source="brain",
+                        summary=f"{len(unreviewed)} decisions pending review (oldest {stale_days} days)",
+                        urgency="normal",
+                        needs_action=True,
+                        raw_data={"count": len(unreviewed)},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: get_unreviewed failed", exc_info=True)
 
@@ -79,13 +80,15 @@ class HealthCheck(BaseCheck):
             censors = await self._heart.censors.list_active()
             high_fp = [c for c in censors if (c.false_positive_count or 0) > 5]
             if high_fp and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="censors",
-                    summary=f"{len(high_fp)} censors with high false-positive counts",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"censor_ids": [str(c.id) for c in high_fp]},
-                ))
+                findings.append(
+                    Finding(
+                        source="censors",
+                        summary=f"{len(high_fp)} censors with high false-positive counts",
+                        urgency="normal",
+                        needs_action=True,
+                        raw_data={"censor_ids": [str(c.id) for c in high_fp]},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: list_active censors failed", exc_info=True)
 
@@ -94,13 +97,15 @@ class HealthCheck(BaseCheck):
             stale_fact_days = int(self.get_param_value("stale_fact_days"))
             stale_count = await self._heart.facts.count_stale(older_than_days=stale_fact_days)
             if stale_count > 10 and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="facts",
-                    summary=f"{stale_count} facts not accessed in {stale_fact_days}+ days",
-                    urgency="low",
-                    needs_action=False,
-                    raw_data={"count": stale_count},
-                ))
+                findings.append(
+                    Finding(
+                        source="facts",
+                        summary=f"{stale_count} facts not accessed in {stale_fact_days}+ days",
+                        urgency="low",
+                        needs_action=False,
+                        raw_data={"count": stale_count},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: count_stale failed", exc_info=True)
 
@@ -109,13 +114,15 @@ class HealthCheck(BaseCheck):
             threshold = self.get_param_value("low_effectiveness_threshold")
             low_procs = await self._heart.procedures.get_low_effectiveness(threshold=threshold)
             if low_procs and len(findings) < max_findings:
-                findings.append(Finding(
-                    source="procedures",
-                    summary=f"{len(low_procs)} procedures below {threshold:.0%} effectiveness",
-                    urgency="normal",
-                    needs_action=True,
-                    raw_data={"procedure_ids": [str(p.id) for p in low_procs]},
-                ))
+                findings.append(
+                    Finding(
+                        source="procedures",
+                        summary=f"{len(low_procs)} procedures below {threshold:.0%} effectiveness",
+                        urgency="normal",
+                        needs_action=True,
+                        raw_data={"procedure_ids": [str(p.id) for p in low_procs]},
+                    )
+                )
         except Exception:
             logger.debug("HealthCheck: get_low_effectiveness failed", exc_info=True)
 
@@ -237,7 +244,7 @@ class SelfInitiatedCheck(BaseCheck):
 
         findings: list[Finding] = []
         threshold = self.get_param_value("similarity_threshold")
-        lookback_days = int(self.get_param_value("lookback_days"))
+        lookback_days = int(self.get_param_value("lookback_days"))  # noqa: F841
         max_items = int(self.get_param_value("max_pending_items"))
 
         # Search facts using each prototype query
@@ -262,13 +269,15 @@ class SelfInitiatedCheck(BaseCheck):
                     if not self._is_observation(fact.content) and (
                         score >= threshold or self._looks_like_pending(fact.content)
                     ):
-                        findings.append(Finding(
-                            source="facts",
-                            summary=f"Pending action: {fact.content[:100]}",
-                            urgency="normal",
-                            needs_action=True,
-                            raw_data={"fact_id": fid, "detection": "embedding"},
-                        ))
+                        findings.append(
+                            Finding(
+                                source="facts",
+                                summary=f"Pending action: {fact.content[:100]}",
+                                urgency="normal",
+                                needs_action=True,
+                                raw_data={"fact_id": fid, "detection": "embedding"},
+                            )
+                        )
                         if len(findings) >= max_items:
                             break
             except Exception:
@@ -311,17 +320,19 @@ class SelfInitiatedCheck(BaseCheck):
 
                     if is_ongoing or is_stale:
                         summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
-                        findings.append(Finding(
-                            source="episodes",
-                            summary=f"Unresolved commitment: {summary_text[:100]}",
-                            urgency="normal",
-                            needs_action=True,
-                            raw_data={
-                                "episode_id": eid,
-                                "detection": "promise_scan",
-                                "outcome": getattr(ep, "outcome", None),
-                            },
-                        ))
+                        findings.append(
+                            Finding(
+                                source="episodes",
+                                summary=f"Unresolved commitment: {summary_text[:100]}",
+                                urgency="normal",
+                                needs_action=True,
+                                raw_data={
+                                    "episode_id": eid,
+                                    "detection": "promise_scan",
+                                    "outcome": getattr(ep, "outcome", None),
+                                },
+                            )
+                        )
                         if len(findings) >= max_items:
                             break
             except Exception:
@@ -340,7 +351,7 @@ class SelfInitiatedCheck(BaseCheck):
             return findings
 
         max_items = int(self.get_param_value("max_pending_items"))
-        lookback_days = int(self.get_param_value("lookback_days"))
+        lookback_days = int(self.get_param_value("lookback_days"))  # noqa: F841
 
         # Search for facts with temporal language
         temporal_queries = ["by Friday", "next week", "deadline", "due date", "end of week", "before Monday"]
@@ -364,17 +375,19 @@ class SelfInitiatedCheck(BaseCheck):
                     if parsed_date is not None:
                         delta = parsed_date - now
                         if timedelta(0) <= delta <= upcoming_window:
-                            findings.append(Finding(
-                                source="facts",
-                                summary=f"Approaching deadline: {fact.content[:100]}",
-                                urgency="high" if delta.days <= 1 else "normal",
-                                needs_action=True,
-                                raw_data={
-                                    "fact_id": fid,
-                                    "detection": "temporal",
-                                    "parsed_date": parsed_date.isoformat(),
-                                },
-                            ))
+                            findings.append(
+                                Finding(
+                                    source="facts",
+                                    summary=f"Approaching deadline: {fact.content[:100]}",
+                                    urgency="high" if delta.days <= 1 else "normal",
+                                    needs_action=True,
+                                    raw_data={
+                                        "fact_id": fid,
+                                        "detection": "temporal",
+                                        "parsed_date": parsed_date.isoformat(),
+                                    },
+                                )
+                            )
                             if len(findings) >= max_items:
                                 break
             except Exception:
@@ -424,13 +437,15 @@ class SelfInitiatedCheck(BaseCheck):
                     if fid in seen_ids:
                         continue
                     if self._looks_like_pending(fact.content):
-                        findings.append(Finding(
-                            source="facts",
-                            summary=f"Pending action: {fact.content[:100]}",
-                            urgency="normal",
-                            needs_action=True,
-                            raw_data={"fact_id": fid, "detection": "keyword"},
-                        ))
+                        findings.append(
+                            Finding(
+                                source="facts",
+                                summary=f"Pending action: {fact.content[:100]}",
+                                urgency="normal",
+                                needs_action=True,
+                                raw_data={"fact_id": fid, "detection": "keyword"},
+                            )
+                        )
             except Exception:
                 logger.debug("SelfInitiatedCheck: keyword fact search failed", exc_info=True)
 
@@ -458,13 +473,15 @@ class SelfInitiatedCheck(BaseCheck):
                 now = datetime.now(UTC)
                 due_schedules = await self._heart.schedules.get_due(now)
                 if due_schedules:
-                    findings.append(Finding(
-                        source="schedules",
-                        summary=f"{len(due_schedules)} schedule(s) past due",
-                        urgency="normal",
-                        needs_action=True,
-                        raw_data={"count": len(due_schedules)},
-                    ))
+                    findings.append(
+                        Finding(
+                            source="schedules",
+                            summary=f"{len(due_schedules)} schedule(s) past due",
+                            urgency="normal",
+                            needs_action=True,
+                            raw_data={"count": len(due_schedules)},
+                        )
+                    )
             except Exception:
                 logger.debug("SelfInitiatedCheck: get_due failed", exc_info=True)
 
@@ -585,7 +602,9 @@ class EmailCheck(BaseCheck):
         new_count = sum(1 for mid, _, _ in messages if mid not in self._seen_ids)
         logger.info(
             "EmailCheck: fetched %d unseen, %d new (seen cache: %d)",
-            len(messages), new_count, len(self._seen_ids),
+            len(messages),
+            new_count,
+            len(self._seen_ids),
         )
 
         findings: list[Finding] = []
@@ -596,13 +615,15 @@ class EmailCheck(BaseCheck):
 
             urgency = await self._classify_email(subject, sender)
             logger.info("EmailCheck: new email [%s] from %s — %s", urgency, sender, subject[:60])
-            findings.append(Finding(
-                source="email",
-                summary=f"New email from {sender}: {subject[:80]}",
-                urgency=urgency,
-                needs_action=True,
-                raw_data={"message_id": msg_id, "subject": subject, "sender": sender},
-            ))
+            findings.append(
+                Finding(
+                    source="email",
+                    summary=f"New email from {sender}: {subject[:80]}",
+                    urgency=urgency,
+                    needs_action=True,
+                    raw_data={"message_id": msg_id, "subject": subject, "sender": sender},
+                )
+            )
 
         return CheckResult(
             has_updates=bool(findings),
@@ -747,10 +768,7 @@ class EmailCheck(BaseCheck):
     def _prune_seen(self) -> None:
         """Remove seen IDs older than 24 hours."""
         now = datetime.now(UTC)
-        self._seen_ids = {
-            k: v for k, v in self._seen_ids.items()
-            if (now - v).total_seconds() < 86400
-        }
+        self._seen_ids = {k: v for k, v in self._seen_ids.items() if (now - v).total_seconds() < 86400}
 
 
 # ------------------------------------------------------------------
@@ -792,6 +810,7 @@ class DriveCheck(BaseCheck):
     def _ensure_gdrive(self) -> None:
         if self._gdrive is None:
             from nous.integrations.gdrive import GDrive
+
             self._gdrive = GDrive()
 
     async def run(self) -> CheckResult:
@@ -809,9 +828,7 @@ class DriveCheck(BaseCheck):
         query = f"modifiedTime > '{cutoff_str}' and trashed = false"
 
         try:
-            files = await asyncio.to_thread(
-                self._gdrive.list_files, query=query
-            )
+            files = await asyncio.to_thread(self._gdrive.list_files, query=query)
         except Exception:
             logger.warning("DriveCheck: list_files failed", exc_info=True)
             raise
@@ -845,13 +862,15 @@ class DriveCheck(BaseCheck):
             elif significance == "normal":
                 urgency = "low"
 
-            findings.append(Finding(
-                source="drive",
-                summary=summary,
-                urgency=urgency,
-                needs_action=significance == "high",
-                raw_data={**f, "significance": significance},
-            ))
+            findings.append(
+                Finding(
+                    source="drive",
+                    summary=summary,
+                    urgency=urgency,
+                    needs_action=significance == "high",
+                    raw_data={**f, "significance": significance},
+                )
+            )
 
         return CheckResult(
             has_updates=bool(findings),
@@ -930,13 +949,13 @@ class BehaviorDriftCheck(BaseCheck):
         self._bus_stats = bus_stats
         self._db = db
         from nous.observability.drift import DriftDetector
+
         self._detector = DriftDetector()
         self._last_snapshot: Any = None  # BehaviorSnapshot
         self._last_anomalies: list[dict] = []  # Serialized anomalies for DB persistence
-        self.interval = getattr(settings, 'drift_detection_interval', 3600)
+        self.interval = getattr(settings, "drift_detection_interval", 3600)
 
     async def run(self) -> CheckResult:
-        from nous.observability.snapshots import BehaviorSnapshot
         findings: list[Finding] = []
         try:
             snapshot = await self._capture_snapshot()
@@ -945,19 +964,33 @@ class BehaviorDriftCheck(BaseCheck):
             if baseline:
                 anomalies = self._detector.detect(snapshot, baseline)
                 self._last_anomalies = [
-                    {"metric": a.metric, "current": a.current, "mean": a.mean,
-                     "stddev": a.stddev, "z_score": a.z_score, "direction": a.direction,
-                     "severity": a.severity}
+                    {
+                        "metric": a.metric,
+                        "current": a.current,
+                        "mean": a.mean,
+                        "stddev": a.stddev,
+                        "z_score": a.z_score,
+                        "direction": a.direction,
+                        "severity": a.severity,
+                    }
                     for a in anomalies
                 ]
                 for a in anomalies:
-                    findings.append(Finding(
-                        source="drift",
-                        summary=f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})",
-                        urgency="high" if a.severity == "alert" else "normal",
-                        needs_action=a.severity == "alert",
-                        raw_data={"metric": a.metric, "current": a.current, "mean": a.mean, "stddev": a.stddev, "z_score": a.z_score},
-                    ))
+                    findings.append(
+                        Finding(
+                            source="drift",
+                            summary=f"{a.metric}: {a.current} ({a.direction} from {a.mean} +/- {a.stddev})",
+                            urgency="high" if a.severity == "alert" else "normal",
+                            needs_action=a.severity == "alert",
+                            raw_data={
+                                "metric": a.metric,
+                                "current": a.current,
+                                "mean": a.mean,
+                                "stddev": a.stddev,
+                                "z_score": a.z_score,
+                            },
+                        )
+                    )
             await self._store_snapshot(snapshot)
             self._last_snapshot = snapshot
         except Exception:
@@ -966,22 +999,31 @@ class BehaviorDriftCheck(BaseCheck):
 
     async def _capture_snapshot(self):
         from nous.observability.snapshots import BehaviorSnapshot
+
         now = datetime.now(UTC)
         fact_count = episode_count = censor_count = procedure_count = 0
         if self._db:
             try:
                 async with self._db.session() as session:
                     from sqlalchemy import text
-                    result = await session.execute(text(
-                        "SELECT "
-                        "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
-                        "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
-                        "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
-                        "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures"
-                    ))
+
+                    result = await session.execute(
+                        text(
+                            "SELECT "
+                            "(SELECT COUNT(*) FROM heart.facts WHERE active = true) AS facts, "
+                            "(SELECT COUNT(*) FROM heart.episodes) AS episodes, "
+                            "(SELECT COUNT(*) FROM heart.censors WHERE active = true) AS censors, "
+                            "(SELECT COUNT(*) FROM heart.procedures WHERE active = true) AS procedures"
+                        )
+                    )
                     row = result.fetchone()
                     if row:
-                        fact_count, episode_count, censor_count, procedure_count = row.facts, row.episodes, row.censors, row.procedures
+                        fact_count, episode_count, censor_count, procedure_count = (
+                            row.facts,
+                            row.episodes,
+                            row.censors,
+                            row.procedures,
+                        )
             except Exception:
                 logger.debug("Snapshot: DB query failed", exc_info=True)
 
@@ -994,13 +1036,18 @@ class BehaviorDriftCheck(BaseCheck):
         prev = self._last_snapshot
         return BehaviorSnapshot(
             timestamp=now,
-            fact_count=fact_count, fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
-            episode_count=episode_count, episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
-            active_censor_count=censor_count, active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
-            procedure_count=procedure_count, decision_count=0,
+            fact_count=fact_count,
+            fact_count_delta=fact_count - (prev.fact_count if prev else fact_count),
+            episode_count=episode_count,
+            episode_count_delta=episode_count - (prev.episode_count if prev else episode_count),
+            active_censor_count=censor_count,
+            active_censor_delta=censor_count - (prev.active_censor_count if prev else censor_count),
+            procedure_count=procedure_count,
+            decision_count=0,
             events_processed=bus_data.get("total_processed", 0),
             events_dropped=bus_data.get("total_dropped", 0),
-            handler_error_count=total_errors, handler_error_rate=round(error_rate, 4),
+            handler_error_count=total_errors,
+            handler_error_rate=round(error_rate, 4),
             turns_processed=bus_data.get("event_counts", {}).get("turn_completed", 0),
         )
 
@@ -1009,14 +1056,22 @@ class BehaviorDriftCheck(BaseCheck):
             return
         try:
             import json
+
             async with self._db.session() as session:
                 from sqlalchemy import text
-                await session.execute(text(
-                    "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
-                    "VALUES (:aid, :ts, :metrics, :anomalies)"
-                ), {"aid": self._settings.agent_id, "ts": snapshot.timestamp,
-                    "metrics": json.dumps(snapshot.to_metrics_dict()),
-                    "anomalies": json.dumps(self._last_anomalies)})
+
+                await session.execute(
+                    text(
+                        "INSERT INTO nous_system.behavior_snapshots (agent_id, timestamp, metrics, anomalies) "
+                        "VALUES (:aid, :ts, :metrics, :anomalies)"
+                    ),
+                    {
+                        "aid": self._settings.agent_id,
+                        "ts": snapshot.timestamp,
+                        "metrics": json.dumps(snapshot.to_metrics_dict()),
+                        "anomalies": json.dumps(self._last_anomalies),
+                    },
+                )
                 await session.commit()
         except Exception:
             logger.debug("Snapshot store failed", exc_info=True)
@@ -1026,15 +1081,21 @@ class BehaviorDriftCheck(BaseCheck):
             return []
         try:
             import json as _json
+
             from nous.observability.snapshots import BehaviorSnapshot
+
             async with self._db.session() as session:
                 from sqlalchemy import text
+
                 now = datetime.now(UTC)
                 cutoff = now - timedelta(hours=hours)
-                result = await session.execute(text(
-                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
-                ), {"aid": self._settings.agent_id, "cutoff": cutoff})
+                result = await session.execute(
+                    text(
+                        "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                        "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                    ),
+                    {"aid": self._settings.agent_id, "cutoff": cutoff},
+                )
                 rows = result.fetchall()
             snapshots = []
             for row in rows:

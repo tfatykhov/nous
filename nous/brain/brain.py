@@ -52,10 +52,20 @@ from nous.storage.models import (
 logger = logging.getLogger(__name__)
 
 # Noise indicators — short descriptions with no alternatives/reasoning signal
-_NOISE_KEYWORDS = frozenset({
-    "completed", "done", "finished", "success", "started",
-    "status", "progress", "update", "checked", "confirmed",
-})
+_NOISE_KEYWORDS = frozenset(
+    {
+        "completed",
+        "done",
+        "finished",
+        "success",
+        "started",
+        "status",
+        "progress",
+        "update",
+        "checked",
+        "confirmed",
+    }
+)
 
 
 class Brain:
@@ -113,12 +123,34 @@ class Brain:
         if session is None:
             async with self.db.session() as session:
                 return await self._list_decisions(
-                    limit, offset, agent_id, category, stakes, outcome,
-                    confidence_min, date_from, date_to, reviewed, sort, order, session,
+                    limit,
+                    offset,
+                    agent_id,
+                    category,
+                    stakes,
+                    outcome,
+                    confidence_min,
+                    date_from,
+                    date_to,
+                    reviewed,
+                    sort,
+                    order,
+                    session,
                 )
         return await self._list_decisions(
-            limit, offset, agent_id, category, stakes, outcome,
-            confidence_min, date_from, date_to, reviewed, sort, order, session,
+            limit,
+            offset,
+            agent_id,
+            category,
+            stakes,
+            outcome,
+            confidence_min,
+            date_from,
+            date_to,
+            reviewed,
+            sort,
+            order,
+            session,
         )
 
     async def _list_decisions(
@@ -300,7 +332,7 @@ class Brain:
             return True
 
         # F038-1.1: Starts with quote character
-        if desc_stripped and desc_stripped[0] in ('"', "'", '\u201c', '\u201d'):
+        if desc_stripped and desc_stripped[0] in ('"', "'", "\u201c", "\u201d"):
             return True
 
         # F038-1.1: Conversational filler — short descriptions starting with filler words
@@ -310,7 +342,7 @@ class Brain:
 
         # P1-4: Use regex tokenization to strip punctuation
         # "completed." -> "completed" (matches _NOISE_KEYWORDS)
-        words = set(re.findall(r'\w+', desc_lower))
+        words = set(re.findall(r"\w+", desc_lower))
         if not words:
             return True
         noise_count = len(words & _NOISE_KEYWORDS)
@@ -678,7 +710,7 @@ class Brain:
 
         if query_embedding is not None:
             # Full hybrid search using RRF (F025)
-            from nous.heart.search import _resolve_vector_weight, _resolve_rrf_k, _rrf_merge
+            from nous.heart.search import _resolve_rrf_k, _resolve_vector_weight, _rrf_merge
 
             vw = _resolve_vector_weight()
             rrf_k = _resolve_rrf_k()
@@ -882,7 +914,9 @@ class Brain:
     # ------------------------------------------------------------------
 
     async def get_session_decisions(
-        self, session_id: str, session: AsyncSession | None = None,
+        self,
+        session_id: str,
+        session: AsyncSession | None = None,
     ) -> list[DecisionSummary]:
         """Fetch decisions made during a specific session."""
         if session is None:
@@ -891,7 +925,9 @@ class Brain:
         return await self._get_session_decisions(session_id, session)
 
     async def _get_session_decisions(
-        self, session_id: str, session: AsyncSession,
+        self,
+        session_id: str,
+        session: AsyncSession,
     ) -> list[DecisionSummary]:
         stmt = (
             select(Decision)
@@ -906,7 +942,9 @@ class Brain:
     # ------------------------------------------------------------------
 
     async def get_unreviewed(
-        self, max_age_days: int = 30, stakes: str | None = None,
+        self,
+        max_age_days: int = 30,
+        stakes: str | None = None,
         session: AsyncSession | None = None,
     ) -> list[DecisionSummary]:
         """Fetch unreviewed decisions, optionally filtered by stakes."""
@@ -916,7 +954,10 @@ class Brain:
         return await self._get_unreviewed(max_age_days, stakes, session)
 
     async def _get_unreviewed(
-        self, max_age_days: int, stakes: str | None, session: AsyncSession,
+        self,
+        max_age_days: int,
+        stakes: str | None,
+        session: AsyncSession,
     ) -> list[DecisionSummary]:
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
         stmt = (
@@ -938,7 +979,8 @@ class Brain:
     # ------------------------------------------------------------------
 
     async def generate_calibration_snapshot(
-        self, session: AsyncSession | None = None,
+        self,
+        session: AsyncSession | None = None,
     ) -> CalibrationReport:
         """Compute calibration metrics and store a snapshot."""
         if session is None:
@@ -979,7 +1021,9 @@ class Brain:
     # ------------------------------------------------------------------
 
     async def get_episode_for_decision(
-        self, decision_id: UUID, session: AsyncSession | None = None,
+        self,
+        decision_id: UUID,
+        session: AsyncSession | None = None,
     ):
         """Get the episode linked to a decision via episode_decisions table."""
         if session is None:
@@ -988,7 +1032,8 @@ class Brain:
         return await self._get_episode_for_decision(decision_id, session)
 
     async def _get_episode_for_decision(self, decision_id: UUID, session: AsyncSession):
-        from nous.storage.models import EpisodeDecision, Episode
+        from nous.storage.models import Episode, EpisodeDecision
+
         stmt = (
             select(Episode)
             .join(EpisodeDecision, Episode.id == EpisodeDecision.episode_id)
@@ -1026,7 +1071,9 @@ class Brain:
         """Create a graph edge between two nodes."""
         if session is None:
             async with self.db.session() as session:
-                result = await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
+                result = await self._link(
+                    source_id, target_id, relation, weight, False, source_type, target_type, session
+                )
                 await session.commit()
                 return result
         return await self._link(source_id, target_id, relation, weight, False, source_type, target_type, session)
@@ -1146,8 +1193,7 @@ class Brain:
         descriptions: dict[UUID, tuple[str, datetime]] = {}
         if decision_ids:
             dec_result = await session.execute(
-                select(Decision.id, Decision.description, Decision.created_at)
-                .where(Decision.id.in_(decision_ids))
+                select(Decision.id, Decision.description, Decision.created_at).where(Decision.id.in_(decision_ids))
             )
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
@@ -1161,14 +1207,16 @@ class Brain:
             else:
                 desc = f"[{ntype}] {r.neighbor_id}"
                 created = datetime.now(UTC)
-            results.append(NeighborResult(
-                id=r.neighbor_id,
-                node_type=ntype,
-                description=desc,
-                edge_relation=rel,
-                edge_weight=weight,
-                created_at=created,
-            ))
+            results.append(
+                NeighborResult(
+                    id=r.neighbor_id,
+                    node_type=ntype,
+                    description=desc,
+                    edge_relation=rel,
+                    edge_weight=weight,
+                    created_at=created,
+                )
+            )
 
         return results
 
@@ -1295,14 +1343,24 @@ class Brain:
         if session is None:
             async with self.db.session() as session:
                 await self._emit_event(
-                    session, event_type, data, session_id=session_id,
-                    event_id=event_id, trace_id=trace_id, caused_by=caused_by,
+                    session,
+                    event_type,
+                    data,
+                    session_id=session_id,
+                    event_id=event_id,
+                    trace_id=trace_id,
+                    caused_by=caused_by,
                 )
                 await session.commit()
         else:
             await self._emit_event(
-                session, event_type, data, session_id=session_id,
-                event_id=event_id, trace_id=trace_id, caused_by=caused_by,
+                session,
+                event_type,
+                data,
+                session_id=session_id,
+                event_id=event_id,
+                trace_id=trace_id,
+                caused_by=caused_by,
             )
 
     async def _emit_event(

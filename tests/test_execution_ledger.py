@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from nous.cognitive.execution_ledger import (
     EXTERNAL_TOOLS,
     IRREVERSIBLE_TOOLS,
@@ -37,7 +35,6 @@ from nous.cognitive.execution_ledger import (
     classify_side_effect,
     redact_key_args,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -561,9 +558,7 @@ class TestRedactKeyArgs:
         assert result["command"] == "ls -la /tmp"
 
     def test_bash_multiple_patterns_applied(self):
-        key_args = {
-            "command": "AUTH_TOKEN=secret Bearer secret2 https://admin:pass@host"
-        }
+        key_args = {"command": "AUTH_TOKEN=secret Bearer secret2 https://admin:pass@host"}
         result = redact_key_args("bash", key_args)
         assert "secret" not in result["command"]
         assert "[REDACTED" in result["command"]

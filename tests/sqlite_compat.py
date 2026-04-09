@@ -18,7 +18,7 @@ import sqlite3
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import event, inspect
@@ -28,19 +28,22 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-
 # ---------------------------------------------------------------------------
 # 0. sqlite3 type adapters
 # ---------------------------------------------------------------------------
 
+
 def _adapt_list(val):
     return json.dumps(val)
+
 
 def _adapt_dict(val):
     return json.dumps(val)
 
+
 def _adapt_uuid(val):
     return str(val).replace("-", "") if val else None
+
 
 sqlite3.register_adapter(list, _adapt_list)
 sqlite3.register_adapter(dict, _adapt_dict)
@@ -51,9 +54,9 @@ sqlite3.register_adapter(uuid.UUID, _adapt_uuid)
 # 1. Type compilation overrides
 # ---------------------------------------------------------------------------
 
-from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.dialects.postgresql import JSONB, ARRAY
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector  # noqa: E402
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB  # noqa: E402
+from sqlalchemy.ext.compiler import compiles  # noqa: E402
 
 
 @compiles(Vector, "sqlite")
@@ -82,7 +85,9 @@ class TestDatabase:
     def __init__(self, engine):
         self.engine = engine
         self.session_factory = async_sessionmaker(
-            engine, class_=AsyncSession, expire_on_commit=False,
+            engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
         )
 
     async def connect(self) -> None:
@@ -108,19 +113,16 @@ class TestDatabase:
 # 3. Engine and table creation
 # ---------------------------------------------------------------------------
 
-_SCHEMA_PREFIXES = re.compile(r'\b(heart|brain|nous_system)\.')
+_SCHEMA_PREFIXES = re.compile(r"\b(heart|brain|nous_system)\.")
 
 
 def _rewrite_sql_for_sqlite(sql_text: str) -> str:
     """Strip PG schema prefixes and rewrite PG functions for SQLite."""
     # Remove schema prefixes (heart.facts -> facts)
-    sql_text = _SCHEMA_PREFIXES.sub('', sql_text)
+    sql_text = _SCHEMA_PREFIXES.sub("", sql_text)
     # ON CONFLICT DO NOTHING with constraint name -> simpler form
     sql_text = re.sub(
-        r"ON CONFLICT\s*\([^)]+\)\s*DO\s+NOTHING",
-        "ON CONFLICT DO NOTHING",
-        sql_text,
-        flags=re.IGNORECASE
+        r"ON CONFLICT\s*\([^)]+\)\s*DO\s+NOTHING", "ON CONFLICT DO NOTHING", sql_text, flags=re.IGNORECASE
     )
     # Replace NOW() with CURRENT_TIMESTAMP
     sql_text = sql_text.replace("NOW()", "CURRENT_TIMESTAMP")
@@ -130,7 +132,7 @@ def _rewrite_sql_for_sqlite(sql_text: str) -> str:
         r"NOW\(\)\s*-\s*make_interval\(hours\s*=>\s*:hours\)",
         "datetime('now', '-' || :hours || ' hours')",
         sql_text,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
     return sql_text
 
@@ -155,16 +157,20 @@ async def create_test_engine():
         cursor.execute("PRAGMA foreign_keys=ON")
         # Register gen_random_uuid as SQLite function
         dbapi_connection.create_function(
-            "gen_random_uuid", 0,
+            "gen_random_uuid",
+            0,
             lambda: str(uuid.uuid4()).replace("-", ""),
         )
+
         # Register stddev aggregate (SQLite doesn't have it natively)
         class StddevAggregate:
             def __init__(self):
                 self.values = []
+
             def step(self, value):
                 if value is not None:
                     self.values.append(float(value))
+
             def finalize(self):
                 if len(self.values) < 2:
                     return None
@@ -177,10 +183,18 @@ async def create_test_engine():
         try:
             raw_conn = dbapi_connection._connection._conn
             raw_conn.create_aggregate("stddev", 1, StddevAggregate)
-            raw_conn.create_function("power", 2, lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None)
+            raw_conn.create_function(
+                "power",
+                2,
+                lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None,
+            )
         except Exception:
             # Fallback: register via the adapter which proxies create_function
-            dbapi_connection.create_function("power", 2, lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None)
+            dbapi_connection.create_function(
+                "power",
+                2,
+                lambda base, exp: float(base) ** float(exp) if base is not None and exp is not None else None,
+            )
         cursor.close()
 
     @event.listens_for(engine.sync_engine, "before_cursor_execute", retval=True)
@@ -195,6 +209,7 @@ async def create_test_engine():
 async def create_tables(engine):
     """Create all ORM tables in SQLite."""
     from nous.storage.models import Base
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -306,6 +321,7 @@ def _parse_embedding(val: Any) -> list[float] | None:
 # 7. ARRAY column deserialization for SQLite
 # ---------------------------------------------------------------------------
 
+
 def install_array_deserializer():
     """Register a load listener that deserializes JSON strings in ARRAY columns.
 
@@ -313,8 +329,9 @@ def install_array_deserializer():
     When read back, SQLAlchemy returns raw strings instead of lists because
     ARRAY type has no result_processor for SQLite. This listener fixes that.
     """
-    from nous.storage.models import Base
     from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+
+    from nous.storage.models import Base
 
     @event.listens_for(Base, "load", propagate=True)
     def _deserialize_arrays(target, context):
@@ -349,17 +366,17 @@ def install_array_deserializer():
                         pass
 
 
-
 # ---------------------------------------------------------------------------
 # 8. TypeDecorator wrappers for transparent ARRAY/Vector serialization
 # ---------------------------------------------------------------------------
 
-from sqlalchemy import TypeDecorator, Text as SAText_TD
-from sqlalchemy.types import JSON as SA_JSON
+from sqlalchemy import Text as SAText_TD  # noqa: E402
+from sqlalchemy import TypeDecorator  # noqa: E402
 
 
 class JSONEncodedList(TypeDecorator):
     """Stores Python lists as JSON strings in SQLite TEXT columns."""
+
     impl = SAText_TD
     cache_ok = True
 
@@ -382,6 +399,7 @@ class JSONEncodedList(TypeDecorator):
 
 class JSONEncodedVector(TypeDecorator):
     """Stores embedding vectors as JSON strings in SQLite TEXT columns."""
+
     impl = SAText_TD
     cache_ok = True
 

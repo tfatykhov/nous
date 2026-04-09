@@ -75,12 +75,15 @@ class GraphLinker:
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 5
         """)
-        result = await session.execute(sql, {
-            "embedding": embedding_str,
-            "agent_id": self.agent_id,
-            "cutoff": cutoff,
-            "threshold": self.settings.cross_type_threshold * 0.9,
-        })
+        result = await session.execute(
+            sql,
+            {
+                "embedding": embedding_str,
+                "agent_id": self.agent_id,
+                "cutoff": cutoff,
+                "threshold": self.settings.cross_type_threshold * 0.9,
+            },
+        )
         candidates = result.all()
 
         edges = []
@@ -108,15 +111,17 @@ class GraphLinker:
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
                 await session.execute(stmt)
-                edges.append(GraphEdgeInfo(
-                    source_id=fact_id,
-                    target_id=row.id,
-                    source_type="fact",
-                    target_type="decision",
-                    relation="evidence_for",
-                    weight=float(similarity),
-                    auto_linked=True,
-                ))
+                edges.append(
+                    GraphEdgeInfo(
+                        source_id=fact_id,
+                        target_id=row.id,
+                        source_type="fact",
+                        target_type="decision",
+                        relation="evidence_for",
+                        weight=float(similarity),
+                        auto_linked=True,
+                    )
+                )
 
         return edges
 
@@ -151,12 +156,15 @@ class GraphLinker:
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 5
         """)
-        result = await session.execute(sql, {
-            "embedding": embedding_str,
-            "agent_id": self.agent_id,
-            "fact_id": fact_id,
-            "threshold": self.settings.cross_type_same_threshold * 0.9,
-        })
+        result = await session.execute(
+            sql,
+            {
+                "embedding": embedding_str,
+                "agent_id": self.agent_id,
+                "fact_id": fact_id,
+                "threshold": self.settings.cross_type_same_threshold * 0.9,
+            },
+        )
         candidates = result.all()
 
         edges = []
@@ -177,15 +185,17 @@ class GraphLinker:
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
                 await session.execute(stmt)
-                edges.append(GraphEdgeInfo(
-                    source_id=fact_id,
-                    target_id=row.id,
-                    source_type="fact",
-                    target_type="fact",
-                    relation="related_to",
-                    weight=float(row.similarity),
-                    auto_linked=True,
-                ))
+                edges.append(
+                    GraphEdgeInfo(
+                        source_id=fact_id,
+                        target_id=row.id,
+                        source_type="fact",
+                        target_type="fact",
+                        relation="related_to",
+                        weight=float(row.similarity),
+                        auto_linked=True,
+                    )
+                )
 
         return edges
 
@@ -215,11 +225,17 @@ class GraphLinker:
                 .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
             )
             await session.execute(stmt)
-            edges.append(GraphEdgeInfo(
-                source_id=episode_id, target_id=dec_id,
-                source_type="episode", target_type="decision",
-                relation="discussed_in", weight=1.0, auto_linked=True,
-            ))
+            edges.append(
+                GraphEdgeInfo(
+                    source_id=episode_id,
+                    target_id=dec_id,
+                    source_type="episode",
+                    target_type="decision",
+                    relation="discussed_in",
+                    weight=1.0,
+                    auto_linked=True,
+                )
+            )
 
         for fact_id in fact_ids:
             stmt = (
@@ -237,11 +253,17 @@ class GraphLinker:
                 .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
             )
             await session.execute(stmt)
-            edges.append(GraphEdgeInfo(
-                source_id=fact_id, target_id=episode_id,
-                source_type="fact", target_type="episode",
-                relation="extracted_from", weight=1.0, auto_linked=True,
-            ))
+            edges.append(
+                GraphEdgeInfo(
+                    source_id=fact_id,
+                    target_id=episode_id,
+                    source_type="fact",
+                    target_type="episode",
+                    relation="extracted_from",
+                    weight=1.0,
+                    auto_linked=True,
+                )
+            )
 
         return edges
 

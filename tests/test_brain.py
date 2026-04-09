@@ -486,9 +486,7 @@ async def test_link_with_types(brain, session):
     assert edge.target_type == "decision"
 
     # Verify agent_id persisted in DB
-    result = await session.execute(
-        select(GraphEdge).where(GraphEdge.source_id == d1.id)
-    )
+    result = await session.execute(select(GraphEdge).where(GraphEdge.source_id == d1.id))
     db_edge = result.scalar_one()
     assert db_edge.agent_id == brain.agent_id
     assert db_edge.source_type == "decision"

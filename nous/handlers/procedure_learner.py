@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Prompts
 # ---------------------------------------------------------------------------
 
-_DECISION_CLUSTER_PROMPT = """You are analyzing a cluster of similar successful decisions to extract a reusable procedure.
+_DECISION_CLUSTER_PROMPT = """
+You are analyzing a cluster of similar successful decisions to extract a reusable procedure.
 
 Decisions in this cluster:
 {decisions}
@@ -49,7 +50,8 @@ Output ONLY valid JSON:
   "implementation_notes": ["<edge cases, caveats>"]
 }}"""
 
-_EPISODE_LESSON_PROMPT = """You are analyzing a cluster of similar lessons learned from episodes to extract a reusable procedure.
+_EPISODE_LESSON_PROMPT = """
+You are analyzing a cluster of similar lessons learned from episodes to extract a reusable procedure.
 
 Lessons in this cluster:
 {lessons}
@@ -109,6 +111,7 @@ Extract a recovery procedure. Output ONLY valid JSON:
 # Cosine similarity (pure Python — no numpy dependency)
 # ---------------------------------------------------------------------------
 
+
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors using pure Python."""
     dot = sum(x * y for x, y in zip(a, b))
@@ -154,6 +157,7 @@ def _greedy_cluster(
 # ---------------------------------------------------------------------------
 # ProcedureLearner
 # ---------------------------------------------------------------------------
+
 
 class ProcedureLearner:
     """Auto-learns procedures from decision clusters and episode lessons.
@@ -228,21 +232,20 @@ class ProcedureLearner:
             # Fetch reviewed successful decisions — pass filters to DB
             # to avoid the window problem where 100 most recent are all pending.
             # Issue #188 Bug 1: was list_decisions(limit=100) with no filters.
-            decisions_success, _ = await self._brain.list_decisions(
-                limit=50, outcome="success", reviewed=True
-            )
-            decisions_partial, _ = await self._brain.list_decisions(
-                limit=50, outcome="partial", reviewed=True
-            )
+            decisions_success, _ = await self._brain.list_decisions(limit=50, outcome="success", reviewed=True)
+            decisions_partial, _ = await self._brain.list_decisions(limit=50, outcome="partial", reviewed=True)
             successful = list(decisions_success) + list(decisions_partial)
             logger.info(
                 "Decision pathway: %d success + %d partial = %d reviewed decisions",
-                len(decisions_success), len(decisions_partial), len(successful),
+                len(decisions_success),
+                len(decisions_partial),
+                len(successful),
             )
             if len(successful) < self._settings.procedure_cluster_min_size:
                 logger.info(
                     "Decision pathway: too few reviewed decisions (%d < %d)",
-                    len(successful), self._settings.procedure_cluster_min_size,
+                    len(successful),
+                    self._settings.procedure_cluster_min_size,
                 )
                 return 0
 
@@ -376,14 +379,17 @@ class ProcedureLearner:
 
             logger.info(
                 "Episode pathway: %d lessons collected (%d skipped: %d wrong outcome, %d no lessons)",
-                len(all_lessons), skipped_outcome + skipped_no_lessons,
-                skipped_outcome, skipped_no_lessons,
+                len(all_lessons),
+                skipped_outcome + skipped_no_lessons,
+                skipped_outcome,
+                skipped_no_lessons,
             )
 
             if len(all_lessons) < self._settings.procedure_cluster_min_size:
                 logger.info(
                     "Episode pathway: too few lessons (%d < %d)",
-                    len(all_lessons), self._settings.procedure_cluster_min_size,
+                    len(all_lessons),
+                    self._settings.procedure_cluster_min_size,
                 )
                 return 0
 
@@ -398,7 +404,8 @@ class ProcedureLearner:
             )
             logger.info(
                 "Episode pathway: %d clusters found from %d embeddings (threshold=%.2f, min_size=%d)",
-                len(clusters), len(embeddings),
+                len(clusters),
+                len(embeddings),
                 self._settings.procedure_episode_similarity,
                 self._settings.procedure_cluster_min_size,
             )
@@ -412,9 +419,7 @@ class ProcedureLearner:
 
                 # Extract procedure via LLM
                 lessons_text = "\n".join(f"- {lesson}" for lesson in cluster_lessons)
-                procedure_data = await self._call_llm(
-                    _EPISODE_LESSON_PROMPT.format(lessons=lessons_text)
-                )
+                procedure_data = await self._call_llm(_EPISODE_LESSON_PROMPT.format(lessons=lessons_text))
                 if not procedure_data:
                     continue
 
@@ -468,7 +473,10 @@ class ProcedureLearner:
 
                 # Check weakness criteria
                 is_weak = False
-                if proc_detail.effectiveness is not None and proc_detail.effectiveness < self._settings.procedure_weakness_threshold:
+                if (
+                    proc_detail.effectiveness is not None
+                    and proc_detail.effectiveness < self._settings.procedure_weakness_threshold
+                ):
                     is_weak = True
                 if proc_detail.last_activated and proc_detail.last_activated < staleness_cutoff:
                     is_weak = True

@@ -640,10 +640,14 @@ async def test_post_turn_adds_error_thread(cognitive, heart, session):
 
     # Build a minimal TurnContext (skip pre_turn to avoid schema issues)
     from nous.cognitive.schemas import FrameSelection
+
     ctx = TurnContext(
         system_prompt="test",
         frame=FrameSelection(
-            frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern",
+            frame_id="task",
+            frame_name="Task",
+            confidence=0.9,
+            match_method="pattern",
         ),
     )
 
@@ -676,10 +680,14 @@ async def test_post_turn_resolves_thread_on_success(cognitive, heart, session):
     await heart.get_or_create_working_memory(sid, session=session)
 
     from nous.cognitive.schemas import FrameSelection
+
     ctx = TurnContext(
         system_prompt="test",
         frame=FrameSelection(
-            frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern",
+            frame_id="task",
+            frame_name="Task",
+            confidence=0.9,
+            match_method="pattern",
         ),
     )
 
@@ -738,8 +746,10 @@ async def test_task_synthesis_empty_current_task_fallback(cognitive, heart, sess
     sid = f"test-task-synth-{uuid.uuid4().hex[:8]}"
 
     # First turn with substantive input sets the task
-    ctx1 = await cognitive.pre_turn(
-        "nous-default", sid, "Help me design a database schema for users",
+    ctx1 = await cognitive.pre_turn(  # noqa: F841
+        "nous-default",
+        sid,
+        "Help me design a database schema for users",
         session=session,
     )
 
@@ -759,8 +769,10 @@ async def test_task_synthesis_empty_current_task_fallback(cognitive, heart, sess
     assert not wm_empty.current_task
 
     # Second turn with short "yes" and conversation history
-    ctx2 = await cognitive.pre_turn(
-        "nous-default", sid, "yes",
+    ctx2 = await cognitive.pre_turn(  # noqa: F841
+        "nous-default",
+        sid,
+        "yes",
         session=session,
         conversation_messages=[
             "Help me design a database schema for users",
@@ -781,7 +793,9 @@ async def test_task_synthesis_existing_task_preserved(cognitive, heart, session)
 
     # First turn sets the task
     await cognitive.pre_turn(
-        "nous-default", sid, "Build the authentication module",
+        "nous-default",
+        sid,
+        "Build the authentication module",
         session=session,
     )
 
@@ -792,7 +806,9 @@ async def test_task_synthesis_existing_task_preserved(cognitive, heart, session)
 
     # Second turn with "ok" — existing task should be preserved
     await cognitive.pre_turn(
-        "nous-default", sid, "ok",
+        "nous-default",
+        sid,
+        "ok",
         session=session,
         conversation_messages=[
             "Build the authentication module",

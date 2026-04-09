@@ -14,7 +14,6 @@ import httpx
 import pytest
 
 from nous.api.tools import ToolDispatcher
-from nous.config import Settings
 
 
 def _extract_text(result: dict) -> str:
@@ -84,6 +83,7 @@ def _brave_search_response(results: list[dict] | None = None) -> dict:
 def _import_web_tools():
     """Import nous.api.web_tools, reloading to pick up latest code."""
     import nous.api.web_tools as wt
+
     importlib.reload(wt)
     return wt
 
@@ -279,10 +279,16 @@ class TestWebSearch:
         settings = _make_settings()
         response = _mock_response(
             status_code=200,
-            json_data=_brave_search_response([
-                {"title": "Python Docs", "url": "https://docs.python.org", "description": "Official Python documentation"},
-                {"title": "PyPI", "url": "https://pypi.org", "description": "Python Package Index"},
-            ]),
+            json_data=_brave_search_response(
+                [
+                    {
+                        "title": "Python Docs",
+                        "url": "https://docs.python.org",
+                        "description": "Official Python documentation",
+                    },
+                    {"title": "PyPI", "url": "https://pypi.org", "description": "Python Package Index"},
+                ]
+            ),
         )
         client = _mock_http_client(response)
 
@@ -777,15 +783,21 @@ class TestWebSearchWithRouter:
         from nous.api.search_providers import SearchResult
 
         mock_router = MagicMock()
-        mock_router.search = AsyncMock(return_value=(
-            [SearchResult(title="T1", url="https://t.com", snippet="S1", provider="tavily")],
-            "tavily",
-        ))
+        mock_router.search = AsyncMock(
+            return_value=(
+                [SearchResult(title="T1", url="https://t.com", snippet="S1", provider="tavily")],
+                "tavily",
+            )
+        )
 
         settings = _make_settings()
         result = await wt._web_search(
-            "test query", count=5, freshness=None,
-            _settings=settings, _http=AsyncMock(), _router=mock_router,
+            "test query",
+            count=5,
+            freshness=None,
+            _settings=settings,
+            _http=AsyncMock(),
+            _router=mock_router,
         )
 
         text = _extract_text(result)
@@ -804,8 +816,12 @@ class TestWebSearchWithRouter:
 
         settings = _make_settings()
         result = await wt._web_search(
-            "test", count=5, freshness=None,
-            _settings=settings, _http=AsyncMock(), _router=mock_router,
+            "test",
+            count=5,
+            freshness=None,
+            _settings=settings,
+            _http=AsyncMock(),
+            _router=mock_router,
         )
 
         text = _extract_text(result)
@@ -818,15 +834,21 @@ class TestWebSearchWithRouter:
         settings = _make_settings()
         response = _mock_response(
             status_code=200,
-            json_data=_brave_search_response([
-                {"title": "Brave Result", "url": "https://b.com", "description": "From Brave"},
-            ]),
+            json_data=_brave_search_response(
+                [
+                    {"title": "Brave Result", "url": "https://b.com", "description": "From Brave"},
+                ]
+            ),
         )
         client = _mock_http_client(response)
 
         result = await wt._web_search(
-            "test", count=5, freshness=None,
-            _settings=settings, _http=client, _router=None,
+            "test",
+            count=5,
+            freshness=None,
+            _settings=settings,
+            _http=client,
+            _router=None,
         )
 
         text = _extract_text(result)

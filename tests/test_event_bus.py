@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import httpx
@@ -25,7 +25,6 @@ import pytest
 from nous.cognitive.schemas import SessionMetadata
 from nous.events import Event, EventBus
 from nous.heart.schemas import EpisodeInput, FactInput, FactSummary
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -297,13 +296,11 @@ class TestEpisodeSummarizer:
             "topics": ["testing"],
         }
         summarizer, heart, bus, llm_client = self._make_summarizer()
-        heart.get_episode = AsyncMock(
-            return_value=MagicMock(summary="opening msg", structured_summary=None)
-        )
+        heart.get_episode = AsyncMock(return_value=MagicMock(summary="opening msg", structured_summary=None))
         heart.update_episode_summary = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(summary_json)}]
-        ))
+        llm_client.call = AsyncMock(
+            return_value=MagicMock(content=[{"type": "text", "text": json.dumps(summary_json)}])
+        )
 
         episode_id = str(uuid4())
         event = _make_event(
@@ -324,9 +321,7 @@ class TestEpisodeSummarizer:
     async def test_skips_short_transcripts(self):
         """10. Skips short transcripts (<50 chars)."""
         summarizer, heart, bus, llm_client = self._make_summarizer()
-        heart.get_episode = AsyncMock(
-            return_value=MagicMock(summary="hi", structured_summary=None)
-        )
+        heart.get_episode = AsyncMock(return_value=MagicMock(summary="hi", structured_summary=None))
 
         event = _make_event(
             "session_ended",
@@ -357,13 +352,11 @@ class TestEpisodeSummarizer:
             "topics": [],
         }
         summarizer, heart, bus, llm_client = self._make_summarizer()
-        heart.get_episode = AsyncMock(
-            return_value=MagicMock(summary="opening", structured_summary=None)
-        )
+        heart.get_episode = AsyncMock(return_value=MagicMock(summary="opening", structured_summary=None))
         heart.update_episode_summary = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(summary_json)}]
-        ))
+        llm_client.call = AsyncMock(
+            return_value=MagicMock(content=[{"type": "text", "text": json.dumps(summary_json)}])
+        )
 
         episode_id = str(uuid4())
         event = _make_event(
@@ -385,9 +378,7 @@ class TestEpisodeSummarizer:
     async def test_handles_llm_failure_gracefully(self):
         """13. Handles LLM failure gracefully (mock 500 response)."""
         summarizer, heart, bus, llm_client = self._make_summarizer()
-        heart.get_episode = AsyncMock(
-            return_value=MagicMock(summary="opening", structured_summary=None)
-        )
+        heart.get_episode = AsyncMock(return_value=MagicMock(summary="opening", structured_summary=None))
         llm_client.call = AsyncMock(side_effect=RuntimeError("API error (500)"))
 
         event = _make_event(
@@ -407,9 +398,7 @@ class TestEpisodeSummarizer:
     async def test_truncates_long_transcripts(self):
         """14. Truncates long transcripts (>8000 chars)."""
         summarizer, heart, bus, llm_client = self._make_summarizer()
-        heart.get_episode = AsyncMock(
-            return_value=MagicMock(summary="opening", structured_summary=None)
-        )
+        heart.get_episode = AsyncMock(return_value=MagicMock(summary="opening", structured_summary=None))
         heart.update_episode_summary = AsyncMock()
 
         summary_json = {"title": "T", "summary": "S", "key_points": [], "outcome": "resolved", "topics": []}
@@ -448,24 +437,27 @@ class TestEpisodeSummarizer:
             "outcome_rationale": "User's question was fully answered with a concrete decision",
             "topics": ["architecture", "database"],
             "candidate_facts": [
-                {"subject": "project_database", "content": "Project uses PostgreSQL 17 with pgvector for embeddings", "category": "technical"},
+                {
+                    "subject": "project_database",
+                    "content": "Project uses PostgreSQL 17 with pgvector for embeddings",
+                    "category": "technical",
+                },
             ],
         }
         summarizer, heart, bus, llm_client = self._make_summarizer()
-        heart.get_episode = AsyncMock(
-            return_value=MagicMock(summary="opening", structured_summary=None)
-        )
+        heart.get_episode = AsyncMock(return_value=MagicMock(summary="opening", structured_summary=None))
         heart.update_episode_summary = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(summary_json)}]
-        ))
+        llm_client.call = AsyncMock(
+            return_value=MagicMock(content=[{"type": "text", "text": json.dumps(summary_json)}])
+        )
 
         episode_id = str(uuid4())
         event = _make_event(
             "session_ended",
             data={
                 "episode_id": episode_id,
-                "transcript": "User: What database should we use?\n\nAssistant: I recommend PostgreSQL with pgvector." * 3,
+                "transcript": "User: What database should we use?\n\nAssistant: I recommend PostgreSQL with pgvector."
+                * 3,
             },
         )
         await summarizer.handle(event)
@@ -474,29 +466,37 @@ class TestEpisodeSummarizer:
         heart.update_episode_summary.assert_called_once()
         stored_summary = heart.update_episode_summary.call_args[0][1]
         assert stored_summary["outcome_rationale"] == "User's question was fully answered with a concrete decision"
-        assert stored_summary["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        assert (
+            stored_summary["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        )
         assert stored_summary["candidate_facts"][0]["category"] == "technical"
 
         # Verify candidate_facts passed through in emitted event
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
-        assert emitted.data["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        assert (
+            emitted.data["candidate_facts"][0]["content"] == "Project uses PostgreSQL 17 with pgvector for embeddings"
+        )
 
     @pytest.mark.asyncio
     async def test_build_decision_context_with_decisions(self):
         """008.4: Decision context includes linked decisions."""
         brain = AsyncMock()
-        brain.get = AsyncMock(return_value=MagicMock(
-            description="Use PostgreSQL for storage",
-            category="architecture",
-            stakes="high",
-            confidence=0.9,
-        ))
+        brain.get = AsyncMock(
+            return_value=MagicMock(
+                description="Use PostgreSQL for storage",
+                category="architecture",
+                stakes="high",
+                confidence=0.9,
+            )
+        )
         heart = AsyncMock()
-        heart.get_episode = AsyncMock(return_value=MagicMock(
-            decision_ids=[uuid4()],
-            structured_summary=None,
-        ))
+        heart.get_episode = AsyncMock(
+            return_value=MagicMock(
+                decision_ids=[uuid4()],
+                structured_summary=None,
+            )
+        )
         summarizer, _, _, _llm = self._make_summarizer(heart=heart, brain=brain)
 
         result = await summarizer._build_decision_context(str(uuid4()))
@@ -539,7 +539,9 @@ class TestEpisodeSummarizer:
     async def test_truncate_preserves_first_last(self):
         """008.4: First and last turns always kept."""
         summarizer, _, _, _llm = self._make_summarizer()
-        turns = ["User: First turn"] + [f"Assistant: Middle turn {i} " + "x" * 500 for i in range(20)] + ["User: Last turn"]
+        turns = (
+            ["User: First turn"] + [f"Assistant: Middle turn {i} " + "x" * 500 for i in range(20)] + ["User: Last turn"]
+        )
         transcript = "\n\n".join(turns)
         result = summarizer._truncate_transcript(transcript, max_chars=2000)
         assert result.startswith("User: First turn")
@@ -595,9 +597,7 @@ class TestFactExtractor:
         extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])  # No existing
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -629,9 +629,7 @@ class TestFactExtractor:
         existing_fact.score = 0.90  # Above 0.85 threshold -> deduped
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -657,9 +655,7 @@ class TestFactExtractor:
         existing_fact.score = 0.70  # Between 0.65 and 0.85 -> allowed through
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -682,9 +678,7 @@ class TestFactExtractor:
 
         heart.search_facts = AsyncMock(return_value=[])  # No existing match
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -709,9 +703,7 @@ class TestFactExtractor:
         extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -734,9 +726,7 @@ class TestFactExtractor:
         extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -798,8 +788,16 @@ class TestFactExtractor:
                     "key_points": ["chose PostgreSQL"],
                 },
                 "candidate_facts": [
-                    {"subject": "project_database", "content": "Project uses PostgreSQL 17 with pgvector", "category": "technical"},
-                    {"subject": "Tim", "content": "Tim prefers direct architecture decisions", "category": "preference"},
+                    {
+                        "subject": "project_database",
+                        "content": "Project uses PostgreSQL 17 with pgvector",
+                        "category": "technical",
+                    },
+                    {
+                        "subject": "Tim",
+                        "content": "Tim prefers direct architecture decisions",
+                        "category": "preference",
+                    },
                 ],
             },
         )
@@ -833,7 +831,9 @@ class TestFactExtractor:
             data={
                 "episode_id": str(uuid4()),
                 "summary": {"summary": "Already known.", "key_points": []},
-                "candidate_facts": [{"subject": "project", "content": "Project uses PostgreSQL", "category": "technical"}],
+                "candidate_facts": [
+                    {"subject": "project", "content": "Project uses PostgreSQL", "category": "technical"}
+                ],
             },
         )
         await extractor.handle(event)
@@ -850,9 +850,7 @@ class TestFactExtractor:
         extractor, heart, bus, llm_client = self._make_extractor()
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",
@@ -880,7 +878,9 @@ class TestFactExtractor:
             data={
                 "episode_id": str(uuid4()),
                 "summary": {"summary": "Many facts.", "key_points": []},
-                "candidate_facts": [{"subject": f"topic_{i}", "content": f"Fact number {i}", "category": "technical"} for i in range(8)],
+                "candidate_facts": [
+                    {"subject": f"topic_{i}", "content": f"Fact number {i}", "category": "technical"} for i in range(8)
+                ],
             },
         )
         await extractor.handle(event)
@@ -1273,13 +1273,19 @@ class TestSleepHandler:
             "gaps": [],
             "summary": "The agent primarily assists with Python development.",
             "facts": [
-                {"subject": "user_workflow", "content": "User primarily works with Python development", "category": "preference"},
+                {
+                    "subject": "user_workflow",
+                    "content": "User primarily works with Python development",
+                    "category": "preference",
+                },
                 {"subject": "testing_practice", "content": "Always write tests first", "category": "rule"},
             ],
         }
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
-        ))
+        llm_client.call = AsyncMock(
+            return_value=MagicMock(
+                content=[{"type": "tool_use", "id": "toolu_1", "name": "store_reflection", "input": reflection_json}]
+            )
+        )
 
         await handler._phase_reflect({"facts_created": 0, "procedures_created": 0, "censors_retired": 0})
 
@@ -1349,8 +1355,7 @@ class TestReviewFixes:
     async def test_bus_none_backward_compat(self):
         """42. bus=None backward compat -- events still go to Brain.emit_event."""
         from nous.cognitive.layer import CognitiveLayer
-        from nous.cognitive.schemas import TurnContext, TurnResult
-        from nous.cognitive.schemas import FrameSelection
+        from nous.cognitive.schemas import FrameSelection, TurnResult
 
         brain = AsyncMock()
         brain.db = MagicMock()
@@ -1368,27 +1373,50 @@ class TestReviewFixes:
 
         # Mock the sub-engines to avoid DB calls
         cognitive._frames = MagicMock()
-        cognitive._frames.select = AsyncMock(return_value=FrameSelection(
-            frame_id="conversation", frame_name="Conversation",
-            confidence=0.9, match_method="default",
-        ))
+        cognitive._frames.select = AsyncMock(
+            return_value=FrameSelection(
+                frame_id="conversation",
+                frame_name="Conversation",
+                confidence=0.9,
+                match_method="default",
+            )
+        )
         cognitive._frames._default_selection = MagicMock()
         cognitive._context = MagicMock()
-        cognitive._context.build = AsyncMock(return_value=MagicMock(
-            system_prompt="prompt", sections=[], recalled_ids={}, recalled_content_map={},
-        ))
+        cognitive._context.build = AsyncMock(
+            return_value=MagicMock(
+                system_prompt="prompt",
+                sections=[],
+                recalled_ids={},
+                recalled_content_map={},
+            )
+        )
         cognitive._context._identity_prompt = ""
         cognitive._deliberation = MagicMock()
         cognitive._deliberation.should_deliberate = AsyncMock(return_value=False)
         cognitive._monitor = MagicMock()
-        cognitive._monitor.assess = AsyncMock(return_value=MagicMock(
-            surprise_level=0.0, decision_id=None, intended=None,
-            actual="test", censor_candidates=[], facts_extracted=0, episode_recorded=False,
-        ))
-        cognitive._monitor.learn = AsyncMock(return_value=MagicMock(
-            surprise_level=0.0, decision_id=None, intended=None,
-            actual="test", censor_candidates=[], facts_extracted=0, episode_recorded=False,
-        ))
+        cognitive._monitor.assess = AsyncMock(
+            return_value=MagicMock(
+                surprise_level=0.0,
+                decision_id=None,
+                intended=None,
+                actual="test",
+                censor_candidates=[],
+                facts_extracted=0,
+                episode_recorded=False,
+            )
+        )
+        cognitive._monitor.learn = AsyncMock(
+            return_value=MagicMock(
+                surprise_level=0.0,
+                decision_id=None,
+                intended=None,
+                actual="test",
+                censor_candidates=[],
+                facts_extracted=0,
+                episode_recorded=False,
+            )
+        )
         cognitive._monitor._session_censor_counts = {}
 
         # Do a turn
@@ -1417,7 +1445,7 @@ class TestReviewFixes:
         handler = SleepHandler(brain, heart, settings, bus)
 
         # Make _run_sleep take some time
-        original_run_sleep = handler._run_sleep
+        original_run_sleep = handler._run_sleep  # noqa: F841
         run_sleep_started = asyncio.Event()
         run_sleep_finished = asyncio.Event()
 
@@ -1488,9 +1516,7 @@ class TestReviewFixes:
         ]
         heart.search_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
-        llm_client.call = AsyncMock(return_value=MagicMock(
-            content=[{"type": "text", "text": json.dumps(facts_json)}]
-        ))
+        llm_client.call = AsyncMock(return_value=MagicMock(content=[{"type": "text", "text": json.dumps(facts_json)}]))
 
         event = _make_event(
             "episode_summarized",

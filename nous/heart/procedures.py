@@ -10,7 +10,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
@@ -104,8 +104,12 @@ class ProcedureManager:
         embedding = None
         if self.embeddings:
             embed_text = _build_embed_text(
-                input.name, input.description, input.core_patterns,
-                input.goals, input.core_tools, input.core_concepts,
+                input.name,
+                input.description,
+                input.core_patterns,
+                input.goals,
+                input.core_tools,
+                input.core_concepts,
                 input.implementation_notes,
             )
             try:
@@ -316,7 +320,7 @@ class ProcedureManager:
                 .where(ProcedureTaskAffinity.procedure_id.in_(ids))
                 .where(ProcedureTaskAffinity.frame_type == frame_type)
                 .where(ProcedureTaskAffinity.agent_id == self.agent_id)
-                .where(ProcedureTaskAffinity.active == True)
+                .where(ProcedureTaskAffinity.active == True)  # noqa: E712
             )
             for row in affinity_rows.scalars().all():
                 affinity_map[row.procedure_id] = (row.success_count, row.failure_count)
@@ -368,9 +372,7 @@ class ProcedureManager:
     # get_evolution_candidates() — F037 Part 3
     # ------------------------------------------------------------------
 
-    async def get_evolution_candidates(
-        self, session: AsyncSession | None = None
-    ) -> list[EvolutionCandidate]:
+    async def get_evolution_candidates(self, session: AsyncSession | None = None) -> list[EvolutionCandidate]:
         """Return procedures that should be rewritten, retired, or investigated.
 
         Categories:
@@ -389,9 +391,7 @@ class ProcedureManager:
 
     async def _get_evolution_candidates(self, session: AsyncSession) -> list[EvolutionCandidate]:
         result = await session.execute(
-            select(Procedure)
-            .where(Procedure.agent_id == self.agent_id)
-            .where(Procedure.active == True)  # noqa: E712
+            select(Procedure).where(Procedure.agent_id == self.agent_id).where(Procedure.active == True)  # noqa: E712
         )
         procedures = list(result.scalars().all())
 
@@ -403,41 +403,49 @@ class ProcedureManager:
             activation_count = p.activation_count or 0
 
             if eff < 0.3 and activation_count >= 10:
-                candidates.append(EvolutionCandidate(
-                    id=p.id,
-                    name=p.name,
-                    category="retire",
-                    effectiveness=eff,
-                    activation_count=activation_count,
-                    reason=f"Effectiveness {eff:.2f} below retirement threshold (0.3) with {activation_count} activations",
-                ))
+                candidates.append(
+                    EvolutionCandidate(
+                        id=p.id,
+                        name=p.name,
+                        category="retire",
+                        effectiveness=eff,
+                        activation_count=activation_count,
+                        reason=f"Effectiveness {eff:.2f} below retirement threshold (0.3) with {activation_count} activations",  # noqa: E501
+                    )
+                )
             elif eff < 0.5 and activation_count >= 15:
-                candidates.append(EvolutionCandidate(
-                    id=p.id,
-                    name=p.name,
-                    category="rewrite",
-                    effectiveness=eff,
-                    activation_count=activation_count,
-                    reason=f"Effectiveness {eff:.2f} below rewrite threshold (0.5) with {activation_count} activations",
-                ))
+                candidates.append(
+                    EvolutionCandidate(
+                        id=p.id,
+                        name=p.name,
+                        category="rewrite",
+                        effectiveness=eff,
+                        activation_count=activation_count,
+                        reason=f"Effectiveness {eff:.2f} below rewrite threshold (0.5) with {activation_count} activations",  # noqa: E501
+                    )
+                )
             elif activation_count >= 30 and eff < 0.6:
-                candidates.append(EvolutionCandidate(
-                    id=p.id,
-                    name=p.name,
-                    category="investigate",
-                    effectiveness=eff,
-                    activation_count=activation_count,
-                    reason=f"High activation count ({activation_count}) but effectiveness {eff:.2f} below 0.6 — may be declining",
-                ))
+                candidates.append(
+                    EvolutionCandidate(
+                        id=p.id,
+                        name=p.name,
+                        category="investigate",
+                        effectiveness=eff,
+                        activation_count=activation_count,
+                        reason=f"High activation count ({activation_count}) but effectiveness {eff:.2f} below 0.6 — may be declining",  # noqa: E501
+                    )
+                )
             elif eff >= 0.85 and activation_count >= 10:
-                candidates.append(EvolutionCandidate(
-                    id=p.id,
-                    name=p.name,
-                    category="star",
-                    effectiveness=eff,
-                    activation_count=activation_count,
-                    reason=f"Effectiveness {eff:.2f} with {activation_count} activations — candidate for template",
-                ))
+                candidates.append(
+                    EvolutionCandidate(
+                        id=p.id,
+                        name=p.name,
+                        category="star",
+                        effectiveness=eff,
+                        activation_count=activation_count,
+                        reason=f"Effectiveness {eff:.2f} with {activation_count} activations — candidate for template",
+                    )
+                )
 
         return candidates
 
@@ -445,9 +453,7 @@ class ProcedureManager:
     # get_effectiveness() — F037 diagnostic helper
     # ------------------------------------------------------------------
 
-    async def get_effectiveness(
-        self, procedure_id: UUID, session: AsyncSession | None = None
-    ) -> float | None:
+    async def get_effectiveness(self, procedure_id: UUID, session: AsyncSession | None = None) -> float | None:
         """Return Laplace-smoothed effectiveness for a procedure, or None if no outcome data."""
         if session is None:
             async with self.db.session() as session:
@@ -481,6 +487,7 @@ class ProcedureManager:
 
     async def _list_all(self, limit, offset, domain, active_only, min_activations, session):
         from sqlalchemy import func as sa_func
+
         conditions = [Procedure.agent_id == self.agent_id]
         if active_only:
             conditions.append(Procedure.active == True)  # noqa: E712
@@ -492,8 +499,7 @@ class ProcedureManager:
         count_q = select(sa_func.count()).select_from(Procedure).where(*conditions)
         total = (await session.execute(count_q)).scalar() or 0
 
-        q = (select(Procedure).where(*conditions)
-             .order_by(Procedure.created_at.desc()).limit(limit).offset(offset))
+        q = select(Procedure).where(*conditions).order_by(Procedure.created_at.desc()).limit(limit).offset(offset)
         result = await session.execute(q)
         procs = list(result.scalars().all())
 
@@ -501,7 +507,9 @@ class ProcedureManager:
         # NOTE: No success_count/failure_count fields. Compute effectiveness from counts.
         summaries = [
             ProcedureSummary(
-                id=p.id, name=p.name, domain=p.domain,
+                id=p.id,
+                name=p.name,
+                domain=p.domain,
                 description=p.description,
                 activation_count=p.activation_count or 0,
                 effectiveness=self._compute_effectiveness(p),
@@ -515,7 +523,9 @@ class ProcedureManager:
     # ------------------------------------------------------------------
 
     async def get_low_effectiveness(
-        self, threshold: float = 0.5, session: AsyncSession | None = None,
+        self,
+        threshold: float = 0.5,
+        session: AsyncSession | None = None,
     ) -> list[ProcedureSummary]:
         """Return active procedures with effectiveness below threshold.
 
@@ -528,12 +538,12 @@ class ProcedureManager:
         return await self._get_low_effectiveness(threshold, session)
 
     async def _get_low_effectiveness(
-        self, threshold: float, session: AsyncSession,
+        self,
+        threshold: float,
+        session: AsyncSession,
     ) -> list[ProcedureSummary]:
         result = await session.execute(
-            select(Procedure)
-            .where(Procedure.agent_id == self.agent_id)
-            .where(Procedure.active == True)  # noqa: E712
+            select(Procedure).where(Procedure.agent_id == self.agent_id).where(Procedure.active == True)  # noqa: E712
         )
         procedures = list(result.scalars().all())
 
@@ -541,14 +551,16 @@ class ProcedureManager:
         for p in procedures:
             eff = self._compute_effectiveness(p)
             if eff is not None and eff < threshold:
-                low.append(ProcedureSummary(
-                    id=p.id,
-                    name=p.name,
-                    domain=p.domain,
-                    description=p.description,
-                    activation_count=p.activation_count or 0,
-                    effectiveness=eff,
-                ))
+                low.append(
+                    ProcedureSummary(
+                        id=p.id,
+                        name=p.name,
+                        domain=p.domain,
+                        description=p.description,
+                        activation_count=p.activation_count or 0,
+                        effectiveness=eff,
+                    )
+                )
         return low
 
     # ------------------------------------------------------------------
@@ -613,17 +625,19 @@ class ProcedureManager:
             return 0
 
         result = await session.execute(
-            select(Procedure)
-            .where(Procedure.agent_id == self.agent_id)
-            .where(Procedure.active == True)  # noqa: E712
+            select(Procedure).where(Procedure.agent_id == self.agent_id).where(Procedure.active == True)  # noqa: E712
         )
         procedures = list(result.scalars().all())
 
         count = 0
         for proc in procedures:
             embed_text = _build_embed_text(
-                proc.name, proc.description, proc.core_patterns,
-                proc.goals, proc.core_tools, proc.core_concepts,
+                proc.name,
+                proc.description,
+                proc.core_patterns,
+                proc.goals,
+                proc.core_tools,
+                proc.core_concepts,
                 proc.implementation_notes,
             )
             try:

@@ -23,7 +23,6 @@ from nous.brain.guardrails import (
 from nous.brain.schemas import GuardrailResult
 from nous.storage.models import Guardrail
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -276,53 +275,39 @@ class TestEvaluate:
 
     def test_compound_true(self):
         activation = default_activation(stakes="high", confidence=0.3)
-        assert self.engine._evaluate(
-            "decision.stakes == 'high' && decision.confidence < 0.5", activation
-        ) is True
+        assert self.engine._evaluate("decision.stakes == 'high' && decision.confidence < 0.5", activation) is True
 
     def test_compound_false_when_confidence_high(self):
         activation = default_activation(stakes="high", confidence=0.8)
-        assert self.engine._evaluate(
-            "decision.stakes == 'high' && decision.confidence < 0.5", activation
-        ) is False
+        assert self.engine._evaluate("decision.stakes == 'high' && decision.confidence < 0.5", activation) is False
 
     def test_timeout_block_fails_closed(self):
         activation = default_activation()
-        with patch.object(
-            concurrent.futures.Future, "result", side_effect=concurrent.futures.TimeoutError
-        ):
+        with patch.object(concurrent.futures.Future, "result", side_effect=concurrent.futures.TimeoutError):
             result = self.engine._evaluate("true", activation, severity="block")
         assert result is True
 
     def test_timeout_absolute_fails_closed(self):
         activation = default_activation()
-        with patch.object(
-            concurrent.futures.Future, "result", side_effect=concurrent.futures.TimeoutError
-        ):
+        with patch.object(concurrent.futures.Future, "result", side_effect=concurrent.futures.TimeoutError):
             result = self.engine._evaluate("true", activation, severity="absolute")
         assert result is True
 
     def test_timeout_warn_fails_open(self):
         activation = default_activation()
-        with patch.object(
-            concurrent.futures.Future, "result", side_effect=concurrent.futures.TimeoutError
-        ):
+        with patch.object(concurrent.futures.Future, "result", side_effect=concurrent.futures.TimeoutError):
             result = self.engine._evaluate("true", activation, severity="warn")
         assert result is False
 
     def test_error_block_fails_closed(self):
         activation = default_activation()
-        with patch.object(
-            concurrent.futures.Future, "result", side_effect=RuntimeError("boom")
-        ):
+        with patch.object(concurrent.futures.Future, "result", side_effect=RuntimeError("boom")):
             result = self.engine._evaluate("true", activation, severity="block")
         assert result is True
 
     def test_error_warn_fails_open(self):
         activation = default_activation()
-        with patch.object(
-            concurrent.futures.Future, "result", side_effect=RuntimeError("boom")
-        ):
+        with patch.object(concurrent.futures.Future, "result", side_effect=RuntimeError("boom")):
             result = self.engine._evaluate("true", activation, severity="warn")
         assert result is False
 
@@ -525,9 +510,7 @@ class TestCheck:
             severity="block",
         )
         session = make_session([g])
-        result = await engine.check(
-            session, "agent-1", "do it", "low", 0.9, context={"risky": True}
-        )
+        result = await engine.check(session, "agent-1", "do it", "low", 0.9, context={"risky": True})
         assert result.allowed is False
 
     async def test_legacy_jsonb_condition_in_check(self):

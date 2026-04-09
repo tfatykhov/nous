@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
+from nous.observability.drift import DriftDetector
 from nous.observability.snapshots import BehaviorSnapshot
-from nous.observability.drift import Anomaly, DriftDetector
-
 
 # ------------------------------------------------------------------
 # BehaviorSnapshot tests
@@ -50,13 +47,33 @@ class TestBehaviorSnapshot:
         d = snap.to_metrics_dict()
         # Should have all numeric fields (excluding timestamp and interval_changes)
         expected_keys = {
-            "fact_count", "fact_count_delta", "episode_count", "episode_count_delta",
-            "active_censor_count", "active_censor_delta", "procedure_count", "decision_count",
-            "facts_admitted", "facts_rejected_dedup", "facts_rejected_admission", "admission_rate",
-            "checks_run", "findings_created", "findings_resolved", "triage_sessions_opened",
-            "sleep_ran", "episodes_compacted", "facts_pruned", "contradictions_resolved",
-            "events_processed", "events_dropped", "handler_error_count", "handler_error_rate",
-            "turns_processed", "avg_turn_latency_ms", "tool_calls",
+            "fact_count",
+            "fact_count_delta",
+            "episode_count",
+            "episode_count_delta",
+            "active_censor_count",
+            "active_censor_delta",
+            "procedure_count",
+            "decision_count",
+            "facts_admitted",
+            "facts_rejected_dedup",
+            "facts_rejected_admission",
+            "admission_rate",
+            "checks_run",
+            "findings_created",
+            "findings_resolved",
+            "triage_sessions_opened",
+            "sleep_ran",
+            "episodes_compacted",
+            "facts_pruned",
+            "contradictions_resolved",
+            "events_processed",
+            "events_dropped",
+            "handler_error_count",
+            "handler_error_rate",
+            "turns_processed",
+            "avg_turn_latency_ms",
+            "tool_calls",
         }
         assert set(d.keys()) == expected_keys
 
@@ -157,6 +174,7 @@ class TestBehaviorDriftCheck:
     def test_initialization_and_name(self):
         """Check can be instantiated with minimal args."""
         from unittest.mock import MagicMock
+
         from nous.heartbeat.checks import BehaviorDriftCheck
 
         mock_heart = MagicMock()
@@ -176,6 +194,7 @@ class TestBehaviorDriftCheck:
     def test_default_interval(self):
         """Falls back to 3600 if setting is missing."""
         from unittest.mock import MagicMock
+
         from nous.heartbeat.checks import BehaviorDriftCheck
 
         mock_settings = MagicMock(spec=[])  # No attributes

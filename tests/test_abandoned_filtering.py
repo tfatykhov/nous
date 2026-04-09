@@ -5,7 +5,7 @@ Fix 1b: CalibrationEngine excludes abandoned from Brier score
 Fix 2:  Episodes exclude outcome='abandoned' from list/search/format
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -15,9 +15,8 @@ from nous.brain.brain import Brain
 from nous.brain.calibration import CalibrationEngine
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.context import ContextEngine
-from nous.heart import EpisodeInput, EpisodeSummary
-from nous.storage.models import Decision, Episode
-
+from nous.heart import EpisodeInput
+from nous.storage.models import Decision
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -214,7 +213,9 @@ async def test_list_episodes_returns_abandoned_when_explicitly_requested(heart, 
     results = await heart.list_episodes(limit=50, outcome="abandoned", session=session)
     result_ids = {r.id for r in results}
 
-    assert abandoned.id in result_ids, "Abandoned episode should appear when outcome='abandoned' is explicitly requested"
+    assert abandoned.id in result_ids, (
+        "Abandoned episode should appear when outcome='abandoned' is explicitly requested"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -265,17 +266,17 @@ def test_format_episodes_skips_abandoned():
         SimpleNamespace(
             outcome="success",
             summary="Completed task",
-            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
         ),
         SimpleNamespace(
             outcome="abandoned",
             summary="Should not appear",
-            started_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            started_at=datetime(2026, 1, 2, tzinfo=UTC),
         ),
         SimpleNamespace(
             outcome="ongoing",
             summary="Still in progress",
-            started_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            started_at=datetime(2026, 1, 3, tzinfo=UTC),
         ),
     ]
 
@@ -296,7 +297,7 @@ def test_format_episodes_handles_none_outcome():
         SimpleNamespace(
             outcome=None,
             summary="No outcome yet",
-            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
         ),
     ]
 

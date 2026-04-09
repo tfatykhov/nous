@@ -7,11 +7,11 @@ memory operations, filter results, and return shaped data — reducing
 token consumption compared to separate tool calls.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from nous.config import Settings
+import pytest
 
+from nous.config import Settings
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -212,9 +212,7 @@ class TestRunPythonSafeBuiltins:
 
     @pytest.mark.asyncio
     async def test_dict_and_list(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = list(dict(a=1, b=2).keys())"
-        )
+        result = await run_python_tool(code="result = list(dict(a=1, b=2).keys())")
         text = result["content"][0]["text"]
         assert "a" in text and "b" in text
 
@@ -225,24 +223,18 @@ class TestRunPythonSafeBuiltins:
 
     @pytest.mark.asyncio
     async def test_range_enumerate_zip(self, run_python_tool):
-        result = await run_python_tool(
-            code='result = list(zip(range(3), ["a","b","c"]))'
-        )
+        result = await run_python_tool(code='result = list(zip(range(3), ["a","b","c"]))')
         text = result["content"][0]["text"]
         assert "0" in text and "a" in text
 
     @pytest.mark.asyncio
     async def test_max_min_sum(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = (max([1,5,3]), min([1,5,3]), sum([1,5,3]))"
-        )
+        result = await run_python_tool(code="result = (max([1,5,3]), min([1,5,3]), sum([1,5,3]))")
         assert result["content"][0]["text"] == "(5, 1, 9)"
 
     @pytest.mark.asyncio
     async def test_map_filter(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = list(filter(lambda x: x > 2, [1, 2, 3, 4]))"
-        )
+        result = await run_python_tool(code="result = list(filter(lambda x: x > 2, [1, 2, 3, 4]))")
         assert result["content"][0]["text"] == "[3, 4]"
 
 
@@ -312,16 +304,12 @@ class TestRunPythonSafeModules:
 
     @pytest.mark.asyncio
     async def test_json_loads(self, run_python_tool):
-        result = await run_python_tool(
-            code='d = json.loads(\'{"x": 42}\'); result = d["x"]'
-        )
+        result = await run_python_tool(code='d = json.loads(\'{"x": 42}\'); result = d["x"]')
         assert result["content"][0]["text"] == "42"
 
     @pytest.mark.asyncio
     async def test_re_match(self, run_python_tool):
-        result = await run_python_tool(
-            code='result = bool(re.match(r"\\d+", "123"))'
-        )
+        result = await run_python_tool(code='result = bool(re.match(r"\\d+", "123"))')
         assert result["content"][0]["text"] == "True"
 
     @pytest.mark.asyncio
@@ -331,37 +319,27 @@ class TestRunPythonSafeModules:
 
     @pytest.mark.asyncio
     async def test_datetime_now(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = type(datetime.datetime.now()).__name__"
-        )
+        result = await run_python_tool(code="result = type(datetime.datetime.now()).__name__")
         assert result["content"][0]["text"] == "datetime"
 
     @pytest.mark.asyncio
     async def test_collections_counter(self, run_python_tool):
-        result = await run_python_tool(
-            code="c = collections.Counter([1,1,2]); result = c[1]"
-        )
+        result = await run_python_tool(code="c = collections.Counter([1,1,2]); result = c[1]")
         assert result["content"][0]["text"] == "2"
 
     @pytest.mark.asyncio
     async def test_itertools_chain(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = list(itertools.chain([1,2], [3,4]))"
-        )
+        result = await run_python_tool(code="result = list(itertools.chain([1,2], [3,4]))")
         assert result["content"][0]["text"] == "[1, 2, 3, 4]"
 
     @pytest.mark.asyncio
     async def test_functools_reduce(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = functools.reduce(lambda a, b: a+b, [1,2,3])"
-        )
+        result = await run_python_tool(code="result = functools.reduce(lambda a, b: a+b, [1,2,3])")
         assert result["content"][0]["text"] == "6"
 
     @pytest.mark.asyncio
     async def test_statistics_mean(self, run_python_tool):
-        result = await run_python_tool(
-            code="result = statistics.mean([1, 2, 3, 4, 5])"
-        )
+        result = await run_python_tool(code="result = statistics.mean([1, 2, 3, 4, 5])")
         assert result["content"][0]["text"] == "3"
 
 
@@ -376,36 +354,28 @@ class TestRunPythonMemoryWrappers:
     @pytest.mark.asyncio
     async def test_recall_deep_calls_search_facts(self, run_python_tool, mock_heart):
         """recall_deep calls heart.search_facts with correct args."""
-        result = await run_python_tool(
-            code='facts = recall_deep("caching", limit=3)\nresult = json.dumps(len(facts))'
-        )
+        result = await run_python_tool(code='facts = recall_deep("caching", limit=3)\nresult = json.dumps(len(facts))')
         mock_heart.search_facts.assert_called_once_with("caching", limit=3)
         assert result["content"][0]["text"] == "2"
 
     @pytest.mark.asyncio
     async def test_recall_recent_calls_list_episodes(self, run_python_tool, mock_heart):
         """recall_recent calls heart.list_episodes with correct args."""
-        result = await run_python_tool(
-            code='eps = recall_recent(hours=12, limit=5)\nresult = json.dumps(len(eps))'
-        )
+        result = await run_python_tool(code="eps = recall_recent(hours=12, limit=5)\nresult = json.dumps(len(eps))")
         mock_heart.list_episodes.assert_called_once_with(limit=5, hours=12)
         assert result["content"][0]["text"] == "1"
 
     @pytest.mark.asyncio
     async def test_list_tasks_calls_subtasks(self, run_python_tool, mock_heart):
         """list_tasks calls heart.subtasks.list with correct args."""
-        result = await run_python_tool(
-            code='tasks = list_tasks(status="completed")\nresult = json.dumps(len(tasks))'
-        )
+        result = await run_python_tool(code='tasks = list_tasks(status="completed")\nresult = json.dumps(len(tasks))')
         mock_heart.subtasks.list.assert_called_once_with(status="completed")
         assert result["content"][0]["text"] == "1"
 
     @pytest.mark.asyncio
     async def test_learn_fact_calls_heart_learn(self, run_python_tool, mock_heart):
         """learn_fact calls heart.learn and returns confirmation."""
-        result = await run_python_tool(
-            code='msg = learn_fact("Redis is fast", category="technical")\nresult = msg'
-        )
+        result = await run_python_tool(code='msg = learn_fact("Redis is fast", category="technical")\nresult = msg')
         mock_heart.learn.assert_called_once()
         assert "stored" in result["content"][0]["text"]
 
@@ -468,9 +438,7 @@ class TestRunPythonTimeout:
         )
         from nous.api.tools import create_programmatic_tools
 
-        tools = create_programmatic_tools(
-            AsyncMock(), AsyncMock(), short_settings
-        )
+        tools = create_programmatic_tools(AsyncMock(), AsyncMock(), short_settings)
         # while loop with increment is slow in CPython (~15s for 10**8)
         result = await tools["run_python"](code="x = 0\nwhile x < 10**8: x += 1")
         text = result["content"][0]["text"]

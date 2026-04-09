@@ -181,25 +181,27 @@ class MonitorEngine:
                 if tr.error and not self._is_transient_error(tr.error):
                     if session_id not in self._last_errors:
                         self._last_errors[session_id] = []
-                    self._last_errors[session_id].append({
-                        "tool": tr.tool_name,
-                        "error": tr.error[:200],
-                    })
+                    self._last_errors[session_id].append(
+                        {
+                            "tool": tr.tool_name,
+                            "error": tr.error[:200],
+                        }
+                    )
         elif self._last_errors.get(session_id):
             # Successful turn after errors = recovery
-            recovery_tools = [
-                tr.tool_name for tr in turn_result.tool_results if not tr.error
-            ]
+            recovery_tools = [tr.tool_name for tr in turn_result.tool_results if not tr.error]
             if recovery_tools:
                 pending = self._last_errors.pop(session_id, [])
                 if session_id not in self._error_recovery_pairs:
                     self._error_recovery_pairs[session_id] = []
                 for err_info in pending:
-                    self._error_recovery_pairs[session_id].append({
-                        "error": err_info,
-                        "recovery": recovery_tools,
-                        "context": turn_result.response_text[:200],
-                    })
+                    self._error_recovery_pairs[session_id].append(
+                        {
+                            "error": err_info,
+                            "recovery": recovery_tools,
+                            "context": turn_result.response_text[:200],
+                        }
+                    )
 
                 # Check if trigger count reached
                 pairs = self._error_recovery_pairs[session_id]
@@ -245,18 +247,12 @@ class MonitorEngine:
         error_lower = error.lower()
         return any(pattern in error_lower for pattern in _TRANSIENT_PATTERNS)
 
-    async def _try_create_recovery_procedure(
-        self, session_id: str, pairs: list[dict]
-    ) -> None:
+    async def _try_create_recovery_procedure(self, session_id: str, pairs: list[dict]) -> None:
         """F012: Create a recovery procedure from error→recovery pairs."""
         from nous.handlers.procedure_learner import _MONITOR_RECOVERY_PROMPT
 
-        error_summary = "; ".join(
-            f"{p['error']['tool']}:{p['error']['error'][:50]}" for p in pairs[:5]
-        )
-        recovery_summary = "; ".join(
-            f"{','.join(p['recovery'])}" for p in pairs[:5]
-        )
+        error_summary = "; ".join(f"{p['error']['tool']}:{p['error']['error'][:50]}" for p in pairs[:5])
+        recovery_summary = "; ".join(f"{','.join(p['recovery'])}" for p in pairs[:5])
 
         result = await self._procedure_learner._call_llm(
             _MONITOR_RECOVERY_PROMPT.format(
@@ -269,6 +265,7 @@ class MonitorEngine:
             stored = await self._procedure_learner._is_duplicate(result)
             if not stored:
                 from nous.heart.schemas import ProcedureInput
+
                 tags = result.get("tags", [])
                 tags.append("auto:monitor_recovery")
                 proc_input = ProcedureInput(

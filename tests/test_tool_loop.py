@@ -17,7 +17,6 @@ from nous.api.tools import ToolDispatcher
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.config import Settings
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -34,12 +33,14 @@ def _make_api_response(
         content.append({"type": "text", "text": text})
     if tool_uses:
         for tu in tool_uses:
-            content.append({
-                "type": "tool_use",
-                "id": tu.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
-                "name": tu["name"],
-                "input": tu.get("input", {}),
-            })
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": tu.get("id", f"toolu_{uuid.uuid4().hex[:12]}"),
+                    "name": tu["name"],
+                    "input": tu.get("input", {}),
+                }
+            )
     return ApiResponse(content=content, stop_reason=stop_reason)
 
 
@@ -59,8 +60,10 @@ class MockCognitiveLayer:
         return TurnContext(
             system_prompt="test",
             frame=FrameSelection(
-                frame_id="task", frame_name="Task",
-                confidence=0.9, match_method="default",
+                frame_id="task",
+                frame_name="Task",
+                confidence=0.9,
+                match_method="default",
             ),
         )
 
@@ -105,23 +108,31 @@ def echo_dispatcher():
     async def echo_tool(message: str = "default") -> dict:
         return {"content": [{"type": "text", "text": f"Echo: {message}"}]}
 
-    dispatcher.register("echo", echo_tool, {
-        "type": "object",
-        "description": "Echo tool",
-        "properties": {"message": {"type": "string"}},
-        "required": ["message"],
-    })
+    dispatcher.register(
+        "echo",
+        echo_tool,
+        {
+            "type": "object",
+            "description": "Echo tool",
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+        },
+    )
 
     # Register a second tool for parallel dispatch tests
     async def add_tool(a: float = 0, b: float = 0) -> dict:
         return {"content": [{"type": "text", "text": str(a + b)}]}
 
-    dispatcher.register("add", add_tool, {
-        "type": "object",
-        "description": "Add tool",
-        "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
-        "required": ["a", "b"],
-    })
+    dispatcher.register(
+        "add",
+        add_tool,
+        {
+            "type": "object",
+            "description": "Add tool",
+            "properties": {"a": {"type": "number"}, "b": {"type": "number"}},
+            "required": ["a", "b"],
+        },
+    )
 
     return dispatcher
 
@@ -150,10 +161,12 @@ class TestToolLoop:
     @pytest.mark.asyncio
     async def test_tool_loop_end_turn(self, loop_runner):
         """API returns end_turn on first call -> single API call, text extracted."""
-        loop_runner._call_api = AsyncMock(return_value=_make_api_response(
-            text="Simple response",
-            stop_reason="end_turn",
-        ))
+        loop_runner._call_api = AsyncMock(
+            return_value=_make_api_response(
+                text="Simple response",
+                stop_reason="end_turn",
+            )
+        )
 
         conv = _make_conversation([("user", "Hello")])
         response_text, tool_results, _usage, _ = await loop_runner._tool_loop(
@@ -231,10 +244,12 @@ class TestToolLoop:
     @pytest.mark.asyncio
     async def test_tool_loop_max_tokens(self, loop_runner):
         """API returns max_tokens stop_reason -> loop breaks, text extracted."""
-        loop_runner._call_api = AsyncMock(return_value=_make_api_response(
-            text="Partial response due to token limit",
-            stop_reason="max_tokens",
-        ))
+        loop_runner._call_api = AsyncMock(
+            return_value=_make_api_response(
+                text="Partial response due to token limit",
+                stop_reason="max_tokens",
+            )
+        )
 
         conv = _make_conversation([("user", "Long request")])
         response_text, tool_results, _usage, _ = await loop_runner._tool_loop(

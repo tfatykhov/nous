@@ -2,9 +2,8 @@
 
 import pytest
 
-from tests.conftest import MockEmbeddingProvider
 from nous.cognitive.dedup import ConversationDeduplicator
-
+from tests.conftest import MockEmbeddingProvider
 
 # ---------------------------------------------------------------------------
 # No conversation messages

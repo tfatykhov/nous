@@ -1,6 +1,7 @@
 """Tests for 4-tier pruning with metadata degradation (F016 Phase 1)."""
 
 import pytest
+
 from nous.api.compaction import ConversationCompactor
 from nous.config import Settings
 
@@ -79,8 +80,9 @@ class TestFourTierPruning:
         messages = []
         for i in range(n_tool_msgs):
             asst, user = _make_tool_msg(
-                tool_name, {"command": f"cmd_{i}"},
-                f"import os\n" + f"line {i}\n" * (content_size // 10),
+                tool_name,
+                {"command": f"cmd_{i}"},
+                "import os\n" + f"line {i}\n" * (content_size // 10),
                 tool_use_id=f"tu_{i}",
             )
             messages.extend([asst, user])
@@ -100,11 +102,15 @@ class TestFourTierPruning:
         messages = self._make_session(16)
         c.prune_tool_results(messages)
         # Oldest tool result (position 0, age 16) should be cleared
-        tool_msgs = [m for m in messages if m.get("role") == "user"
-                     and isinstance(m.get("content"), list)
-                     and len(m["content"]) > 0
-                     and isinstance(m["content"][0], dict)
-                     and m["content"][0].get("type") == "tool_result"]
+        tool_msgs = [
+            m
+            for m in messages
+            if m.get("role") == "user"
+            and isinstance(m.get("content"), list)
+            and len(m["content"]) > 0
+            and isinstance(m["content"][0], dict)
+            and m["content"][0].get("type") == "tool_result"
+        ]
         cleared = tool_msgs[0]["content"][0]["content"]
         assert "cleared" in cleared.lower()
 
@@ -113,11 +119,15 @@ class TestFourTierPruning:
         c = ConversationCompactor(s)
         messages = self._make_session(14)
         c.prune_tool_results(messages)
-        tool_msgs = [m for m in messages if m.get("role") == "user"
-                     and isinstance(m.get("content"), list)
-                     and len(m["content"]) > 0
-                     and isinstance(m["content"][0], dict)
-                     and m["content"][0].get("type") == "tool_result"]
+        tool_msgs = [
+            m
+            for m in messages
+            if m.get("role") == "user"
+            and isinstance(m.get("content"), list)
+            and len(m["content"]) > 0
+            and isinstance(m["content"][0], dict)
+            and m["content"][0].get("type") == "tool_result"
+        ]
         # Find one in the metadata-degraded range (age 8-11)
         # With 14 tool msgs and keep_last=2, tool_msgs[4] has age 10
         degraded = tool_msgs[4]["content"][0]["content"]

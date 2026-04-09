@@ -61,7 +61,9 @@ class AgentIdentity(Base):
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_by: Mapped[str | None] = mapped_column(String(50))
-    previous_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("nous_system.agent_identity.id"))
+    previous_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nous_system.agent_identity.id")
+    )
 
 
 class Frame(Base):
@@ -544,7 +546,9 @@ class OutcomeSignal(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(String(100), ForeignKey("nous_system.agents.id"), nullable=False)
-    episode_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("heart.episodes.id", ondelete="CASCADE"), nullable=False)
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("heart.episodes.id", ondelete="CASCADE"), nullable=False
+    )
     signal_type: Mapped[str] = mapped_column(String(30), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.5")
     evidence: Mapped[str | None] = mapped_column(Text)
@@ -650,9 +654,7 @@ class Subtask(Base):
         {"schema": "heart"},
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     parent_session_id: Mapped[str | None] = mapped_column(String(200))
     task: Mapped[str] = mapped_column(Text, nullable=False)
@@ -669,9 +671,7 @@ class Subtask(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSONB, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
 
 
 class Schedule(Base):
@@ -686,9 +686,7 @@ class Schedule(Base):
         {"schema": "heart"},
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     task: Mapped[str] = mapped_column(Text, nullable=False)
     schedule_type: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -704,9 +702,7 @@ class Schedule(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, server_default="120")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     created_by_session: Mapped[str | None] = mapped_column(String(200))
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSONB, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
     model: Mapped[str | None] = mapped_column(String(100))
     frame_type: Mapped[str | None] = mapped_column(String(20))
 
@@ -720,18 +716,14 @@ class ToolCache(Base):
         {"schema": "heart"},
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(Text, nullable=False)
     session_id: Mapped[str] = mapped_column(Text, nullable=False)
     hash_key: Mapped[str] = mapped_column(Text, nullable=False)
     tool_name: Mapped[str] = mapped_column(Text, nullable=False)
     tool_input: Mapped[dict | None] = mapped_column(JSONB)
     original_content: Mapped[str] = mapped_column(Text, nullable=False)
-    compressed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    compressed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     item_count: Mapped[int | None] = mapped_column(Integer)
 
 
@@ -741,9 +733,7 @@ class DynamicCheckModel(Base):
     __tablename__ = "dynamic_checks"
     __table_args__ = {"schema": "nous_system"}
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(String, nullable=False, default="nous")
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(String, nullable=False)
@@ -754,21 +744,13 @@ class DynamicCheckModel(Base):
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=30)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     urgent: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_by: Mapped[str] = mapped_column(String, default="conversation")
-    last_run_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     run_count: Mapped[int] = mapped_column(Integer, default=0)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(String, nullable=True)
     on_complete_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     on_complete_tools: Mapped[list] = mapped_column(ARRAY(String), nullable=False, server_default="{}")
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSONB, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, server_default="{}")

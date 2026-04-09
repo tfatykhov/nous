@@ -1,12 +1,11 @@
 """Tests for ReversibleCache — Postgres-backed tool result cache."""
 
 import json
-import pytest
 
 from nous.api.tool_cache import (
-    compute_hash_key,
-    _keyword_filter,
     NON_REFETCHABLE_TOOLS,
+    _keyword_filter,
+    compute_hash_key,
 )
 from nous.api.tools import CACHE_RETRIEVE_TOOL_DEF
 
@@ -110,20 +109,25 @@ class TestCacheRetrieveToolDef:
 class TestFrameToolAccess:
     def test_cache_retrieve_in_conversation_frame(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert "cache_retrieve" in FRAME_TOOLS["conversation"]
 
     def test_cache_retrieve_in_question_frame(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert "cache_retrieve" in FRAME_TOOLS["question"]
 
     def test_cache_retrieve_in_decision_frame(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert "cache_retrieve" in FRAME_TOOLS["decision"]
 
     def test_cache_retrieve_in_debug_frame(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert "cache_retrieve" in FRAME_TOOLS["debug"]
 
     def test_cache_retrieve_in_task_via_wildcard(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert "*" in FRAME_TOOLS["task"]  # wildcard covers all

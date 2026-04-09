@@ -3,11 +3,9 @@
 Tests use mocks to verify wiring without requiring Postgres.
 """
 
-from dataclasses import dataclass, field
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fix 1: Brain._emit_event session_id
@@ -72,9 +70,7 @@ class TestPersistToDb:
         event = Event(type="turn_completed", agent_id="test", session_id="sess-456", data={"frame": "task"})
         await persist_to_db(event)
 
-        brain.emit_event.assert_awaited_once_with(
-            "turn_completed", {"frame": "task"}, session_id="sess-456"
-        )
+        brain.emit_event.assert_awaited_once_with("turn_completed", {"frame": "task"}, session_id="sess-456")
 
 
 # ---------------------------------------------------------------------------
@@ -87,8 +83,9 @@ class TestTelegramUserIdentity:
 
     def test_chat_streaming_accepts_user_params(self):
         """_chat_streaming signature accepts user_id and user_display_name."""
-        from nous.telegram_bot import NousTelegramBot
         import inspect
+
+        from nous.telegram_bot import NousTelegramBot
 
         sig = inspect.signature(NousTelegramBot._chat_streaming)
         params = list(sig.parameters.keys())
@@ -110,20 +107,22 @@ class TestRestUserIdentity:
         from starlette.testclient import TestClient
 
         runner = MagicMock()
-        runner.run_turn = AsyncMock(return_value=(
-            "Hello!",
-            MagicMock(
-                frame=MagicMock(frame_id="conversation"),
-                decision_id=None,
-                active_censors=[],
-                recalled_decision_ids=[],
-                recalled_fact_ids=[],
-                recalled_episode_ids=[],
-                context_token_estimate=100,
-                system_prompt="test",
-            ),
-            {"input_tokens": 10, "output_tokens": 20},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                "Hello!",
+                MagicMock(
+                    frame=MagicMock(frame_id="conversation"),
+                    decision_id=None,
+                    active_censors=[],
+                    recalled_decision_ids=[],
+                    recalled_fact_ids=[],
+                    recalled_episode_ids=[],
+                    context_token_estimate=100,
+                    system_prompt="test",
+                ),
+                {"input_tokens": 10, "output_tokens": 20},
+            )
+        )
 
         from nous.api.rest import create_app
 
@@ -137,11 +136,14 @@ class TestRestUserIdentity:
         )
 
         client = TestClient(app)
-        response = client.post("/chat", json={
-            "message": "hello",
-            "user_id": "tg-12345",
-            "user_display_name": "Tim",
-        })
+        response = client.post(
+            "/chat",
+            json={
+                "message": "hello",
+                "user_id": "tg-12345",
+                "user_display_name": "Tim",
+            },
+        )
 
         assert response.status_code == 200
         # Verify runner.run_turn was called with user identity
@@ -160,7 +162,7 @@ class TestLastActiveUpdate:
 
     def test_layer_imports_agent_model(self):
         """layer.py imports Agent model for last_active update."""
-        from nous.cognitive.layer import CognitiveLayer
         from nous.storage.models import Agent
+
         # If import works, the wiring is in place
         assert Agent is not None

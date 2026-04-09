@@ -13,9 +13,10 @@ import asyncio
 import logging
 import time
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable
+from typing import Any
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -35,13 +36,14 @@ class Event:
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     # F035.2: Causal chain fields
     event_id: str = field(default_factory=lambda: uuid4().hex[:12])
-    trace_id: str | None = None       # root cause identifier (shared across chain)
-    caused_by: str | None = None      # event_id of the direct parent event
+    trace_id: str | None = None  # root cause identifier (shared across chain)
+    caused_by: str | None = None  # event_id of the direct parent event
 
 
 @dataclass
 class HandlerStat:
     """Per-handler invocation statistics (F035.1)."""
+
     name: str
     invocations: int = 0
     successes: int = 0
@@ -63,6 +65,7 @@ class HandlerStat:
 @dataclass
 class RecentEvent:
     """Lightweight record for the ring buffer (F035.1)."""
+
     type: str
     timestamp: str
     handlers_invoked: int
@@ -90,14 +93,26 @@ class EventBusStats:
     def total_dropped(self) -> int:
         return self._total_dropped
 
-    def record_event(self, event_type: str, handlers_invoked: int, handlers_failed: int, duration_ms: float, session_id: str | None = None) -> None:
+    def record_event(
+        self,
+        event_type: str,
+        handlers_invoked: int,
+        handlers_failed: int,
+        duration_ms: float,
+        session_id: str | None = None,
+    ) -> None:
         self._total_processed += 1
         self._event_counts[event_type] += 1
-        self._recent.append(RecentEvent(
-            type=event_type, timestamp=datetime.now(UTC).isoformat(),
-            handlers_invoked=handlers_invoked, handlers_failed=handlers_failed,
-            duration_ms=duration_ms, session_id=session_id,
-        ))
+        self._recent.append(
+            RecentEvent(
+                type=event_type,
+                timestamp=datetime.now(UTC).isoformat(),
+                handlers_invoked=handlers_invoked,
+                handlers_failed=handlers_failed,
+                duration_ms=duration_ms,
+                session_id=session_id,
+            )
+        )
 
     def record_handler_success(self, handler_name: str, duration_ms: float) -> None:
         stat = self._handler_stats.setdefault(handler_name, HandlerStat(name=handler_name))
@@ -125,8 +140,10 @@ class EventBusStats:
         handlers = {}
         for name, stat in self._handler_stats.items():
             h: dict[str, Any] = {
-                "invocations": stat.invocations, "successes": stat.successes,
-                "errors": stat.errors, "error_rate": round(stat.error_rate, 3),
+                "invocations": stat.invocations,
+                "successes": stat.successes,
+                "errors": stat.errors,
+                "error_rate": round(stat.error_rate, 3),
                 "avg_duration_ms": round(stat.avg_duration_ms, 2),
             }
             if stat.last_invoked is not None:
@@ -219,7 +236,7 @@ class EventBus:
             try:
                 event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 await self._dispatch(event)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break

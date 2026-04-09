@@ -29,10 +29,18 @@ logger = logging.getLogger(__name__)
 # check creation is restricted to admin/conversation so risk is accepted.
 # heartbeat_check_create/manage enable autonomous sequential pipelines:
 # a check can spawn follow-up checks and disable itself when done.
-ALLOWED_TOOLS = frozenset({
-    "web_search", "web_fetch", "recall_deep", "recall_recent", "bash", "read_file",
-    "heartbeat_check_create", "heartbeat_check_manage",
-})
+ALLOWED_TOOLS = frozenset(
+    {
+        "web_search",
+        "web_fetch",
+        "recall_deep",
+        "recall_recent",
+        "bash",
+        "read_file",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+    }
+)
 
 MIN_INTERVAL_SECONDS = 300  # 5 minutes minimum
 CALLBACK_RETRY_DELAY_SECONDS = 30
@@ -94,9 +102,7 @@ class DynamicCheck(BaseCheck):
             return CheckResult()
 
         session_id = f"dynamic-check-{self.name}-{uuid4().hex[:8]}"
-        has_pipeline_tools = bool(
-            {"heartbeat_check_create", "heartbeat_check_manage"} & set(self._tools)
-        )
+        has_pipeline_tools = bool({"heartbeat_check_create", "heartbeat_check_manage"} & set(self._tools))
         pipeline_section = ""
         if has_pipeline_tools:
             pipeline_section = (
@@ -116,12 +122,13 @@ class DynamicCheck(BaseCheck):
             f"Respond with a JSON object:\n"
             f'{{"has_findings": bool, "findings": [{{"summary": "...", '
             f'"urgency": "high|normal|low", "needs_action": bool}}]}}\n\n'
-            f"If nothing noteworthy, return: {{\"has_findings\": false, \"findings\": []}}"
+            f'If nothing noteworthy, return: {{"has_findings": false, "findings": []}}'
         )
 
         try:
             response_text, _ctx, usage = await self._runner.run_turn(
-                session_id, instruction,
+                session_id,
+                instruction,
                 platform="heartbeat",
                 skip_episode=True,
                 is_subtask=True,
@@ -168,19 +175,21 @@ class DynamicCheck(BaseCheck):
             urgency = item.get("urgency", "normal")
             if urgency not in ("high", "normal", "low"):
                 urgency = "normal"
-            findings.append(Finding(
-                source=f"dynamic:{self.name}",
-                summary=summary[:200],
-                urgency=urgency,
-                needs_action=item.get("needs_action", False),
-                raw_data={"check_id": self.check_id, "dynamic": True},
-            ))
+            findings.append(
+                Finding(
+                    source=f"dynamic:{self.name}",
+                    summary=summary[:200],
+                    urgency=urgency,
+                    needs_action=item.get("needs_action", False),
+                    raw_data={"check_id": self.check_id, "dynamic": True},
+                )
+            )
 
         return findings
 
     def signature(self) -> str:
         """Return a signature string for change detection."""
-        return f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"
+        return f"{self.name}|{self._prompt}|{self._tools}|{self.interval}|{self.timeout}|{self.urgent_override}|{self._cron_expr}|{self.on_complete_prompt}|{self.on_complete_tools}"  # noqa: E501
 
 
 class DynamicCheckLoader:
@@ -240,7 +249,8 @@ class DynamicCheckLoader:
             existing = self._registry.get_check(name)
             if existing and name in self._registry._permanent:
                 logger.warning(
-                    "F034.5: Skipping dynamic check '%s' — collides with permanent check", name,
+                    "F034.5: Skipping dynamic check '%s' — collides with permanent check",
+                    name,
                 )
                 continue
 
@@ -298,7 +308,10 @@ class DynamicCheckLoader:
             return list(result.scalars().all())
 
     async def update_run_stats(
-        self, check_id: str, success: bool, error_msg: str | None = None,
+        self,
+        check_id: str,
+        success: bool,
+        error_msg: str | None = None,
     ) -> None:
         """Update run statistics in DB after a check execution."""
         from nous.storage.models import DynamicCheckModel
@@ -434,7 +447,10 @@ class DynamicCheckLoader:
         }
 
     async def manage_check(
-        self, action: str, name: str | None = None, updates: dict | None = None,
+        self,
+        action: str,
+        name: str | None = None,
+        updates: dict | None = None,
     ) -> dict[str, Any]:
         """List, enable, disable, delete, or update a dynamic check."""
         from nous.storage.models import DynamicCheckModel
@@ -491,9 +507,15 @@ class DynamicCheckLoader:
                 if not updates:
                     raise ValueError("No updates provided")
                 allowed_fields = {
-                    "description", "prompt", "tools", "interval_seconds",
-                    "cron_expr", "timeout_seconds", "urgent",
-                    "on_complete_prompt", "on_complete_tools",
+                    "description",
+                    "prompt",
+                    "tools",
+                    "interval_seconds",
+                    "cron_expr",
+                    "timeout_seconds",
+                    "urgent",
+                    "on_complete_prompt",
+                    "on_complete_tools",
                 }
                 for key, value in updates.items():
                     if key not in allowed_fields:
@@ -549,26 +571,27 @@ class DynamicCheckLoader:
         checks = []
         for row in rows:
             registry_check = self._registry.get_check(row.name)
-            checks.append({
-                "name": row.name,
-                "description": row.description,
-                "enabled": row.enabled,
-                "interval_seconds": row.interval_seconds,
-                "cron_expr": row.cron_expr,
-                "urgent": row.urgent,
-                "tools": row.tools or [],
-                "run_count": row.run_count,
-                "error_count": row.error_count,
-                "last_error": row.last_error,
-                "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "created_by": row.created_by,
-                "on_complete_prompt": (row.on_complete_prompt or "")[:200] if row.on_complete_prompt else None,
-                "on_complete_tools": row.on_complete_tools or [],
-                "circuit_breaker_open": (
-                    registry_check.consecutive_failures >= registry_check.max_failures
-                    if registry_check else False
-                ),
-            })
+            checks.append(
+                {
+                    "name": row.name,
+                    "description": row.description,
+                    "enabled": row.enabled,
+                    "interval_seconds": row.interval_seconds,
+                    "cron_expr": row.cron_expr,
+                    "urgent": row.urgent,
+                    "tools": row.tools or [],
+                    "run_count": row.run_count,
+                    "error_count": row.error_count,
+                    "last_error": row.last_error,
+                    "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "created_by": row.created_by,
+                    "on_complete_prompt": (row.on_complete_prompt or "")[:200] if row.on_complete_prompt else None,
+                    "on_complete_tools": row.on_complete_tools or [],
+                    "circuit_breaker_open": (
+                        registry_check.consecutive_failures >= registry_check.max_failures if registry_check else False
+                    ),
+                }
+            )
 
         return {"checks": checks, "count": len(checks), "max": self._max_checks}

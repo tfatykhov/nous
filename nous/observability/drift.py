@@ -16,24 +16,24 @@ class Anomaly:
     mean: float
     stddev: float
     z_score: float
-    direction: str   # "up" or "down"
-    severity: str    # "warning" or "alert"
+    direction: str  # "up" or "down"
+    severity: str  # "warning" or "alert"
 
 
 class DriftDetector:
     """Z-score based behavioral drift detection."""
 
     THRESHOLDS: dict[str, dict[str, Any]] = {
-        "fact_count_delta":        {"k": 2.0, "min_samples": 10},
-        "admission_rate":          {"k": 2.0, "min_samples": 10},
-        "active_censor_count":     {"k": 2.5, "min_samples": 10},
-        "active_censor_delta":     {"k": 2.5, "min_samples": 10},
-        "handler_error_rate":      {"k": 1.5, "min_samples": 5},
-        "handler_error_count":     {"k": 1.5, "min_samples": 5},
-        "events_dropped":          {"k": 1.5, "min_samples": 5},
-        "facts_pruned":            {"k": 2.0, "min_samples": 10},
-        "findings_created":        {"k": 2.0, "min_samples": 10},
-        "episodes_compacted":      {"k": 2.0, "min_samples": 10},
+        "fact_count_delta": {"k": 2.0, "min_samples": 10},
+        "admission_rate": {"k": 2.0, "min_samples": 10},
+        "active_censor_count": {"k": 2.5, "min_samples": 10},
+        "active_censor_delta": {"k": 2.5, "min_samples": 10},
+        "handler_error_rate": {"k": 1.5, "min_samples": 5},
+        "handler_error_count": {"k": 1.5, "min_samples": 5},
+        "events_dropped": {"k": 1.5, "min_samples": 5},
+        "facts_pruned": {"k": 2.0, "min_samples": 10},
+        "findings_created": {"k": 2.0, "min_samples": 10},
+        "episodes_compacted": {"k": 2.0, "min_samples": 10},
         "contradictions_resolved": {"k": 2.0, "min_samples": 10},
     }
 
@@ -55,9 +55,15 @@ class DriftDetector:
             z_score = (current_val - mean) / stddev
             if abs(z_score) > config["k"]:
                 severity = "alert" if abs(z_score) >= 3.0 else "warning"
-                anomalies.append(Anomaly(
-                    metric=metric, current=current_val, mean=round(mean, 2),
-                    stddev=round(stddev, 2), z_score=round(z_score, 2),
-                    direction="up" if z_score > 0 else "down", severity=severity,
-                ))
+                anomalies.append(
+                    Anomaly(
+                        metric=metric,
+                        current=current_val,
+                        mean=round(mean, 2),
+                        stddev=round(stddev, 2),
+                        z_score=round(z_score, 2),
+                        direction="up" if z_score > 0 else "down",
+                        severity=severity,
+                    )
+                )
         return anomalies

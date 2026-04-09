@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import pytest
-
 from nous.api.tools import ToolDispatcher
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_dispatcher() -> ToolDispatcher:
     """Create a ToolDispatcher with two registered dummy tools."""
@@ -20,12 +18,8 @@ def _make_dispatcher() -> ToolDispatcher:
     async def dummy(**kwargs):
         return {"content": [{"type": "text", "text": "ok"}]}
 
-    dispatcher.register(
-        "tool_a", dummy, {"description": "Tool A", "type": "object", "properties": {}}
-    )
-    dispatcher.register(
-        "tool_b", dummy, {"description": "Tool B", "type": "object", "properties": {}}
-    )
+    dispatcher.register("tool_a", dummy, {"description": "Tool A", "type": "object", "properties": {}})
+    dispatcher.register("tool_b", dummy, {"description": "Tool B", "type": "object", "properties": {}})
     return dispatcher
 
 
@@ -87,9 +81,7 @@ class TestToolSchemaCache:
             async def dummy(**kwargs):
                 return {"content": [{"type": "text", "text": "ok"}]}
 
-            dispatcher.register(
-                "tool_c", dummy, {"description": "Tool C", "type": "object", "properties": {}}
-            )
+            dispatcher.register("tool_c", dummy, {"description": "Tool C", "type": "object", "properties": {}})
             assert dispatcher._tool_schema_cache == {}
 
     def test_deep_copy_prevents_cache_corruption(self):

@@ -9,15 +9,14 @@ unknown tool handling, error propagation, tool definitions output,
 and frame-gated tool filtering.
 """
 
-import pytest
-import pytest_asyncio
 from unittest.mock import AsyncMock
 
-from nous.api.tools import create_nous_tools, ToolDispatcher
+import pytest
+import pytest_asyncio
+
+from nous.api.tools import ToolDispatcher, create_nous_tools
 from nous.brain.brain import Brain
 from nous.config import Settings
-from nous.heart import Heart
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

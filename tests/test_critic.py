@@ -1,6 +1,7 @@
 """Tests for F024 Critic Agent Phase 0."""
+
 import json
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -141,12 +142,19 @@ class TestCriticClassification:
         mock_api = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = [
-            {"type": "text", "text": json.dumps({
-                "complexity": "moderate", "routing": "single",
-                "frames": ["task"], "skills": [],
-                "rationale": "User wants to build something",
-                "per_frame_instructions": {},
-            })}
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "complexity": "moderate",
+                        "routing": "single",
+                        "frames": ["task"],
+                        "skills": [],
+                        "rationale": "User wants to build something",
+                        "per_frame_instructions": {},
+                    }
+                ),
+            }
         ]
         mock_api.call = AsyncMock(return_value=mock_response)
         agent.set_api_client(mock_api)
@@ -227,7 +235,10 @@ class TestCriticClassification:
         mock_api = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = [
-            {"type": "text", "text": '```json\n{"complexity":"simple","routing":"single","frames":["question"],"skills":[],"rationale":"Simple question","per_frame_instructions":{}}\n```'}
+            {
+                "type": "text",
+                "text": '```json\n{"complexity":"simple","routing":"single","frames":["question"],"skills":[],"rationale":"Simple question","per_frame_instructions":{}}\n```',  # noqa: E501
+            }
         ]
         mock_api.call = AsyncMock(return_value=mock_response)
         agent.set_api_client(mock_api)
@@ -245,11 +256,19 @@ class TestCriticClassification:
         mock_api = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = [
-            {"type": "text", "text": json.dumps({
-                "complexity": "simple", "routing": "single",
-                "frames": [], "skills": [], "rationale": "",
-                "per_frame_instructions": {},
-            })}
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "complexity": "simple",
+                        "routing": "single",
+                        "frames": [],
+                        "skills": [],
+                        "rationale": "",
+                        "per_frame_instructions": {},
+                    }
+                ),
+            }
         ]
         mock_api.call = AsyncMock(return_value=mock_response)
         agent.set_api_client(mock_api)
@@ -304,21 +323,26 @@ class TestDiagnosticCritics:
             {"tool": "bash", "args": "pytest"},
         ]
         results = agent.run_diagnostics(
-            tool_history, turn_number=1, current_frame="conversation",
+            tool_history,
+            turn_number=1,
+            current_frame="conversation",
         )
         assert any(d.fired and d.critic_name == "frame_mismatch" for d in results)
 
     def test_scope_creep_detector(self):
         agent = CriticAgent(_settings())
         results = agent.run_diagnostics(
-            [], turn_number=1, response_lengths=[100, 200, 500, 1200, 2500],
+            [],
+            turn_number=1,
+            response_lengths=[100, 200, 500, 1200, 2500],
         )
         assert any(d.fired and d.critic_name == "scope_creep" for d in results)
 
     def test_user_frustration_detector(self):
         agent = CriticAgent(_settings())
         results = agent.run_diagnostics(
-            [], turn_number=1,
+            [],
+            turn_number=1,
             recent_user_messages=["no", "I already said that", "no I meant the other one"],
         )
         assert any(d.fired and d.critic_name == "user_frustration" for d in results)
@@ -382,16 +406,32 @@ class TestSkillCatalog:
     async def test_build_catalog_from_procedures(self):
         """Catalog is built from active procedures with correct format."""
         from nous.heart.procedures import ProcedureManager
+
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
-        mock_pm.list_all = AsyncMock(return_value=([
-            ProcedureSummary(id=uuid4(), name="code-review", domain="process",
-                           description="Review pull requests", activation_count=5,
-                           effectiveness=0.85),
-            ProcedureSummary(id=uuid4(), name="debug-strategy", domain="engineering",
-                           description="Systematic debugging approach", activation_count=3,
-                           effectiveness=None),
-        ], 2))
+        mock_pm.list_all = AsyncMock(
+            return_value=(
+                [
+                    ProcedureSummary(
+                        id=uuid4(),
+                        name="code-review",
+                        domain="process",
+                        description="Review pull requests",
+                        activation_count=5,
+                        effectiveness=0.85,
+                    ),
+                    ProcedureSummary(
+                        id=uuid4(),
+                        name="debug-strategy",
+                        domain="engineering",
+                        description="Systematic debugging approach",
+                        activation_count=3,
+                        effectiveness=None,
+                    ),
+                ],
+                2,
+            )
+        )
         agent._procedure_manager = mock_pm
         catalog, valid_names = await agent._build_skill_catalog()
         assert "code-review" in catalog
@@ -412,6 +452,7 @@ class TestSkillCatalog:
     async def test_catalog_empty_procedures(self):
         """Empty procedure list returns safe default."""
         from nous.heart.procedures import ProcedureManager
+
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
         mock_pm.list_all = AsyncMock(return_value=([], 0))
@@ -424,6 +465,7 @@ class TestSkillCatalog:
     async def test_catalog_list_all_exception_degrades_gracefully(self):
         """list_all failure returns safe default."""
         from nous.heart.procedures import ProcedureManager
+
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
         mock_pm.list_all = AsyncMock(side_effect=RuntimeError("DB error"))
@@ -436,18 +478,29 @@ class TestSkillCatalog:
     async def test_catalog_escapes_curly_braces(self):
         """Curly braces in descriptions are escaped for .format()."""
         from nous.heart.procedures import ProcedureManager
+
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
-        mock_pm.list_all = AsyncMock(return_value=([
-            ProcedureSummary(id=uuid4(), name="template-skill", domain="general",
-                           description="Use {variable} syntax",
-                           activation_count=1, effectiveness=None),
-        ], 1))
+        mock_pm.list_all = AsyncMock(
+            return_value=(
+                [
+                    ProcedureSummary(
+                        id=uuid4(),
+                        name="template-skill",
+                        domain="general",
+                        description="Use {variable} syntax",
+                        activation_count=1,
+                        effectiveness=None,
+                    ),
+                ],
+                1,
+            )
+        )
         agent._procedure_manager = mock_pm
         catalog, valid_names = await agent._build_skill_catalog()
         # Should not raise when used in .format()
         test_template = "Skills:\n{skill_catalog}"
-        formatted = test_template.format(skill_catalog=catalog)
+        formatted = test_template.format(skill_catalog=catalog)  # noqa: F841
         assert "{{variable}}" in catalog
         assert "template-skill" in valid_names
 
@@ -457,41 +510,52 @@ class TestSkillFiltering:
 
     def test_hallucinated_skills_filtered(self):
         agent = CriticAgent(_settings())
-        raw_json = json.dumps({
-            "complexity": "moderate", "routing": "single",
-            "frames": ["task"],
-            "skills": ["code-review", "hallucinated-skill", "debug-strategy"],
-            "rationale": "Task with skills",
-            "per_frame_instructions": {},
-        })
+        raw_json = json.dumps(
+            {
+                "complexity": "moderate",
+                "routing": "single",
+                "frames": ["task"],
+                "skills": ["code-review", "hallucinated-skill", "debug-strategy"],
+                "rationale": "Task with skills",
+                "per_frame_instructions": {},
+            }
+        )
         result = agent._parse_classification(
-            raw_json, _frame(), valid_skill_names={"code-review", "debug-strategy"},
+            raw_json,
+            _frame(),
+            valid_skill_names={"code-review", "debug-strategy"},
         )
         assert result.skills == ["code-review", "debug-strategy"]
 
     def test_no_valid_names_passes_all(self):
         """When valid_skill_names is None (backward compat), all skills pass through."""
         agent = CriticAgent(_settings())
-        raw_json = json.dumps({
-            "complexity": "moderate", "routing": "single",
-            "frames": ["task"],
-            "skills": ["anything", "goes"],
-            "rationale": "Test",
-            "per_frame_instructions": {},
-        })
+        raw_json = json.dumps(
+            {
+                "complexity": "moderate",
+                "routing": "single",
+                "frames": ["task"],
+                "skills": ["anything", "goes"],
+                "rationale": "Test",
+                "per_frame_instructions": {},
+            }
+        )
         result = agent._parse_classification(raw_json, _frame(), valid_skill_names=None)
         assert result.skills == ["anything", "goes"]
 
     def test_empty_valid_names_filters_everything(self):
         """When catalog is empty (set()), all skills are filtered out."""
         agent = CriticAgent(_settings())
-        raw_json = json.dumps({
-            "complexity": "moderate", "routing": "single",
-            "frames": ["task"],
-            "skills": ["hallucinated"],
-            "rationale": "Test",
-            "per_frame_instructions": {},
-        })
+        raw_json = json.dumps(
+            {
+                "complexity": "moderate",
+                "routing": "single",
+                "frames": ["task"],
+                "skills": ["hallucinated"],
+                "rationale": "Test",
+                "per_frame_instructions": {},
+            }
+        )
         result = agent._parse_classification(raw_json, _frame(), valid_skill_names=set())
         assert result.skills == []
 
@@ -499,22 +563,43 @@ class TestSkillFiltering:
     async def test_classify_injects_catalog_into_prompt(self):
         """Full classify call includes skill catalog in prompt."""
         from nous.heart.procedures import ProcedureManager
+
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
-        mock_pm.list_all = AsyncMock(return_value=([
-            ProcedureSummary(id=uuid4(), name="my-skill", domain="engineering",
-                           description="A real skill", activation_count=1,
-                           effectiveness=0.9),
-        ], 1))
+        mock_pm.list_all = AsyncMock(
+            return_value=(
+                [
+                    ProcedureSummary(
+                        id=uuid4(),
+                        name="my-skill",
+                        domain="engineering",
+                        description="A real skill",
+                        activation_count=1,
+                        effectiveness=0.9,
+                    ),
+                ],
+                1,
+            )
+        )
         agent._procedure_manager = mock_pm
 
         mock_api = AsyncMock()
         mock_response = MagicMock()
-        mock_response.content = [{"type": "text", "text": json.dumps({
-            "complexity": "moderate", "routing": "single",
-            "frames": ["task"], "skills": ["my-skill"],
-            "rationale": "Needs skill", "per_frame_instructions": {},
-        })}]
+        mock_response.content = [
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "complexity": "moderate",
+                        "routing": "single",
+                        "frames": ["task"],
+                        "skills": ["my-skill"],
+                        "rationale": "Needs skill",
+                        "per_frame_instructions": {},
+                    }
+                ),
+            }
+        ]
         mock_api.call = AsyncMock(return_value=mock_response)
         agent.set_api_client(mock_api)
 
@@ -529,6 +614,7 @@ class TestSkillFiltering:
     async def test_passthrough_returns_empty_skills(self):
         """Passthrough skips catalog and returns empty skills."""
         from nous.heart.procedures import ProcedureManager
+
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
         agent._procedure_manager = mock_pm

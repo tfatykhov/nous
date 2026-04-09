@@ -11,8 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from nous.cognitive.execution_ledger import classify_side_effect
 
@@ -46,7 +47,7 @@ class GateResult:
             if stripped.startswith("```"):
                 lines = stripped.splitlines()
                 # Drop opening and closing fence lines
-                inner = [l for l in lines[1:] if not l.startswith("```")]
+                inner = [ln for ln in lines[1:] if not ln.startswith("```")]
                 stripped = "\n".join(inner).strip()
 
             data = json.loads(stripped)
@@ -134,20 +135,13 @@ class ActionGate:
         # Summarize new args the same way the ledger summarizes recorded args
         new_key_args = ledger._summarize_args(tool_name, tool_input)  # noqa: SLF001
 
-        recent = [
-            a
-            for a in ledger.actions[-20:]
-            if a.tool_name == tool_name and a.status == "success"
-        ]
+        recent = [a for a in ledger.actions[-20:] if a.tool_name == tool_name and a.status == "success"]
 
         for prior in recent:
             if self._args_similar(prior.key_args, new_key_args):
                 return GateResult(
                     approved=False,
-                    reason=(
-                        f"Duplicate: {tool_name} already succeeded with the same"
-                        f" arguments on turn {prior.turn}"
-                    ),
+                    reason=(f"Duplicate: {tool_name} already succeeded with the same arguments on turn {prior.turn}"),
                     suggestion=(
                         "If you intend a different outcome, adjust the arguments"
                         " or confirm the first result was incorrect."
@@ -180,9 +174,7 @@ class ActionGate:
             )
             return GateResult.from_json(str(response))
         except TimeoutError:
-            logger.warning(
-                "ActionGate: gate model call timed out for %s — failing open", tool_name
-            )
+            logger.warning("ActionGate: gate model call timed out for %s — failing open", tool_name)
             return GateResult(approved=True, reason="gate-timeout-fail-open")
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -242,7 +234,7 @@ class ActionGate:
 
         return (
             "You are a safety gate reviewing a proposed tool action.\n"
-            "Answer ONLY with valid JSON: {\"approved\": true/false, \"reason\": \"...\"}.\n"
+            'Answer ONLY with valid JSON: {"approved": true/false, "reason": "..."}.\n'
             "Do NOT add any other text.\n\n"
             f"USER REQUEST:\n{user_text}\n\n"
             f"PROPOSED ACTION:\n  tool: {tool_name}\n  args: {args_text}\n\n"

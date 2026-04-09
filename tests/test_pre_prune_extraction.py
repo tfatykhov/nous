@@ -47,25 +47,39 @@ class TestPrePruneExtraction:
         # We need enough tool results so that the first ones exceed hard_clear_after
         messages = []
         # Add an assistant message with tool_use so we can build the index
-        messages.append({
-            "role": "assistant",
-            "content": [{"type": "tool_use", "id": "tu_1", "name": "web_search", "input": {"query": "test"}}],
-        })
+        messages.append(
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "tu_1", "name": "web_search", "input": {"query": "test"}}],
+            }
+        )
         # Tool result with a URL that should be extracted
-        messages.append({
-            "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "Found at https://important.example.com/docs"}],
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_1",
+                        "content": "Found at https://important.example.com/docs",
+                    }
+                ],
+            }
+        )
         # Add many more tool results to push the first one past hard_clear_after
         for i in range(2, 20):
-            messages.append({
-                "role": "assistant",
-                "content": [{"type": "tool_use", "id": f"tu_{i}", "name": "bash", "input": {"command": "echo hi"}}],
-            })
-            messages.append({
-                "role": "user",
-                "content": [{"type": "tool_result", "tool_use_id": f"tu_{i}", "content": "ok"}],
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": f"tu_{i}", "name": "bash", "input": {"command": "echo hi"}}],
+                }
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": f"tu_{i}", "content": "ok"}],
+                }
+            )
 
         result = c.prune_tool_results(messages)
         assert isinstance(result, list)

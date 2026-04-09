@@ -16,8 +16,7 @@ from httpx import ASGITransport, AsyncClient
 
 from nous.brain.brain import Brain
 from nous.cognitive import CognitiveLayer
-from nous.identity.manager import IdentityManager, VALID_SECTIONS
-
+from nous.identity.manager import IdentityManager
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -49,7 +48,12 @@ def app(brain, heart, cognitive, db, settings, identity_manager):
 
     mock_runner = AsyncMock(spec=AgentRunner)
     return create_app(
-        mock_runner, brain, heart, cognitive, db, settings,
+        mock_runner,
+        brain,
+        heart,
+        cognitive,
+        db,
+        settings,
         identity_manager=identity_manager,
     )
 

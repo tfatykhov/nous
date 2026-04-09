@@ -132,9 +132,7 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
 
             filename = os.path.basename(file_path)
             warning = f" (Note: {size_msg})" if size_msg else ""
-            return _ok(
-                f"File sent successfully: {filename} via {method} to chat {target_chat}.{warning}"
-            )
+            return _ok(f"File sent successfully: {filename} via {method} to chat {target_chat}.{warning}")
 
         except httpx.HTTPError as e:
             logger.error("Telegram send failed for %s: %s", file_path, type(e).__name__)
@@ -190,7 +188,9 @@ _SEND_FILE_SCHEMA = {
 
 
 def register_telegram_tools(
-    dispatcher, settings: Settings, http_client: httpx.AsyncClient,
+    dispatcher,
+    settings: Settings,
+    http_client: httpx.AsyncClient,
 ) -> None:
     """Register Telegram tools with the dispatcher."""
     handler = create_send_file_tool(settings, http_client)

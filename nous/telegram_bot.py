@@ -37,8 +37,8 @@ SESSION_TTL_SECONDS = 1800
 TG_MAX_LEN = 4096
 
 # Regex patterns for markdown sanitization
-import html as html_module
-import re
+import html as html_module  # noqa: E402
+import re  # noqa: E402
 
 _FENCED_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$", re.MULTILINE)  # |---|---|
@@ -212,8 +212,13 @@ def format_event_bus_status(stats: dict) -> str:
     mins = int((uptime_s % 3600) // 60)
     uptime_str = f"{hours}h {mins}m" if hours else f"{mins}m"
 
-    lines = ["\n<b>Event Bus</b>", f"  {total} events processed, {dropped} dropped",
-             f"  Queue: {queue} pending | Uptime: {uptime_str}", "", "  Handlers:"]
+    lines = [
+        "\n<b>Event Bus</b>",
+        f"  {total} events processed, {dropped} dropped",
+        f"  Queue: {queue} pending | Uptime: {uptime_str}",
+        "",
+        "  Handlers:",
+    ]
 
     for name, h in stats.get("handlers", {}).items():
         # Safe class name extraction that handles names without dots
@@ -232,9 +237,11 @@ def format_trace_summary(trace_data: dict) -> str:
     events = trace_data.get("events", [])
     if not events:
         return "No events found for this trace."
-    lines = [f"<b>Trace: {trace_data.get('trace_id', '?')}</b>",
-             f"Root: {trace_data.get('root_event', '?')}",
-             f"Depth: {trace_data.get('depth', 0)} events"]
+    lines = [
+        f"<b>Trace: {trace_data.get('trace_id', '?')}</b>",
+        f"Root: {trace_data.get('root_event', '?')}",
+        f"Depth: {trace_data.get('depth', 0)} events",
+    ]
     if trace_data.get("duration_ms"):
         lines.append(f"Duration: {trace_data['duration_ms']:.0f}ms")
     lines.append("")
@@ -306,9 +313,9 @@ class StreamingMessage:
         self._min_interval = 1.2  # N6: ~20 edits/msg limit
         self._pending = False
         self._usage: dict[str, int] | None = None  # Token usage stats
-        self._thinking_text = ""           # accumulated thinking content
-        self._thinking_count = 0           # number of thinking blocks seen
-        self._thinking_displayed = False   # whether we've shown an indicator
+        self._thinking_text = ""  # accumulated thinking content
+        self._thinking_count = 0  # number of thinking blocks seen
+        self._thinking_displayed = False  # whether we've shown an indicator
 
     def set_usage(self, usage: dict[str, int]) -> None:
         """Set token usage for the footer."""
@@ -369,9 +376,7 @@ class StreamingMessage:
         if self._tool_counts:
             indicators: list[str] = []
             for tool_name, count in self._tool_counts.items():
-                emoji, label = self.TOOL_INDICATORS.get(
-                    tool_name, ("\U0001f527", tool_name)
-                )
+                emoji, label = self.TOOL_INDICATORS.get(tool_name, ("\U0001f527", tool_name))
                 if count > 1:
                     indicators.append(f"{emoji} {label}... ({count})")
                 else:
@@ -446,9 +451,7 @@ class StreamingMessage:
             return
 
         if self.message_id is None:
-            result = await self._bot._send(
-                self.chat_id, display_text, parse_mode=parse_mode
-            )
+            result = await self._bot._send(self.chat_id, display_text, parse_mode=parse_mode)
             if isinstance(result, dict) and "message_id" in result:
                 self.message_id = result["message_id"]
         else:
@@ -554,12 +557,15 @@ class NousTelegramBot:
 
         # Forward to Nous (streaming) — 007.4: pass user identity
         user_display_name = message.get("from", {}).get("first_name")
-        await self._chat_streaming(chat_id, text, user_id=str(user_id) if user_id else None, user_display_name=user_display_name)
+        await self._chat_streaming(
+            chat_id, text, user_id=str(user_id) if user_id else None, user_display_name=user_display_name
+        )
 
     async def _show_identity(self, chat_id: int) -> None:
         """Show current agent identity via REST API."""
         try:
             from html import escape
+
             resp = await self._http.get(f"{self.nous_url}/identity", timeout=10)
             if resp.status_code != 200:
                 await self._send(chat_id, f"❌ Failed to fetch identity: {escape(resp.text)}")
@@ -586,8 +592,9 @@ class NousTelegramBot:
         # Zombie session fix: expire stale session IDs
         last_active = self._session_last_active.get(chat_id, 0)
         if chat_id in self._sessions and (time.time() - last_active) > SESSION_TTL_SECONDS:
-            logger.info("Session %s expired (idle %.0fs), starting fresh",
-                        self._sessions[chat_id], time.time() - last_active)
+            logger.info(
+                "Session %s expired (idle %.0fs), starting fresh", self._sessions[chat_id], time.time() - last_active
+            )
             del self._sessions[chat_id]
         session_id = self._sessions.get(chat_id)
         payload: dict[str, Any] = {"message": text, "platform": "telegram"}
@@ -671,8 +678,11 @@ class NousTelegramBot:
             await self._send(chat_id, f"❌ Error: {e}")
 
     async def _chat_streaming(
-        self, chat_id: int, text: str,
-        user_id: str | None = None, user_display_name: str | None = None,
+        self,
+        chat_id: int,
+        text: str,
+        user_id: str | None = None,
+        user_display_name: str | None = None,
     ) -> None:
         """Send message to Nous streaming API and progressively edit Telegram message."""
         from uuid import uuid4
@@ -683,8 +693,9 @@ class NousTelegramBot:
         # Zombie session fix: expire stale session IDs to match server-side idle timeout
         last_active = self._session_last_active.get(chat_id, 0)
         if chat_id in self._sessions and (time.time() - last_active) > SESSION_TTL_SECONDS:
-            logger.info("Session %s expired (idle %.0fs), starting fresh",
-                        self._sessions[chat_id], time.time() - last_active)
+            logger.info(
+                "Session %s expired (idle %.0fs), starting fresh", self._sessions[chat_id], time.time() - last_active
+            )
             del self._sessions[chat_id]
         session_id = self._sessions.setdefault(chat_id, str(uuid4()))
         self._session_last_active[chat_id] = time.time()
@@ -770,9 +781,7 @@ class NousTelegramBot:
             params["parse_mode"] = parse_mode
         return await self._tg("sendMessage", params=params)
 
-    async def _send_long(
-        self, chat_id: int, text: str, parse_mode: str | None = None
-    ) -> None:
+    async def _send_long(self, chat_id: int, text: str, parse_mode: str | None = None) -> None:
         """Send a long message, splitting if needed."""
         if len(text) <= TG_MAX_LEN:
             await self._send(chat_id, text, parse_mode=parse_mode)

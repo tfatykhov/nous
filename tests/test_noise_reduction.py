@@ -12,20 +12,16 @@ All tests use mocks — no real database needed.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nous.brain.schemas import ReasonInput
-from nous.cognitive.schemas import FrameSelection, TurnContext
-
 
 # ---------------------------------------------------------------------------
 # SessionMetadata — imported from the real module (005.5 landed).
 # ---------------------------------------------------------------------------
-from nous.cognitive.schemas import SessionMetadata
-
+from nous.cognitive.schemas import FrameSelection, SessionMetadata, TurnContext
 
 # ---------------------------------------------------------------------------
 # Constants from the spec (module-level in layer.py)
@@ -76,9 +72,7 @@ def _make_cognitive_layer():
     ):
         from nous.cognitive.layer import CognitiveLayer
 
-        layer = CognitiveLayer(
-            mock_brain, mock_heart, mock_settings, identity_prompt="Test."
-        )
+        layer = CognitiveLayer(mock_brain, mock_heart, mock_settings, identity_prompt="Test.")
 
     # Ensure _session_metadata exists (it should from __init__ after 005.5)
     if not hasattr(layer, "_session_metadata"):
@@ -377,9 +371,7 @@ class TestEpisodeDedup:
 
         # Return a match above the 0.85 threshold
         matching_episode_id = uuid.uuid4()
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[(matching_episode_id, 0.92)]
-        )
+        layer._heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[(matching_episode_id, 0.92)])
 
         result = await layer._is_duplicate_episode("Hello, what can you do?")
         assert result is True
@@ -396,9 +388,7 @@ class TestEpisodeDedup:
 
         # Return a match below the 0.85 threshold
         matching_episode_id = uuid.uuid4()
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[(matching_episode_id, 0.80)]
-        )
+        layer._heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[(matching_episode_id, 0.80)])
 
         result = await layer._is_duplicate_episode("Build a REST API")
         assert result is False
@@ -429,9 +419,7 @@ class TestEpisodeDedup:
         mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
         layer._heart._episodes.embeddings = mock_embeddings
 
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[]
-        )
+        layer._heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
 
         result = await layer._is_duplicate_episode("Totally new topic")
         assert result is False
@@ -504,9 +492,7 @@ class TestEpisodeDedup:
 
         # The search method filters by 48h window and finds nothing
         # (the similar episode exists but is older than 48h)
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[]
-        )
+        layer._heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
 
         result = await layer._is_duplicate_episode("Hello, what can you do?")
         assert result is False
@@ -555,9 +541,7 @@ class TestDecisionNoise:
             ReasonInput(type="analysis", text="Compared PostgreSQL vs MongoDB for our use case"),
             ReasonInput(type="pattern", text="Follows established RDBMS patterns"),
         ]
-        result = brain._is_noise_decision(
-            "Use PostgreSQL instead of MongoDB for persistent storage", reasons
-        )
+        result = brain._is_noise_decision("Use PostgreSQL instead of MongoDB for persistent storage", reasons)
         assert result is False
 
     # 18. Noise keywords >50% with no reasons -> True
@@ -570,9 +554,7 @@ class TestDecisionNoise:
         brain = _make_brain()
         # Words: {completed, status, update, checked, successfully}
         # Noise keywords: completed, status, update, checked -> 4/5 = 80% > 50%
-        result = brain._is_noise_decision(
-            "Completed status update checked successfully", []
-        )
+        result = brain._is_noise_decision("Completed status update checked successfully", [])
         assert result is True
 
     # 19. Noise keywords but WITH reasons -> False
@@ -582,9 +564,7 @@ class TestDecisionNoise:
         reasons = [
             ReasonInput(type="analysis", text="Decided to mark as completed after review"),
         ]
-        result = brain._is_noise_decision(
-            "Completed the migration status update", reasons
-        )
+        result = brain._is_noise_decision("Completed the migration status update", reasons)
         assert result is False
 
     # 20. Empty description -> True
@@ -601,9 +581,7 @@ class TestDecisionNoise:
         reasons = [
             ReasonInput(type="analysis", text="Analyzed trade-offs between options"),
         ]
-        result = brain._is_noise_decision(
-            "Chose HNSW indexing over IVFFlat for vector similarity search", reasons
-        )
+        result = brain._is_noise_decision("Chose HNSW indexing over IVFFlat for vector similarity search", reasons)
         assert result is False
 
     # 22. Punctuation-attached keywords detected ("completed." matches)

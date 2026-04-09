@@ -25,19 +25,17 @@ Usage:
 from __future__ import annotations
 
 import base64
-import io
 import json
 import logging
 import mimetypes
 import os
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as OAuthCredentials
 from google.oauth2.service_account import Credentials as ServiceAccountCredentials
-from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
@@ -185,8 +183,7 @@ class GDrive:
                 except Exception as e:
                     logger.error("Failed to refresh access token: %s", e)
                     raise RuntimeError(
-                        f"OAuth token refresh failed: {e}\n"
-                        "The refresh token may have expired. Ask Tim to re-authorize."
+                        f"OAuth token refresh failed: {e}\nThe refresh token may have expired. Ask Tim to re-authorize."
                     ) from e
 
     def _call(self, method, *args, **kwargs):
@@ -333,8 +330,7 @@ class GDrive:
 
         if self._auth_mode == "service":
             logger.warning(
-                "Uploading with service account — this may fail with "
-                "storageQuotaExceeded. Consider using OAuth mode."
+                "Uploading with service account — this may fail with storageQuotaExceeded. Consider using OAuth mode."
             )
 
         local_path = Path(local_path)
@@ -425,11 +421,7 @@ class GDrive:
         if parent_id:
             metadata["parents"] = [parent_id]
 
-        result = (
-            self._service.files()
-            .create(body=metadata, fields="id, name, webViewLink")
-            .execute()
-        )
+        result = self._service.files().create(body=metadata, fields="id, name, webViewLink").execute()
         logger.info("Created folder '%s' (id=%s)", name, result["id"])
         return result
 

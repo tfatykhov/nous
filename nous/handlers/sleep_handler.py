@@ -243,9 +243,7 @@ class SleepHandler:
         """
         if self._sleeping:
             return  # Already sleeping
-        self._sleep_task = asyncio.create_task(
-            self._run_sleep(event), name="sleep-work"
-        )
+        self._sleep_task = asyncio.create_task(self._run_sleep(event), name="sleep-work")
 
     @property
     def is_sleeping(self) -> bool:
@@ -317,18 +315,20 @@ class SleepHandler:
                 if success:
                     phases_completed.append("evolve_rubric")
 
-            await self._bus.emit(Event(
-                type="sleep_completed",
-                agent_id=event.agent_id,
-                data={
-                    "phases_completed": phases_completed,
-                    "interrupted": self._interrupted,
-                    "modifies": "memory",
-                    **sleep_stats,
-                },
-                trace_id=event.trace_id,       # F035.2: inherit from parent
-                caused_by=event.event_id,      # F035.2: point to parent
-            ))
+            await self._bus.emit(
+                Event(
+                    type="sleep_completed",
+                    agent_id=event.agent_id,
+                    data={
+                        "phases_completed": phases_completed,
+                        "interrupted": self._interrupted,
+                        "modifies": "memory",
+                        **sleep_stats,
+                    },
+                    trace_id=event.trace_id,  # F035.2: inherit from parent
+                    caused_by=event.event_id,  # F035.2: point to parent
+                )
+            )
             logger.info(
                 "Sleep completed: %s (interrupted=%s)",
                 phases_completed,
@@ -399,9 +399,7 @@ class SleepHandler:
                 logger.debug("Not enough recent episodes for reflection")
                 return True
 
-            episodes_text = "\n\n".join(
-                f"- {ep.summary[:200]}" for ep in recent if ep.summary
-            )
+            episodes_text = "\n\n".join(f"- {ep.summary[:200]}" for ep in recent if ep.summary)
             if not episodes_text:
                 return True
 
@@ -438,20 +436,20 @@ class SleepHandler:
 
                     # F031: UPDATES prefix — supersede existing fact (case-insensitive)
                     if isinstance(subject, str) and subject.upper().startswith("UPDATES:"):
-                        updated = await self._handle_updates_prefix(
-                            subject, fact, sleep_stats
-                        )
+                        updated = await self._handle_updates_prefix(subject, fact, sleep_stats)
                         if updated:
                             stored += 1
                         continue
 
-                    result = await self._heart.learn(FactInput(
-                        subject=subject,
-                        content=fact["content"],
-                        source="sleep_reflection",
-                        confidence=0.8,
-                        category=fact.get("category", "concept"),
-                    ))
+                    result = await self._heart.learn(
+                        FactInput(
+                            subject=subject,
+                            content=fact["content"],
+                            source="sleep_reflection",
+                            confidence=0.8,
+                            category=fact.get("category", "concept"),
+                        )
+                    )
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", fact["content"][:50])
                         continue
@@ -461,13 +459,15 @@ class SleepHandler:
             # Fallback: if LLM didn't return structured facts, store summary + lessons
             if not structured_facts:
                 if reflection.get("summary"):
-                    result = await self._heart.learn(FactInput(
-                        subject="daily_reflection",
-                        content=reflection["summary"],
-                        source="sleep_reflection",
-                        confidence=0.8,
-                        category="concept",
-                    ))
+                    result = await self._heart.learn(
+                        FactInput(
+                            subject="daily_reflection",
+                            content=reflection["summary"],
+                            source="sleep_reflection",
+                            confidence=0.8,
+                            category="concept",
+                        )
+                    )
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", reflection["summary"][:50])
                     else:
@@ -477,13 +477,15 @@ class SleepHandler:
                 for lesson in reflection.get("lessons", [])[:3]:
                     if self._interrupted:
                         break
-                    result = await self._heart.learn(FactInput(
-                        subject="lesson_learned",
-                        content=lesson,
-                        source="sleep_reflection",
-                        confidence=0.7,
-                        category="rule",
-                    ))
+                    result = await self._heart.learn(
+                        FactInput(
+                            subject="lesson_learned",
+                            content=lesson,
+                            source="sleep_reflection",
+                            confidence=0.7,
+                            category="rule",
+                        )
+                    )
                     if isinstance(result, FactRejected):
                         logger.debug("Admission rejected sleep-reflected fact: %s", lesson[:50])
                         continue
@@ -539,9 +541,7 @@ class SleepHandler:
         # Format as orient context (max 20 facts)
         facts_list = list(existing_facts.values())[:20]
         logger.info("F031 orient: injecting %d existing facts from %d queries", len(facts_list), len(queries))
-        facts_text = "\n".join(
-            f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list
-        )
+        facts_text = "\n".join(f"- [{f.category or 'unknown'}] {f.content}" for f in facts_list)
         return (
             f"\nEXISTING KNOWLEDGE (do NOT re-extract these — only extract genuinely NEW information):\n"
             f"{facts_text}\n\n"
@@ -549,15 +549,13 @@ class SleepHandler:
             f'include it with a note: "UPDATES: <existing fact content>" in the fact\'s subject field.\n'
         )
 
-    async def _handle_updates_prefix(
-        self, subject: str, fact: dict, sleep_stats: dict
-    ) -> bool:
+    async def _handle_updates_prefix(self, subject: str, fact: dict, sleep_stats: dict) -> bool:
         """F031: Handle UPDATES: prefix — find and supersede the referenced fact.
 
         Case-insensitive prefix detection. Requires similarity >0.80 to prevent
         wrong-fact supersession (review fix from devil's advocate P0-1).
         """
-        referenced_content = subject[len("UPDATES:"):].strip()
+        referenced_content = subject[len("UPDATES:") :].strip()
         if not referenced_content:
             return False
 
@@ -566,13 +564,15 @@ class SleepHandler:
             if not results:
                 logger.debug("UPDATES: no matching fact found for '%s'", referenced_content[:50])
                 # Fall back to learning as new fact
-                result = await self._heart.learn(FactInput(
-                    subject=referenced_content,
-                    content=fact["content"],
-                    source="sleep_reflection",
-                    confidence=0.8,
-                    category=fact.get("category", "concept"),
-                ))
+                result = await self._heart.learn(
+                    FactInput(
+                        subject=referenced_content,
+                        content=fact["content"],
+                        source="sleep_reflection",
+                        confidence=0.8,
+                        category=fact.get("category", "concept"),
+                    )
+                )
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
                     return True
@@ -580,18 +580,20 @@ class SleepHandler:
 
             # Check similarity threshold before superseding (review fix P0-1)
             best_match = results[0]
-            if hasattr(best_match, 'score') and best_match.score is not None and best_match.score < 0.80:
+            if hasattr(best_match, "score") and best_match.score is not None and best_match.score < 0.80:
                 logger.debug(
                     "UPDATES: best match score %.2f below threshold 0.80, learning as new fact",
                     best_match.score,
                 )
-                result = await self._heart.learn(FactInput(
-                    subject=referenced_content,
-                    content=fact["content"],
-                    source="sleep_reflection",
-                    confidence=0.8,
-                    category=fact.get("category", "concept"),
-                ))
+                result = await self._heart.learn(
+                    FactInput(
+                        subject=referenced_content,
+                        content=fact["content"],
+                        source="sleep_reflection",
+                        confidence=0.8,
+                        category=fact.get("category", "concept"),
+                    )
+                )
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
                     return True
@@ -661,7 +663,8 @@ class SleepHandler:
                 if confidence < 0.7 and action != "KEEP_BOTH":
                     logger.info(
                         "F031 resolve: confidence %.2f below 0.7 for %s, downgrading to KEEP_BOTH",
-                        confidence, action,
+                        confidence,
+                        action,
                     )
                     action = "KEEP_BOTH"
 
@@ -672,38 +675,50 @@ class SleepHandler:
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info(
                             "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
-                            action, fact1_id, fact2_id, confidence,
+                            action,
+                            fact1_id,
+                            fact2_id,
+                            confidence,
                         )
                     elif action == "SUPERSEDE_B":
                         await self._heart.deactivate_fact(fact2_id)
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info(
                             "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
-                            action, fact2_id, fact1_id, confidence,
+                            action,
+                            fact2_id,
+                            fact1_id,
+                            confidence,
                         )
                     elif action == "MERGE":
                         merged = resolution.get("merged_content", "")
                         if merged:
                             try:
-                                await self._heart.learn(FactInput(
-                                    subject=pair.get("subject", None),
-                                    content=merged,
-                                    source="contradiction_resolution",
-                                    confidence=0.8,
-                                    category=pair.get("category", None),
-                                ))
+                                await self._heart.learn(
+                                    FactInput(
+                                        subject=pair.get("subject", None),
+                                        content=merged,
+                                        source="contradiction_resolution",
+                                        confidence=0.8,
+                                        category=pair.get("category", None),
+                                    )
+                                )
                                 await self._heart.deactivate_fact(fact1_id)
                                 await self._heart.deactivate_fact(fact2_id)
                                 sleep_stats["contradictions_resolved"] += 1
                                 sleep_stats["facts_created"] += 1
                                 logger.info(
                                     "F031 resolve: MERGE — combined %s + %s into new fact (%.2f confidence)",
-                                    fact1_id, fact2_id, confidence,
+                                    fact1_id,
+                                    fact2_id,
+                                    confidence,
                                 )
                             except Exception:
                                 logger.warning(
                                     "MERGE partially failed for %s/%s",
-                                    fact1_id, fact2_id, exc_info=True,
+                                    fact1_id,
+                                    fact2_id,
+                                    exc_info=True,
                                 )
                     elif action == "REMOVE_A":
                         await self._heart.deactivate_fact(fact1_id)
@@ -716,14 +731,19 @@ class SleepHandler:
                     elif action == "KEEP_BOTH":
                         logger.info(
                             "F031 resolve: KEEP_BOTH — %s and %s: %s",
-                            fact1_id, fact2_id, resolution.get("reason", ""),
+                            fact1_id,
+                            fact2_id,
+                            resolution.get("reason", ""),
                         )
                     else:
                         logger.warning("Unknown resolution action: %s", action)
                 except Exception:
                     logger.warning(
                         "Failed to execute resolution %s for %s/%s",
-                        action, fact1_id, fact2_id, exc_info=True,
+                        action,
+                        fact1_id,
+                        fact2_id,
+                        exc_info=True,
                     )
 
             logger.info(
@@ -756,10 +776,7 @@ class SleepHandler:
                         Fact.superseded_by.isnot(None),
                         Fact.confidence < 0.5,
                     )
-                    .where(
-                        (Fact.last_recalled_at.is_(None))
-                        | (Fact.last_recalled_at < cutoff)
-                    )
+                    .where((Fact.last_recalled_at.is_(None)) | (Fact.last_recalled_at < cutoff))
                 )
                 result = await session.execute(stmt)
                 stale_facts = result.scalars().all()
@@ -835,9 +852,7 @@ class SleepHandler:
                 if len(fact_list) < 3:
                     continue
 
-                facts_text = "\n".join(
-                    f"{i + 1}. {f.content}" for i, f in enumerate(fact_list)
-                )
+                facts_text = "\n".join(f"{i + 1}. {f.content}" for i, f in enumerate(fact_list))
                 prompt = (
                     f"Subject: {subject}\n\n"
                     f"These {len(fact_list)} facts all concern the same subject:\n\n"
@@ -870,13 +885,15 @@ class SleepHandler:
 
                 try:
                     # Learn the merged fact (bypasses dedup, which would catch it)
-                    merged = await self._heart.learn(FactInput(
-                        subject=subject,
-                        content=merged_content,
-                        source="cluster_consolidation",
-                        confidence=merged_confidence,
-                        category=merged_category,
-                    ))
+                    merged = await self._heart.learn(
+                        FactInput(
+                            subject=subject,
+                            content=merged_content,
+                            source="cluster_consolidation",
+                            confidence=merged_confidence,
+                            category=merged_category,
+                        )
+                    )
                     if not isinstance(merged, FactRejected):
                         # Deactivate originals
                         async with self._heart.db.session() as session:
@@ -891,12 +908,15 @@ class SleepHandler:
                         sleep_stats["facts_created"] = sleep_stats.get("facts_created", 0) + 1
                         logger.info(
                             "F027 cluster consolidation: merged %d facts about '%s' into %s",
-                            len(fact_list), subject, merged.id,
+                            len(fact_list),
+                            subject,
+                            merged.id,
                         )
                 except Exception:
                     logger.warning(
                         "F027 cluster consolidation: merge failed for subject '%s'",
-                        subject, exc_info=True,
+                        subject,
+                        exc_info=True,
                     )
 
             sleep_stats["clusters_merged"] = merged_count
@@ -912,8 +932,8 @@ class SleepHandler:
         if self._procedure_learner:
             try:
                 stats = await self._procedure_learner.run_sleep_learning()
-                sleep_stats["procedures_created"] += (
-                    stats.get("decisions_learned", 0) + stats.get("episodes_learned", 0)
+                sleep_stats["procedures_created"] += stats.get("decisions_learned", 0) + stats.get(
+                    "episodes_learned", 0
                 )
                 logger.info(
                     "Sleep generalize: %d decisions, %d episodes, %d reviewed",

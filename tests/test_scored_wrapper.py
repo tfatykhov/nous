@@ -1,10 +1,11 @@
 """Tests for _ScoredWrapper and boost writeback."""
 
-from nous.heart.search import apply_frame_boost, _ScoredWrapper, _wrap_with_score
+from nous.heart.search import _ScoredWrapper, _wrap_with_score, apply_frame_boost
 
 
 class FakeItem:
     """Minimal item with score and frame attributes."""
+
     def __init__(self, score, encoded_frame=None, encoded_censors=None, name="item"):
         self.score = score
         self.encoded_frame = encoded_frame

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -288,9 +287,7 @@ class TestFactGraphLinker:
         mock_cm.__aexit__ = AsyncMock(return_value=False)
         graph_linker.db = MagicMock()
         graph_linker.db.session.return_value = mock_cm
-        graph_linker.link_fact_to_decisions = AsyncMock(
-            side_effect=Exception("embedding service down")
-        )
+        graph_linker.link_fact_to_decisions = AsyncMock(side_effect=Exception("embedding service down"))
 
         handler, _, _ = self._make_handler(graph_linker=graph_linker)
 
@@ -308,9 +305,7 @@ class TestFactGraphLinker:
         graph_linker.db = MagicMock()
         graph_linker.db.session.return_value = mock_cm
         graph_linker.link_fact_to_decisions = AsyncMock(return_value=[])
-        graph_linker.link_fact_to_facts = AsyncMock(
-            side_effect=Exception("embedding service down")
-        )
+        graph_linker.link_fact_to_facts = AsyncMock(side_effect=Exception("embedding service down"))
 
         handler, _, _ = self._make_handler(graph_linker=graph_linker)
 

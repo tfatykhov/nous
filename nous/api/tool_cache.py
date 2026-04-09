@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
@@ -42,21 +41,28 @@ async def cache_compressed_result(
     hash_key = compute_hash_key(original_content)
 
     # Upsert — same session+hash means same content, skip
-    stmt = insert(ToolCache).values(
-        agent_id=agent_id,
-        session_id=session_id,
-        hash_key=hash_key,
-        tool_name=tool_name,
-        tool_input=tool_input,
-        original_content=original_content,
-        item_count=item_count,
-    ).on_conflict_do_nothing(index_elements=["session_id", "hash_key"])
+    stmt = (
+        insert(ToolCache)
+        .values(
+            agent_id=agent_id,
+            session_id=session_id,
+            hash_key=hash_key,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            original_content=original_content,
+            item_count=item_count,
+        )
+        .on_conflict_do_nothing(index_elements=["session_id", "hash_key"])
+    )
     await session.execute(stmt)
     await session.commit()
 
     logger.info(
         "Cached %s result [%s] for session %s (%d chars, %s items)",
-        tool_name, hash_key, session_id[:8], len(original_content),
+        tool_name,
+        hash_key,
+        session_id[:8],
+        len(original_content),
         item_count or "n/a",
     )
     return hash_key
@@ -89,12 +95,17 @@ async def retrieve_cached_result(
         content = _keyword_filter(content, query)
         logger.info(
             "Cache hit [%s] %s with filter %r → %d chars",
-            hash_key, entry.tool_name, query, len(content),
+            hash_key,
+            entry.tool_name,
+            query,
+            len(content),
         )
     else:
         logger.info(
             "Cache hit [%s] %s → %d chars (full content)",
-            hash_key, entry.tool_name, len(content),
+            hash_key,
+            entry.tool_name,
+            len(content),
         )
 
     return content
@@ -115,11 +126,7 @@ def _keyword_filter(content: str, query: str) -> str:
             items = json.loads(stripped)
             if isinstance(items, list) and items and isinstance(items[0], dict):
                 matched = [
-                    item for item in items
-                    if any(
-                        term in json.dumps(item, default=str).lower()
-                        for term in query_terms
-                    )
+                    item for item in items if any(term in json.dumps(item, default=str).lower() for term in query_terms)
                 ]
                 if matched:
                     return json.dumps(matched[:20], default=str, indent=None)
@@ -129,10 +136,7 @@ def _keyword_filter(content: str, query: str) -> str:
 
     # Text: filter lines
     lines = content.split("\n")
-    matched = [
-        ln for ln in lines
-        if any(term in ln.lower() for term in query_terms)
-    ]
+    matched = [ln for ln in lines if any(term in ln.lower() for term in query_terms)]
     if matched:
         return "\n".join(matched[:50])
     return f"No lines matching '{query}' in cached {len(lines)} lines."
@@ -140,9 +144,13 @@ def _keyword_filter(content: str, query: str) -> str:
 
 async def has_cache_entries(session: AsyncSession, session_id: str) -> bool:
     """Check if any cache entries exist for this session."""
-    stmt = select(ToolCache.id).where(
-        ToolCache.session_id == session_id,
-    ).limit(1)
+    stmt = (
+        select(ToolCache.id)
+        .where(
+            ToolCache.session_id == session_id,
+        )
+        .limit(1)
+    )
     result = await session.execute(stmt)
     return result.scalar_one_or_none() is not None
 

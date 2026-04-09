@@ -44,6 +44,7 @@ class TestEffectiveThresholds:
 class TestShouldCompactUsesEffective:
     def test_should_compact_uses_effective_threshold(self):
         from nous.api.compaction import ConversationCompactor
+
         s = Settings(model="claude-sonnet-4-6-20250514", NOUS_COMPACTION_ENABLED="true")
         c = ConversationCompactor(s)
         # With 1M model, threshold is 600K

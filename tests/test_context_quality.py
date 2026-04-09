@@ -13,12 +13,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
 from nous.utils import text_overlap
-
 
 # ---------------------------------------------------------------
 # text_overlap utility
@@ -113,9 +112,7 @@ class TestFactSupersession:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=mock_result)
 
-        await fact_manager._supersede_by_subject(
-            new_id, "Nous", [1.0, 0.85, 0.15], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "Nous", [1.0, 0.85, 0.15], session)
 
         assert old_fact.active is False
         assert old_fact.superseded_by == new_id
@@ -135,9 +132,7 @@ class TestFactSupersession:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=mock_result)
 
-        await fact_manager._supersede_by_subject(
-            new_id, "Nous", [1.0, 0.0, 0.0], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "Nous", [1.0, 0.0, 0.0], session)
 
         assert old_fact.active is True  # Not superseded
 
@@ -154,9 +149,7 @@ class TestFactSupersession:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=mock_result)
 
-        await fact_manager._supersede_by_subject(
-            new_id, "Redis", [1.0, 0.0, 0.0], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "Redis", [1.0, 0.0, 0.0], session)
 
         # No facts returned means no modifications -- just verify no error
         session.execute.assert_awaited_once()
@@ -229,9 +222,7 @@ class TestFactSupersession:
         session.execute = AsyncMock(return_value=mock_result)
 
         # Call with "NOUS" (uppercase) -- the code does subject.lower()
-        await fact_manager._supersede_by_subject(
-            new_id, "NOUS", [1.0, 0.85, 0.15], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "NOUS", [1.0, 0.85, 0.15], session)
 
         # Old fact should be superseded (high similarity)
         assert old_fact.active is False
@@ -241,9 +232,7 @@ class TestFactSupersession:
         old_fact.active = True
         old_fact.superseded_by = None
 
-        await fact_manager._supersede_by_subject(
-            new_id, "Nous", [1.0, 0.85, 0.15], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "Nous", [1.0, 0.85, 0.15], session)
 
         assert old_fact.active is False
         assert old_fact.superseded_by == new_id
@@ -294,9 +283,7 @@ class TestFactSupersession:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=mock_result)
 
-        await fact_manager._supersede_by_subject(
-            new_id, "Nous", [1.0, 0.0, 0.0], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "Nous", [1.0, 0.0, 0.0], session)
 
         assert old_fact.active is True  # Unchanged
 
@@ -313,9 +300,7 @@ class TestFactSupersession:
         session = AsyncMock()
         session.execute = AsyncMock(return_value=mock_result)
 
-        await fact_manager._supersede_by_subject(
-            new_id, "Nous", [1.0, 0.85, 0.15], session
-        )
+        await fact_manager._supersede_by_subject(new_id, "Nous", [1.0, 0.85, 0.15], session)
 
         assert similar.active is False
         assert similar.superseded_by == new_id
@@ -332,10 +317,13 @@ class TestEpisodeDedup:
 
     def test_text_overlap_above_threshold(self):
         """Identical summaries have overlap 1.0 > 0.80."""
-        assert text_overlap(
-            "Show me your current status and tools",
-            "Show me your current status and tools",
-        ) == 1.0
+        assert (
+            text_overlap(
+                "Show me your current status and tools",
+                "Show me your current status and tools",
+            )
+            == 1.0
+        )
 
     def test_text_overlap_below_threshold_different_content(self):
         """Different summaries should be below 0.80."""
@@ -534,8 +522,8 @@ class TestInformationalDetection:
         """Minimal CognitiveLayer for testing _is_informational."""
         from nous.cognitive.layer import CognitiveLayer
 
-        brain = MagicMock()
-        heart = MagicMock()
+        brain = MagicMock()  # noqa: F841
+        heart = MagicMock()  # noqa: F841
         settings = MagicMock()
         settings.agent_id = "test"
         settings.identity_prompt = ""
@@ -633,14 +621,14 @@ class TestInformationalDetection:
     def test_list_dominated_detected(self, layer):
         """Response that is mostly a list -> informational."""
         result = MockTurnResult(
-            response_text="Available endpoints:\n- GET /status\n- POST /chat\n- DELETE /chat/{id}\n- GET /health\n- GET /facts",
+            response_text="Available endpoints:\n- GET /status\n- POST /chat\n- DELETE /chat/{id}\n- GET /health\n- GET /facts",  # noqa: E501
         )
         assert layer._is_informational(result) is True
 
     def test_real_decision_not_filtered(self, layer):
         """Response with decision language -> NOT informational."""
         result = MockTurnResult(
-            response_text="I decided to use PostgreSQL over Redis because it supports complex queries and we need ACID guarantees for the decision log.",
+            response_text="I decided to use PostgreSQL over Redis because it supports complex queries and we need ACID guarantees for the decision log.",  # noqa: E501
         )
         assert layer._is_informational(result) is False
 
@@ -719,8 +707,12 @@ class TestDecisionRecallDedup:
     def test_different_outcomes_preserved(self, context_engine):
         """Same description, different outcomes -> both kept."""
         decisions = [
-            MockDecision(description="Deploy service to production", outcome="success", created_at="2026-02-25T02:00:00"),
-            MockDecision(description="Deploy service to production", outcome="failure", created_at="2026-02-25T01:00:00"),
+            MockDecision(
+                description="Deploy service to production", outcome="success", created_at="2026-02-25T02:00:00"
+            ),
+            MockDecision(
+                description="Deploy service to production", outcome="failure", created_at="2026-02-25T01:00:00"
+            ),
         ]
         result = context_engine._dedup_decisions(decisions)
         assert len(result) == 2

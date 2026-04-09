@@ -16,8 +16,15 @@ CategoryType = Literal["architecture", "process", "tooling", "security", "integr
 StakesType = Literal["low", "medium", "high", "critical"]
 OutcomeType = Literal["pending", "success", "partial", "failure"]
 RelationType = Literal[
-    "supports", "contradicts", "supersedes", "related_to", "caused_by",
-    "informed_by", "evidence_for", "discussed_in", "extracted_from",
+    "supports",
+    "contradicts",
+    "supersedes",
+    "related_to",
+    "caused_by",
+    "informed_by",
+    "evidence_for",
+    "discussed_in",
+    "extracted_from",
 ]
 NodeType = Literal["decision", "fact", "episode", "procedure"]
 ReasonType = Literal[

@@ -116,11 +116,7 @@ class KnowledgeExtractor:
 
                 # Dedup against existing facts
                 existing = await self._heart.search_facts(content, limit=1)
-                if (
-                    existing
-                    and existing[0].score is not None
-                    and existing[0].score > 0.85
-                ):
+                if existing and existing[0].score is not None and existing[0].score > 0.85:
                     logger.debug("Skipping duplicate fact: %s", content[:50])
                     continue
 
@@ -173,9 +169,7 @@ class KnowledgeExtractor:
                     lines.append(f"{role}: {' '.join(parts)[:2000]}")
         return "\n\n".join(lines)
 
-    async def _extract_facts(
-        self, conversation_text: str
-    ) -> list[dict[str, Any]]:
+    async def _extract_facts(self, conversation_text: str) -> list[dict[str, Any]]:
         """Call LLM to extract facts from conversation text."""
         if not self._llm:
             return []

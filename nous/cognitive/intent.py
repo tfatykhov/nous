@@ -93,9 +93,7 @@ class IntentClassifier:
         signals.is_greeting = bool(self._GREETING_PATTERNS.match(stripped))
 
         # Question detection (F18: expanded starters)
-        signals.is_question = stripped.endswith("?") or bool(
-            self._QUESTION_STARTERS.match(stripped)
-        )
+        signals.is_question = stripped.endswith("?") or bool(self._QUESTION_STARTERS.match(stripped))
 
         # Temporal recency
         for pattern, weight in _RECENCY_PATTERNS:
@@ -106,14 +104,10 @@ class IntentClassifier:
         for mem_type, patterns in _MEMORY_HINTS.items():
             for pattern in patterns:
                 if re.search(pattern, input_text, re.IGNORECASE):
-                    signals.memory_type_hints[mem_type] = (
-                        signals.memory_type_hints.get(mem_type, 0) + 0.5
-                    )
+                    signals.memory_type_hints[mem_type] = signals.memory_type_hints.get(mem_type, 0) + 0.5
 
         # Topic keywords: capitalized words + long words + ALL-CAPS acronyms (F19)
-        words = re.findall(
-            r"\b[A-Z][a-z]+\b|\b\w{6,}\b|\b[A-Z]{2,}\b", input_text
-        )
+        words = re.findall(r"\b[A-Z][a-z]+\b|\b\w{6,}\b|\b[A-Z]{2,}\b", input_text)
         signals.topic_keywords = list(set(w.lower() for w in words))[:10]
 
         # Entity mentions (proper nouns -- capitalized words not at sentence start)
@@ -122,9 +116,7 @@ class IntentClassifier:
 
         return signals
 
-    def plan_retrieval(
-        self, signals: IntentSignals, input_text: str = ""
-    ) -> RetrievalPlan:
+    def plan_retrieval(self, signals: IntentSignals, input_text: str = "") -> RetrievalPlan:
         """Map intent signals to a retrieval plan.
 
         Args:
@@ -168,9 +160,7 @@ class IntentClassifier:
 
         plan = RetrievalPlan()
         # F27: Fall back to original input_text, not empty string
-        query_text = (
-            " ".join(signals.topic_keywords) if signals.topic_keywords else input_text
-        )
+        query_text = " ".join(signals.topic_keywords) if signals.topic_keywords else input_text
 
         # If strong memory type hints, bias toward those types
         if signals.memory_type_hints:

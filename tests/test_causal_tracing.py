@@ -1,7 +1,5 @@
 """Tests for F035.2 Causal Chain Tracing."""
 
-import pytest
-
 from nous.events import Event
 
 
@@ -104,11 +102,13 @@ class TestTelegramFormatting:
 
     def test_format_trace_summary_empty(self):
         from nous.telegram_bot import format_trace_summary
+
         result = format_trace_summary({"events": []})
         assert "No events found" in result
 
     def test_format_trace_summary_with_events(self):
         from nous.telegram_bot import format_trace_summary
+
         trace_data = {
             "trace_id": "abc123def456",
             "root_event": "session_ended",

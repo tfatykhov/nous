@@ -33,6 +33,7 @@ from nous.events import Event, EventBus
 from nous.heart.censor_actions import CensorActionExecutor
 from nous.heart.heart import Heart
 from nous.heart.schemas import EpisodeInput, FactInput, OpenThread, WorkingMemoryItem
+from nous.identity.manager import IdentityManager
 from nous.storage.models import Agent
 
 if TYPE_CHECKING:
@@ -46,20 +47,22 @@ _LEARNED_PATTERN = re.compile(r"^\s*[-*]?\s*learned:\s*(.+)$", re.IGNORECASE | r
 # Significance threshold constants (005.5 Phase A)
 _MIN_CONTENT_LENGTH = 200  # Combined user+assistant chars
 _MIN_TURNS_WITHOUT_TOOLS = 1  # R: off-by-one fix — turn_count is incremented in post_turn,
-                               # so during turn 2's pre_turn, turn_count==1
+# so during turn 2's pre_turn, turn_count==1
 
 # 008.6: Recap query detection
-_RECAP_PATTERNS = frozenset({
-    "what did we talk about",
-    "what have we discussed",
-    "what did we do",
-    "recent conversations",
-    "catch me up",
-    "what happened recently",
-    "what happened lately",
-    "recap",
-    "summary of recent",
-})
+_RECAP_PATTERNS = frozenset(
+    {
+        "what did we talk about",
+        "what have we discussed",
+        "what did we do",
+        "recent conversations",
+        "catch me up",
+        "what happened recently",
+        "what happened lately",
+        "recap",
+        "summary of recent",
+    }
+)
 
 
 def _is_recap_query(user_input: str) -> bool:
@@ -150,8 +153,8 @@ class CognitiveLayer:
         identity_prompt: str = "",
         *,
         bus: EventBus | None = None,
-        identity_manager: "IdentityManager | None" = None,
-        critic: "CriticAgent | None" = None,
+        identity_manager: IdentityManager | None = None,
+        critic: CriticAgent | None = None,
     ) -> None:
         self._brain = brain
         self._heart = heart
@@ -168,9 +171,7 @@ class CognitiveLayer:
         _deduplicator = ConversationDeduplicator(
             embedding_provider=brain.embeddings,
         )
-        self._context = ContextEngine(
-            brain, heart, settings, identity_prompt, deduplicator=_deduplicator
-        )
+        self._context = ContextEngine(brain, heart, settings, identity_prompt, deduplicator=_deduplicator)
         self._deliberation = DeliberationEngine(brain)
         self._monitor = MonitorEngine(brain, heart, settings)
 
@@ -265,9 +266,7 @@ class CognitiveLayer:
         # 007.4: Update agents.last_active timestamp
         try:
             async with self._brain.db.session() as _session:
-                await _session.execute(
-                    sa_update(Agent).where(Agent.id == agent_id).values(last_active=func.now())
-                )
+                await _session.execute(sa_update(Agent).where(Agent.id == agent_id).values(last_active=func.now()))
                 await _session.commit()
         except Exception:
             logger.debug("Failed to update last_active for agent %s", agent_id)
@@ -293,6 +292,7 @@ class CognitiveLayer:
         if _is_initiation:
             # 008: Force initiation frame — restricts tools to store_identity + complete_initiation
             from nous.cognitive.schemas import FrameSelection
+
             frame = FrameSelection(
                 frame_id="initiation",
                 frame_name="Initiation",
@@ -324,11 +324,9 @@ class CognitiveLayer:
             heuristic_frame = frame  # preserve for shadow logging
             try:
                 all_frames = await self._frames.list_frames(agent_id, session=session)
-                available_frame_ids = [f.frame_id for f in all_frames
-                                       if f.frame_id != "initiation"]
+                available_frame_ids = [f.frame_id for f in all_frames if f.frame_id != "initiation"]
             except Exception:
-                available_frame_ids = ["conversation", "task", "question",
-                                       "decision", "debug", "creative"]
+                available_frame_ids = ["conversation", "task", "question", "decision", "debug", "creative"]
 
             tool_history = self._session_tool_history.get(session_id, [])
             critic_result = await self._critic.classify(
@@ -339,37 +337,46 @@ class CognitiveLayer:
             )
 
             # In advised mode, override frame selection
-            if (self._settings.critic_mode == "advised"
-                    and critic_result.routing == RoutingMode.SINGLE_ADVISED
-                    and critic_result.recommended_frame != frame.frame_id):
+            if (
+                self._settings.critic_mode == "advised"
+                and critic_result.routing == RoutingMode.SINGLE_ADVISED
+                and critic_result.recommended_frame != frame.frame_id
+            ):
                 try:
                     frame = await self._frames.get(
-                        critic_result.recommended_frame, agent_id, session=session,
+                        critic_result.recommended_frame,
+                        agent_id,
+                        session=session,
                     )
                     logger.info(
                         "F024 Critic override: %s -> %s (reason: %s, latency=%dms)",
-                        heuristic_frame.frame_id, critic_result.recommended_frame,
-                        critic_result.rationale, critic_result.latency_ms,
+                        heuristic_frame.frame_id,
+                        critic_result.recommended_frame,
+                        critic_result.rationale,
+                        critic_result.latency_ms,
                     )
                 except ValueError:
-                    logger.warning("F024 Critic recommended unknown frame: %s",
-                                   critic_result.recommended_frame)
+                    logger.warning("F024 Critic recommended unknown frame: %s", critic_result.recommended_frame)
             elif self._settings.critic_mode == "advised":
                 logger.info(
                     "F024 Critic advised agree: frame=%s, latency=%dms",
-                    frame.frame_id, critic_result.latency_ms,
+                    frame.frame_id,
+                    critic_result.latency_ms,
                 )
             elif self._settings.critic_mode == "shadow":
                 if critic_result.recommended_frame != frame.frame_id:
                     logger.info(
                         "F024 Critic shadow disagree: heuristic=%s, critic=%s, reason=%s, latency=%dms",
-                        frame.frame_id, critic_result.recommended_frame,
-                        critic_result.rationale, critic_result.latency_ms,
+                        frame.frame_id,
+                        critic_result.recommended_frame,
+                        critic_result.rationale,
+                        critic_result.latency_ms,
                     )
                 else:
                     logger.info(
                         "F024 Critic shadow agree: frame=%s, latency=%dms",
-                        frame.frame_id, critic_result.latency_ms,
+                        frame.frame_id,
+                        critic_result.latency_ms,
                     )
                 if critic_result.skills:
                     logger.info(
@@ -379,21 +386,23 @@ class CognitiveLayer:
 
             # F024/issue-216: Activate Critic-recommended skills
             activated_skill_ids: list[str] = []
-            if (self._settings.critic_mode == "advised"
-                    and critic_result.skills):
+            if self._settings.critic_mode == "advised" and critic_result.skills:
                 for skill_name in critic_result.skills:
                     try:
                         proc = await self._heart.get_procedure_by_name(
-                            skill_name, session=session,
+                            skill_name,
+                            session=session,
                         )
                         if proc:
                             await self._heart.activate_procedure(
-                                proc.id, session=session,
+                                proc.id,
+                                session=session,
                             )
                             activated_skill_ids.append(str(proc.id))
                             logger.info(
                                 "F024 Critic activated skill: %s (id=%s)",
-                                skill_name, proc.id,
+                                skill_name,
+                                proc.id,
                             )
                     except Exception:
                         logger.warning("F024 Critic skill activation failed: %s", skill_name)
@@ -401,28 +410,29 @@ class CognitiveLayer:
             # Emit critic_classified event
             if self._bus:
                 try:
-                    await self._bus.emit(Event(
-                        type="critic_classified",
-                        agent_id=agent_id,
-                        session_id=session_id,
-                        data={
-                            "heuristic_frame": heuristic_frame.frame_id,
-                            "critic_frame": critic_result.recommended_frame,
-                            "routing": critic_result.routing.value,
-                            "rationale": critic_result.rationale,
-                            "latency_ms": critic_result.latency_ms,
-                            "mode": self._settings.critic_mode,
-                            "agreed": heuristic_frame.frame_id == critic_result.recommended_frame,
-                            "skills": critic_result.skills,
-                            "activated_skills": activated_skill_ids,
-                        },
-                    ))
+                    await self._bus.emit(
+                        Event(
+                            type="critic_classified",
+                            agent_id=agent_id,
+                            session_id=session_id,
+                            data={
+                                "heuristic_frame": heuristic_frame.frame_id,
+                                "critic_frame": critic_result.recommended_frame,
+                                "routing": critic_result.routing.value,
+                                "rationale": critic_result.rationale,
+                                "latency_ms": critic_result.latency_ms,
+                                "mode": self._settings.critic_mode,
+                                "agreed": heuristic_frame.frame_id == critic_result.recommended_frame,
+                                "skills": critic_result.skills,
+                                "activated_skills": activated_skill_ids,
+                            },
+                        )
+                    )
                 except Exception:
                     pass  # non-critical
 
             # Issue #229: Capture critic skills for context build (advised mode only)
-            if (self._settings.critic_mode == "advised"
-                    and critic_result.skills):
+            if self._settings.critic_mode == "advised" and critic_result.skills:
                 _critic_skills = critic_result.skills
 
         # 2b. CLASSIFY — extract intent signals and plan retrieval (005.1)
@@ -451,6 +461,7 @@ class CognitiveLayer:
         if _is_initiation:
             # 008: Use initiation prompt instead of normal context
             from nous.identity.protocol import INITIATION_PROMPT
+
             system_prompt = INITIATION_PROMPT
         recalled_decision_ids: list[str] = []
         recalled_fact_ids: list[str] = []
@@ -515,7 +526,8 @@ class CognitiveLayer:
                     await self._heart.subtasks.mark_delivered(delivered_ids)
                     logger.info(
                         "Injected %d subtask results into session %s",
-                        len(undelivered), session_id,
+                        len(undelivered),
+                        session_id,
                     )
         except Exception:
             logger.warning("Failed to inject subtask results for session %s", session_id)
@@ -525,8 +537,11 @@ class CognitiveLayer:
         try:
             if await self._deliberation.should_deliberate(frame):
                 decision_id = await self._deliberation.start(
-                    agent_id, user_input[:500], frame,
-                    session_id=session_id, session=session,
+                    agent_id,
+                    user_input[:500],
+                    frame,
+                    session_id=session_id,
+                    session=session,
                 )
         except Exception:
             logger.warning("Deliberation start failed, continuing without decision_id")
@@ -571,9 +586,7 @@ class CognitiveLayer:
                     for msg in reversed(conversation_messages[:-1]):  # Skip current message
                         candidate = self._resolve_focus_text(msg)
                         if candidate:
-                            await self._heart.focus(
-                                session_id, candidate, frame.frame_id, session=session
-                            )
+                            await self._heart.focus(session_id, candidate, frame.frame_id, session=session)
                             break
         except Exception:
             logger.warning("Failed to update working memory for session %s", session_id, exc_info=True)
@@ -581,9 +594,7 @@ class CognitiveLayer:
         # 6b. WORKING MEMORY — load recalled items (skip if step 6 failed)
         if build_result is not None and wm_ready:
             try:
-                await self._load_recalled_to_working_memory(
-                    session_id, build_result, session=session
-                )
+                await self._load_recalled_to_working_memory(session_id, build_result, session=session)
             except Exception:
                 logger.warning("Failed to load items to working memory", exc_info=True)
 
@@ -602,90 +613,103 @@ class CognitiveLayer:
         censor_blocked = False
         censor_block_reason: str | None = None
         if not is_subtask:
-          try:
-            matches = await self._heart.check_censors(user_input, session=session)
-            for match in matches:
-                if match.action == "block":
-                    # F031: Conditional unblock — if trigger_action + unblock_pattern,
-                    # execute action and check if results match unblock_pattern.
-                    # Match → downgrade to warn (skip block). No match → block as normal.
-                    unblocked = False
-                    action_result: str | None = None
-                    if match.trigger_action:
-                        try:
-                            action_result = await self._censor_executor.execute(
-                                match.trigger_action, session=session,
-                            )
-                        except Exception:
-                            logger.warning(
-                                "Censor block action failed (session=%s, censor=%s)",
-                                session_id, match.id, exc_info=True,
-                            )
-
-                        # Check unblock condition
-                        if action_result and match.unblock_pattern:
+            try:
+                matches = await self._heart.check_censors(user_input, session=session)
+                for match in matches:
+                    if match.action == "block":
+                        # F031: Conditional unblock — if trigger_action + unblock_pattern,
+                        # execute action and check if results match unblock_pattern.
+                        # Match → downgrade to warn (skip block). No match → block as normal.
+                        unblocked = False
+                        action_result: str | None = None
+                        if match.trigger_action:
                             try:
-                                if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
-                                    unblocked = True
-                                    logger.info(
-                                        "Censor UNBLOCK: pattern matched (session=%s, censor=%s)",
-                                        session_id, match.id,
-                                    )
-                            except re.error:
-                                logger.warning("Invalid unblock_pattern regex: %s", match.unblock_pattern)
+                                action_result = await self._censor_executor.execute(
+                                    match.trigger_action,
+                                    session=session,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Censor block action failed (session=%s, censor=%s)",
+                                    session_id,
+                                    match.id,
+                                    exc_info=True,
+                                )
 
-                    if unblocked:
-                        # Downgrade to warn — inject context like a warn censor
-                        logger.info(
-                            "Censor BLOCK→WARN downgrade (session=%s, censor=%s): %s",
-                            session_id, match.id, match.trigger_pattern,
-                        )
-                        if action_result:
-                            censor_injected[str(match.id)] = action_result
-                    else:
-                        # Block as normal
-                        censor_blocked = True
-                        censor_block_reason = (
-                            f"Blocked by censor: {match.reason or match.trigger_pattern}"
-                        )
-                        logger.warning(
-                            "Censor BLOCK on user input (session=%s, censor=%s): %s",
-                            session_id, match.id, match.trigger_pattern,
-                        )
-                        if action_result:
-                            censor_block_reason += f"\n\nRelated context:\n{action_result}"
-                        if match.action_instruction:
-                            censor_block_reason += f"\n\n{match.action_instruction}"
-                        break  # One block is enough
-                elif match.action == "warn":
-                    logger.info(
-                        "Censor WARN on user input (session=%s, censor=%s): %s",
-                        session_id, match.id, match.trigger_pattern,
-                    )
-                    # F031: Execute trigger_action if present
-                    if match.trigger_action:
-                        try:
-                            action_result = await self._censor_executor.execute(
-                                match.trigger_action, session=session,
+                            # Check unblock condition
+                            if action_result and match.unblock_pattern:
+                                try:
+                                    if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
+                                        unblocked = True
+                                        logger.info(
+                                            "Censor UNBLOCK: pattern matched (session=%s, censor=%s)",
+                                            session_id,
+                                            match.id,
+                                        )
+                                except re.error:
+                                    logger.warning("Invalid unblock_pattern regex: %s", match.unblock_pattern)
+
+                        if unblocked:
+                            # Downgrade to warn — inject context like a warn censor
+                            logger.info(
+                                "Censor BLOCK→WARN downgrade (session=%s, censor=%s): %s",
+                                session_id,
+                                match.id,
+                                match.trigger_pattern,
                             )
                             if action_result:
                                 censor_injected[str(match.id)] = action_result
-                                logger.info(
-                                    "Censor action executed (session=%s, censor=%s, tool=%s)",
-                                    session_id, match.id, match.trigger_action.get("tool"),
-                                )
-                        except Exception:
+                        else:
+                            # Block as normal
+                            censor_blocked = True
+                            censor_block_reason = f"Blocked by censor: {match.reason or match.trigger_pattern}"
                             logger.warning(
-                                "Censor action failed (session=%s, censor=%s)",
-                                session_id, match.id, exc_info=True,
+                                "Censor BLOCK on user input (session=%s, censor=%s): %s",
+                                session_id,
+                                match.id,
+                                match.trigger_pattern,
                             )
-          except Exception:
-            logger.debug("Censor check failed during pre_turn")
+                            if action_result:
+                                censor_block_reason += f"\n\nRelated context:\n{action_result}"
+                            if match.action_instruction:
+                                censor_block_reason += f"\n\n{match.action_instruction}"
+                            break  # One block is enough
+                    elif match.action == "warn":
+                        logger.info(
+                            "Censor WARN on user input (session=%s, censor=%s): %s",
+                            session_id,
+                            match.id,
+                            match.trigger_pattern,
+                        )
+                        # F031: Execute trigger_action if present
+                        if match.trigger_action:
+                            try:
+                                action_result = await self._censor_executor.execute(
+                                    match.trigger_action,
+                                    session=session,
+                                )
+                                if action_result:
+                                    censor_injected[str(match.id)] = action_result
+                                    logger.info(
+                                        "Censor action executed (session=%s, censor=%s, tool=%s)",
+                                        session_id,
+                                        match.id,
+                                        match.trigger_action.get("tool"),
+                                    )
+                            except Exception:
+                                logger.warning(
+                                    "Censor action failed (session=%s, censor=%s)",
+                                    session_id,
+                                    match.id,
+                                    exc_info=True,
+                                )
+            except Exception:
+                logger.debug("Censor check failed during pre_turn")
 
         # F031: Append censor-injected context to system prompt
         if censor_injected:
             injected_section = "\n\n## Censor-Injected Context\n"
-            injected_section += "The following information was automatically retrieved by active censors. Use it to inform your response:\n\n"
+            injected_section += "The following information was automatically retrieved by active censors. Use it to inform your response:\n\n"  # noqa: E501
             for censor_id, result_text in censor_injected.items():
                 injected_section += f"{result_text}\n\n"
             system_prompt += injected_section
@@ -786,7 +810,8 @@ class CognitiveLayer:
                             logger.debug("Failed to capture thinking block for %s", decision_id)
                     logger.info(
                         "Captured %d thinking blocks for decision %s",
-                        len(turn_result.thinking_blocks), decision_id,
+                        len(turn_result.thinking_blocks),
+                        decision_id,
                     )
 
                 # Finalize deliberation (always attempted, even if think() failed)
@@ -847,13 +872,12 @@ class CognitiveLayer:
 
         # F012: Procedure reinforcement — record outcomes for procedures in context
         if turn_context.recalled_procedure_ids:
-            has_any_error = turn_result.error is not None or any(
-                tr.error for tr in turn_result.tool_results
-            )
+            has_any_error = turn_result.error is not None or any(tr.error for tr in turn_result.tool_results)
             proc_outcome = "failure" if has_any_error else "success"
             for proc_id_str in turn_context.recalled_procedure_ids:
                 try:
                     from uuid import UUID as _UUID
+
                     pid = _UUID(proc_id_str)
                     await self._heart.activate_procedure(pid, session=session)
                     await self._heart.record_procedure_outcome(
@@ -871,18 +895,23 @@ class CognitiveLayer:
         # Increments activation_count for monitoring/escalation.
         try:
             output_matches = await self._heart.check_censors(
-                turn_result.response_text, session=session,
+                turn_result.response_text,
+                session=session,
             )
             for match in output_matches:
                 if match.action == "block":
                     logger.warning(
                         "Censor BLOCK on model output (session=%s, censor=%s): %s",
-                        session_id, match.id, match.trigger_pattern,
+                        session_id,
+                        match.id,
+                        match.trigger_pattern,
                     )
                 elif match.action == "warn":
                     logger.info(
                         "Censor WARN on model output (session=%s, censor=%s): %s",
-                        session_id, match.id, match.trigger_pattern,
+                        session_id,
+                        match.id,
+                        match.trigger_pattern,
                     )
         except Exception:
             logger.debug("Censor check failed during post_turn")
@@ -897,12 +926,14 @@ class CognitiveLayer:
                 if used:
                     logger.info(
                         "Censor compliance: agent referenced injected context (session=%s, censor=%s)",
-                        session_id, censor_id,
+                        session_id,
+                        censor_id,
                     )
                 else:
                     logger.warning(
                         "Censor compliance: agent did NOT reference injected context (session=%s, censor=%s)",
-                        session_id, censor_id,
+                        session_id,
+                        censor_id,
                     )
 
         # 5. Update session metadata for significance tracking (005.5)
@@ -994,34 +1025,69 @@ class CognitiveLayer:
     # 007.3: Expanded keyword patterns for informational detection
     _INFO_PATTERNS = [
         # Status & inventory
-        "current status", "available tools", "here's what",
-        "here is what", "here are the", "summary of",
+        "current status",
+        "available tools",
+        "here's what",
+        "here is what",
+        "here are the",
+        "summary of",
         # Memory recall
-        "i remember", "my memory", "what i know",
-        "i recall", "from memory", "i found",
+        "i remember",
+        "my memory",
+        "what i know",
+        "i recall",
+        "from memory",
+        "i found",
         # Git / repo status
-        "repo pulled", "repo is at", "git pull",
-        "latest commit", "new branch", "new pr",
-        "commits since", "merged to main",
+        "repo pulled",
+        "repo is at",
+        "git pull",
+        "latest commit",
+        "new branch",
+        "new pr",
+        "commits since",
+        "merged to main",
         # Acknowledgment / confirmation
-        "got it", "understood", "noted", "will do",
-        "sure thing", "okay,", "alright,",
+        "got it",
+        "understood",
+        "noted",
+        "will do",
+        "sure thing",
+        "okay,",
+        "alright,",
         # Simple answers
-        "the answer is", "it means", "this is because",
-        "that's correct", "you're right",
+        "the answer is",
+        "it means",
+        "this is because",
+        "that's correct",
+        "you're right",
         # Lists / enumerations
-        "here's a list", "the following",
+        "here's a list",
+        "the following",
         # 009.5: Completion / status updates
-        "done!", "done.", "completed!", "finished!",
-        "on it!", "created!", "pushed to",
-        "review complete", "spec scores", "task is running",
+        "done!",
+        "done.",
+        "completed!",
+        "finished!",
+        "on it!",
+        "created!",
+        "pushed to",
+        "review complete",
+        "spec scores",
+        "task is running",
         # 009.5: Transition phrases
-        "now let me", "next i'll", "moving on to",
-        "let me check", "let me look",
-        "i'll start", "starting with",
+        "now let me",
+        "next i'll",
+        "moving on to",
+        "let me check",
+        "let me look",
+        "i'll start",
+        "starting with",
         # 009.5: Report phrases
-        "here's the result", "here are the results",
-        "pr #", "pr created",
+        "here's the result",
+        "here are the results",
+        "pr #",
+        "pr created",
     ]
 
     # 007.3: Emoji header pattern — status dump indicator
@@ -1030,19 +1096,62 @@ class CognitiveLayer:
     # 007.2 spike: pronouns and short phrases that signal a follow-up, not a new topic
     _FOLLOWUP_PRONOUNS = {"it", "that", "this", "them", "they", "those", "these", "he", "she"}
     _FOLLOWUP_STARTERS = (
-        "what about", "how about", "tell me more", "more about",
-        "and what", "and how", "what else", "anything else",
-        "go on", "continue", "keep going", "elaborate",
+        "what about",
+        "how about",
+        "tell me more",
+        "more about",
+        "and what",
+        "and how",
+        "what else",
+        "anything else",
+        "go on",
+        "continue",
+        "keep going",
+        "elaborate",
     )
     # Single-word question starters — only treated as follow-up when alone
     _FOLLOWUP_QUESTION_WORDS = {"why", "how", "when", "where", "who"}
-    _FOLLOWUP_STOP_WORDS = frozenset({
-        "the", "and", "for", "are", "was", "were", "has", "have",
-        "does", "did", "can", "could", "would", "should", "will",
-        "not", "but", "with", "from", "about", "what", "how",
-        "is", "a", "an", "do", "its", "it's", "what's", "right",
-        "really", "sure", "just", "so", "then", "well", "ok",
-    })
+    _FOLLOWUP_STOP_WORDS = frozenset(
+        {
+            "the",
+            "and",
+            "for",
+            "are",
+            "was",
+            "were",
+            "has",
+            "have",
+            "does",
+            "did",
+            "can",
+            "could",
+            "would",
+            "should",
+            "will",
+            "not",
+            "but",
+            "with",
+            "from",
+            "about",
+            "what",
+            "how",
+            "is",
+            "a",
+            "an",
+            "do",
+            "its",
+            "it's",
+            "what's",
+            "right",
+            "really",
+            "sure",
+            "just",
+            "so",
+            "then",
+            "well",
+            "ok",
+        }
+    )
 
     def _resolve_focus_text(self, user_input: str) -> str | None:
         """Return the text to set as current_task, or None to preserve existing topic.
@@ -1072,15 +1181,14 @@ class CognitiveLayer:
         for starter in self._FOLLOWUP_STARTERS:
             if text_lower.startswith(starter):
                 # "tell me more about X" / "more about X" — if there's a clear object, use it
-                remainder = text_lower[len(starter):].strip()
+                remainder = text_lower[len(starter) :].strip()
                 if starter in ("tell me more", "more about") and len(remainder) > 3:
                     return text[:200]
                 return None
 
         # Pronoun-only subject (e.g., "what about that?", "is that right?")
         if len(words) <= 5:
-            non_stop = [w.rstrip("?!.,") for w in words
-                        if w.rstrip("?!.,") not in self._FOLLOWUP_STOP_WORDS]
+            non_stop = [w.rstrip("?!.,") for w in words if w.rstrip("?!.,") not in self._FOLLOWUP_STOP_WORDS]
             if non_stop and all(w in self._FOLLOWUP_PRONOUNS for w in non_stop):
                 return None
 
@@ -1181,9 +1289,20 @@ class CognitiveLayer:
 
     # 009.5: Report markers for action report detection
     _ACTION_REPORT_MARKERS = [
-        "done", "created", "updated", "fixed", "merged",
-        "pushed", "committed", "deployed", "sent", "saved",
-        "completed", "finished", "resolved", "applied",
+        "done",
+        "created",
+        "updated",
+        "fixed",
+        "merged",
+        "pushed",
+        "committed",
+        "deployed",
+        "sent",
+        "saved",
+        "completed",
+        "finished",
+        "resolved",
+        "applied",
     ]
 
     def _is_action_report(self, turn_result: TurnResult) -> bool:
@@ -1322,12 +1441,14 @@ class CognitiveLayer:
 
         # 2. Emit event — handlers get the snapshot, not live state
         if self._bus:
-            await self._bus.emit(Event(
-                type="conversation_compacting",
-                agent_id=agent_id,
-                session_id=session_id,
-                data={"message_snapshot": message_snapshot},
-            ))
+            await self._bus.emit(
+                Event(
+                    type="conversation_compacting",
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    data={"message_snapshot": message_snapshot},
+                )
+            )
 
     async def end_session(
         self,

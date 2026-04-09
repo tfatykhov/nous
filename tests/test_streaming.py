@@ -9,27 +9,24 @@ Tests cover:
 """
 
 import json
-import time
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nous.api.runner import (
     AgentRunner,
-    Conversation,
     Message,
     StreamEvent,
     _parse_sse_event,
 )
 from nous.cognitive.schemas import (
     FrameSelection,
-    ToolResult,
     TurnContext,
     TurnResult,
 )
 from nous.telegram_bot import StreamingMessage
-
 
 # ---------------------------------------------------------------------------
 # TestParseSSEEvent — 10 pure function tests
@@ -450,7 +447,7 @@ class TestStreamChat:
 
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
 
-        events = [e async for e in runner.stream_chat("s1", "Search and recall")]
+        events = [e async for e in runner.stream_chat("s1", "Search and recall")]  # noqa: F841
 
         # Two tool dispatches should have occurred
         assert runner._dispatcher.dispatch.call_count == 2
@@ -505,10 +502,13 @@ class TestStreamChat:
 
         # Mock _call_api for the final no-tools call
         from nous.api.runner import ApiResponse
-        runner._call_api = AsyncMock(return_value=ApiResponse(
-            content=[{"type": "text", "text": "Max turns reached."}],
-            stop_reason="end_turn",
-        ))
+
+        runner._call_api = AsyncMock(
+            return_value=ApiResponse(
+                content=[{"type": "text", "text": "Max turns reached."}],
+                stop_reason="end_turn",
+            )
+        )
 
         events = [e async for e in runner.stream_chat("s1", "Loop me")]
         # Should complete without infinite loop
@@ -524,7 +524,7 @@ class TestStreamChat:
 
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
 
-        events = [e async for e in runner.stream_chat("s1", "Hi")]
+        events = [e async for e in runner.stream_chat("s1", "Hi")]  # noqa: F841
 
         # post_turn must have been called
         cognitive.post_turn.assert_called_once()
@@ -549,7 +549,7 @@ class TestStreamChat:
 
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
 
-        events = [e async for e in runner.stream_chat("s1", "Search")]
+        events = [e async for e in runner.stream_chat("s1", "Search")]  # noqa: F841
 
         # post_turn should receive TurnResult with tool_results
         cognitive.post_turn.assert_called_once()
@@ -571,7 +571,7 @@ class TestStreamChat:
 
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
 
-        events = [e async for e in runner.stream_chat("s1", "Hi")]
+        events = [e async for e in runner.stream_chat("s1", "Hi")]  # noqa: F841
 
         runner._check_safety_net.assert_called_once()
 
@@ -586,7 +586,7 @@ class TestStreamChat:
 
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
 
-        events = [e async for e in runner.stream_chat("s1", "Hello")]
+        events = [e async for e in runner.stream_chat("s1", "Hello")]  # noqa: F841
 
         conv = runner._conversations["s1"]
         assert len(conv.messages) >= 2
@@ -607,7 +607,7 @@ class TestStreamChat:
 
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
 
-        events = [e async for e in runner.stream_chat("s1", "Hello", agent_id="custom-agent")]
+        events = [e async for e in runner.stream_chat("s1", "Hello", agent_id="custom-agent")]  # noqa: F841
 
         # pre_turn should receive the custom agent_id
         pre_call_args = cognitive.pre_turn.call_args
@@ -638,7 +638,7 @@ class TestStreamChat:
         runner._call_api_stream = MagicMock(side_effect=fake_stream)
         runner._dispatcher.dispatch = AsyncMock(side_effect=RuntimeError("Command failed"))
 
-        events = [e async for e in runner.stream_chat("s1", "Run command")]
+        events = [e async for e in runner.stream_chat("s1", "Run command")]  # noqa: F841
 
         # post_turn should have ToolResult with is_error=True (error field set)
         cognitive.post_turn.assert_called_once()
@@ -836,10 +836,7 @@ class TestStreamingMessage:
             await sm.update(long_text)
 
         # Should have called editMessageText with truncated text
-        edit_calls = [
-            c for c in bot._tg.call_args_list
-            if c[0][0] == "editMessageText"
-        ]
+        edit_calls = [c for c in bot._tg.call_args_list if c[0][0] == "editMessageText"]
         assert len(edit_calls) >= 1
         # The truncated text should end with "(continued...)"
         edit_text = edit_calls[-1][1]["params"]["text"]

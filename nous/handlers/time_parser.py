@@ -18,9 +18,7 @@ from dateutil import parser as dateutil_parser
 # ---------------------------------------------------------------------------
 
 # Relative time: "in N hours/minutes/days/weeks"
-_RELATIVE_RE = re.compile(
-    r"in\s+(\d+)\s+(minute|hour|day|week)s?", re.IGNORECASE
-)
+_RELATIVE_RE = re.compile(r"in\s+(\d+)\s+(minute|hour|day|week)s?", re.IGNORECASE)
 
 _UNIT_SECONDS = {
     "minute": 60,
@@ -30,14 +28,10 @@ _UNIT_SECONDS = {
 }
 
 # Simple interval: "N hours/minutes/days"
-_INTERVAL_RE = re.compile(
-    r"^(\d+)\s+(minute|hour|day|week)s?$", re.IGNORECASE
-)
+_INTERVAL_RE = re.compile(r"^(\d+)\s+(minute|hour|day|week)s?$", re.IGNORECASE)
 
 # "daily at 8am", "daily at 9am EST", "daily at 2pm UTC"
-_DAILY_RE = re.compile(
-    r"daily\s+at\s+(\d{1,2})\s*(am|pm)(?:\s+([\w/]+))?", re.IGNORECASE
-)
+_DAILY_RE = re.compile(r"daily\s+at\s+(\d{1,2})\s*(am|pm)(?:\s+([\w/]+))?", re.IGNORECASE)
 
 # "every monday at 10am", "every friday at 3pm"
 _WEEKLY_RE = re.compile(

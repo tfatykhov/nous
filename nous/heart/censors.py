@@ -274,9 +274,7 @@ class CensorManager:
         malformed regex cannot disable all censors (Issue #199).
         """
         stmt = (
-            select(Censor)
-            .where(Censor.agent_id == self.agent_id)
-            .where(Censor.active == True)  # noqa: E712
+            select(Censor).where(Censor.agent_id == self.agent_id).where(Censor.active == True)  # noqa: E712
         )
         if domain:
             stmt = stmt.where((Censor.domain == domain) | (Censor.domain.is_(None)))
@@ -407,9 +405,7 @@ class CensorManager:
     ) -> list[CensorMatch]:
         """Read-only regex keyword search (Issue #199)."""
         stmt = (
-            select(Censor)
-            .where(Censor.agent_id == self.agent_id)
-            .where(Censor.active == True)  # noqa: E712
+            select(Censor).where(Censor.agent_id == self.agent_id).where(Censor.active == True)  # noqa: E712
         )
         if domain:
             stmt = stmt.where((Censor.domain == domain) | (Censor.domain.is_(None)))
@@ -576,8 +572,7 @@ class CensorManager:
         count_q = select(sa_func.count()).select_from(Censor).where(*conditions)
         total = (await session.execute(count_q)).scalar() or 0
 
-        q = (select(Censor).where(*conditions)
-             .order_by(Censor.created_at.desc()).limit(limit).offset(offset))
+        q = select(Censor).where(*conditions).order_by(Censor.created_at.desc()).limit(limit).offset(offset)
         result = await session.execute(q)
         censors = list(result.scalars().all())
 
@@ -629,18 +624,24 @@ class CensorManager:
         if session is None:
             async with self.db.session() as session:
                 result = await self._update(
-                    censor_id, trigger_action=trigger_action,
+                    censor_id,
+                    trigger_action=trigger_action,
                     action_instruction=action_instruction,
                     unblock_pattern=unblock_pattern,
-                    reason=reason, domain=domain, session=session,
+                    reason=reason,
+                    domain=domain,
+                    session=session,
                 )
                 await session.commit()
                 return result
         return await self._update(
-            censor_id, trigger_action=trigger_action,
+            censor_id,
+            trigger_action=trigger_action,
             action_instruction=action_instruction,
             unblock_pattern=unblock_pattern,
-            reason=reason, domain=domain, session=session,
+            reason=reason,
+            domain=domain,
+            session=session,
         )
 
     async def _update(

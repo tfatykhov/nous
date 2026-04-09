@@ -15,15 +15,12 @@ from __future__ import annotations
 import pytest
 
 from nous.config import Settings
-from nous.heart import Heart
 from nous.heart.procedures import ProcedureManager
 from nous.heart.schemas import (
     EvolutionCandidate,
     ProcedureInput,
-    ProcedureSummary,
 )
 from nous.storage.models import Procedure, ProcedureTaskAffinity
-
 
 # ===========================================================================
 # UNIT TESTS — No database required
@@ -180,6 +177,7 @@ class TestEvolutionCandidateLogic:
     def test_evolution_candidate_schema_fields(self):
         """EvolutionCandidate has expected fields."""
         import uuid
+
         cand = EvolutionCandidate(
             id=uuid.uuid4(),
             name="Test",
@@ -243,7 +241,8 @@ async def test_high_effectiveness_scores_higher(db, session, mock_embeddings):
     """A high-effectiveness procedure should score higher than a low-effectiveness one
     with the same hybrid score."""
     mgr = await _make_manager(
-        db, mock_embeddings,
+        db,
+        mock_embeddings,
         utility_boost=True,
         utility_alpha=0.15,
         min_activations_for_boost=3,
@@ -277,8 +276,7 @@ async def test_high_effectiveness_scores_higher(db, session, mock_embeddings):
     assert good_result is not None, "Good procedure not found in results"
     assert bad_result is not None, "Bad procedure not found in results"
     assert good_result.score > bad_result.score, (
-        f"Expected high-effectiveness procedure to rank higher: "
-        f"good={good_result.score:.4f} bad={bad_result.score:.4f}"
+        f"Expected high-effectiveness procedure to rank higher: good={good_result.score:.4f} bad={bad_result.score:.4f}"
     )
 
 
@@ -286,7 +284,8 @@ async def test_high_effectiveness_scores_higher(db, session, mock_embeddings):
 async def test_no_boost_below_min_activations(db, session, mock_embeddings):
     """A procedure with fewer activations than min_activations_for_boost should NOT get a boost."""
     mgr = await _make_manager(
-        db, mock_embeddings,
+        db,
+        mock_embeddings,
         utility_boost=True,
         utility_alpha=0.15,
         min_activations_for_boost=10,  # High threshold
@@ -321,7 +320,8 @@ async def test_no_boost_below_min_activations(db, session, mock_embeddings):
 async def test_alpha_zero_gives_identical_scores(db, session, mock_embeddings):
     """When alpha=0, utility boost factor is always 0, so final_score = hybrid_score."""
     mgr = await _make_manager(
-        db, mock_embeddings,
+        db,
+        mock_embeddings,
         utility_boost=True,
         utility_alpha=0.0,  # No boost
         affinity_beta=0.0,
@@ -356,7 +356,8 @@ async def test_alpha_zero_gives_identical_scores(db, session, mock_embeddings):
 async def test_negative_boost_for_low_effectiveness(db, session, mock_embeddings):
     """A low-effectiveness procedure (< 0.5) should receive a negative score adjustment."""
     mgr = await _make_manager(
-        db, mock_embeddings,
+        db,
+        mock_embeddings,
         utility_boost=True,
         utility_alpha=0.15,
         min_activations_for_boost=3,
@@ -375,9 +376,8 @@ async def test_negative_boost_for_low_effectiveness(db, session, mock_embeddings
     eff = mgr._compute_effectiveness(proc)
     # Reload from DB since we modified in-session
     from sqlalchemy import select
-    result = await session.execute(
-        select(Procedure).where(Procedure.id == proc.id)
-    )
+
+    result = await session.execute(select(Procedure).where(Procedure.id == proc.id))
     p = result.scalars().first()
     eff = mgr._compute_effectiveness(p)
     assert eff is not None
@@ -391,7 +391,8 @@ async def test_negative_boost_for_low_effectiveness(db, session, mock_embeddings
 async def test_feature_flag_disabled(db, session, mock_embeddings):
     """With utility_boost=False, results should come purely from hybrid scoring."""
     mgr = await _make_manager(
-        db, mock_embeddings,
+        db,
+        mock_embeddings,
         utility_boost=False,
     )
 
@@ -501,10 +502,7 @@ async def test_affinity_no_row_without_frame_type(db, session, mock_embeddings):
 
     await mgr.record_outcome(proc.id, "success", frame_type=None, session=session)
 
-    result = await session.execute(
-        select(ProcedureTaskAffinity)
-        .where(ProcedureTaskAffinity.procedure_id == proc.id)
-    )
+    result = await session.execute(select(ProcedureTaskAffinity).where(ProcedureTaskAffinity.procedure_id == proc.id))
     rows = result.scalars().all()
     assert len(rows) == 0
 
@@ -513,7 +511,8 @@ async def test_affinity_no_row_without_frame_type(db, session, mock_embeddings):
 async def test_affinity_boost_applied_in_search(db, session, mock_embeddings):
     """Frame-type affinity boost should influence score when searching with frame_type."""
     mgr = await _make_manager(
-        db, mock_embeddings,
+        db,
+        mock_embeddings,
         utility_boost=True,
         utility_alpha=0.10,
         affinity_beta=0.20,
@@ -748,9 +747,7 @@ async def test_heart_record_outcome_accepts_frame_type(heart, session):
     detail = await heart.store_procedure(inp, session=session)
     await session.flush()
 
-    result = await heart.record_procedure_outcome(
-        detail.id, "success", frame_type="task", session=session
-    )
+    result = await heart.record_procedure_outcome(detail.id, "success", frame_type="task", session=session)
     assert result.success_count == 1
 
 

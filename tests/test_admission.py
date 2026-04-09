@@ -11,14 +11,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nous.heart.admission import (
-    DEFAULT_TYPE_PRIORS,
     DEFAULT_WEIGHTS,
     AdmissionConfig,
     AdmissionController,
-    AdmissionResult,
 )
 from nous.heart.schemas import FactInput
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -336,7 +333,7 @@ class TestUtilityLLM:
         )
         await ctrl._score_utility(_fact())
         call_args = mock_client.complete.call_args
-        prompt = call_args.kwargs.get("prompt", "") or call_args.args[0] if call_args.args else ""
+        prompt = call_args.kwargs.get("prompt", "") or call_args.args[0] if call_args.args else ""  # noqa: F841
         # Check for calibration anchors
         assert "0.9" in str(call_args) or "birthday" in str(call_args)
 
@@ -562,12 +559,18 @@ class TestUserDirectBonus:
         fact_ext = _fact(source="fact_extractor")
 
         result_ud = await ctrl.score(
-            fact_input=fact_ud, embedding=None,
-            max_existing_similarity=None, source_text=None, session=None,
+            fact_input=fact_ud,
+            embedding=None,
+            max_existing_similarity=None,
+            source_text=None,
+            session=None,
         )
         result_ext = await ctrl.score(
-            fact_input=fact_ext, embedding=None,
-            max_existing_similarity=None, source_text=None, session=None,
+            fact_input=fact_ext,
+            embedding=None,
+            max_existing_similarity=None,
+            source_text=None,
+            session=None,
         )
         # user_direct should score 0.15 higher
         assert abs(result_ud.composite_score - result_ext.composite_score - 0.15) < 0.001

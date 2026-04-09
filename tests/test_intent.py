@@ -1,6 +1,6 @@
 """Unit tests for IntentClassifier — pure pattern matching, no DB needed."""
 
-from nous.cognitive.intent import IntentClassifier, RetrievalPlan
+from nous.cognitive.intent import IntentClassifier
 from nous.cognitive.schemas import FrameSelection
 
 
@@ -73,9 +73,7 @@ def test_plan_greeting_skips_all():
 
 def test_plan_decision_frame_budget():
     """Decision frame gets budget_overrides with decisions=3500."""
-    signals = classifier.classify(
-        "should we migrate to PostgreSQL", _frame("decision")
-    )
+    signals = classifier.classify("should we migrate to PostgreSQL", _frame("decision"))
     plan = classifier.plan_retrieval(signals)
 
     assert plan.budget_overrides.get("decisions") == 3500
@@ -83,9 +81,7 @@ def test_plan_decision_frame_budget():
 
 def test_plan_hint_biased_limits():
     """Dominant memory type hint gets limit=8, others get 3."""
-    signals = classifier.classify(
-        "what was my decision about deployment strategy", _frame()
-    )
+    signals = classifier.classify("what was my decision about deployment strategy", _frame())
     plan = classifier.plan_retrieval(signals)
 
     limits_by_type = {q.memory_type: q.limit for q in plan.queries}

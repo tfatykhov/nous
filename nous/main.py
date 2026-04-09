@@ -53,6 +53,7 @@ async def create_components(settings: Settings) -> dict:
 
     # Load runtime config overrides from DB (must be after migrations)
     from nous.runtime_config import RuntimeConfig
+
     runtime_cfg = RuntimeConfig.get()
     async with database.session() as cfg_session:
         await runtime_cfg.load_from_db(cfg_session)
@@ -82,8 +83,11 @@ async def create_components(settings: Settings) -> dict:
         async def persist_to_db(event: Event) -> None:
             data = {**event.data}
             await brain.emit_event(
-                event.type, data, session_id=event.session_id,
-                event_id=event.event_id, trace_id=event.trace_id,
+                event.type,
+                data,
+                session_id=event.session_id,
+                event_id=event.event_id,
+                trace_id=event.trace_id,
                 caused_by=event.caused_by,
             )
 
@@ -92,6 +96,7 @@ async def create_components(settings: Settings) -> dict:
     # P0-2/P0-3 fix: preserve identity_prompt, pass bus as keyword arg
     # 008: Initialize IdentityManager
     from nous.identity.manager import IdentityManager
+
     identity_manager = IdentityManager(database, settings.agent_id)
 
     # 008: Auto-seed from existing facts on upgrade (review fix P2-2)
@@ -106,6 +111,7 @@ async def create_components(settings: Settings) -> dict:
 
     # Create shared API client for all LLM calls (handlers + runner + admission + critic)
     from nous.api.anthropic_client import create_client
+
     api_client = create_client(settings)
     await api_client.start()
 
@@ -113,15 +119,16 @@ async def create_components(settings: Settings) -> dict:
     critic = None
     if settings.critic_enabled:
         from nous.cognitive.critic import CriticAgent
+
         critic = CriticAgent(settings, procedure_manager=heart.procedures)
         critic.set_api_client(api_client)
-        logger.info("F024: CriticAgent wired (mode=%s, model=%s)",
-                     settings.critic_mode, settings.critic_model)
+        logger.info("F024: CriticAgent wired (mode=%s, model=%s)", settings.critic_mode, settings.critic_model)
 
     # F024 Phase 3b: Rubric manager
     rubric_manager = None
     if settings.rubric_enabled:
         from nous.cognitive.rubric import RubricManager
+
         rubric_manager = RubricManager(db=database, agent_id=settings.agent_id)
         # Seed v1.0.0 if no active rubric exists
         existing = await rubric_manager.get_active()
@@ -137,14 +144,19 @@ async def create_components(settings: Settings) -> dict:
                     raise
 
     cognitive = CognitiveLayer(
-        brain, heart, settings, settings.identity_prompt,
-        bus=bus, identity_manager=identity_manager,
+        brain,
+        heart,
+        settings,
+        settings.identity_prompt,
+        bus=bus,
+        identity_manager=identity_manager,
         critic=critic,
     )
 
     # F023: Wire admission LLM client using shared api_client
     if heart.facts._admission_controller is not None:
         from nous.heart.admission import AdmissionLLMClient
+
         heart.facts._admission_controller.llm_client = AdmissionLLMClient(
             api_client=api_client,
         )
@@ -169,8 +181,10 @@ async def create_components(settings: Settings) -> dict:
 
             if settings.cross_type_linking_enabled or settings.episode_summary_enabled:
                 graph_linker = GraphLinker(
-                    db=database, embedder=embedding_provider,
-                    settings=settings, agent_id=settings.agent_id,
+                    db=database,
+                    embedder=embedding_provider,
+                    settings=settings,
+                    agent_id=settings.agent_id,
                 )
         except ImportError:
             logger.debug("GraphLinker not available yet")
@@ -197,8 +211,11 @@ async def create_components(settings: Settings) -> dict:
 
             if settings.rubric_outcome_detection_enabled:
                 OutcomeDetector(
-                    db=database, settings=settings, bus=bus,
-                    llm_client=api_client, agent_id=settings.agent_id,
+                    db=database,
+                    settings=settings,
+                    bus=bus,
+                    llm_client=api_client,
+                    agent_id=settings.agent_id,
                 )
         except ImportError:
             logger.debug("OutcomeDetector not available yet")
@@ -208,6 +225,7 @@ async def create_components(settings: Settings) -> dict:
         try:
             if rubric_manager:
                 from nous.handlers.rubric_evolver import RubricEvolver
+
                 rubric_evolver = RubricEvolver(
                     rubric_manager=rubric_manager,
                     db=database,
@@ -263,8 +281,11 @@ async def create_components(settings: Settings) -> dict:
                 from nous.handlers.procedure_learner import ProcedureLearner
 
                 procedure_learner = ProcedureLearner(
-                    brain=brain, heart=heart, embeddings=embedding_provider,
-                    settings=settings, llm_client=api_client,
+                    brain=brain,
+                    heart=heart,
+                    embeddings=embedding_provider,
+                    settings=settings,
+                    llm_client=api_client,
                 )
                 if sleep_handler is not None:
                     sleep_handler._procedure_learner = procedure_learner
@@ -312,6 +333,7 @@ async def create_components(settings: Settings) -> dict:
     # F011: Bootstrap local skills (one-time, only if DB has no skills)
     try:
         from nous.skills.bootstrap import bootstrap_local_skills, reactivate_skills
+
         await bootstrap_local_skills(settings.workspace_dir, heart)
         await reactivate_skills(heart)
     except Exception:
@@ -328,7 +350,7 @@ async def create_components(settings: Settings) -> dict:
         limits=httpx.Limits(max_connections=5, max_keepalive_connections=2),
     )
     # F033: Multi-tier search router
-    from nous.api.search_providers import TavilyProvider, ExaProvider, BraveProvider
+    from nous.api.search_providers import BraveProvider, ExaProvider, TavilyProvider
     from nous.api.search_router import SearchRouter
 
     search_router = SearchRouter(
@@ -342,15 +364,18 @@ async def create_components(settings: Settings) -> dict:
     # Issue #220: Register Telegram file delivery tool (gated on bot token)
     if settings.telegram_bot_token:
         from nous.api.telegram_tools import register_telegram_tools
+
         register_telegram_tools(dispatcher, settings, web_http)
         logger.info("Telegram file delivery tool registered (send_file)")
 
     # F020: Register cache_retrieve tool
     from nous.api.tools import register_cache_retrieve_tool
+
     register_cache_retrieve_tool(dispatcher, database.session_factory)
 
     # 008: Register identity tools (gated by "initiation" frame)
     from nous.identity.tools import register_identity_tools
+
     register_identity_tools(dispatcher, identity_manager)
 
     runner = AgentRunner(cognitive, brain, heart, settings)
@@ -367,29 +392,43 @@ async def create_components(settings: Settings) -> dict:
             try:
                 async with database.session() as s:
                     from sqlalchemy import text
-                    await s.execute(text(
-                        "INSERT INTO nous_system.context_log "
-                        "(id, agent_id, session_id, turn_number, call_type, model, frame_id, trace_id, "
-                        "token_breakdown, total_tokens_est, context_window_size, utilization_pct, "
-                        "sections_present, tools_count, tool_names, messages_count, message_roles, "
-                        "loaded_facts, loaded_decisions, loaded_procedures, loaded_episodes, recent_conversations) "
-                        "VALUES (:id, :agent_id, :sid, :turn, :ctype, :model, :frame, :trace, "
-                        ":breakdown, :total, :window, :util, :sections, :tools_c, :tool_names, "
-                        ":msg_c, :msg_roles, :facts, :decisions, :procedures, :episodes, :conversations)"
-                    ), {
-                        "id": entry.id, "agent_id": settings.agent_id,
-                        "sid": entry.session_id, "turn": entry.turn_number,
-                        "ctype": entry.call_type, "model": entry.model,
-                        "frame": entry.frame_id, "trace": entry.trace_id,
-                        "breakdown": json.dumps(entry.token_breakdown),
-                        "total": entry.total_tokens_est, "window": entry.context_window_size,
-                        "util": entry.utilization_pct, "sections": entry.sections_present,
-                        "tools_c": entry.tools_count, "tool_names": entry.tool_names,
-                        "msg_c": entry.messages_count, "msg_roles": json.dumps(entry.message_roles),
-                        "facts": entry.loaded_facts, "decisions": entry.loaded_decisions,
-                        "procedures": entry.loaded_procedures, "episodes": entry.loaded_episodes,
-                        "conversations": entry.recent_conversations,
-                    })
+
+                    await s.execute(
+                        text(
+                            "INSERT INTO nous_system.context_log "
+                            "(id, agent_id, session_id, turn_number, call_type, model, frame_id, trace_id, "
+                            "token_breakdown, total_tokens_est, context_window_size, utilization_pct, "
+                            "sections_present, tools_count, tool_names, messages_count, message_roles, "
+                            "loaded_facts, loaded_decisions, loaded_procedures, loaded_episodes, recent_conversations) "
+                            "VALUES (:id, :agent_id, :sid, :turn, :ctype, :model, :frame, :trace, "
+                            ":breakdown, :total, :window, :util, :sections, :tools_c, :tool_names, "
+                            ":msg_c, :msg_roles, :facts, :decisions, :procedures, :episodes, :conversations)"
+                        ),
+                        {
+                            "id": entry.id,
+                            "agent_id": settings.agent_id,
+                            "sid": entry.session_id,
+                            "turn": entry.turn_number,
+                            "ctype": entry.call_type,
+                            "model": entry.model,
+                            "frame": entry.frame_id,
+                            "trace": entry.trace_id,
+                            "breakdown": json.dumps(entry.token_breakdown),
+                            "total": entry.total_tokens_est,
+                            "window": entry.context_window_size,
+                            "util": entry.utilization_pct,
+                            "sections": entry.sections_present,
+                            "tools_c": entry.tools_count,
+                            "tool_names": entry.tool_names,
+                            "msg_c": entry.messages_count,
+                            "msg_roles": json.dumps(entry.message_roles),
+                            "facts": entry.loaded_facts,
+                            "decisions": entry.loaded_decisions,
+                            "procedures": entry.loaded_procedures,
+                            "episodes": entry.loaded_episodes,
+                            "conversations": entry.recent_conversations,
+                        },
+                    )
                     await s.commit()
             except Exception:
                 logger.debug("F035.4: context log write failed", exc_info=True)
@@ -406,11 +445,13 @@ async def create_components(settings: Settings) -> dict:
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
     if settings.subtask_enabled:
         from nous.api.tools import register_subtask_tools
+
         register_subtask_tools(dispatcher, heart, settings, runner=runner)
 
     # 012.3: Register programmatic tool calling (run_python)
     if settings.programmatic_tools_enabled:
         from nous.api.tools import register_programmatic_tools
+
         register_programmatic_tools(dispatcher, brain, heart, settings, cognitive=cognitive)
 
     # 011.1: Start SubtaskWorkerPool (needs runner + bus)
@@ -418,9 +459,13 @@ async def create_components(settings: Settings) -> dict:
     if settings.subtask_enabled and bus is not None:
         try:
             from nous.handlers.subtask_worker import SubtaskWorkerPool
+
             subtask_pool = SubtaskWorkerPool(
-                runner=runner, heart=heart, settings=settings,
-                bus=bus, http_client=handler_http,
+                runner=runner,
+                heart=heart,
+                settings=settings,
+                bus=bus,
+                http_client=handler_http,
             )
             await subtask_pool.start()
         except ImportError:
@@ -431,6 +476,7 @@ async def create_components(settings: Settings) -> dict:
     if settings.schedule_enabled:
         try:
             from nous.handlers.task_scheduler import TaskScheduler
+
             task_scheduler = TaskScheduler(heart, settings)
             await task_scheduler.start()
         except ImportError:
@@ -440,13 +486,16 @@ async def create_components(settings: Settings) -> dict:
     heartbeat_runner = None
     if settings.heartbeat_enabled:
         try:
-            from nous.heartbeat.finding_store import FindingStore
-            from nous.heartbeat.runner import HeartbeatRunner
-            from nous.heartbeat.registry import CheckRegistry
-            from nous.heartbeat.schemas import EscalationConfig
             from nous.heartbeat.checks import (
-                HealthCheck, SelfInitiatedCheck, EmailCheck, DriveCheck,
+                DriveCheck,
+                EmailCheck,
+                HealthCheck,
+                SelfInitiatedCheck,
             )
+            from nous.heartbeat.finding_store import FindingStore
+            from nous.heartbeat.registry import CheckRegistry
+            from nous.heartbeat.runner import HeartbeatRunner
+            from nous.heartbeat.schemas import EscalationConfig
 
             escalation_config = EscalationConfig(
                 low_to_normal_hours=settings.heartbeat_escalation_low_to_normal_hours,
@@ -472,17 +521,23 @@ async def create_components(settings: Settings) -> dict:
             # F035.3: Behavioral drift detection
             if settings.drift_detection_enabled and bus is not None:
                 from nous.heartbeat.checks import BehaviorDriftCheck
+
                 drift_check = BehaviorDriftCheck(
-                    heart=heart, brain=brain, settings=settings,
-                    bus_stats=bus.stats, db=database,
+                    heart=heart,
+                    brain=brain,
+                    settings=settings,
+                    bus_stats=bus.stats,
+                    db=database,
                 )
                 registry.register(drift_check)
                 logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
 
             # F034.5: Create dynamic check loader
             from nous.heartbeat.dynamic import DynamicCheckLoader
+
             dynamic_loader = DynamicCheckLoader(
-                db=database, registry=registry,
+                db=database,
+                registry=registry,
                 agent_id=settings.agent_id,
                 max_checks=settings.heartbeat_max_dynamic_checks,
                 model_override=settings.heartbeat_model or settings.background_model,
@@ -495,8 +550,13 @@ async def create_components(settings: Settings) -> dict:
             logger.info("F034: Heartbeat API client created (isolated from main runner)")
 
             heartbeat_runner = HeartbeatRunner(
-                settings=settings, registry=registry, runner=runner,
-                brain=brain, heart=heart, bus=bus, http_client=handler_http,
+                settings=settings,
+                registry=registry,
+                runner=runner,
+                brain=brain,
+                heart=heart,
+                bus=bus,
+                http_client=handler_http,
                 finding_store=finding_store,
                 api_client=heartbeat_api_client,
                 dynamic_loader=dynamic_loader,
@@ -508,6 +568,7 @@ async def create_components(settings: Settings) -> dict:
     # F034.5: Register heartbeat check management tools
     if heartbeat_runner and heartbeat_runner.dynamic_loader:
         from nous.api.tools import register_heartbeat_tools
+
         register_heartbeat_tools(dispatcher, heartbeat_runner.dynamic_loader)
 
     return {
@@ -731,10 +792,7 @@ def main() -> None:
 
     # F15: Warn if no Anthropic credentials set
     if not settings.anthropic_api_key and not settings.anthropic_auth_token:
-        logger.warning(
-            "Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set — "
-            "/chat endpoints will fail"
-        )
+        logger.warning("Neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set — /chat endpoints will fail")
 
     if not settings.brave_search_api_key:
         logger.warning("BRAVE_SEARCH_API_KEY not set — web_search will be unavailable")

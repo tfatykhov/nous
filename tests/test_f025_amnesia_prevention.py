@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -53,7 +53,7 @@ class TestStalenessPersonExemption:
     def test_person_category_exempt(self):
         """Old person facts keep original score."""
         engine = _make_engine()
-        old_date = datetime.now(timezone.utc) - timedelta(days=60)
+        old_date = datetime.now(UTC) - timedelta(days=60)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="person")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score == 0.8
@@ -61,7 +61,7 @@ class TestStalenessPersonExemption:
     def test_rule_still_exempt(self):
         """Existing rule exemption unchanged."""
         engine = _make_engine()
-        old_date = datetime.now(timezone.utc) - timedelta(days=60)
+        old_date = datetime.now(UTC) - timedelta(days=60)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="rule")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score == 0.8
@@ -69,7 +69,7 @@ class TestStalenessPersonExemption:
     def test_preference_still_exempt(self):
         """Existing preference exemption unchanged."""
         engine = _make_engine()
-        old_date = datetime.now(timezone.utc) - timedelta(days=60)
+        old_date = datetime.now(UTC) - timedelta(days=60)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="preference")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score == 0.8
@@ -77,7 +77,7 @@ class TestStalenessPersonExemption:
     def test_technical_still_exempt(self):
         """Existing technical exemption unchanged."""
         engine = _make_engine()
-        old_date = datetime.now(timezone.utc) - timedelta(days=60)
+        old_date = datetime.now(UTC) - timedelta(days=60)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="technical")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score == 0.8
@@ -85,7 +85,7 @@ class TestStalenessPersonExemption:
     def test_uncategorized_still_decayed(self):
         """Items without exempt category still decay."""
         engine = _make_engine()
-        old_date = datetime.now(timezone.utc) - timedelta(days=60)
+        old_date = datetime.now(UTC) - timedelta(days=60)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="other")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score < 0.8
@@ -93,7 +93,7 @@ class TestStalenessPersonExemption:
     def test_tool_category_still_decayed(self):
         """Tool facts should still decay (they genuinely go stale)."""
         engine = _make_engine()
-        old_date = datetime.now(timezone.utc) - timedelta(days=60)
+        old_date = datetime.now(UTC) - timedelta(days=60)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="tool")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score < 0.8
@@ -101,7 +101,7 @@ class TestStalenessPersonExemption:
     def test_staleness_disabled_skips_all(self):
         """When staleness_penalty_enabled=False, no decay applied."""
         engine = _make_engine(staleness_penalty_enabled=False)
-        old_date = datetime.now(timezone.utc) - timedelta(days=100)
+        old_date = datetime.now(UTC) - timedelta(days=100)
         items = [MockMemoryItem(score=0.8, created_at=old_date, category="other")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score == 0.8
@@ -109,7 +109,7 @@ class TestStalenessPersonExemption:
     def test_staleness_minimum_floor_030(self):
         """Decay should never go below 0.3 floor."""
         engine = _make_engine()
-        very_old = datetime.now(timezone.utc) - timedelta(days=365)
+        very_old = datetime.now(UTC) - timedelta(days=365)
         items = [MockMemoryItem(score=1.0, created_at=very_old, category="other")]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score == pytest.approx(0.3, abs=0.01)
@@ -117,7 +117,7 @@ class TestStalenessPersonExemption:
     def test_no_score_items_pass_through(self):
         """Items without score pass through unchanged."""
         engine = _make_engine()
-        items = [MockMemoryItem(score=None, created_at=datetime.now(timezone.utc))]
+        items = [MockMemoryItem(score=None, created_at=datetime.now(UTC))]
         result = engine._apply_staleness_penalty(items)
         assert result[0].score is None
 
@@ -156,6 +156,7 @@ class TestSourceTextPassthrough:
 
     def test_fact_input_has_source_text_field(self):
         from nous.heart.schemas import FactInput
+
         inp = FactInput(
             content="Tim uses Python",
             subject="Tim",
@@ -165,12 +166,14 @@ class TestSourceTextPassthrough:
 
     def test_fact_input_source_text_defaults_none(self):
         from nous.heart.schemas import FactInput
+
         inp = FactInput(content="test", subject="test")
         assert inp.source_text is None
 
     @pytest.mark.asyncio
     async def test_get_source_text_prefers_source_text_field(self):
         from nous.heart.facts import FactManager
+
         manager = FactManager.__new__(FactManager)
 
         inp = MagicMock()

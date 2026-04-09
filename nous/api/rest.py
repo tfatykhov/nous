@@ -97,8 +97,11 @@ def create_app(
             user_id = body.get("user_id")
             user_display_name = body.get("user_display_name")
             response_text, turn_context, usage = await runner.run_turn(
-                session_id, message, platform=platform,
-                user_id=user_id, user_display_name=user_display_name,
+                session_id,
+                message,
+                platform=platform,
+                user_id=user_id,
+                user_display_name=user_display_name,
             )
             result: dict[str, Any] = {
                 "response": response_text,
@@ -141,8 +144,11 @@ def create_app(
 
         async def event_generator():
             stream = runner.stream_chat(
-                session_id, message, platform=platform,
-                user_id=user_id, user_display_name=user_display_name,
+                session_id,
+                message,
+                platform=platform,
+                user_id=user_id,
+                user_display_name=user_display_name,
             )
             try:
                 async for event in stream:
@@ -225,70 +231,66 @@ def create_app(
                 for wm_sid in wm_session_ids:
                     wm_state = await heart.get_working_memory(wm_sid, session=session)
                     if wm_state:
-                        working_memory_sessions.append({
-                            "session_id": wm_sid,
-                            "current_task": wm_state.current_task,
-                            "current_frame": wm_state.current_frame,
-                            "item_count": wm_state.item_count,
-                            "items": [
-                                {"type": it.type, "summary": it.summary, "relevance": it.relevance}
-                                for it in wm_state.items
-                            ],
-                            "open_threads": [
-                                {"description": t.description, "priority": t.priority}
-                                for t in wm_state.open_threads
-                            ],
-                        })
+                        working_memory_sessions.append(
+                            {
+                                "session_id": wm_sid,
+                                "current_task": wm_state.current_task,
+                                "current_frame": wm_state.current_frame,
+                                "item_count": wm_state.item_count,
+                                "items": [
+                                    {"type": it.type, "summary": it.summary, "relevance": it.relevance}
+                                    for it in wm_state.items
+                                ],
+                                "open_threads": [
+                                    {"description": t.description, "priority": t.priority}
+                                    for t in wm_state.open_threads
+                                ],
+                            }
+                        )
 
             result_data: dict[str, Any] = {
-                    "agent_id": settings.agent_id,
-                    "agent_name": settings.agent_name,
-                    "model": settings.model,
-                    "calibration": {
-                        "brier_score": calibration.brier_score,
-                        "accuracy": calibration.accuracy,
-                        "total_decisions": calibration.total_decisions,
-                        "reviewed_decisions": calibration.reviewed_decisions,
+                "agent_id": settings.agent_id,
+                "agent_name": settings.agent_name,
+                "model": settings.model,
+                "calibration": {
+                    "brier_score": calibration.brier_score,
+                    "accuracy": calibration.accuracy,
+                    "total_decisions": calibration.total_decisions,
+                    "reviewed_decisions": calibration.reviewed_decisions,
+                },
+                "memory": {
+                    "active_conversations": len(runner._conversations),
+                    "active_censors": counts["active_censors"],
+                    "total_decisions": counts["total_decisions"],
+                    "total_facts": counts["total_facts"],
+                    "total_episodes": counts["total_episodes"],
+                    "total_procedures": counts["total_procedures"],
+                },
+                "working_memory": working_memory_sessions,
+                "execution_integrity": {
+                    **_build_integrity_config(),
+                    "active_ledgers": len(runner._ledgers),
+                    "sessions": {
+                        sid: {
+                            "total_actions": len(ledger.actions),
+                            "blocked_actions": sum(1 for a in ledger.actions if a.status == "blocked"),
+                            "current_turn": ledger._current_turn,
+                            "summary": ledger.one_line_summary(),
+                        }
+                        for sid, ledger in runner._ledgers.items()
                     },
-                    "memory": {
-                        "active_conversations": len(runner._conversations),
-                        "active_censors": counts["active_censors"],
-                        "total_decisions": counts["total_decisions"],
-                        "total_facts": counts["total_facts"],
-                        "total_episodes": counts["total_episodes"],
-                        "total_procedures": counts["total_procedures"],
+                    "pending_corrections": {
+                        sid: len(corrections) for sid, corrections in runner._pending_corrections.items() if corrections
                     },
-                    "working_memory": working_memory_sessions,
-                    "execution_integrity": {
-                        **_build_integrity_config(),
-                        "active_ledgers": len(runner._ledgers),
-                        "sessions": {
-                            sid: {
-                                "total_actions": len(ledger.actions),
-                                "blocked_actions": sum(
-                                    1 for a in ledger.actions if a.status == "blocked"
-                                ),
-                                "current_turn": ledger._current_turn,
-                                "summary": ledger.one_line_summary(),
-                            }
-                            for sid, ledger in runner._ledgers.items()
-                        },
-                        "pending_corrections": {
-                            sid: len(corrections)
-                            for sid, corrections in runner._pending_corrections.items()
-                            if corrections
-                        },
-                    },
-                }
+                },
+            }
 
             # F021: Dashboard extension
             if request.query_params.get("dashboard") == "true":
                 from nous.api.dashboard_queries import get_dashboard_stats
 
                 async with database.session() as dash_session:
-                    result_data["dashboard"] = await get_dashboard_stats(
-                        dash_session, settings.agent_id
-                    )
+                    result_data["dashboard"] = await get_dashboard_stats(dash_session, settings.agent_id)
 
             return JSONResponse(result_data)
         except Exception as e:
@@ -317,17 +319,26 @@ def create_app(
 
         try:
             decisions, total = await brain.list_decisions(
-                limit=limit, offset=offset, category=category, stakes=stakes,
-                outcome=outcome, confidence_min=confidence_min,
-                date_from=date_from, date_to=date_to, reviewed=reviewed,
-                sort=sort, order=order,
+                limit=limit,
+                offset=offset,
+                category=category,
+                stakes=stakes,
+                outcome=outcome,
+                confidence_min=confidence_min,
+                date_from=date_from,
+                date_to=date_to,
+                reviewed=reviewed,
+                sort=sort,
+                order=order,
             )
-            return JSONResponse({
-                "decisions": [d.model_dump(mode="json") for d in decisions],
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            })
+            return JSONResponse(
+                {
+                    "decisions": [d.model_dump(mode="json") for d in decisions],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
         except Exception as e:
             logger.error("List decisions error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -366,15 +377,23 @@ def create_app(
 
         try:
             episodes, total = await heart.list_episodes_paginated(
-                limit=limit, offset=offset, outcome=outcome, frame=frame,
-                date_from=date_from, date_to=date_to, sort=sort, order=order,
+                limit=limit,
+                offset=offset,
+                outcome=outcome,
+                frame=frame,
+                date_from=date_from,
+                date_to=date_to,
+                sort=sort,
+                order=order,
             )
-            return JSONResponse({
-                "episodes": [e.model_dump(mode="json") for e in episodes],
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            })
+            return JSONResponse(
+                {
+                    "episodes": [e.model_dump(mode="json") for e in episodes],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
         except Exception as e:
             logger.error("List episodes error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -394,10 +413,12 @@ def create_app(
                 # Existing search behavior
                 category = request.query_params.get("category")
                 facts = await heart.search_facts(q, limit=limit, category=category)
-                return JSONResponse({
-                    "facts": [f.model_dump(mode="json") for f in facts],
-                    "total": len(facts),
-                })
+                return JSONResponse(
+                    {
+                        "facts": [f.model_dump(mode="json") for f in facts],
+                        "total": len(facts),
+                    }
+                )
             else:
                 # Browse mode (F021)
                 category = request.query_params.get("category")
@@ -411,16 +432,24 @@ def create_app(
                 order = request.query_params.get("order", "desc")
 
                 facts, total = await heart.list_facts(
-                    limit=limit, offset=offset, category=category,
-                    active_only=active_only, confidence_min=confidence_min,
-                    date_from=date_from, date_to=date_to, sort=sort, order=order,
+                    limit=limit,
+                    offset=offset,
+                    category=category,
+                    active_only=active_only,
+                    confidence_min=confidence_min,
+                    date_from=date_from,
+                    date_to=date_to,
+                    sort=sort,
+                    order=order,
                 )
-                return JSONResponse({
-                    "facts": [f.model_dump(mode="json") for f in facts],
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset,
-                })
+                return JSONResponse(
+                    {
+                        "facts": [f.model_dump(mode="json") for f in facts],
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                    }
+                )
         except Exception as e:
             logger.error("Search/browse facts error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -440,15 +469,20 @@ def create_app(
 
         try:
             censors, total = await heart.list_censors_paginated(
-                limit=limit, offset=offset, action=action,
-                active_only=active_only, domain=domain,
+                limit=limit,
+                offset=offset,
+                action=action,
+                active_only=active_only,
+                domain=domain,
             )
-            return JSONResponse({
-                "censors": [c.model_dump(mode="json") for c in censors],
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            })
+            return JSONResponse(
+                {
+                    "censors": [c.model_dump(mode="json") for c in censors],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
         except Exception as e:
             logger.error("List censors error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -475,6 +509,7 @@ def create_app(
             if not isinstance(ta, dict):
                 return JSONResponse({"error": "trigger_action must be a JSON object or null"}, status_code=400)
             from nous.heart.censor_actions import ALLOWED_TOOLS
+
             tool = ta.get("tool")
             if not tool or tool not in ALLOWED_TOOLS:
                 return JSONResponse(
@@ -484,6 +519,7 @@ def create_app(
 
         try:
             from uuid import UUID
+
             detail = await heart.update_censor(UUID(censor_id), **update_fields)
             return JSONResponse(detail.model_dump(mode="json"))
         except ValueError as e:
@@ -503,8 +539,17 @@ def create_app(
         active_param = request.query_params.get("active")
         active_only = active_param != "false" if active_param else True
         try:
-            procs, total = await heart.list_procedures(limit=limit, offset=offset, domain=domain, active_only=active_only)
-            return JSONResponse({"procedures": [p.model_dump(mode="json") for p in procs], "total": total, "limit": limit, "offset": offset})
+            procs, total = await heart.list_procedures(
+                limit=limit, offset=offset, domain=domain, active_only=active_only
+            )
+            return JSONResponse(
+                {
+                    "procedures": [p.model_dump(mode="json") for p in procs],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
         except Exception as e:
             logger.error("List procedures error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -553,11 +598,13 @@ def create_app(
         try:
             sections = await identity_manager.get_current()
             is_initiated = await identity_manager.is_initiated()
-            return JSONResponse({
-                "agent_id": identity_manager.agent_id,
-                "is_initiated": is_initiated,
-                "sections": sections,
-            })
+            return JSONResponse(
+                {
+                    "agent_id": identity_manager.agent_id,
+                    "is_initiated": is_initiated,
+                    "sections": sections,
+                }
+            )
         except Exception as e:
             logger.error("GET /identity failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -569,6 +616,7 @@ def create_app(
 
         section = request.path_params["section"]
         from nous.identity.manager import VALID_SECTIONS
+
         if section not in VALID_SECTIONS:
             return JSONResponse(
                 {"error": f"Invalid section '{section}'. Valid: {', '.join(sorted(VALID_SECTIONS))}"},
@@ -598,7 +646,9 @@ def create_app(
             return JSONResponse({"error": "Identity manager not initialized"}, status_code=503)
         try:
             await identity_manager.reset_identity()
-            return JSONResponse({"status": "reset", "message": "Identity cleared. Next conversation will trigger initiation."})
+            return JSONResponse(
+                {"status": "reset", "message": "Identity cleared. Next conversation will trigger initiation."}
+            )
         except Exception as e:
             logger.error("POST /reinitiate failed: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -641,10 +691,12 @@ def create_app(
             stakes=stakes,
         )
         decisions = decisions[:limit]
-        return JSONResponse({
-            "decisions": [d.model_dump(mode="json") for d in decisions],
-            "total": len(decisions),
-        })
+        return JSONResponse(
+            {
+                "decisions": [d.model_dump(mode="json") for d in decisions],
+                "total": len(decisions),
+            }
+        )
 
     # ------------------------------------------------------------------
     # 011.1: Subtask & Schedule endpoints
@@ -660,25 +712,27 @@ def create_app(
 
         try:
             subtasks = await heart.subtasks.list(status=status_filter, limit=limit)
-            return JSONResponse({
-                "subtasks": [
-                    {
-                        "id": str(st.id),
-                        "task": st.task,
-                        "status": st.status,
-                        "priority": st.priority,
-                        "result": st.result,
-                        "error": st.error,
-                        "worker_id": st.worker_id,
-                        "notify": st.notify,
-                        "timeout_seconds": st.timeout_seconds,
-                        "created_at": st.created_at.isoformat() if st.created_at else None,
-                        "started_at": st.started_at.isoformat() if st.started_at else None,
-                        "completed_at": st.completed_at.isoformat() if st.completed_at else None,
-                    }
-                    for st in subtasks
-                ],
-            })
+            return JSONResponse(
+                {
+                    "subtasks": [
+                        {
+                            "id": str(st.id),
+                            "task": st.task,
+                            "status": st.status,
+                            "priority": st.priority,
+                            "result": st.result,
+                            "error": st.error,
+                            "worker_id": st.worker_id,
+                            "notify": st.notify,
+                            "timeout_seconds": st.timeout_seconds,
+                            "created_at": st.created_at.isoformat() if st.created_at else None,
+                            "started_at": st.started_at.isoformat() if st.started_at else None,
+                            "completed_at": st.completed_at.isoformat() if st.completed_at else None,
+                        }
+                        for st in subtasks
+                    ],
+                }
+            )
         except Exception as e:
             logger.error("List subtasks error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -695,21 +749,23 @@ def create_app(
             st = await heart.subtasks.get(subtask_id)
             if st is None:
                 return JSONResponse({"error": "Subtask not found"}, status_code=404)
-            return JSONResponse({
-                "id": str(st.id),
-                "task": st.task,
-                "status": st.status,
-                "priority": st.priority,
-                "result": st.result,
-                "error": st.error,
-                "worker_id": st.worker_id,
-                "notify": st.notify,
-                "timeout_seconds": st.timeout_seconds,
-                "created_at": st.created_at.isoformat() if st.created_at else None,
-                "started_at": st.started_at.isoformat() if st.started_at else None,
-                "completed_at": st.completed_at.isoformat() if st.completed_at else None,
-                "metadata": st.metadata_,
-            })
+            return JSONResponse(
+                {
+                    "id": str(st.id),
+                    "task": st.task,
+                    "status": st.status,
+                    "priority": st.priority,
+                    "result": st.result,
+                    "error": st.error,
+                    "worker_id": st.worker_id,
+                    "notify": st.notify,
+                    "timeout_seconds": st.timeout_seconds,
+                    "created_at": st.created_at.isoformat() if st.created_at else None,
+                    "started_at": st.started_at.isoformat() if st.started_at else None,
+                    "completed_at": st.completed_at.isoformat() if st.completed_at else None,
+                    "metadata": st.metadata_,
+                }
+            )
         except Exception as e:
             logger.error("Get subtask error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -744,25 +800,27 @@ def create_app(
 
         try:
             schedules = await heart.schedules.list(active_only=active_only, limit=limit)
-            return JSONResponse({
-                "schedules": [
-                    {
-                        "id": str(sc.id),
-                        "task": sc.task,
-                        "schedule_type": sc.schedule_type,
-                        "active": sc.active,
-                        "cron_expr": sc.cron_expr,
-                        "interval_seconds": sc.interval_seconds,
-                        "next_fire_at": sc.next_fire_at.isoformat() if sc.next_fire_at else None,
-                        "last_fired_at": sc.last_fired_at.isoformat() if sc.last_fired_at else None,
-                        "fire_count": sc.fire_count,
-                        "max_fires": sc.max_fires,
-                        "notify": sc.notify,
-                        "created_at": sc.created_at.isoformat() if sc.created_at else None,
-                    }
-                    for sc in schedules
-                ],
-            })
+            return JSONResponse(
+                {
+                    "schedules": [
+                        {
+                            "id": str(sc.id),
+                            "task": sc.task,
+                            "schedule_type": sc.schedule_type,
+                            "active": sc.active,
+                            "cron_expr": sc.cron_expr,
+                            "interval_seconds": sc.interval_seconds,
+                            "next_fire_at": sc.next_fire_at.isoformat() if sc.next_fire_at else None,
+                            "last_fired_at": sc.last_fired_at.isoformat() if sc.last_fired_at else None,
+                            "fire_count": sc.fire_count,
+                            "max_fires": sc.max_fires,
+                            "notify": sc.notify,
+                            "created_at": sc.created_at.isoformat() if sc.created_at else None,
+                        }
+                        for sc in schedules
+                    ],
+                }
+            )
         except Exception as e:
             logger.error("List schedules error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -813,12 +871,14 @@ def create_app(
                     timeout=timeout,
                 )
 
-            return JSONResponse({
-                "id": str(schedule.id),
-                "schedule_type": schedule.schedule_type,
-                "next_fire_at": schedule.next_fire_at.isoformat() if schedule.next_fire_at else None,
-                "active": schedule.active,
-            })
+            return JSONResponse(
+                {
+                    "id": str(schedule.id),
+                    "schedule_type": schedule.schedule_type,
+                    "next_fire_at": schedule.next_fire_at.isoformat() if schedule.next_fire_at else None,
+                    "active": schedule.active,
+                }
+            )
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         except Exception as e:
@@ -867,11 +927,13 @@ def create_app(
                 {"error": "Event bus not configured"},
                 status_code=503,
             )
-        await bus.emit(Event(
-            type="sleep_started",
-            agent_id=settings.agent_id,
-            data={"manual": True},
-        ))
+        await bus.emit(
+            Event(
+                type="sleep_started",
+                agent_id=settings.agent_id,
+                data={"manual": True},
+            )
+        )
         return JSONResponse({"status": "started", "message": "Sleep cycle triggered"})
 
     # ------------------------------------------------------------------
@@ -885,12 +947,14 @@ def create_app(
         rc = RuntimeConfig.get()
         vw = rc.get_vector_weight(settings)
         source = rc.get_vector_weight_source(settings)
-        return JSONResponse({
-            "vector_weight": vw,
-            "keyword_weight": round(1.0 - vw, 4),
-            "rrf_k": rc.get_rrf_k(settings),
-            "source": source,
-        })
+        return JSONResponse(
+            {
+                "vector_weight": vw,
+                "keyword_weight": round(1.0 - vw, 4),
+                "rrf_k": rc.get_rrf_k(settings),
+                "source": source,
+            }
+        )
 
     async def set_search_weights(request: Request) -> JSONResponse:
         """POST /admin/search-weights — update vector weight and/or rrf_k at runtime."""
@@ -925,7 +989,9 @@ def create_app(
                 logger.error("Failed to persist vector_weight: %s", e)
             logger.info(
                 "vector_weight updated to %.4f (was %.4f, source: %s)",
-                vw, old_vw, old_source,
+                vw,
+                old_vw,
+                old_source,
             )
 
         # Optional rrf_k update
@@ -951,12 +1017,14 @@ def create_app(
             )
 
         vw_now = rc.get_vector_weight(settings)
-        return JSONResponse({
-            "vector_weight": vw_now,
-            "keyword_weight": round(1.0 - vw_now, 4),
-            "rrf_k": rc.get_rrf_k(settings),
-            "source": rc.get_vector_weight_source(settings),
-        })
+        return JSONResponse(
+            {
+                "vector_weight": vw_now,
+                "keyword_weight": round(1.0 - vw_now, 4),
+                "rrf_k": rc.get_rrf_k(settings),
+                "source": rc.get_vector_weight_source(settings),
+            }
+        )
 
     # ------------------------------------------------------------------
     # F021: Dashboard endpoints (route registration in Task 10)
@@ -1047,7 +1115,8 @@ def create_app(
 
             async with database.session() as session:
                 data = await get_admission_data(
-                    session, settings.agent_id,
+                    session,
+                    settings.agent_id,
                     days=days,
                     threshold=settings.admission_threshold,
                     source=source_filter,
@@ -1088,10 +1157,14 @@ def create_app(
 
             async with database.session() as session:
                 data = await get_admission_rejected(
-                    session, settings.agent_id,
+                    session,
+                    settings.agent_id,
                     threshold=settings.admission_threshold,
-                    days=days, limit=limit, offset=offset,
-                    sort=sort, order=order,
+                    days=days,
+                    limit=limit,
+                    offset=offset,
+                    sort=sort,
+                    order=order,
                 )
             return JSONResponse(data)
         except Exception as e:
@@ -1140,28 +1213,32 @@ def create_app(
 
                 serialized_actions = []
                 for a in display_actions:
-                    serialized_actions.append({
-                        "turn": a.turn,
-                        "tool_name": a.tool_name,
-                        "key_args": redact_key_args(a.tool_name, a.key_args),
-                        "status": a.status,
-                        "timestamp": a.timestamp.isoformat(),
-                        "result_summary": a.result_summary,
-                        "side_effect_type": a.side_effect_type,
-                    })
+                    serialized_actions.append(
+                        {
+                            "turn": a.turn,
+                            "tool_name": a.tool_name,
+                            "key_args": redact_key_args(a.tool_name, a.key_args),
+                            "status": a.status,
+                            "timestamp": a.timestamp.isoformat(),
+                            "result_summary": a.result_summary,
+                            "side_effect_type": a.side_effect_type,
+                        }
+                    )
 
-                sessions.append({
-                    "session_id": sid,
-                    "current_turn": ledger.current_turn,
-                    "total_actions": len(actions_snapshot),
-                    "success_actions": status_counts.get("success", 0),
-                    "blocked_actions": status_counts.get("blocked", 0),
-                    "error_actions": status_counts.get("error", 0),
-                    "timeout_actions": status_counts.get("timeout", 0),
-                    "summary": ledger.one_line_summary(),
-                    "actions": serialized_actions,
-                    "actions_truncated": truncated,
-                })
+                sessions.append(
+                    {
+                        "session_id": sid,
+                        "current_turn": ledger.current_turn,
+                        "total_actions": len(actions_snapshot),
+                        "success_actions": status_counts.get("success", 0),
+                        "blocked_actions": status_counts.get("blocked", 0),
+                        "error_actions": status_counts.get("error", 0),
+                        "timeout_actions": status_counts.get("timeout", 0),
+                        "summary": ledger.one_line_summary(),
+                        "actions": serialized_actions,
+                        "actions_truncated": truncated,
+                    }
+                )
 
             result = _build_integrity_config()
             result["sessions"] = sessions
@@ -1189,7 +1266,9 @@ def create_app(
 
             async with database.session() as session:
                 data = await get_heartbeat_dashboard_data(
-                    session, settings.agent_id, hours=hours,
+                    session,
+                    settings.agent_id,
+                    hours=hours,
                 )
 
             # Merge in-memory state from heartbeat_runner
@@ -1240,7 +1319,9 @@ def create_app(
                     "skipped_checks": last_report.skipped_checks,
                     "timestamp": last_report.timestamp.isoformat() if last_report.timestamp else None,
                     "summary": tuner.generate_report_text(last_report),
-                } if last_report else None,
+                }
+                if last_report
+                else None,
             }
 
             return JSONResponse(data)
@@ -1268,7 +1349,9 @@ def create_app(
         try:
             async with database.session() as session:
                 from sqlalchemy import text
-                tr = await session.execute(text("""
+
+                tr = await session.execute(
+                    text("""
                     WITH trace_stats AS (
                         SELECT trace_id,
                                COUNT(*) AS event_count,
@@ -1290,13 +1373,20 @@ def create_app(
                     JOIN trace_stats ts ON ts.trace_id = r.trace_id
                     ORDER BY r.created_at DESC
                     LIMIT 10
-                """), {"aid": settings.agent_id})
+                """),
+                    {"aid": settings.agent_id},
+                )
                 rows = tr.fetchall()
-            result["recent_traces"] = [{
-                "trace_id": r.trace_id, "root_type": r.root_type,
-                "timestamp": r.created_at.isoformat() if r.created_at else None,
-                "event_count": r.event_count, "has_modifications": bool(r.has_modifications),
-            } for r in rows]
+            result["recent_traces"] = [
+                {
+                    "trace_id": r.trace_id,
+                    "root_type": r.root_type,
+                    "timestamp": r.created_at.isoformat() if r.created_at else None,
+                    "event_count": r.event_count,
+                    "has_modifications": bool(r.has_modifications),
+                }
+                for r in rows
+            ]
         except Exception:
             logger.debug("dashboard_observability: recent_traces failed", exc_info=True)
             result["recent_traces"] = []
@@ -1305,20 +1395,29 @@ def create_app(
         try:
             async with database.session() as session:
                 from sqlalchemy import text
-                mr = await session.execute(text("""
+
+                mr = await session.execute(
+                    text("""
                     SELECT event_id, event_type, trace_id, data, created_at
                     FROM nous_system.events
                     WHERE data->>'modifies' IS NOT NULL
                     AND agent_id = :aid
                     AND created_at > NOW() - INTERVAL '24 hours'
                     ORDER BY created_at DESC LIMIT 20
-                """), {"aid": settings.agent_id})
+                """),
+                    {"aid": settings.agent_id},
+                )
                 rows = mr.fetchall()
-            result["recent_modifications"] = [{
-                "event_id": r.event_id, "type": r.event_type, "trace_id": r.trace_id,
-                "modifies": (r.data or {}).get("modifies"),
-                "timestamp": r.created_at.isoformat() if r.created_at else None,
-            } for r in rows]
+            result["recent_modifications"] = [
+                {
+                    "event_id": r.event_id,
+                    "type": r.event_type,
+                    "trace_id": r.trace_id,
+                    "modifies": (r.data or {}).get("modifies"),
+                    "timestamp": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+            ]
         except Exception:
             logger.debug("dashboard_observability: recent_modifications failed", exc_info=True)
             result["recent_modifications"] = []
@@ -1327,10 +1426,14 @@ def create_app(
         try:
             async with database.session() as session:
                 from sqlalchemy import text
-                sr = await session.execute(text(
-                    "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
-                    "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
-                ), {"aid": settings.agent_id})
+
+                sr = await session.execute(
+                    text(
+                        "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                        "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+                    ),
+                    {"aid": settings.agent_id},
+                )
                 row = sr.fetchone()
             if row:
                 result["drift"] = {
@@ -1348,11 +1451,15 @@ def create_app(
         try:
             async with database.session() as session:
                 from sqlalchemy import text
+
                 cutoff = datetime.now(UTC) - timedelta(days=7)
-                tr2 = await session.execute(text(
-                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
-                ), {"aid": settings.agent_id, "cutoff": cutoff})
+                tr2 = await session.execute(
+                    text(
+                        "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                        "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                    ),
+                    {"aid": settings.agent_id, "cutoff": cutoff},
+                )
                 rows = tr2.fetchall()
             trend_metrics = ["fact_count_delta", "handler_error_rate"]
             trends = {m: [] for m in trend_metrics}
@@ -1390,10 +1497,7 @@ def create_app(
         # Total input = input_tokens + cache_creation + cache_read.
         total_cache_read = sum(e.cache_read_tokens or 0 for e in calls)
         total_cache_created = sum(e.cache_creation_tokens or 0 for e in calls)
-        total_input = (
-            sum(e.input_tokens_actual or 0 for e in calls)
-            + total_cache_read + total_cache_created
-        )
+        total_input = sum(e.input_tokens_actual or 0 for e in calls) + total_cache_read + total_cache_created
         total_breaks = sum(1 for e in calls if e.cache_break)
         total_break_tokens = sum(e.cache_break_tokens_lost for e in calls if e.cache_break)
 
@@ -1408,11 +1512,7 @@ def create_app(
             s["cache_read"] += e.cache_read_tokens or 0
             s["cache_created"] += e.cache_creation_tokens or 0
             # Total input = non-cached + cache_creation + cache_read
-            s["input"] += (
-                (e.input_tokens_actual or 0)
-                + (e.cache_read_tokens or 0)
-                + (e.cache_creation_tokens or 0)
-            )
+            s["input"] += (e.input_tokens_actual or 0) + (e.cache_read_tokens or 0) + (e.cache_creation_tokens or 0)
             if e.cache_break:
                 s["breaks"] += 1
 
@@ -1431,49 +1531,55 @@ def create_app(
             # Total input = non-cached + cache_creation + cache_read
             input_tok = (e.input_tokens_actual or 0) + cache_read + cache_created
             hit_rate = round(cache_read / input_tok * 100, 1) if input_tok > 0 else 0
-            timeline.append({
-                "timestamp": e.timestamp,
-                "session_id": e.session_id,
-                "turn": e.turn_number,
-                "model": e.model,
-                "input_tokens": input_tok,
-                "cache_read": cache_read,
-                "cache_created": cache_created,
-                "hit_rate": hit_rate,
-                "cache_break": e.cache_break,
-                "break_components": e.cache_break_components if e.cache_break else [],
-            })
+            timeline.append(
+                {
+                    "timestamp": e.timestamp,
+                    "session_id": e.session_id,
+                    "turn": e.turn_number,
+                    "model": e.model,
+                    "input_tokens": input_tok,
+                    "cache_read": cache_read,
+                    "cache_created": cache_created,
+                    "hit_rate": hit_rate,
+                    "cache_break": e.cache_break,
+                    "break_components": e.cache_break_components if e.cache_break else [],
+                }
+            )
 
         # Session list sorted by calls descending
         session_list = []
         for sid, s in sessions.items():
             hit_rate = round(s["cache_read"] / s["input"] * 100, 1) if s["input"] > 0 else 0
-            session_list.append({
-                "session_id": sid,
-                "calls": s["calls"],
-                "input_tokens": s["input"],
-                "cache_read": s["cache_read"],
-                "cache_created": s["cache_created"],
-                "hit_rate": hit_rate,
-                "breaks": s["breaks"],
-            })
+            session_list.append(
+                {
+                    "session_id": sid,
+                    "calls": s["calls"],
+                    "input_tokens": s["input"],
+                    "cache_read": s["cache_read"],
+                    "cache_created": s["cache_created"],
+                    "hit_rate": hit_rate,
+                    "breaks": s["breaks"],
+                }
+            )
         session_list.sort(key=lambda x: x["calls"], reverse=True)
 
-        return JSONResponse({
-            "summary": {
-                "total_calls": total_calls,
-                "total_input_tokens": total_input,
-                "total_cache_read": total_cache_read,
-                "total_cache_created": total_cache_created,
-                "overall_hit_rate": round(total_cache_read / total_input * 100, 1) if total_input > 0 else 0,
-                "total_breaks": total_breaks,
-                "break_rate": round(total_breaks / total_calls * 100, 1) if total_calls > 0 else 0,
-                "tokens_lost_to_breaks": total_break_tokens,
-            },
-            "break_components": component_counts,
-            "sessions": session_list,
-            "timeline": timeline,
-        })
+        return JSONResponse(
+            {
+                "summary": {
+                    "total_calls": total_calls,
+                    "total_input_tokens": total_input,
+                    "total_cache_read": total_cache_read,
+                    "total_cache_created": total_cache_created,
+                    "overall_hit_rate": round(total_cache_read / total_input * 100, 1) if total_input > 0 else 0,
+                    "total_breaks": total_breaks,
+                    "break_rate": round(total_breaks / total_calls * 100, 1) if total_calls > 0 else 0,
+                    "tokens_lost_to_breaks": total_break_tokens,
+                },
+                "break_components": component_counts,
+                "sessions": session_list,
+                "timeline": timeline,
+            }
+        )
 
     # --- F024 Phase 3b: Rubric endpoints ---
 
@@ -1543,12 +1649,13 @@ def create_app(
 
         # Store as a pending proposal fact for Tim's review
         from nous.heart.schemas import FactInput
+
         fact = FactInput(
             content=f"[RUBRIC PROPOSAL] New dimension: {body['name']}\n\n"
-                    f"Description: {body['description']}\n"
-                    f"Scoring: {body['scoring_criteria']}\n"
-                    f"Evidence: {body['gap_analysis']}\n"
-                    f"Suggested weight: {body.get('suggested_weight', 0.15)}",
+            f"Description: {body['description']}\n"
+            f"Scoring: {body['scoring_criteria']}\n"
+            f"Evidence: {body['gap_analysis']}\n"
+            f"Suggested weight: {body.get('suggested_weight', 0.15)}",
             category="technical",
             subject="rubric_dimension_proposal",
             source="f024_phase3b",
@@ -1556,11 +1663,14 @@ def create_app(
         )
         result = await heart.learn(fact)
 
-        return JSONResponse({
-            "status": "pending_approval",
-            "fact_id": str(result.id) if result else None,
-            "message": "Dimension proposal stored. Requires Tim's approval to activate.",
-        }, status_code=201)
+        return JSONResponse(
+            {
+                "status": "pending_approval",
+                "fact_id": str(result.id) if result else None,
+                "message": "Dimension proposal stored. Requires Tim's approval to activate.",
+            },
+            status_code=201,
+        )
 
     async def list_proposals(request: Request) -> JSONResponse:
         """GET /rubric/proposals — list pending dimension proposals."""
@@ -1574,14 +1684,16 @@ def create_app(
             limit=20,
             category="technical",
         )
-        return JSONResponse([
-            {
-                "id": str(f.id),
-                "content": f.content,
-                "created_at": f.created_at.isoformat() if hasattr(f, "created_at") and f.created_at else None,
-            }
-            for f in results
-        ])
+        return JSONResponse(
+            [
+                {
+                    "id": str(f.id),
+                    "content": f.content,
+                    "created_at": f.created_at.isoformat() if hasattr(f, "created_at") and f.created_at else None,
+                }
+                for f in results
+            ]
+        )
 
     async def approve_proposal(request: Request) -> JSONResponse:
         """POST /rubric/proposals/{id}/approve — approve a proposed dimension."""
@@ -1607,17 +1719,20 @@ def create_app(
         if not active:
             return JSONResponse({"error": "No active rubric"}, status_code=404)
 
-        new_dims = list(active.dimensions) + [{
-            "name": name,
-            "weight": weight,
-            "description": description,
-            "scoring_criteria": scoring_criteria,
-            "min_weight": 0.10,
-            "max_weight": 0.40,
-        }]
+        new_dims = list(active.dimensions) + [
+            {
+                "name": name,
+                "weight": weight,
+                "description": description,
+                "scoring_criteria": scoring_criteria,
+                "min_weight": 0.10,
+                "max_weight": 0.40,
+            }
+        ]
 
         # Normalize weights
         from nous.cognitive.correlation import _normalize_weights
+
         norm = _normalize_weights({d["name"]: d["weight"] for d in new_dims})
         for d in new_dims:
             d["weight"] = norm[d["name"]]
@@ -1665,12 +1780,14 @@ def create_app(
         except (RuntimeError, AttributeError):
             return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
 
-        return JSONResponse({
-            "checks": heartbeat_runner.registry.get_status(),
-            "tokens_used_today": heartbeat_runner.tokens_used_today,
-            "daily_budget": settings.heartbeat_daily_token_budget,
-            "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
-        })
+        return JSONResponse(
+            {
+                "checks": heartbeat_runner.registry.get_status(),
+                "tokens_used_today": heartbeat_runner.tokens_used_today,
+                "daily_budget": settings.heartbeat_daily_token_budget,
+                "last_tick": heartbeat_runner.last_tick.isoformat() if heartbeat_runner.last_tick else None,
+            }
+        )
 
     async def heartbeat_trigger(request: Request) -> JSONResponse:
         """POST /heartbeat/trigger — force immediate tick."""
@@ -1680,11 +1797,13 @@ def create_app(
             return JSONResponse({"error": "Heartbeat not enabled"}, status_code=503)
 
         findings = await heartbeat_runner.trigger_tick()
-        return JSONResponse({
-            "status": "triggered",
-            "findings_count": len(findings),
-            "findings": [{"source": f.source, "summary": f.summary, "urgency": f.urgency} for f in findings],
-        })
+        return JSONResponse(
+            {
+                "status": "triggered",
+                "findings_count": len(findings),
+                "findings": [{"source": f.source, "summary": f.summary, "urgency": f.urgency} for f in findings],
+            }
+        )
 
     async def heartbeat_config(request: Request) -> JSONResponse:
         """PUT /heartbeat/config — update intervals, quiet hours, budget at runtime."""
@@ -1705,9 +1824,14 @@ def create_app(
             "heartbeat_self_initiated_interval": "self_initiated",
         }
 
-        for field_name in ("heartbeat_tick_interval", "heartbeat_quiet_start",
-                           "heartbeat_quiet_end", "heartbeat_daily_token_budget",
-                           "heartbeat_health_interval", "heartbeat_self_initiated_interval"):
+        for field_name in (
+            "heartbeat_tick_interval",
+            "heartbeat_quiet_start",
+            "heartbeat_quiet_end",
+            "heartbeat_daily_token_budget",
+            "heartbeat_health_interval",
+            "heartbeat_self_initiated_interval",
+        ):
             short = field_name.replace("heartbeat_", "")
             if short in body:
                 val = body[short]
@@ -1737,14 +1861,16 @@ def create_app(
 
         try:
             result = await heartbeat_runner.trigger_check(name)
-            return JSONResponse({
-                "status": "triggered",
-                "has_updates": result.has_updates if result else False,
-                "findings": [
-                    {"source": f.source, "summary": f.summary, "urgency": f.urgency}
-                    for f in (result.findings if result else [])
-                ],
-            })
+            return JSONResponse(
+                {
+                    "status": "triggered",
+                    "has_updates": result.has_updates if result else False,
+                    "findings": [
+                        {"source": f.source, "summary": f.summary, "urgency": f.urgency}
+                        for f in (result.findings if result else [])
+                    ],
+                }
+            )
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -1836,15 +1962,18 @@ def create_app(
                 val = int(body[field_name])
                 if val < min_val:
                     return JSONResponse(
-                        {"error": f"{field_name} must be >= {min_val}"}, status_code=400,
+                        {"error": f"{field_name} must be >= {min_val}"},
+                        status_code=400,
                     )
                 setattr(cfg, field_name, val)
-        return JSONResponse({
-            "low_to_normal_hours": cfg.low_to_normal_hours,
-            "normal_to_high_hours": cfg.normal_to_high_hours,
-            "high_realert_hours": cfg.high_realert_hours,
-            "accumulation_threshold": cfg.accumulation_threshold,
-        })
+        return JSONResponse(
+            {
+                "low_to_normal_hours": cfg.low_to_normal_hours,
+                "normal_to_high_hours": cfg.normal_to_high_hours,
+                "high_realert_hours": cfg.high_realert_hours,
+                "accumulation_threshold": cfg.accumulation_threshold,
+            }
+        )
 
     # ------------------------------------------------------------------
     # Heartbeat Tuning (F034.3)
@@ -1876,10 +2005,12 @@ def create_app(
                 "timestamp": report.timestamp.isoformat() if report.timestamp else None,
                 "report_text": tuner.generate_report_text(report),
             }
-        return JSONResponse({
-            "report": report_data,
-            "tuning_enabled": settings.heartbeat_tuning_enabled,
-        })
+        return JSONResponse(
+            {
+                "report": report_data,
+                "tuning_enabled": settings.heartbeat_tuning_enabled,
+            }
+        )
 
     async def heartbeat_tune(request: Request) -> JSONResponse:
         """POST /heartbeat/tune — Force tuning pass."""
@@ -1890,11 +2021,13 @@ def create_app(
             return JSONResponse({"error": "Finding store not available"}, status_code=503)
         tuner = heartbeat_runner.tuner
         report = await tuner.tune(store, heartbeat_runner.registry)
-        return JSONResponse({
-            "adjustments": len(report.adjustments),
-            "skipped": report.skipped_checks,
-            "report_text": tuner.generate_report_text(report),
-        })
+        return JSONResponse(
+            {
+                "adjustments": len(report.adjustments),
+                "skipped": report.skipped_checks,
+                "report_text": tuner.generate_report_text(report),
+            }
+        )
 
     # ------------------------------------------------------------------
     # F034.5: Dynamic heartbeat check endpoints
@@ -1994,14 +2127,16 @@ def create_app(
             return JSONResponse({"error": f"Check '{name}' not found"}, status_code=404)
         try:
             result = await heartbeat_runner.trigger_check(name)
-            return JSONResponse({
-                "status": "triggered",
-                "has_updates": result.has_updates if result else False,
-                "findings": [
-                    {"source": f.source, "summary": f.summary, "urgency": f.urgency}
-                    for f in (result.findings if result else [])
-                ],
-            })
+            return JSONResponse(
+                {
+                    "status": "triggered",
+                    "has_updates": result.has_updates if result else False,
+                    "findings": [
+                        {"source": f.source, "summary": f.summary, "urgency": f.urgency}
+                        for f in (result.findings if result else [])
+                    ],
+                }
+            )
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -2032,10 +2167,23 @@ def create_app(
         if bus is None:
             return JSONResponse({"events": [], "source": "memory", "count": 0})
         events = bus.stats.recent_events(limit=limit)
-        return JSONResponse({
-            "events": [{"type": e.type, "timestamp": e.timestamp, "handlers_invoked": e.handlers_invoked, "handlers_failed": e.handlers_failed, "duration_ms": round(e.duration_ms, 2), "session_id": e.session_id} for e in events],
-            "source": "memory", "count": len(events),
-        })
+        return JSONResponse(
+            {
+                "events": [
+                    {
+                        "type": e.type,
+                        "timestamp": e.timestamp,
+                        "handlers_invoked": e.handlers_invoked,
+                        "handlers_failed": e.handlers_failed,
+                        "duration_ms": round(e.duration_ms, 2),
+                        "session_id": e.session_id,
+                    }
+                    for e in events
+                ],
+                "source": "memory",
+                "count": len(events),
+            }
+        )
 
     # ------------------------------------------------------------------
     # F035.2: Causal chain tracing endpoints
@@ -2046,41 +2194,51 @@ def create_app(
         trace_id = request.path_params["trace_id"]
         async with database.session() as session:
             from sqlalchemy import text
-            result = await session.execute(text("""
+
+            result = await session.execute(
+                text("""
                 SELECT event_id, event_type, session_id, data, created_at, trace_id, caused_by
                 FROM nous_system.events
                 WHERE trace_id = :tid
                 ORDER BY created_at ASC
-            """), {"tid": trace_id})
+            """),
+                {"tid": trace_id},
+            )
             rows = result.fetchall()
 
         events = []
         for r in rows:
-            events.append({
-                "event_id": r.event_id,
-                "type": r.event_type,
-                "session_id": r.session_id,
-                "data": r.data if isinstance(r.data, dict) else {},
-                "timestamp": r.created_at.isoformat() if r.created_at else None,
-                "trace_id": r.trace_id,
-                "caused_by": r.caused_by,
-            })
+            events.append(
+                {
+                    "event_id": r.event_id,
+                    "type": r.event_type,
+                    "session_id": r.session_id,
+                    "data": r.data if isinstance(r.data, dict) else {},
+                    "timestamp": r.created_at.isoformat() if r.created_at else None,
+                    "trace_id": r.trace_id,
+                    "caused_by": r.caused_by,
+                }
+            )
 
         root_event = next((e for e in events if not e["caused_by"]), None)
-        return JSONResponse({
-            "trace_id": trace_id,
-            "root_event": root_event["type"] if root_event else None,
-            "depth": len(events),
-            "events": events,
-            "duration_ms": None,  # Could compute from first/last timestamps
-        })
+        return JSONResponse(
+            {
+                "trace_id": trace_id,
+                "root_event": root_event["type"] if root_event else None,
+                "depth": len(events),
+                "events": events,
+                "duration_ms": None,  # Could compute from first/last timestamps
+            }
+        )
 
     async def events_recent_traces(request: Request) -> JSONResponse:
         """GET /events/recent-traces — Recent trace roots with stats."""
         limit = int(request.query_params.get("limit", "20"))
         async with database.session() as session:
             from sqlalchemy import text
-            result = await session.execute(text("""
+
+            result = await session.execute(
+                text("""
                 WITH trace_stats AS (
                     SELECT trace_id,
                            COUNT(*) AS event_count,
@@ -2100,13 +2258,21 @@ def create_app(
                 JOIN trace_stats ts ON ts.trace_id = r.trace_id
                 ORDER BY r.created_at DESC
                 LIMIT :lim
-            """), {"lim": limit})
+            """),
+                {"lim": limit},
+            )
             rows = result.fetchall()
 
-        traces = [{"trace_id": r.trace_id, "root_type": r.root_type,
-                   "timestamp": r.created_at.isoformat() if r.created_at else None,
-                   "event_count": r.event_count, "has_modifications": bool(r.has_modifications)}
-                  for r in rows]
+        traces = [
+            {
+                "trace_id": r.trace_id,
+                "root_type": r.root_type,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "event_count": r.event_count,
+                "has_modifications": bool(r.has_modifications),
+            }
+            for r in rows
+        ]
         return JSONResponse({"traces": traces})
 
     async def events_modifications(request: Request) -> JSONResponse:
@@ -2114,20 +2280,30 @@ def create_app(
         hours = int(request.query_params.get("hours", "24"))
         async with database.session() as session:
             from sqlalchemy import text
-            result = await session.execute(text("""
+
+            result = await session.execute(
+                text("""
                 SELECT event_id, event_type, session_id, data, created_at, trace_id, caused_by
                 FROM nous_system.events
                 WHERE data->>'modifies' IS NOT NULL
                   AND created_at > NOW() - INTERVAL '1 hour' * :hours
                 ORDER BY created_at DESC
-            """), {"hours": hours})
+            """),
+                {"hours": hours},
+            )
             rows = result.fetchall()
 
-        events = [{"event_id": r.event_id, "type": r.event_type, "session_id": r.session_id,
-                   "modifies": (r.data or {}).get("modifies"),
-                   "timestamp": r.created_at.isoformat() if r.created_at else None,
-                   "trace_id": r.trace_id}
-                  for r in rows]
+        events = [
+            {
+                "event_id": r.event_id,
+                "type": r.event_type,
+                "session_id": r.session_id,
+                "modifies": (r.data or {}).get("modifies"),
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+                "trace_id": r.trace_id,
+            }
+            for r in rows
+        ]
         return JSONResponse({"events": events, "hours": hours, "count": len(events)})
 
     # ------------------------------------------------------------------
@@ -2167,12 +2343,14 @@ def create_app(
         entry = context_logger.get_entry(entry_id)
         if not entry:
             return JSONResponse({"error": "Not found"}, status_code=404)
-        return JSONResponse({
-            "sections": entry.token_breakdown,
-            "sections_text": entry.sections_text,
-            "total_tokens_est": entry.total_tokens_est,
-            "sections_present": entry.sections_present,
-        })
+        return JSONResponse(
+            {
+                "sections": entry.token_breakdown,
+                "sections_text": entry.sections_text,
+                "total_tokens_est": entry.total_tokens_est,
+                "sections_present": entry.sections_present,
+            }
+        )
 
     async def context_diff(request: Request) -> JSONResponse:
         a_id = request.query_params.get("a")
@@ -2188,18 +2366,21 @@ def create_app(
             d = b.token_breakdown.get(s, 0) - a.token_breakdown.get(s, 0)
             if d != 0:
                 token_delta[s] = d
-        return JSONResponse({
-            "a": a_id, "b": b_id,
-            "token_delta": {
-                "total": b.total_tokens_est - a.total_tokens_est,
-                "by_section": token_delta,
-            },
-            "sections_added": [s for s in b.sections_present if s not in a.sections_present],
-            "sections_removed": [s for s in a.sections_present if s not in b.sections_present],
-            "tools_added": [t for t in b.tool_names if t not in a.tool_names],
-            "tools_removed": [t for t in a.tool_names if t not in b.tool_names],
-            "messages_delta": b.messages_count - a.messages_count,
-        })
+        return JSONResponse(
+            {
+                "a": a_id,
+                "b": b_id,
+                "token_delta": {
+                    "total": b.total_tokens_est - a.total_tokens_est,
+                    "by_section": token_delta,
+                },
+                "sections_added": [s for s in b.sections_present if s not in a.sections_present],
+                "sections_removed": [s for s in a.sections_present if s not in b.sections_present],
+                "tools_added": [t for t in b.tool_names if t not in a.tool_names],
+                "tools_removed": [t for t in a.tool_names if t not in b.tool_names],
+                "messages_delta": b.messages_count - a.messages_count,
+            }
+        )
 
     # ------------------------------------------------------------------
     # F035.3: Behavioral drift detection endpoints
@@ -2208,27 +2389,44 @@ def create_app(
     async def behavior_snapshot_latest(request: Request) -> JSONResponse:
         async with database.session() as session:
             from sqlalchemy import text
-            result = await session.execute(text(
-                "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
-                "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
-            ), {"aid": settings.agent_id})
+
+            result = await session.execute(
+                text(
+                    "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+                ),
+                {"aid": settings.agent_id},
+            )
             row = result.fetchone()
         if not row:
             return JSONResponse({"snapshot": None})
-        return JSONResponse({"snapshot": {"timestamp": row.timestamp.isoformat(), "metrics": row.metrics, "anomalies": row.anomalies or []}})
+        return JSONResponse(
+            {
+                "snapshot": {
+                    "timestamp": row.timestamp.isoformat(),
+                    "metrics": row.metrics,
+                    "anomalies": row.anomalies or [],
+                }
+            }
+        )
 
     async def behavior_trends(request: Request) -> JSONResponse:
-        from datetime import UTC, datetime, timedelta
         import statistics as st
+        from datetime import UTC, datetime, timedelta
+
         metric = request.query_params.get("metric", "fact_count_delta")
         hours = int(request.query_params.get("hours", "168"))
         async with database.session() as session:
             from sqlalchemy import text
+
             cutoff = datetime.now(UTC) - timedelta(hours=hours)
-            result = await session.execute(text(
-                "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
-                "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
-            ), {"aid": settings.agent_id, "cutoff": cutoff})
+            result = await session.execute(
+                text(
+                    "SELECT timestamp, metrics FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid AND timestamp > :cutoff ORDER BY timestamp"
+                ),
+                {"aid": settings.agent_id, "cutoff": cutoff},
+            )
             rows = result.fetchall()
         points = []
         values = []
@@ -2246,18 +2444,23 @@ def create_app(
 
     async def behavior_anomalies(request: Request) -> JSONResponse:
         from datetime import UTC, datetime, timedelta
+
         hours = int(request.query_params.get("hours", "168"))
         async with database.session() as session:
             from sqlalchemy import text
+
             cutoff = datetime.now(UTC) - timedelta(hours=hours)
-            result = await session.execute(text(
-                "SELECT timestamp, anomalies FROM nous_system.behavior_snapshots "
-                "WHERE agent_id = :aid AND anomalies != '[]'::jsonb AND timestamp > :cutoff ORDER BY timestamp DESC"
-            ), {"aid": settings.agent_id, "cutoff": cutoff})
+            result = await session.execute(
+                text(
+                    "SELECT timestamp, anomalies FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid AND anomalies != '[]'::jsonb AND timestamp > :cutoff ORDER BY timestamp DESC"
+                ),
+                {"aid": settings.agent_id, "cutoff": cutoff},
+            )
             rows = result.fetchall()
         anomalies = []
         for row in rows:
-            for a in (row.anomalies or []):
+            for a in row.anomalies or []:
                 a["timestamp"] = row.timestamp.isoformat()
                 anomalies.append(a)
         return JSONResponse({"anomalies": anomalies, "hours": hours})
@@ -2266,21 +2469,27 @@ def create_app(
         """GET /behavior/drift-report - Human-readable drift summary."""
         async with database.session() as session:
             from sqlalchemy import text
-            result = await session.execute(text(
-                "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
-                "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
-            ), {"aid": settings.agent_id})
+
+            result = await session.execute(
+                text(
+                    "SELECT timestamp, metrics, anomalies FROM nous_system.behavior_snapshots "
+                    "WHERE agent_id = :aid ORDER BY timestamp DESC LIMIT 1"
+                ),
+                {"aid": settings.agent_id},
+            )
             row = result.fetchone()
         if not row:
             return JSONResponse({"report": "No snapshots yet.", "anomalies": []})
         anomalies = row.anomalies or []
-        metrics = row.metrics if isinstance(row.metrics, dict) else {}
+        metrics = row.metrics if isinstance(row.metrics, dict) else {}  # noqa: F841
         if not anomalies:
             report = f"System behavior is within normal parameters. Last snapshot: {row.timestamp.isoformat()}"
         else:
             lines = [f"Drift detected at {row.timestamp.isoformat()}:"]
             for a in anomalies:
-                lines.append(f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)")
+                lines.append(
+                    f"  - {a.get('metric', '?')}: {a.get('current', '?')} ({a.get('direction', '?')} from baseline)"
+                )
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 
@@ -2386,7 +2595,8 @@ def create_app(
     # MUST be LAST in routes list (catch-all for /dashboard/*)
     dashboard_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "static", "dashboard",
+        "static",
+        "dashboard",
     )
     if os.path.isdir(dashboard_dir):
         routes.append(

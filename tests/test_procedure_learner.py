@@ -8,12 +8,13 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from nous.brain.schemas import BridgeInfo, DecisionDetail, DecisionSummary
+from nous.config import Settings
 from nous.handlers.procedure_learner import (
     ProcedureLearner,
     _cosine_similarity,
@@ -355,7 +356,7 @@ async def test_success_rate_gate():
     learner, brain, heart, embeddings, llm_client = _build_learner()
 
     # 2 success + 2 failure (all reviewed) = 50% success rate
-    summaries = [
+    summaries = [  # noqa: F841
         _make_decision_summary(outcome="success"),
         _make_decision_summary(outcome="success"),
         _make_decision_summary(outcome="failure"),
@@ -431,10 +432,7 @@ async def test_episode_lesson_clustering():
     ep_summaries = [_make_episode_summary() for _ in range(3)]
     heart.list_episodes.return_value = ep_summaries
 
-    ep_details = [
-        _make_episode_detail(s, lessons=["Use async context managers for DB"])
-        for s in ep_summaries
-    ]
+    ep_details = [_make_episode_detail(s, lessons=["Use async context managers for DB"]) for s in ep_summaries]
     heart.get_episode.side_effect = ep_details
 
     # Embeddings: all similar
@@ -468,9 +466,7 @@ async def test_too_few_episodes():
 
     ep_summaries = [_make_episode_summary()]
     heart.list_episodes.return_value = ep_summaries
-    heart.get_episode.return_value = _make_episode_detail(
-        ep_summaries[0], lessons=["Single lesson"]
-    )
+    heart.get_episode.return_value = _make_episode_detail(ep_summaries[0], lessons=["Single lesson"])
 
     stats = await learner.run_sleep_learning()
 
@@ -509,9 +505,7 @@ async def test_dedup_skips_similar_existing():
 @pytest.mark.asyncio
 async def test_max_cap_enforcement():
     """Respects procedure_max_per_sleep cap."""
-    learner, brain, heart, embeddings, llm_client = _build_learner(
-        _make_settings(procedure_max_per_sleep=1)
-    )
+    learner, brain, heart, embeddings, llm_client = _build_learner(_make_settings(procedure_max_per_sleep=1))
 
     # Set up enough decisions for 2 clusters
     summaries = [_make_decision_summary() for _ in range(6)]
@@ -545,9 +539,7 @@ async def test_max_cap_enforcement():
 @pytest.mark.asyncio
 async def test_disabled_learning_returns_empty():
     """When procedure_learning_enabled=False, returns empty stats."""
-    learner, brain, heart, embeddings, llm_client = _build_learner(
-        _make_settings(procedure_learning_enabled=False)
-    )
+    learner, brain, heart, embeddings, llm_client = _build_learner(_make_settings(procedure_learning_enabled=False))
 
     stats = await learner.run_sleep_learning()
 
@@ -593,10 +585,12 @@ async def test_weak_review_retires():
         last_activated=_RECENT,
     )
 
-    llm_client.call.return_value = _mock_llm_response({
-        "action": "retire",
-        "reason": "Too unreliable",
-    })
+    llm_client.call.return_value = _mock_llm_response(
+        {
+            "action": "retire",
+            "reason": "Too unreliable",
+        }
+    )
 
     stats = await learner.run_sleep_learning()
 
@@ -665,9 +659,7 @@ async def test_episode_pathway_logs_diagnostics(caplog):
     ep_ongoing = _make_episode_summary(outcome="ongoing")
     heart.list_episodes.return_value = [ep_success, ep_failure, ep_ongoing]
 
-    heart.get_episode.return_value = _make_episode_detail(
-        ep_success, lessons=["Single lesson"]
-    )
+    heart.get_episode.return_value = _make_episode_detail(ep_success, lessons=["Single lesson"])
     heart.search_procedures.return_value = []
 
     with caplog.at_level(logging.INFO, logger="nous.handlers.procedure_learner"):

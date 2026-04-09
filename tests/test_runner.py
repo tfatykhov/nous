@@ -15,10 +15,9 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
-from nous.api.runner import AgentRunner, ApiResponse, MAX_CONVERSATIONS, _parse_sse_event, StreamEvent
+from nous.api.runner import MAX_CONVERSATIONS, AgentRunner, ApiResponse, _parse_sse_event
 from nous.cognitive.schemas import FrameSelection, ToolResult, TurnContext, TurnResult
 from nous.config import Settings
-
 
 # ---------------------------------------------------------------------------
 # Mock CognitiveLayer
@@ -45,7 +44,18 @@ class MockCognitiveLayer:
             context_token_estimate=100,
         )
 
-    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False):
+    async def pre_turn(
+        self,
+        agent_id,
+        session_id,
+        user_input,
+        session=None,
+        *,
+        conversation_messages=None,
+        user_id=None,
+        user_display_name=None,
+        skip_episode=False,
+    ):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 
@@ -254,7 +264,9 @@ async def test_run_turn_with_tool_calls(mock_cognitive, mock_settings):
             result="Fact learned successfully.\nID: def456",
         ),
     ]
-    r._tool_loop = AsyncMock(return_value=("Done with tools.", tool_results, {"input_tokens": 200, "output_tokens": 100}, []))
+    r._tool_loop = AsyncMock(
+        return_value=("Done with tools.", tool_results, {"input_tokens": 200, "output_tokens": 100}, [])
+    )
 
     try:
         session_id = f"test-tools-{uuid.uuid4().hex[:8]}"
@@ -288,7 +300,9 @@ async def test_run_turn_with_tool_error(mock_cognitive, mock_settings):
             error="Error recording decision: validation failed",
         ),
     ]
-    r._tool_loop = AsyncMock(return_value=("Tool had an error.", tool_results, {"input_tokens": 200, "output_tokens": 100}, []))
+    r._tool_loop = AsyncMock(
+        return_value=("Tool had an error.", tool_results, {"input_tokens": 200, "output_tokens": 100}, [])
+    )
 
     try:
         session_id = f"test-tool-err-{uuid.uuid4().hex[:8]}"
@@ -368,7 +382,9 @@ async def test_run_turn_safety_net(mock_cognitive, mock_settings, caplog):
     )
 
     # Return response with NO tool calls (record_decision not called)
-    r._tool_loop = AsyncMock(return_value=("I decided to use caching.", [], {"input_tokens": 100, "output_tokens": 50}, []))
+    r._tool_loop = AsyncMock(
+        return_value=("I decided to use caching.", [], {"input_tokens": 100, "output_tokens": 50}, [])
+    )
 
     try:
         session_id = f"test-safety-{uuid.uuid4().hex[:8]}"
@@ -456,10 +472,12 @@ async def test_end_conversation_with_reflection(mock_cognitive, mock_settings):
     r._tool_loop = mock_tool_loop
 
     # Mock _call_api for the reflection call in end_conversation
-    r._call_api = AsyncMock(return_value=ApiResponse(
-        content=[{"type": "text", "text": "Reflection: The task was about testing."}],
-        stop_reason="end_turn",
-    ))
+    r._call_api = AsyncMock(
+        return_value=ApiResponse(
+            content=[{"type": "text", "text": "Reflection: The task was about testing."}],
+            stop_reason="end_turn",
+        )
+    )
 
     try:
         session_id = f"test-reflect-{uuid.uuid4().hex[:8]}"
@@ -736,7 +754,8 @@ def test_payload_effort_skipped_for_opus_override():
     s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload(
-        "system", [{"role": "user", "content": "hi"}],
+        "system",
+        [{"role": "user", "content": "hi"}],
         model_override="claude-opus-4-6",
     )
     assert "output_config" not in payload
@@ -749,11 +768,13 @@ def test_payload_effort_skipped_for_opus_override():
 
 def test_parse_thinking_block_start():
     """content_block_start with type=thinking returns thinking_start event."""
-    event = _parse_sse_event({
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "thinking", "thinking": ""},
-    })
+    event = _parse_sse_event(
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        }
+    )
     assert event is not None
     assert event.type == "thinking_start"
     assert event.block_index == 0
@@ -761,11 +782,13 @@ def test_parse_thinking_block_start():
 
 def test_parse_redacted_thinking_start():
     """content_block_start with type=redacted_thinking returns redacted_thinking event."""
-    event = _parse_sse_event({
-        "type": "content_block_start",
-        "index": 1,
-        "content_block": {"type": "redacted_thinking", "data": "encrypted-data-here"},
-    })
+    event = _parse_sse_event(
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "redacted_thinking", "data": "encrypted-data-here"},
+        }
+    )
     assert event is not None
     assert event.type == "redacted_thinking"
     assert event.text == "encrypted-data-here"
@@ -774,22 +797,26 @@ def test_parse_redacted_thinking_start():
 
 def test_parse_redacted_thinking_not_text_fallthrough():
     """redacted_thinking block does NOT fall through to text_block_start."""
-    event = _parse_sse_event({
-        "type": "content_block_start",
-        "index": 0,
-        "content_block": {"type": "redacted_thinking", "data": "abc"},
-    })
+    event = _parse_sse_event(
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "redacted_thinking", "data": "abc"},
+        }
+    )
     assert event.type == "redacted_thinking"
     assert event.type != "text_block_start"
 
 
 def test_parse_thinking_delta():
     """content_block_delta with thinking_delta returns thinking_delta event."""
-    event = _parse_sse_event({
-        "type": "content_block_delta",
-        "index": 0,
-        "delta": {"type": "thinking_delta", "thinking": "Let me analyze..."},
-    })
+    event = _parse_sse_event(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Let me analyze..."},
+        }
+    )
     assert event is not None
     assert event.type == "thinking_delta"
     assert event.text == "Let me analyze..."
@@ -797,11 +824,13 @@ def test_parse_thinking_delta():
 
 def test_parse_signature_delta():
     """content_block_delta with signature_delta returns signature_delta event."""
-    event = _parse_sse_event({
-        "type": "content_block_delta",
-        "index": 0,
-        "delta": {"type": "signature_delta", "signature": "EqQBCgIYAh..."},
-    })
+    event = _parse_sse_event(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "EqQBCgIYAh..."},
+        }
+    )
     assert event is not None
     assert event.type == "signature_delta"
     assert event.text == "EqQBCgIYAh..."
@@ -907,6 +936,7 @@ async def test_tool_loop_preserves_thinking_blocks(mock_cognitive):
     r.set_dispatcher(MockDispatcher())
 
     from nous.api.runner import Conversation
+
     conv = Conversation(session_id="test")
     conv.messages.append(type("M", (), {"role": "user", "content": "do something"})())
 
@@ -954,6 +984,7 @@ async def test_tool_loop_preserves_redacted_thinking(mock_cognitive):
     r.set_dispatcher(MockDispatcher())
 
     from nous.api.runner import Conversation
+
     conv = Conversation(session_id="test")
     conv.messages.append(type("M", (), {"role": "user", "content": "test"})())
 

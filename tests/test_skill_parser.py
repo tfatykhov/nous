@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import pytest
 
-from nous.skills.parser import SkillManifest, SkillParser, _parse_frontmatter
-
+from nous.skills.parser import SkillParser, _parse_frontmatter
 
 # ---------------------------------------------------------------------------
 # Frontmatter parsing
 # ---------------------------------------------------------------------------
 
+
 class TestParseFrontmatter:
     def test_scalar_values(self):
-        text = 'name: my-skill\ndescription: A test skill'
+        text = "name: my-skill\ndescription: A test skill"
         result = _parse_frontmatter(text)
         assert result["name"] == "my-skill"
         assert result["description"] == "A test skill"
 
     def test_quoted_values(self):
-        text = 'version: "1.0"\nname: \'my-skill\''
+        text = "version: \"1.0\"\nname: 'my-skill'"
         result = _parse_frontmatter(text)
         assert result["version"] == "1.0"
         assert result["name"] == "my-skill"
@@ -36,12 +36,7 @@ class TestParseFrontmatter:
 
     def test_mixed_scalars_and_lists(self):
         text = (
-            "name: serper-search\n"
-            "description: Google search\n"
-            "triggers:\n"
-            "  - web search\n"
-            "  - google\n"
-            "domain: research"
+            "name: serper-search\ndescription: Google search\ntriggers:\n  - web search\n  - google\ndomain: research"
         )
         result = _parse_frontmatter(text)
         assert result["name"] == "serper-search"
@@ -182,6 +177,7 @@ class TestSkillParser:
 # SkillParser.to_procedure_input()
 # ---------------------------------------------------------------------------
 
+
 class TestToProcedureInput:
     def setup_method(self):
         self.parser = SkillParser()
@@ -237,6 +233,7 @@ class TestToProcedureInput:
 # learn_skill tool (unit test with mocked Heart)
 # ---------------------------------------------------------------------------
 
+
 class TestLearnSkillTool:
     """Test the learn_skill tool closure via create_nous_tools."""
 
@@ -261,11 +258,13 @@ class TestLearnSkillTool:
     @pytest.fixture
     def mock_brain(self):
         from unittest.mock import MagicMock
+
         return MagicMock()
 
     @pytest.fixture
     def mock_settings(self):
         from unittest.mock import MagicMock
+
         s = MagicMock()
         s.workspace_dir = "."
         return s
@@ -311,6 +310,7 @@ class TestLearnSkillTool:
     async def test_learn_skill_dedup_updates(self, mock_brain, mock_heart, mock_settings):
         from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
+
         from nous.api.tools import create_nous_tools
 
         existing = MagicMock()
@@ -341,10 +341,12 @@ class TestLearnSkillTool:
 # ProcedureSummary description field
 # ---------------------------------------------------------------------------
 
+
 class TestProcedureSummaryDescription:
     def test_summary_has_description_field(self):
-        from nous.heart.schemas import ProcedureSummary
         from uuid import uuid4
+
+        from nous.heart.schemas import ProcedureSummary
 
         summary = ProcedureSummary(
             id=uuid4(),
@@ -357,8 +359,9 @@ class TestProcedureSummaryDescription:
         assert summary.description == "A test skill description"
 
     def test_summary_description_defaults_none(self):
-        from nous.heart.schemas import ProcedureSummary
         from uuid import uuid4
+
+        from nous.heart.schemas import ProcedureSummary
 
         summary = ProcedureSummary(
             id=uuid4(),
@@ -374,10 +377,12 @@ class TestProcedureSummaryDescription:
 # Active filter in search_procedures
 # ---------------------------------------------------------------------------
 
+
 class TestGetProcedureByName:
     @pytest.mark.asyncio
     async def test_get_by_name_returns_none_when_not_found(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from nous.heart.procedures import ProcedureManager
 
         db = MagicMock()
@@ -459,6 +464,7 @@ class TestRequiresValidation:
     def mock_heart(self):
         from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
+
         heart = MagicMock()
         heart.search_procedures = AsyncMock(return_value=[])
         heart.get_procedure_by_name = AsyncMock(return_value=None)
@@ -472,11 +478,13 @@ class TestRequiresValidation:
     @pytest.fixture
     def mock_brain(self):
         from unittest.mock import MagicMock
+
         return MagicMock()
 
     @pytest.fixture
     def mock_settings(self):
         from unittest.mock import MagicMock
+
         s = MagicMock()
         s.workspace_dir = "."
         return s
@@ -484,6 +492,7 @@ class TestRequiresValidation:
     @pytest.mark.asyncio
     async def test_missing_requires_registers_inactive(self, mock_brain, mock_heart, mock_settings):
         import os
+
         from nous.api.tools import create_nous_tools
 
         os.environ.pop("SERPER_API_KEY", None)
@@ -505,6 +514,7 @@ class TestRequiresValidation:
         import os
         from unittest.mock import MagicMock
         from uuid import uuid4
+
         from nous.api.tools import create_nous_tools
 
         os.environ["SERPER_API_KEY"] = "test-key"
@@ -528,6 +538,7 @@ class TestRequiresValidation:
     async def test_no_requires_registers_active(self, mock_brain, mock_heart, mock_settings):
         from unittest.mock import MagicMock
         from uuid import uuid4
+
         from nous.api.tools import create_nous_tools
 
         # Use skill markdown without requires
@@ -549,10 +560,11 @@ class TestRequiresValidation:
 class TestBootstrapReactivation:
     @pytest.mark.asyncio
     async def test_reactivate_skill_with_satisfied_requires(self):
+        import os
         from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
+
         from nous.skills.bootstrap import reactivate_skills
-        import os
 
         heart = MagicMock()
 
@@ -576,10 +588,11 @@ class TestBootstrapReactivation:
 
     @pytest.mark.asyncio
     async def test_no_reactivation_when_requires_still_missing(self):
+        import os
         from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
+
         from nous.skills.bootstrap import reactivate_skills
-        import os
 
         heart = MagicMock()
 
@@ -601,6 +614,7 @@ class TestBootstrapReactivation:
     @pytest.mark.asyncio
     async def test_no_inactive_skills_returns_zero(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from nous.skills.bootstrap import reactivate_skills
 
         heart = MagicMock()
@@ -615,6 +629,7 @@ class TestLearnSkillWarnings:
     def mock_heart(self):
         from unittest.mock import AsyncMock, MagicMock
         from uuid import uuid4
+
         heart = MagicMock()
         heart.search_procedures = AsyncMock(return_value=[])
         heart.get_procedure_by_name = AsyncMock(return_value=None)
@@ -628,11 +643,13 @@ class TestLearnSkillWarnings:
     @pytest.fixture
     def mock_brain(self):
         from unittest.mock import MagicMock
+
         return MagicMock()
 
     @pytest.fixture
     def mock_settings(self):
         from unittest.mock import MagicMock
+
         s = MagicMock()
         s.workspace_dir = "."
         return s
@@ -669,6 +686,7 @@ class TestActiveFilter:
     @pytest.mark.asyncio
     async def test_search_passes_active_filter_to_hybrid_search(self):
         from unittest.mock import AsyncMock, MagicMock, patch
+
         from nous.heart.procedures import ProcedureManager
 
         db = MagicMock()
@@ -713,11 +731,13 @@ class TestGetProcedureTool:
     @pytest.fixture
     def mock_brain(self):
         from unittest.mock import MagicMock
+
         return MagicMock()
 
     @pytest.fixture
     def mock_settings(self):
         from unittest.mock import MagicMock
+
         s = MagicMock()
         s.workspace_dir = "."
         return s
@@ -741,6 +761,7 @@ class TestGetProcedureTool:
     @pytest.mark.asyncio
     async def test_get_procedure_not_found(self, mock_brain, mock_heart, mock_settings):
         from unittest.mock import AsyncMock
+
         from nous.api.tools import create_nous_tools
 
         mock_heart.get_procedure = AsyncMock(side_effect=ValueError("Procedure xyz not found"))

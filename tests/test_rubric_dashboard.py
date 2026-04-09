@@ -1,8 +1,5 @@
 """Tests for rubric dashboard query and endpoint."""
 
-import uuid
-from datetime import UTC, datetime
-
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -31,14 +28,38 @@ async def seed_rubric(db, settings):
             parent_version=None,
             change_reason="Initial rubric",
             dimensions=[
-                {"name": "Recall", "weight": 0.25, "description": "Memory retrieval",
-                 "scoring_criteria": "1-10", "min_weight": 0.10, "max_weight": 0.40},
-                {"name": "Tool Selection", "weight": 0.25, "description": "Tool choice",
-                 "scoring_criteria": "1-10", "min_weight": 0.10, "max_weight": 0.40},
-                {"name": "Confidence Calibration", "weight": 0.25, "description": "Calibration",
-                 "scoring_criteria": "1-10", "min_weight": 0.10, "max_weight": 0.40},
-                {"name": "Proactivity", "weight": 0.25, "description": "Anticipation",
-                 "scoring_criteria": "1-10", "min_weight": 0.10, "max_weight": 0.40},
+                {
+                    "name": "Recall",
+                    "weight": 0.25,
+                    "description": "Memory retrieval",
+                    "scoring_criteria": "1-10",
+                    "min_weight": 0.10,
+                    "max_weight": 0.40,
+                },
+                {
+                    "name": "Tool Selection",
+                    "weight": 0.25,
+                    "description": "Tool choice",
+                    "scoring_criteria": "1-10",
+                    "min_weight": 0.10,
+                    "max_weight": 0.40,
+                },
+                {
+                    "name": "Confidence Calibration",
+                    "weight": 0.25,
+                    "description": "Calibration",
+                    "scoring_criteria": "1-10",
+                    "min_weight": 0.10,
+                    "max_weight": 0.40,
+                },
+                {
+                    "name": "Proactivity",
+                    "weight": 0.25,
+                    "description": "Anticipation",
+                    "scoring_criteria": "1-10",
+                    "min_weight": 0.10,
+                    "max_weight": 0.40,
+                },
             ],
             outcome_correlations={},
             status="active",
@@ -90,9 +111,11 @@ async def test_get_rubric_dashboard_data(db, settings, seed_rubric):
 
 # brain, heart, db, settings fixtures come from conftest.py — do NOT redefine heart.
 
+
 @pytest_asyncio.fixture
 async def brain(db, settings):
     from nous.brain.brain import Brain
+
     b = Brain(database=db, settings=settings)
     yield b
     await b.close()
@@ -101,12 +124,14 @@ async def brain(db, settings):
 @pytest_asyncio.fixture
 async def cognitive(brain, heart, settings):
     from nous.cognitive.layer import CognitiveLayer
+
     return CognitiveLayer(brain, heart, settings, identity_prompt="You are Nous.")
 
 
 @pytest.fixture
 def app(brain, heart, cognitive, db, settings):
     from nous.api.rest import create_app
+
     return create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
 
 

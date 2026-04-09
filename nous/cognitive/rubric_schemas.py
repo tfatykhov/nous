@@ -1,15 +1,16 @@
 """Pydantic DTOs for F024 Phase 3b — Self-Modifying Rubrics."""
+
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
 
-class OutcomeSignalType(str, Enum):
+class OutcomeSignalType(StrEnum):
     CORRECTED = "corrected"
     COMPLETED = "completed"
     PRAISED = "praised"
@@ -19,6 +20,7 @@ class OutcomeSignalType(str, Enum):
 
 class RubricDimension(BaseModel):
     """A single evaluation dimension within a rubric."""
+
     name: str
     weight: float = Field(ge=0.0, le=1.0)
     description: str
@@ -27,16 +29,15 @@ class RubricDimension(BaseModel):
     max_weight: float = 0.40
 
     @model_validator(mode="after")
-    def weight_in_bounds(self) -> "RubricDimension":
+    def weight_in_bounds(self) -> RubricDimension:
         if self.weight < self.min_weight or self.weight > self.max_weight:
-            raise ValueError(
-                f"weight {self.weight} outside [{self.min_weight}, {self.max_weight}]"
-            )
+            raise ValueError(f"weight {self.weight} outside [{self.min_weight}, {self.max_weight}]")
         return self
 
 
 class RubricVersionDetail(BaseModel):
     """Full rubric version with all fields."""
+
     id: UUID
     agent_id: str
     version: str
@@ -50,6 +51,7 @@ class RubricVersionDetail(BaseModel):
 
 class RubricVersionSummary(BaseModel):
     """Lightweight rubric version for listings."""
+
     id: UUID
     version: str
     status: str
@@ -60,6 +62,7 @@ class RubricVersionSummary(BaseModel):
 
 class OutcomeSignalDetail(BaseModel):
     """A single outcome signal for an episode."""
+
     id: UUID
     agent_id: str
     episode_id: UUID
@@ -72,6 +75,7 @@ class OutcomeSignalDetail(BaseModel):
 
 class CorrelationResult(BaseModel):
     """Correlation between a dimension and an outcome signal type."""
+
     dimension: str
     signal_type: str
     pearson_r: float
@@ -81,6 +85,7 @@ class CorrelationResult(BaseModel):
 
 class CorrelationReport(BaseModel):
     """Full correlation analysis for a rubric version."""
+
     rubric_version: str
     correlations: list[CorrelationResult]
     suggested_weights: dict[str, float] | None = None
@@ -92,6 +97,7 @@ class CorrelationReport(BaseModel):
 
 class DimensionProposal(BaseModel):
     """Proposed new dimension for Tim's approval."""
+
     name: str
     description: str
     scoring_criteria: str

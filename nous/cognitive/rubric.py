@@ -4,14 +4,12 @@ Manages rubric versions: CRUD, seeding v1.0.0, creating new versions
 with weight adjustments, dimension splits/merges, and proposals.
 All versions are immutable. Rollback = reactivate previous version.
 """
+
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
-from typing import Any
-from uuid import UUID
 
-from sqlalchemy import select, update as sa_update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.cognitive.rubric_schemas import (
@@ -30,7 +28,7 @@ _DEFAULT_DIMENSIONS = [
         "name": "Recall",
         "weight": 0.25,
         "description": "Accuracy and completeness of memory retrieval",
-        "scoring_criteria": "1: No relevant memories retrieved. 5: Some relevant, some missed. 10: All relevant memories retrieved with high precision.",
+        "scoring_criteria": "1: No relevant memories retrieved. 5: Some relevant, some missed. 10: All relevant memories retrieved with high precision.",  # noqa: E501
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -38,7 +36,7 @@ _DEFAULT_DIMENSIONS = [
         "name": "Tool Selection",
         "weight": 0.25,
         "description": "Choosing the right tool for the task and using it efficiently",
-        "scoring_criteria": "1: Wrong tools or excessive calls. 5: Right tools, some inefficiency. 10: Optimal tool choice and call efficiency.",
+        "scoring_criteria": "1: Wrong tools or excessive calls. 5: Right tools, some inefficiency. 10: Optimal tool choice and call efficiency.",  # noqa: E501
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -46,7 +44,7 @@ _DEFAULT_DIMENSIONS = [
         "name": "Confidence Calibration",
         "weight": 0.25,
         "description": "Accuracy of confidence estimates vs actual outcomes",
-        "scoring_criteria": "1: Confidence wildly mismatched to outcomes. 5: Some calibration. 10: Confidence closely tracks actual success rates.",
+        "scoring_criteria": "1: Confidence wildly mismatched to outcomes. 5: Some calibration. 10: Confidence closely tracks actual success rates.",  # noqa: E501
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -54,7 +52,7 @@ _DEFAULT_DIMENSIONS = [
         "name": "Proactivity",
         "weight": 0.25,
         "description": "Anticipating needs without being asked",
-        "scoring_criteria": "1: Purely reactive. 5: Some anticipation. 10: Consistently anticipates and prepares for user needs.",
+        "scoring_criteria": "1: Purely reactive. 5: Some anticipation. 10: Consistently anticipates and prepares for user needs.",  # noqa: E501
         "min_weight": 0.10,
         "max_weight": 0.40,
     },
@@ -70,6 +68,7 @@ class RubricManager:
 
     async def get_active(self, session: AsyncSession | None = None) -> RubricVersion | None:
         """Get the currently active rubric version, or None."""
+
         async def _query(s: AsyncSession) -> RubricVersion | None:
             result = await s.execute(
                 select(RubricVersion).where(
@@ -108,6 +107,7 @@ class RubricManager:
 
     async def seed_v1(self, session: AsyncSession | None = None) -> RubricVersion:
         """Seed the initial v1.0.0 rubric if none exists."""
+
         async def _seed(s: AsyncSession) -> RubricVersion:
             rv = RubricVersion(
                 agent_id=self.agent_id,
@@ -155,9 +155,7 @@ class RubricManager:
             min_w = d.get("min_weight", 0.10)
             max_w = d.get("max_weight", 0.40)
             if d["weight"] < min_w or d["weight"] > max_w:
-                raise ValueError(
-                    f"Dimension '{d['name']}' weight {d['weight']} outside [{min_w}, {max_w}]"
-                )
+                raise ValueError(f"Dimension '{d['name']}' weight {d['weight']} outside [{min_w}, {max_w}]")
 
         async def _create(s: AsyncSession) -> RubricVersion:
             active = await self.get_active(session=s)
@@ -186,6 +184,7 @@ class RubricManager:
 
     async def rollback(self, target_version: str, session: AsyncSession | None = None) -> RubricVersion | None:
         """Rollback to a previous version by reactivating it."""
+
         async def _rollback(s: AsyncSession) -> RubricVersion | None:
             active = await self.get_active(session=s)
             if active:
@@ -201,6 +200,7 @@ class RubricManager:
             if target:
                 target.status = "rollback"
                 from datetime import UTC, datetime
+
                 ts = datetime.now(UTC).strftime("%Y%m%d%H%M")
                 rv = RubricVersion(
                     agent_id=self.agent_id,
@@ -233,12 +233,18 @@ class RubricManager:
         from nous.storage.models import OutcomeSignal
 
         async with self.db.session() as session:
-            q = select(OutcomeSignal).where(
-                OutcomeSignal.agent_id == self.agent_id,
-            ).order_by(OutcomeSignal.created_at.desc()).limit(limit)
+            q = (
+                select(OutcomeSignal)
+                .where(
+                    OutcomeSignal.agent_id == self.agent_id,
+                )
+                .order_by(OutcomeSignal.created_at.desc())
+                .limit(limit)
+            )
 
             if episode_id:
                 from uuid import UUID as _UUID
+
                 q = q.where(OutcomeSignal.episode_id == _UUID(episode_id))
 
             result = await session.execute(q)

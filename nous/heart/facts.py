@@ -336,20 +336,23 @@ class FactManager:
             max_sim = await self._find_max_similarity(embedding, exclude_ids, session) if embedding else None
             source_text = await self._get_source_text(input, session)
 
-            admission_result = await self._admission_controller.score(
-                input, embedding, max_sim, source_text, session
-            )
+            admission_result = await self._admission_controller.score(input, embedding, max_sim, source_text, session)
             if not admission_result.admitted:
                 logger.info(
                     "Fact rejected by admission: %s — %s",
-                    input.content[:80], admission_result.explanation,
+                    input.content[:80],
+                    admission_result.explanation,
                 )
-                await self._emit_event(session, "fact_rejected", {
-                    "content": input.content[:200],
-                    "source": input.source,
-                    "scores": admission_result.scores,
-                    "composite_score": admission_result.composite_score,
-                })
+                await self._emit_event(
+                    session,
+                    "fact_rejected",
+                    {
+                        "content": input.content[:200],
+                        "source": input.source,
+                        "scores": admission_result.scores,
+                        "composite_score": admission_result.composite_score,
+                    },
+                )
                 return FactRejected(
                     content=input.content,
                     composite_score=admission_result.composite_score,
@@ -384,9 +387,7 @@ class FactManager:
 
         # Subject + similarity supersession (006.2)
         if check_contradictions and input.subject and embedding is not None:
-            await self._supersede_by_subject(
-                fact.id, input.subject, embedding, session, new_content=input.content
-            )
+            await self._supersede_by_subject(fact.id, input.subject, embedding, session, new_content=input.content)
 
         await self._emit_event(
             session,
@@ -507,7 +508,9 @@ class FactManager:
                     )
                     logger.info(
                         "F027 contradiction-check: REFINEMENT — created refines edge %s->%s (sim=%.2f)",
-                        new_fact_id, old_fact_id, similarity,
+                        new_fact_id,
+                        old_fact_id,
+                        similarity,
                     )
                     return None
 
@@ -527,7 +530,9 @@ class FactManager:
                         logger.info(
                             "F027 contradiction-check: UPDATE (new is current, conf=%.2f) — "
                             "superseded %s by %s with soft penalty",
-                            conf, old_fact_id, new_fact_id,
+                            conf,
+                            old_fact_id,
+                            new_fact_id,
                         )
                         return None
                     else:
@@ -541,9 +546,9 @@ class FactManager:
                             old_fact_id, new_fact_id, "fact", "fact", "supersedes", 1.0, session
                         )
                         logger.info(
-                            "F027 contradiction-check: UPDATE (old is current, conf=%.2f) — "
-                            "deactivated new fact %s",
-                            conf, new_fact_id,
+                            "F027 contradiction-check: UPDATE (old is current, conf=%.2f) — deactivated new fact %s",
+                            conf,
+                            new_fact_id,
                         )
                         return None
 
@@ -655,7 +660,9 @@ class FactManager:
                             )
                             logger.info(
                                 "F027 subject-match: REFINEMENT — created refines edge %s->%s (sim=%.2f)",
-                                new_fact_id, old.id, similarity,
+                                new_fact_id,
+                                old.id,
+                                similarity,
                             )
                             continue
                         elif relation == "UPDATE" and conf >= 0.8 and current == "old":
@@ -676,7 +683,10 @@ class FactManager:
                 old.superseded_by = new_fact_id
                 logger.info(
                     "Superseded fact %s (subject=%s, sim=%.2f) by %s",
-                    old.id, subject, similarity, new_fact_id,
+                    old.id,
+                    subject,
+                    similarity,
+                    new_fact_id,
                 )
 
     @staticmethod
@@ -875,9 +885,7 @@ class FactManager:
         await session.flush()
 
         # F022: Bridge — also create graph edge
-        await self._create_graph_edge(
-            new_detail.id, old_fact_id, "fact", "fact", "supersedes", 1.0, session
-        )
+        await self._create_graph_edge(new_detail.id, old_fact_id, "fact", "fact", "supersedes", 1.0, session)
 
         await self._emit_event(
             session,
@@ -932,9 +940,7 @@ class FactManager:
             await session.flush()
 
         # F022: Bridge — also create graph edge
-        await self._create_graph_edge(
-            new_detail.id, fact_id, "fact", "fact", "contradicts", 1.0, session
-        )
+        await self._create_graph_edge(new_detail.id, fact_id, "fact", "fact", "contradicts", 1.0, session)
 
         # Reduce confidence of old fact by 0.2 (min 0.0)
         old_confidence = old_fact.confidence or 1.0
@@ -989,12 +995,9 @@ class FactManager:
         limit: int,
         session: AsyncSession,
     ) -> list[FactSummary]:
-        stmt = (
-            select(Fact)
-            .where(
-                Fact.agent_id == self.agent_id,
-                Fact.category.in_(categories),
-            )
+        stmt = select(Fact).where(
+            Fact.agent_id == self.agent_id,
+            Fact.category.in_(categories),
         )
         if active_only:
             stmt = stmt.where(Fact.active == True)  # noqa: E712
@@ -1221,12 +1224,28 @@ class FactManager:
         if session is None:
             async with self.db.session() as session:
                 return await self._list_all(
-                    limit, offset, category, active_only,
-                    confidence_min, date_from, date_to, sort, order, session,
+                    limit,
+                    offset,
+                    category,
+                    active_only,
+                    confidence_min,
+                    date_from,
+                    date_to,
+                    sort,
+                    order,
+                    session,
                 )
         return await self._list_all(
-            limit, offset, category, active_only,
-            confidence_min, date_from, date_to, sort, order, session,
+            limit,
+            offset,
+            category,
+            active_only,
+            confidence_min,
+            date_from,
+            date_to,
+            sort,
+            order,
+            session,
         )
 
     async def _list_all(

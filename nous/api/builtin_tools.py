@@ -81,16 +81,11 @@ async def bash_tool(
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=effective_timeout
-            )
-        except asyncio.TimeoutError:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
+        except TimeoutError:
             proc.kill()
             await proc.wait()
-            return _mcp_response(
-                f"Command timed out after {effective_timeout}s.\n"
-                f"Command: {command}"
-            )
+            return _mcp_response(f"Command timed out after {effective_timeout}s.\nCommand: {command}")
 
         # Decode and truncate
         stdout_text = stdout.decode("utf-8", errors="replace")
@@ -199,10 +194,7 @@ async def write_file_tool(
         # Write file
         await asyncio.to_thread(target.write_text, content, encoding="utf-8")
 
-        return _mcp_response(
-            f"File written successfully: {target}\n"
-            f"Size: {len(content):,} bytes"
-        )
+        return _mcp_response(f"File written successfully: {target}\nSize: {len(content):,} bytes")
 
     except ValueError as e:
         return _mcp_response(str(e))

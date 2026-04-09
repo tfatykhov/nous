@@ -241,7 +241,9 @@ async def test_build_includes_censors(context_engine, brain, heart, session):
     result = await context_engine.build("nous-default", sid, "do something dangerous", frame, session=session)
 
     # Censor should appear somewhere in the prompt
-    assert "dangerous operation" in result.system_prompt.lower() or any("censor" in s.label.lower() for s in result.sections)
+    assert "dangerous operation" in result.system_prompt.lower() or any(
+        "censor" in s.label.lower() for s in result.sections
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -619,9 +621,7 @@ async def test_topic_enhanced_query_with_working_memory(context_engine, brain, h
     )
 
     frame = _frame_selection()
-    result = await context_engine.build(
-        "nous-default", sid, "what do you know?", frame, session=session
-    )
+    result = await context_engine.build("nous-default", sid, "what do you know?", frame, session=session)
 
     # The build should complete without error — topic prefix is additive
     assert result.system_prompt is not None
@@ -635,9 +635,7 @@ async def test_topic_no_working_memory_fallback(context_engine, brain, heart, se
     # Don't set a task — current_task is None
 
     frame = _frame_selection()
-    result = await context_engine.build(
-        "nous-default", sid, "tell me about databases", frame, session=session
-    )
+    result = await context_engine.build("nous-default", sid, "tell me about databases", frame, session=session)
 
     # Should work exactly as before — no topic prefix
     assert result.system_prompt is not None

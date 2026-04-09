@@ -10,19 +10,15 @@ Tests cover:
 - Protocol constants
 """
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
-
-from nous.identity.manager import IdentityManager, SECTIONS, VALID_SECTIONS
+from nous.identity.manager import SECTIONS, VALID_SECTIONS, IdentityManager
 from nous.identity.protocol import (
-    INITIATION_PROMPT,
-    UPGRADE_INITIATION_PROMPT,
-    STORE_IDENTITY_SCHEMA,
     COMPLETE_INITIATION_SCHEMA,
+    INITIATION_PROMPT,
+    STORE_IDENTITY_SCHEMA,
+    UPGRADE_INITIATION_PROMPT,
 )
-
 
 # ---------------------------------------------------------------------------
 # IdentityManager unit tests (no DB)
@@ -44,21 +40,25 @@ class TestIdentityManagerAssemble:
 
     def test_assemble_multiple_sections(self):
         mgr = IdentityManager(MagicMock(), "test-agent")
-        result = mgr.assemble_prompt({
-            "character": "Name: Nous",
-            "preferences": "User: Tim\nTimezone: EST",
-            "boundaries": "Never store credentials",
-        })
+        result = mgr.assemble_prompt(
+            {
+                "character": "Name: Nous",
+                "preferences": "User: Tim\nTimezone: EST",
+                "boundaries": "Never store credentials",
+            }
+        )
         assert "## Character" in result
         assert "## Preferences" in result
         assert "## Boundaries" in result
 
     def test_assemble_preserves_section_order(self):
         mgr = IdentityManager(MagicMock(), "test-agent")
-        result = mgr.assemble_prompt({
-            "boundaries": "Never store credentials",
-            "character": "Name: Nous",
-        })
+        result = mgr.assemble_prompt(
+            {
+                "boundaries": "Never store credentials",
+                "character": "Name: Nous",
+            }
+        )
         # Character should appear before boundaries (SECTIONS order)
         char_pos = result.index("## Character")
         bound_pos = result.index("## Boundaries")
@@ -67,20 +67,24 @@ class TestIdentityManagerAssemble:
     def test_assemble_skips_status_section(self):
         """Status is a control field, not prompt content (review fix P3-2)."""
         mgr = IdentityManager(MagicMock(), "test-agent")
-        result = mgr.assemble_prompt({
-            "character": "Name: Nous",
-            "status": "initiated",
-        })
+        result = mgr.assemble_prompt(
+            {
+                "character": "Name: Nous",
+                "status": "initiated",
+            }
+        )
         assert "## Character" in result
         assert "status" not in result.lower()
 
     def test_assemble_skips_empty_sections(self):
         mgr = IdentityManager(MagicMock(), "test-agent")
-        result = mgr.assemble_prompt({
-            "character": "Name: Nous",
-            "values": "",
-            "preferences": "User: Tim",
-        })
+        result = mgr.assemble_prompt(
+            {
+                "character": "Name: Nous",
+                "values": "",
+                "preferences": "User: Tim",
+            }
+        )
         assert "## Character" in result
         assert "## Values" not in result
         assert "## Preferences" in result
@@ -170,16 +174,19 @@ class TestFrameToolsIntegration:
 
     def test_initiation_frame_in_frame_tools(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert "initiation" in FRAME_TOOLS
         assert "store_identity" in FRAME_TOOLS["initiation"]
         assert "complete_initiation" in FRAME_TOOLS["initiation"]
 
     def test_initiation_frame_has_only_identity_tools(self):
         from nous.api.runner import FRAME_TOOLS
+
         assert len(FRAME_TOOLS["initiation"]) == 2
 
     def test_normal_frames_dont_have_identity_tools(self):
         from nous.api.runner import FRAME_TOOLS
+
         for frame_id in ["conversation", "question", "task", "debug"]:
             tools = FRAME_TOOLS[frame_id]
             if "*" in tools:
@@ -198,12 +205,15 @@ class TestAgentIdentityModel:
 
     def test_model_exists(self):
         from nous.storage.models import AgentIdentity
+
         assert AgentIdentity.__tablename__ == "agent_identity"
 
     def test_model_schema(self):
         from nous.storage.models import AgentIdentity
+
         assert AgentIdentity.__table_args__ == {"schema": "nous_system"}
 
     def test_agent_has_is_initiated(self):
         from nous.storage.models import Agent
+
         assert hasattr(Agent, "is_initiated")

@@ -31,9 +31,7 @@ async def test_get_by_name_excludes_inactive(heart_no_env, session):
     assert found.name == "test-inactive-skill"
 
     # Deactivate it
-    await session.execute(
-        update(Procedure).where(Procedure.id == proc.id).values(active=False)
-    )
+    await session.execute(update(Procedure).where(Procedure.id == proc.id).values(active=False))
     await session.flush()
 
     # Should NOT be found anymore

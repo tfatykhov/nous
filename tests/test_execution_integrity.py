@@ -12,16 +12,15 @@ from datetime import UTC, datetime
 
 import pytest
 
+from nous.cognitive.action_gate import ActionGate, GateResult
+from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
 from nous.cognitive.execution_ledger import (
-    ExecutionLedger,
-    ExecutedAction,
-    classify_side_effect,
     READ_TOOLS,
     WRITE_TOOLS,
+    ExecutedAction,
+    ExecutionLedger,
+    classify_side_effect,
 )
-from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
-from nous.cognitive.action_gate import ActionGate, GateResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -363,10 +362,7 @@ class TestClaimVerifier:
     def test_multiple_violations(self):
         cv = ClaimVerifier()
         ledger = self._ledger()
-        response = (
-            "I've saved the report file. "
-            "I've sent the summary email."
-        )
+        response = "I've saved the report file. I've sent the summary email."
         result = cv.verify(response, [], ledger)
         assert result.verified is False
         assert len(result.violations) >= 2
@@ -466,9 +462,7 @@ class TestIntentTracker:
         ledger = self._ledger()
         # Need >= 2 signal matches: a long code block and a "here's the draft" phrase
         long_code = "x" * 250
-        response = (
-            f"Here's the draft report:\n\n```python\n{long_code}\n```"
-        )
+        response = f"Here's the draft report:\n\n```python\n{long_code}\n```"
         result = tracker.check_ghost_planning(response, [], ledger)
         assert result is True
 
@@ -533,7 +527,7 @@ class TestGateResult:
         assert "gate-parse-error-fail-open" in result.reason
 
     def test_gate_result_from_json_strips_markdown_fences(self):
-        text = "```json\n{\"approved\": false, \"reason\": \"blocked\"}\n```"
+        text = '```json\n{"approved": false, "reason": "blocked"}\n```'
         result = GateResult.from_json(text)
         assert result.approved is False
         assert result.reason == "blocked"

@@ -7,7 +7,6 @@ from nous.observability.context_logger import (
     parse_system_sections,
 )
 
-
 # ------------------------------------------------------------------
 # parse_system_sections
 # ------------------------------------------------------------------
@@ -83,9 +82,14 @@ class TestContextLogEntry:
         ]
         tools = [{"name": "recall_deep", "input_schema": {"type": "object"}}]
         entry = ContextLogEntry.from_payload(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="claude-sonnet-4-6", system_prompt=system,
-            messages=messages, tools=tools, frame_id="conversation",
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="claude-sonnet-4-6",
+            system_prompt=system,
+            messages=messages,
+            tools=tools,
+            frame_id="conversation",
             context_window=200000,
         )
         assert entry.total_tokens_est > 0
@@ -102,9 +106,14 @@ class TestContextLogEntry:
             {"role": "user", "content": "Bye"},
         ]
         entry = ContextLogEntry.from_payload(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="## Identity\ntest",
-            messages=messages, tools=None, frame_id="conv",
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="## Identity\ntest",
+            messages=messages,
+            tools=None,
+            frame_id="conv",
             context_window=200000,
         )
         assert entry.message_roles == {"user": 2, "assistant": 1}
@@ -117,9 +126,14 @@ class TestContextLogEntry:
             {"name": "bash", "input_schema": {}},
         ]
         entry = ContextLogEntry.from_payload(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="test",
-            messages=[], tools=tools, frame_id="conv",
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=tools,
+            frame_id="conv",
             context_window=200000,
         )
         assert entry.tools_count == 3
@@ -127,10 +141,15 @@ class TestContextLogEntry:
 
     def test_to_dict_roundtrip(self):
         entry = ContextLogEntry.from_payload(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="## Identity\ntest",
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="## Identity\ntest",
             messages=[{"role": "user", "content": "hi"}],
-            tools=None, frame_id="conv", context_window=200000,
+            tools=None,
+            frame_id="conv",
+            context_window=200000,
         )
         d = entry.to_dict()
         assert d["session_id"] == "s1"
@@ -140,9 +159,14 @@ class TestContextLogEntry:
 
     def test_no_tools_handled(self):
         entry = ContextLogEntry.from_payload(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="test",
-            messages=[], tools=None, frame_id="conv",
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=None,
+            frame_id="conv",
             context_window=200000,
         )
         assert entry.tools_count == 0
@@ -206,9 +230,15 @@ class TestContextLogger:
         # Log more entries than deque maxlen (200)
         for i in range(210):
             ctx_logger.log(
-                session_id="s1", turn_number=i, call_type="chat",
-                model="test", system_prompt="test", messages=[],
-                tools=None, frame_id="conv", context_window=200000,
+                session_id="s1",
+                turn_number=i,
+                call_type="chat",
+                model="test",
+                system_prompt="test",
+                messages=[],
+                tools=None,
+                frame_id="conv",
+                context_window=200000,
             )
         # Deque has maxlen=200, so entries_by_id should be synced
         assert len(ctx_logger._entries) == 200
@@ -218,14 +248,26 @@ class TestContextLogger:
     def test_get_recent_with_session_filter(self):
         ctx_logger = ContextLogger()
         ctx_logger.log(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="test", messages=[],
-            tools=None, frame_id="conv", context_window=200000,
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=None,
+            frame_id="conv",
+            context_window=200000,
         )
         ctx_logger.log(
-            session_id="s2", turn_number=1, call_type="chat",
-            model="test", system_prompt="test", messages=[],
-            tools=None, frame_id="conv", context_window=200000,
+            session_id="s2",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=None,
+            frame_id="conv",
+            context_window=200000,
         )
         assert len(ctx_logger.get_recent()) == 2
         assert len(ctx_logger.get_recent(session_id="s1")) == 1
@@ -233,13 +275,23 @@ class TestContextLogger:
     def test_update_response(self):
         ctx_logger = ContextLogger()
         entry = ctx_logger.log(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="test", messages=[],
-            tools=None, frame_id="conv", context_window=200000,
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=None,
+            frame_id="conv",
+            context_window=200000,
         )
         ctx_logger.update_response(
-            entry.id, input_tokens=500, output_tokens=200,
-            cache_creation=100, cache_read=50, duration_ms=1234.5,
+            entry.id,
+            input_tokens=500,
+            output_tokens=200,
+            cache_creation=100,
+            cache_read=50,
+            duration_ms=1234.5,
             stop_reason="end_turn",
         )
         updated = ctx_logger.get_entry(entry.id)
@@ -251,9 +303,15 @@ class TestContextLogger:
     def test_payload_store_disabled_by_default(self):
         ctx_logger = ContextLogger()
         entry = ctx_logger.log(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="test", messages=[],
-            tools=None, frame_id="conv", context_window=200000,
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=None,
+            frame_id="conv",
+            context_window=200000,
             payload={"some": "data"},
         )
         assert ctx_logger.get_payload(entry.id) is None
@@ -261,9 +319,15 @@ class TestContextLogger:
     def test_payload_store_enabled(self):
         ctx_logger = ContextLogger(full_payload_enabled=True)
         entry = ctx_logger.log(
-            session_id="s1", turn_number=1, call_type="chat",
-            model="test", system_prompt="test", messages=[],
-            tools=None, frame_id="conv", context_window=200000,
+            session_id="s1",
+            turn_number=1,
+            call_type="chat",
+            model="test",
+            system_prompt="test",
+            messages=[],
+            tools=None,
+            frame_id="conv",
+            context_window=200000,
             payload={"some": "data"},
         )
         assert ctx_logger.get_payload(entry.id) == {"some": "data"}

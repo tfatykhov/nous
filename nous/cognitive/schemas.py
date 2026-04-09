@@ -38,9 +38,9 @@ TOOL_DECAY_PROFILES: dict[str, str] = {
 
 # Profile -> (soft_trim_age, metadata_degrade_age, hard_clear_age)
 DECAY_PROFILE_AGES: dict[str, tuple[int, int, int]] = {
-    "preserve": (8, 999, 20),     # Skip metadata degradation
+    "preserve": (8, 999, 20),  # Skip metadata degradation
     "aggressive": (2, 4, 8),
-    "standard": (3, 8, 12),       # Default
+    "standard": (3, 8, 12),  # Default
     "conservative": (5, 10, 15),
 }
 
@@ -122,11 +122,19 @@ class ContextBudget(BaseModel):
         """
         budgets = {
             "conversation": cls(total=3000, decisions=500, facts=500, procedures=0, episodes=0, conversation_window=3),
-            "question": cls(total=6000, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=5),
+            "question": cls(
+                total=6000, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=5
+            ),
             "task": cls(total=8000, conversation_window=5),
-            "decision": cls(total=12000, decisions=3000, facts=2000, procedures=2000, episodes=1000, conversation_window=8),
-            "creative": cls(total=6000, censors=100, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=4),
-            "debug": cls(total=10000, decisions=1500, facts=1000, procedures=2500, episodes=1000, conversation_window=6),
+            "decision": cls(
+                total=12000, decisions=3000, facts=2000, procedures=2000, episodes=1000, conversation_window=8
+            ),
+            "creative": cls(
+                total=6000, censors=100, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=4
+            ),
+            "debug": cls(
+                total=10000, decisions=1500, facts=1000, procedures=2500, episodes=1000, conversation_window=6
+            ),
         }
         budget = budgets.get(frame_id, cls())
         if overrides:

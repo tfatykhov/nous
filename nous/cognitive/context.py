@@ -7,12 +7,10 @@ and concatenates them in priority order within per-section token budgets.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from nous.utils import text_overlap
 
 from nous.brain.brain import Brain
 from nous.cognitive.dedup import ConversationDeduplicator
@@ -21,7 +19,8 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.search import apply_frame_boost, _wrap_with_score
+from nous.heart.search import _wrap_with_score, apply_frame_boost
+from nous.utils import text_overlap
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +44,16 @@ FILTER_EXEMPT_SOURCES: set[str] = {
 
 # Per-type result count bounds for adaptive relevance filtering
 RELEVANCE_MIN_RESULTS: dict[str, int] = {
-    "fact": 3, "decision": 2, "procedure": 2, "episode": 2,
+    "fact": 3,
+    "decision": 2,
+    "procedure": 2,
+    "episode": 2,
 }
 RELEVANCE_MAX_RESULTS: dict[str, int] = {
-    "fact": 12, "decision": 7, "procedure": 5, "episode": 6,
+    "fact": 12,
+    "decision": 7,
+    "procedure": 5,
+    "episode": 6,
 }
 
 # Default per-type fetch limits when RetrievalPlan doesn't specify.
@@ -56,7 +61,10 @@ RELEVANCE_MAX_RESULTS: dict[str, int] = {
 # (staleness, diversity, dedup) reduce the candidate pool before the
 # relevance filter caps results.
 DEFAULT_FETCH_LIMITS: dict[str, int] = {
-    "fact": 15, "decision": 8, "procedure": 5, "episode": 8,
+    "fact": 15,
+    "decision": 8,
+    "procedure": 5,
+    "episode": 8,
 }
 
 # Markers that identify internal/system episodes (handler tasks, summarizers)
@@ -70,10 +78,7 @@ def _is_system_episode(episode) -> bool:
     """Check if an episode is an internal/system episode that shouldn't surface."""
     summary = getattr(episode, "summary", "") or ""
     title = getattr(episode, "title", "") or ""
-    return any(
-        marker in summary or marker in title
-        for marker in _SYSTEM_EPISODE_MARKERS
-    )
+    return any(marker in summary or marker in title for marker in _SYSTEM_EPISODE_MARKERS)
 
 
 class ContextEngine:
@@ -173,7 +178,7 @@ class ContextEngine:
             _conv_msgs = _conv_msgs[-budget.conversation_window :]
 
         # Tier 0: Current date/time — always injected
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         datetime_text = now_utc.strftime("%A, %B %d, %Y %H:%M UTC")
         sections.append(
             ContextSection(
@@ -225,6 +230,7 @@ class ContextEngine:
         if session_id and session:
             try:
                 from nous.api.tool_cache import get_cache_hints
+
                 cache_hints = await get_cache_hints(session, session_id)
                 if cache_hints:
                     hint_text = "Compressed results available:\n" + "\n".join(cache_hints)
@@ -252,11 +258,13 @@ class ContextEngine:
                 if profile_facts and _effective_identity:
                     # Filter out facts whose content overlaps with identity
                     profile_facts = [
-                        f for f in profile_facts
+                        f
+                        for f in profile_facts
                         if text_overlap(
                             (getattr(f, "content", "") or "")[:200],
                             _effective_identity,
-                        ) < _IDENTITY_OVERLAP_THRESHOLD
+                        )
+                        < _IDENTITY_OVERLAP_THRESHOLD
                     ]
                 if profile_facts:
                     profile_text = self._format_facts(profile_facts)
@@ -338,7 +346,9 @@ class ContextEngine:
             _default_query = f"{current_topic}: {input_text}"
         else:
             _default_query = input_text
-        logger.info("Context build query: topic=%r, input=%r, default_query=%r", current_topic, input_text, _default_query)
+        logger.info(
+            "Context build query: topic=%r, input=%r, default_query=%r", current_topic, input_text, _default_query
+        )
 
         # 5. Decisions (F26: skip_types is primary skip mechanism)
         if budget.decisions > 0 and "decision" not in skip_types:
@@ -346,10 +356,13 @@ class ContextEngine:
                 limit = _limits.get("decision", DEFAULT_FETCH_LIMITS.get("decision", 5))
                 q_text = _query_texts.get("decision", _default_query)
                 decisions = await self._brain.query(q_text, limit=limit, session=session)
-                logger.info("Tier3 decisions: %d results, has_embeddings=%s, scores=%s, descs=%s",
-                    len(decisions) if decisions else 0, self._has_embeddings,
+                logger.info(
+                    "Tier3 decisions: %d results, has_embeddings=%s, scores=%s, descs=%s",
+                    len(decisions) if decisions else 0,
+                    self._has_embeddings,
                     [round(getattr(d, "score", 0) or 0, 3) for d in (decisions or [])[:5]],
-                    [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]])
+                    [(getattr(d, "description", "") or "")[:50] for d in (decisions or [])[:3]],
+                )
                 if decisions:
                     # F017: Staleness penalty (before boosts)
                     decisions = self._apply_staleness_penalty(decisions)
@@ -390,13 +403,18 @@ class ContextEngine:
                 q_text = _query_texts.get("fact", _default_query)
                 # Tier 3: exclude Tier 1 categories from semantic search
                 facts = await self._heart.search_facts(
-                    q_text, limit=limit, session=session,
+                    q_text,
+                    limit=limit,
+                    session=session,
                     exclude_categories=TIER1_FACT_CATEGORIES,
                 )
-                logger.info("Tier3 facts: %d results, has_embeddings=%s, scores=%s, subjects=%s",
-                    len(facts) if facts else 0, self._has_embeddings,
+                logger.info(
+                    "Tier3 facts: %d results, has_embeddings=%s, scores=%s, subjects=%s",
+                    len(facts) if facts else 0,
+                    self._has_embeddings,
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
-                    [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
+                    [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]],
+                )
                 if facts:
                     # F017: Staleness penalty (before boosts)
                     facts = self._apply_staleness_penalty(facts)
@@ -457,7 +475,8 @@ class ContextEngine:
                     for skill_name in unique_skills[:critic_slot_count]:
                         try:
                             proc = await self._heart.get_procedure_by_name(
-                                skill_name, session=session,
+                                skill_name,
+                                session=session,
                             )
                             if proc:
                                 critic_procedures.append(proc)
@@ -487,36 +506,45 @@ class ContextEngine:
 
                 q_text = _query_texts.get("procedure", _default_query)
                 embedding_procedures = await self._heart.search_procedures(
-                    q_text, limit=embedding_limit, frame_type=frame.frame_id, session=session,
+                    q_text,
+                    limit=embedding_limit,
+                    frame_type=frame.frame_id,
+                    session=session,
                 )
 
                 if embedding_procedures:
                     # Standard pipeline: staleness -> frame boost -> dedup -> usage boost -> relevance
                     embedding_procedures = self._apply_staleness_penalty(embedding_procedures)
                     embedding_procedures = apply_frame_boost(
-                        embedding_procedures, frame.frame_id, _active_censor_names,
+                        embedding_procedures,
+                        frame.frame_id,
+                        _active_censor_names,
                     )
                     embedding_procedures = await self._apply_dedup(
-                        embedding_procedures, _conv_msgs, "name",
+                        embedding_procedures,
+                        _conv_msgs,
+                        "name",
                     )
                     embedding_procedures = self._apply_usage_boost(
-                        embedding_procedures, usage_tracker,
+                        embedding_procedures,
+                        usage_tracker,
                     )
                     # F038-2.1: Absolute procedure score floor (embedding mode only)
                     if self._has_embeddings and self._settings.procedure_score_floor > 0:
                         embedding_procedures = [
-                            p for p in embedding_procedures
+                            p
+                            for p in embedding_procedures
                             if (getattr(p, "score", 0) or 0) >= self._settings.procedure_score_floor
                         ]
                     embedding_procedures = self._apply_relevance_filter(
-                        embedding_procedures, "procedure",
+                        embedding_procedures,
+                        "procedure",
                     )
 
                     # Deduplicate: exclude Critic picks from embedding results
                     if critic_names:
                         embedding_procedures = [
-                            p for p in embedding_procedures
-                            if getattr(p, "name", "") not in critic_names
+                            p for p in embedding_procedures if getattr(p, "name", "") not in critic_names
                         ]
 
                     embedding_procedures = embedding_procedures[:embedding_limit]
@@ -525,11 +553,13 @@ class ContextEngine:
                 _effective_identity = identity_override or self._identity_prompt
                 if embedding_procedures and _effective_identity:
                     embedding_procedures = [
-                        p for p in embedding_procedures
+                        p
+                        for p in embedding_procedures
                         if text_overlap(
                             getattr(p, "body", "") or getattr(p, "steps_text", "") or "",
                             _effective_identity,
-                        ) < _IDENTITY_OVERLAP_THRESHOLD
+                        )
+                        < _IDENTITY_OVERLAP_THRESHOLD
                     ]
 
                 # --- Combine tracks ---
@@ -547,7 +577,8 @@ class ContextEngine:
 
                     proc_text = self._format_procedures(all_procedures)
                     proc_text = self._truncate_to_budget(
-                        proc_text, self._scaled_budget(budget.procedures),
+                        proc_text,
+                        self._scaled_budget(budget.procedures),
                     )
                     sections.append(
                         ContextSection(
@@ -653,7 +684,9 @@ class ContextEngine:
         total_used = sum(s.token_estimate for s in sections)
         logger.info(
             "Context assembly: frame=%s, budget=%d, used=%d, fill_ratio=%.1f%%",
-            frame.frame_id, total_budget, total_used,
+            frame.frame_id,
+            total_budget,
+            total_used,
             (total_used / total_budget * 100) if total_budget > 0 else 0,
         )
 
@@ -665,11 +698,7 @@ class ContextEngine:
                 tier = "dynamic"
             tier_groups[tier].append(f"## {section.label}\n\n{section.content}")
 
-        sections_by_tier = {
-            tier: "\n\n".join(parts)
-            for tier, parts in tier_groups.items()
-            if parts
-        }
+        sections_by_tier = {tier: "\n\n".join(parts) for tier, parts in tier_groups.items() if parts}
 
         return BuildResult(
             system_prompt=system_prompt,
@@ -694,16 +723,11 @@ class ContextEngine:
             return items
 
         try:
-            memories = [
-                (str(getattr(item, "id", "")), getattr(item, content_attr, ""))
-                for item in items
-            ]
+            memories = [(str(getattr(item, "id", "")), getattr(item, content_attr, "")) for item in items]
             results = await self._deduplicator.check(memories, conversation_messages)
             # Filter out redundant items
             redundant_ids = {r.memory_id for r in results if r.is_redundant}
-            return [
-                item for item in items if str(getattr(item, "id", "")) not in redundant_ids
-            ]
+            return [item for item in items if str(getattr(item, "id", "")) not in redundant_ids]
         except Exception:
             logger.warning("Dedup failed, keeping all items")
             return items
@@ -763,10 +787,7 @@ class ContextEngine:
             score = getattr(results[i], "score", 0) or 0
             if prev_score > 0 and score < prev_score * drop_ratio:
                 # Keep any exempt items beyond the cut point
-                tail_exempt = [
-                    r for r in results[i:]
-                    if getattr(r, "source", None) in FILTER_EXEMPT_SOURCES
-                ]
+                tail_exempt = [r for r in results[i:] if getattr(r, "source", None) in FILTER_EXEMPT_SOURCES]
                 return results[:i] + tail_exempt
             prev_score = score
 
@@ -777,7 +798,7 @@ class ContextEngine:
         if not self._settings.staleness_penalty_enabled:
             return results
         half_life = self._settings.staleness_half_life_days
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         adjusted = []
         for r in results:
             score = getattr(r, "score", None)
@@ -807,7 +828,7 @@ class ContextEngine:
         final_score = score * max(0.5, 1.0 - (age_days / 60))
         Episodes >60 days old get 0.5x penalty, recent ones ~1.0x.
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         adjusted = []
         for ep in episodes:
             score = getattr(ep, "score", None)
@@ -1109,8 +1130,7 @@ class ContextEngine:
                 k_desc = getattr(k, "description", "") or ""
                 k_outcome = getattr(k, "outcome", "pending") or "pending"
                 # Only dedup if BOTH description similar AND same outcome
-                if (outcome == k_outcome and
-                        text_overlap(desc[:150], k_desc[:150]) > 0.80):
+                if outcome == k_outcome and text_overlap(desc[:150], k_desc[:150]) > 0.80:
                     is_dup = True
                     break
             if not is_dup:

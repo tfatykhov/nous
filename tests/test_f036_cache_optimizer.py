@@ -1,6 +1,6 @@
 """Tests for F036 CacheBreakDetector."""
 
-from nous.api.cache_optimizer import CacheBreakDetector, CacheBreakInfo, _hash
+from nous.api.cache_optimizer import CacheBreakDetector, _hash
 
 
 def test_first_call_returns_none() -> None:
@@ -74,7 +74,7 @@ def test_dynamic_text_change_does_not_trigger_break() -> None:
 
 def test_token_loss_estimation_approximately_correct() -> None:
     static_text = "a" * 400  # 400 chars -> ~100 tokens
-    semi_text = "b" * 800   # 800 chars -> ~200 tokens
+    semi_text = "b" * 800  # 800 chars -> ~200 tokens
     tools_text = "c" * 1200  # 1200 chars -> ~300 tokens
 
     detector = CacheBreakDetector()

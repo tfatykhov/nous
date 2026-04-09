@@ -14,9 +14,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from nous.identity.manager import IdentityManager, VALID_SECTIONS, SECTIONS
-from nous.identity.protocol import STORE_IDENTITY_SCHEMA, COMPLETE_INITIATION_SCHEMA
 from nous.api.tools import ToolDispatcher
+from nous.identity.manager import SECTIONS, IdentityManager
+from nous.identity.protocol import COMPLETE_INITIATION_SCHEMA, STORE_IDENTITY_SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +37,10 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
         """Store a piece of identity information."""
         # Review fix P2-3: validate section name
         if section not in SECTIONS:
-            return _mcp_response(
-                f"Invalid section '{section}'. Valid sections: {', '.join(SECTIONS)}"
-            )
+            return _mcp_response(f"Invalid section '{section}'. Valid sections: {', '.join(SECTIONS)}")
 
         try:
-            await identity_manager.update_section(
-                section, content, updated_by="initiation"
-            )
+            await identity_manager.update_section(section, content, updated_by="initiation")
             logger.info("Initiation: stored %s section (%d chars)", section, len(content))
             return _mcp_response(f"✅ Stored {section} identity.")
         except Exception as e:
@@ -69,8 +65,7 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
             identity_manager._invalidate_cache()
             logger.info("Initiation protocol completed for agent %s", identity_manager.agent_id)
             return _mcp_response(
-                "✅ Initiation complete! I now have an identity and know who you are. "
-                "Let's get to work!"
+                "✅ Initiation complete! I now have an identity and know who you are. Let's get to work!"
             )
         except Exception as e:
             logger.error("Failed to complete initiation: %s", e)
@@ -78,15 +73,23 @@ def register_identity_tools(dispatcher: ToolDispatcher, identity_manager: Identi
 
     # Register with flat schema format (type/properties/required/description)
     # matching existing tools — dispatcher.tool_definitions() wraps with name + input_schema
-    dispatcher.register("store_identity", store_identity, {
-        "type": "object",
-        "description": STORE_IDENTITY_SCHEMA["description"],
-        "properties": STORE_IDENTITY_SCHEMA["input_schema"]["properties"],
-        "required": STORE_IDENTITY_SCHEMA["input_schema"]["required"],
-    })
-    dispatcher.register("complete_initiation", complete_initiation, {
-        "type": "object",
-        "description": COMPLETE_INITIATION_SCHEMA["description"],
-        "properties": COMPLETE_INITIATION_SCHEMA["input_schema"]["properties"],
-        "required": COMPLETE_INITIATION_SCHEMA["input_schema"].get("required", []),
-    })
+    dispatcher.register(
+        "store_identity",
+        store_identity,
+        {
+            "type": "object",
+            "description": STORE_IDENTITY_SCHEMA["description"],
+            "properties": STORE_IDENTITY_SCHEMA["input_schema"]["properties"],
+            "required": STORE_IDENTITY_SCHEMA["input_schema"]["required"],
+        },
+    )
+    dispatcher.register(
+        "complete_initiation",
+        complete_initiation,
+        {
+            "type": "object",
+            "description": COMPLETE_INITIATION_SCHEMA["description"],
+            "properties": COMPLETE_INITIATION_SCHEMA["input_schema"]["properties"],
+            "required": COMPLETE_INITIATION_SCHEMA["input_schema"].get("required", []),
+        },
+    )

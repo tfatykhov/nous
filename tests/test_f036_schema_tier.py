@@ -5,7 +5,6 @@ from __future__ import annotations
 from nous.cognitive.context import SECTION_TIERS
 from nous.cognitive.schemas import BuildResult, ContextSection, TurnContext
 
-
 # --- ContextSection tier field ---
 
 
@@ -102,11 +101,7 @@ def test_tier_grouping_groups_sections_correctly() -> None:
             tier = "dynamic"
         tier_groups[tier].append(f"## {section.label}\n\n{section.content}")
 
-    sections_by_tier = {
-        tier: "\n\n".join(parts)
-        for tier, parts in tier_groups.items()
-        if parts
-    }
+    sections_by_tier = {tier: "\n\n".join(parts) for tier, parts in tier_groups.items() if parts}
 
     assert "static" in sections_by_tier
     assert "semi_stable" in sections_by_tier
@@ -132,11 +127,7 @@ def test_tier_grouping_unknown_tier_falls_back_to_dynamic() -> None:
             tier = "dynamic"
         tier_groups[tier].append(f"## {section.label}\n\n{section.content}")
 
-    sections_by_tier = {
-        tier: "\n\n".join(parts)
-        for tier, parts in tier_groups.items()
-        if parts
-    }
+    sections_by_tier = {tier: "\n\n".join(parts) for tier, parts in tier_groups.items() if parts}
 
     assert "static" not in sections_by_tier
     assert "semi_stable" not in sections_by_tier
@@ -157,11 +148,7 @@ def test_tier_grouping_empty_tiers_excluded() -> None:
             tier = "dynamic"
         tier_groups[tier].append(f"## {section.label}\n\n{section.content}")
 
-    sections_by_tier = {
-        tier: "\n\n".join(parts)
-        for tier, parts in tier_groups.items()
-        if parts
-    }
+    sections_by_tier = {tier: "\n\n".join(parts) for tier, parts in tier_groups.items() if parts}
 
     assert "static" in sections_by_tier
     assert "semi_stable" not in sections_by_tier

@@ -7,7 +7,6 @@ Verifies:
 - Budget includes user_profile field
 """
 
-
 import pytest
 import pytest_asyncio
 
@@ -15,7 +14,6 @@ from nous.brain.brain import Brain
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import ContextBudget, FrameSelection
 from nous.heart import FactInput
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

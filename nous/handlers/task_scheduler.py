@@ -36,9 +36,7 @@ class TaskScheduler:
     async def start(self) -> None:
         """Start the scheduler check loop."""
         self._running = True
-        self._task = asyncio.create_task(
-            self._check_loop(), name="task-scheduler"
-        )
+        self._task = asyncio.create_task(self._check_loop(), name="task-scheduler")
         logger.info(
             "Task scheduler started (check_interval=%ds)",
             self._settings.schedule_check_interval,
@@ -122,8 +120,6 @@ class TaskScheduler:
                     exc,
                 )
             except Exception:
-                logger.exception(
-                    "Failed to fire schedule %s", schedule.id.hex[:8]
-                )
+                logger.exception("Failed to fire schedule %s", schedule.id.hex[:8])
 
         return fired

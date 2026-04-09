@@ -1,7 +1,8 @@
 """Tests for anti-hallucination prompt injection (F016 Phase 0)."""
 
+from unittest.mock import AsyncMock
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock
 
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import FrameSelection

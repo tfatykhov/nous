@@ -6,13 +6,15 @@ outcome signals. Proposes weight adjustments (Phase 1), splits/merges
 
 Not event-driven — called on a schedule (weekly) or manually via REST.
 """
+
 from __future__ import annotations
 
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func as sa_func, select
+from sqlalchemy import func as sa_func
+from sqlalchemy import select
 
 from nous.cognitive.correlation import (
     correlate_dimensions_with_outcomes,
@@ -66,7 +68,8 @@ class RubricEvolver:
             if total_signals < self._settings.rubric_min_episodes_for_correlation:
                 logger.info(
                     "F024-3b: Only %d signals, need %d for correlation",
-                    total_signals, self._settings.rubric_min_episodes_for_correlation,
+                    total_signals,
+                    self._settings.rubric_min_episodes_for_correlation,
                 )
                 return None
 
@@ -101,7 +104,8 @@ class RubricEvolver:
 
         current_weights = {d["name"]: d["weight"] for d in active.dimensions}
         suggested = suggest_weights(
-            correlations, current_weights,
+            correlations,
+            current_weights,
             cap=self._settings.rubric_weight_change_cap,
         )
 
@@ -116,15 +120,10 @@ class RubricEvolver:
         report.suggested_splits = detect_split_candidates(correlations)
         dim_profiles = {}
         for dim_name in dim_names:
-            dim_profiles[dim_name] = [
-                c.pearson_r for c in correlations if c.dimension == dim_name
-            ]
+            dim_profiles[dim_name] = [c.pearson_r for c in correlations if c.dimension == dim_name]
         report.suggested_merges = detect_merge_candidates(dim_profiles)
 
-        weight_changed = any(
-            abs(suggested.get(d, 0) - current_weights.get(d, 0)) > 0.001
-            for d in current_weights
-        )
+        weight_changed = any(abs(suggested.get(d, 0) - current_weights.get(d, 0)) > 0.001 for d in current_weights)
 
         if not weight_changed:
             logger.info("F024-3b: No meaningful weight changes suggested")
@@ -150,7 +149,8 @@ class RubricEvolver:
         oc = dict(active.outcome_correlations or {})
         for c in correlations:
             oc.setdefault(c.dimension, {})[c.signal_type] = {
-                "pearson_r": c.pearson_r, "spearman_rho": c.spearman_rho,
+                "pearson_r": c.pearson_r,
+                "spearman_rho": c.spearman_rho,
             }
 
         await self._rubric.create_version(
@@ -175,8 +175,11 @@ class RubricEvolver:
         is non-degenerate even without per-dimension scoring data.
         """
         _PROXY_SCORES = {
-            "completed": 7, "praised": 8, "corrected": 3,
-            "reworked": 2, "self_corrected": 5,
+            "completed": 7,
+            "praised": 8,
+            "corrected": 3,
+            "reworked": 2,
+            "self_corrected": 5,
         }
 
         episode_signals: dict = defaultdict(lambda: {"scores": {}, "signals": []})
@@ -225,18 +228,21 @@ class RubricEvolver:
         sub_weight = round(parent["weight"] / len(sub_names), 4)
         new_dims = []
         for name, desc in zip(sub_names, sub_descriptions):
-            new_dims.append({
-                "name": name,
-                "weight": sub_weight,
-                "description": desc,
-                "scoring_criteria": parent.get("scoring_criteria", "1-10 scale"),
-                "min_weight": 0.10,
-                "max_weight": 0.40,
-            })
+            new_dims.append(
+                {
+                    "name": name,
+                    "weight": sub_weight,
+                    "description": desc,
+                    "scoring_criteria": parent.get("scoring_criteria", "1-10 scale"),
+                    "min_weight": 0.10,
+                    "max_weight": 0.40,
+                }
+            )
 
-        result_dims = dims[:parent_idx] + new_dims + dims[parent_idx + 1:]
+        result_dims = dims[:parent_idx] + new_dims + dims[parent_idx + 1 :]
 
         from nous.cognitive.correlation import _normalize_weights
+
         norm = _normalize_weights(
             {d["name"]: d["weight"] for d in result_dims},
         )
@@ -298,6 +304,7 @@ class RubricEvolver:
         result_dims.append(merged)
 
         from nous.cognitive.correlation import _normalize_weights
+
         norm = _normalize_weights(
             {d["name"]: d["weight"] for d in result_dims},
         )

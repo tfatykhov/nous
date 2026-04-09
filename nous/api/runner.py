@@ -21,10 +21,11 @@ from nous.api.anthropic_client import (
     _parse_sse_event,  # noqa: F401 — re-exported for backward compat (tests)
     create_client,
 )
-from nous.api.cache_optimizer import CacheBreakDetector, _hash as cache_hash
+from nous.api.cache_optimizer import CacheBreakDetector
+from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.compaction import ConversationCompactor
-from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
+from nous.api.smart_compress import smart_compress
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
@@ -49,12 +50,91 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage"],
-    "question": ["recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "write_file", "record_decision", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python"],
-    "decision": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task"],
-    "creative": ["learn_fact", "recall_deep", "recall_recent", "get_procedure", "write_file", "web_search", "cache_retrieve"],
+    "conversation": [
+        "record_decision",
+        "learn_fact",
+        "learn_skill",
+        "recall_deep",
+        "recall_recent",
+        "get_procedure",
+        "create_censor",
+        "bash",
+        "read_file",
+        "write_file",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "spawn_task",
+        "schedule_task",
+        "list_tasks",
+        "cancel_task",
+        "run_python",
+        "send_file",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+    ],
+    "question": [
+        "recall_deep",
+        "recall_recent",
+        "get_procedure",
+        "bash",
+        "read_file",
+        "write_file",
+        "record_decision",
+        "learn_fact",
+        "learn_skill",
+        "create_censor",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "list_tasks",
+        "cancel_task",
+        "run_python",
+    ],
+    "decision": [
+        "record_decision",
+        "recall_deep",
+        "recall_recent",
+        "get_procedure",
+        "create_censor",
+        "bash",
+        "read_file",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "list_tasks",
+        "cancel_task",
+    ],
+    "creative": [
+        "learn_fact",
+        "recall_deep",
+        "recall_recent",
+        "get_procedure",
+        "write_file",
+        "web_search",
+        "cache_retrieve",
+    ],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage"],
+    "debug": [
+        "record_decision",
+        "recall_deep",
+        "recall_recent",
+        "get_procedure",
+        "bash",
+        "read_file",
+        "learn_fact",
+        "web_search",
+        "web_fetch",
+        "cache_retrieve",
+        "spawn_task",
+        "schedule_task",
+        "list_tasks",
+        "cancel_task",
+        "run_python",
+        "send_file",
+        "heartbeat_check_create",
+        "heartbeat_check_manage",
+    ],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -107,15 +187,10 @@ class AgentRunner:
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
         self._pending_corrections: dict[str, list[str]] = {}
-        self._claim_verifier: ClaimVerifier | None = (
-            ClaimVerifier() if settings.claim_verification_enabled else None
-        )
-        self._intent_tracker: IntentTracker | None = (
-            IntentTracker() if settings.claim_verification_enabled else None
-        )
+        self._claim_verifier: ClaimVerifier | None = ClaimVerifier() if settings.claim_verification_enabled else None
+        self._intent_tracker: IntentTracker | None = IntentTracker() if settings.claim_verification_enabled else None
         self._action_gate: ActionGate | None = (
-            ActionGate(settings, call_gate_model=self._call_gate_model)
-            if settings.action_gating_enabled else None
+            ActionGate(settings, call_gate_model=self._call_gate_model) if settings.action_gating_enabled else None
         )
 
         # F036: Prompt cache optimization
@@ -159,7 +234,7 @@ class AgentRunner:
             self._api = create_client(self._settings)
             await self._api.start()
 
-    def fork(self, api_client: "AnthropicClient") -> "AgentRunner":
+    def fork(self, api_client: AnthropicClient) -> AgentRunner:
         """Create a sibling runner sharing cognitive layer and dispatcher.
 
         The forked runner uses its own API client (isolated connection pool)
@@ -222,9 +297,7 @@ class AgentRunner:
 
         # 2. Pre-turn (F4: plumb conversation_messages for dedup)
         # Filter to user messages first, then take last 8 (D7: window = user turns)
-        recent_messages = [
-            m.content for m in conversation.messages if m.role == "user"
-        ][-8:]
+        recent_messages = [m.content for m in conversation.messages if m.role == "user"][-8:]
         turn_context = await self._cognitive.pre_turn(
             _agent_id,
             session_id,
@@ -265,8 +338,10 @@ class AgentRunner:
         try:
             corrections = self._pending_corrections.pop(session_id, None)
             system_prompt = self._build_system_prompt(
-                turn_context, platform=platform,
-                ledger=ledger, corrections=corrections,
+                turn_context,
+                platform=platform,
+                ledger=ledger,
+                corrections=corrections,
             )
             # F036: Handle system_prompt_prefix for both str and dict paths
             if system_prompt_prefix:
@@ -274,8 +349,7 @@ class AgentRunner:
                     # Prefix is stable across session — prepend to static tier
                     existing = system_prompt.get("static", "")
                     system_prompt["static"] = (
-                        system_prompt_prefix + "\n\n" + existing if existing
-                        else system_prompt_prefix
+                        system_prompt_prefix + "\n\n" + existing if existing else system_prompt_prefix
                     )
                 else:
                     system_prompt = system_prompt_prefix + "\n\n" + system_prompt
@@ -285,7 +359,8 @@ class AgentRunner:
             # F036: Compactor needs flat string for token estimation
             _flat_prompt = (
                 "\n\n".join(v for v in system_prompt.values() if v)
-                if isinstance(system_prompt, dict) else system_prompt
+                if isinstance(system_prompt, dict)
+                else system_prompt
             )
             if self._compactor and self._settings.compaction_enabled:
                 system_tokens = self._compactor.estimator.estimate(_flat_prompt)
@@ -296,9 +371,7 @@ class AgentRunner:
                         messages = self._format_messages(conversation)
                         history_tokens = self._compactor.estimator.estimate_messages(messages)
                         if self._compactor.should_compact(system_tokens, history_tokens):
-                            cut_point = self._compactor.find_cut_point(
-                                messages, self._settings.effective_keep_recent
-                            )
+                            cut_point = self._compactor.find_cut_point(messages, self._settings.effective_keep_recent)
                             if cut_point > 0:
                                 snapshot = messages[:cut_point]
                                 await self._cognitive.pre_compaction(
@@ -307,23 +380,21 @@ class AgentRunner:
                                     message_snapshot=snapshot,
                                 )
                                 await self._compactor.compact(
-                                    conversation, messages,
+                                    conversation,
+                                    messages,
                                     call_api=self._call_api,
                                     cut_point=cut_point,
                                 )
-                                await self._save_conversation(
-                                    _agent_id, session_id, conversation
-                                )
+                                await self._save_conversation(_agent_id, session_id, conversation)
             else:
                 system_tokens = len(_flat_prompt) // 4
-                history_tokens = sum(
-                    len(m.get("content", "")) // 4 for m in messages
-                )
+                history_tokens = sum(len(m.get("content", "")) // 4 for m in messages)
 
             logger.info(
-                "Context health: messages=%d, system_tokens~=%d, "
-                "history_tokens~=%d, frame=%s",
-                len(messages), system_tokens, history_tokens,
+                "Context health: messages=%d, system_tokens~=%d, history_tokens~=%d, frame=%s",
+                len(messages),
+                system_tokens,
+                history_tokens,
                 turn_context.frame.frame_id if turn_context else "unknown",
             )
 
@@ -390,10 +461,7 @@ class AgentRunner:
             try:
                 # Build a reflection prompt with conversation history
                 history_text = self._format_history_text(conversation)
-                reflection_prompt = (
-                    f"Here is a conversation to review:\n\n{history_text}\n\n"
-                    f"{self.REFLECTION_PROMPT}"
-                )
+                reflection_prompt = f"Here is a conversation to review:\n\n{history_text}\n\n{self.REFLECTION_PROMPT}"
                 # P1-9: Call _call_api directly, no tool loop needed for reflection.
                 # skip_thinking=True: reflection is a simple summary, no need for
                 # extended thinking budget.
@@ -418,7 +486,9 @@ class AgentRunner:
             blocked = sum(1 for a in ledger.actions if a.status == "blocked")
             logger.info(
                 "F026: Session %s ended — %d actions recorded, %d blocked",
-                session_id, len(ledger.actions), blocked,
+                session_id,
+                len(ledger.actions),
+                blocked,
             )
         self._pending_corrections.pop(session_id, None)  # F026
         if self._cache_break_detector:  # F036
@@ -479,26 +549,28 @@ class AgentRunner:
             static_text = system_prompt.get("static", "")
             semi_stable_text = system_prompt.get("semi_stable", "")
             dynamic_text = system_prompt.get("dynamic", "")
-            flat_system_prompt = "\n\n".join(
-                t for t in [static_text, semi_stable_text, dynamic_text] if t
-            )
+            flat_system_prompt = "\n\n".join(t for t in [static_text, semi_stable_text, dynamic_text] if t)
 
             system_blocks: list[dict[str, Any]] = []
 
             # Block 0: Claude Code preamble — required for claude-code beta rate limits
-            system_blocks.append({
-                "type": "text",
-                "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-                "cache_control": {"type": "ephemeral"},
-            })
+            system_blocks.append(
+                {
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
 
             # Block 1: Static identity — always cached
             if static_text:
-                system_blocks.append({
-                    "type": "text",
-                    "text": static_text,
-                    "cache_control": {"type": "ephemeral"},
-                })
+                system_blocks.append(
+                    {
+                        "type": "text",
+                        "text": static_text,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                )
 
             # Block 1: Semi-stable context — cached with single breakpoint strategy
             if semi_stable_text:
@@ -507,8 +579,7 @@ class AgentRunner:
                     # Only add cache_control if semi-stable hasn't changed
                     # (cache break detector will report if it did)
                     prev_hash = (
-                        self._cache_break_detector.last_semi_stable_hash()
-                        if self._cache_break_detector else None
+                        self._cache_break_detector.last_semi_stable_hash() if self._cache_break_detector else None
                     )
                     if prev_hash is not None:
                         if cache_hash(semi_stable_text) == prev_hash:
@@ -578,10 +649,7 @@ class AgentRunner:
         # Effort parameter ("high" is API default, so only send if different)
         # Supported by Sonnet 4.6 and Opus 4.6. Haiku 4.5 does NOT support it.
         effective_model = payload["model"]
-        if (
-            self._settings.effort != "high"
-            and "haiku" not in effective_model
-        ):
+        if self._settings.effort != "high" and "haiku" not in effective_model:
             payload["output_config"] = {"effort": self._settings.effort}
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
@@ -628,8 +696,11 @@ class AgentRunner:
             raise RuntimeError("API client not initialized -- call start() first")
 
         payload = self._build_api_payload(
-            system_prompt, messages, tools,
-            skip_thinking=skip_thinking, model_override=model_override,
+            system_prompt,
+            messages,
+            tools,
+            skip_thinking=skip_thinking,
+            model_override=model_override,
         )
         return await self._api.call(payload)
 
@@ -676,9 +747,7 @@ class AgentRunner:
         conversation = await self._get_or_create_conversation(session_id)
 
         # Pre-turn with conversation dedup (F4)
-        recent_messages = [
-            m.content for m in conversation.messages if m.role == "user"
-        ][-8:]
+        recent_messages = [m.content for m in conversation.messages if m.role == "user"][-8:]
         turn_context = await self._cognitive.pre_turn(
             _agent_id,
             session_id,
@@ -712,17 +781,16 @@ class AgentRunner:
 
         corrections = self._pending_corrections.pop(session_id, None)
         system_prompt = self._build_system_prompt(
-            turn_context, platform=platform,
-            ledger=ledger, corrections=corrections,
+            turn_context,
+            platform=platform,
+            ledger=ledger,
+            corrections=corrections,
         )
         # F036: Handle system_prompt_prefix for both str and dict paths
         if system_prompt_prefix:
             if isinstance(system_prompt, dict):
                 existing = system_prompt.get("static", "")
-                system_prompt["static"] = (
-                    system_prompt_prefix + "\n\n" + existing if existing
-                    else system_prompt_prefix
-                )
+                system_prompt["static"] = system_prompt_prefix + "\n\n" + existing if existing else system_prompt_prefix
             else:
                 system_prompt = system_prompt_prefix + "\n\n" + system_prompt
         tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
@@ -730,8 +798,7 @@ class AgentRunner:
 
         # F036: Compactor needs flat string for token estimation
         _flat_prompt = (
-            "\n\n".join(v for v in system_prompt.values() if v)
-            if isinstance(system_prompt, dict) else system_prompt
+            "\n\n".join(v for v in system_prompt.values() if v) if isinstance(system_prompt, dict) else system_prompt
         )
 
         # Layer 2: History compaction (Spec 008.1)
@@ -745,9 +812,7 @@ class AgentRunner:
                     messages = self._format_messages(conversation)
                     history_tokens = self._compactor.estimator.estimate_messages(messages)
                     if self._compactor.should_compact(system_tokens, history_tokens):
-                        cut_point = self._compactor.find_cut_point(
-                            messages, self._settings.effective_keep_recent
-                        )
+                        cut_point = self._compactor.find_cut_point(messages, self._settings.effective_keep_recent)
                         if cut_point > 0:
                             # 008.1 Phase 3: Snapshot for event handlers (decoupled from mutation)
                             snapshot = messages[:cut_point]
@@ -757,25 +822,23 @@ class AgentRunner:
                                 message_snapshot=snapshot,
                             )
                             await self._compactor.compact(
-                                conversation, messages,
+                                conversation,
+                                messages,
                                 call_api=self._call_api,
                                 cut_point=cut_point,
                             )
                             # 008.1 Phase 3: Persist state after compaction
-                            await self._save_conversation(
-                                _agent_id, session_id, conversation
-                            )
+                            await self._save_conversation(_agent_id, session_id, conversation)
                             messages = self._format_messages(conversation)
         else:
             system_tokens = len(_flat_prompt) // 4
-            history_tokens = sum(
-                len(m.get("content", "")) // 4 for m in messages
-            )
+            history_tokens = sum(len(m.get("content", "")) // 4 for m in messages)
 
         logger.info(
-            "Context health: messages=%d, system_tokens~=%d, "
-            "history_tokens~=%d, frame=%s",
-            len(messages), system_tokens, history_tokens,
+            "Context health: messages=%d, system_tokens~=%d, history_tokens~=%d, frame=%s",
+            len(messages),
+            system_tokens,
+            history_tokens,
             turn_context.frame.frame_id if turn_context else "unknown",
         )
 
@@ -920,28 +983,36 @@ class AgentRunner:
                 for idx in sorted(all_blocks):
                     block = all_blocks[idx]
                     if block["type"] == "thinking":
-                        content_blocks.append({
-                            "type": "thinking",
-                            "thinking": "".join(block["thinking_parts"]),
-                            "signature": block["signature"],
-                        })
+                        content_blocks.append(
+                            {
+                                "type": "thinking",
+                                "thinking": "".join(block["thinking_parts"]),
+                                "signature": block["signature"],
+                            }
+                        )
                     elif block["type"] == "redacted_thinking":
-                        content_blocks.append({
-                            "type": "redacted_thinking",
-                            "data": block["data"],
-                        })
+                        content_blocks.append(
+                            {
+                                "type": "redacted_thinking",
+                                "data": block["data"],
+                            }
+                        )
                     elif block["type"] == "text":
-                        content_blocks.append({
-                            "type": "text",
-                            "text": "".join(block["text_parts"]),
-                        })
+                        content_blocks.append(
+                            {
+                                "type": "text",
+                                "text": "".join(block["text_parts"]),
+                            }
+                        )
                     elif block["type"] == "tool_use":
-                        content_blocks.append({
-                            "type": "tool_use",
-                            "id": block["id"],
-                            "name": block["name"],
-                            "input": block.get("input", {}),
-                        })
+                        content_blocks.append(
+                            {
+                                "type": "tool_use",
+                                "id": block["id"],
+                                "name": block["name"],
+                                "input": block.get("input", {}),
+                            }
+                        )
                 messages.append({"role": "assistant", "content": content_blocks})
 
                 # Execute tools (P1-2: all results in single user message)
@@ -956,7 +1027,10 @@ class AgentRunner:
                     gated = False
                     if self._action_gate and ledger:
                         gate_result = await self._action_gate.check(
-                            tc["name"], dispatch_input, ledger, user_message=user_message,
+                            tc["name"],
+                            dispatch_input,
+                            ledger,
+                            user_message=user_message,
                         )
                         if gate_result.approved:
                             logger.info("F026 gate: %s approved (%s)", tc["name"], gate_result.reason)
@@ -989,26 +1063,32 @@ class AgentRunner:
                         # F026: Record in execution ledger (post-dispatch)
                         if ledger:
                             ledger.record(
-                                tc["name"], dispatch_input, result_text,
+                                tc["name"],
+                                dispatch_input,
+                                result_text,
                                 "error" if is_error else "success",
                             )
                     else:
                         duration_ms = 0
 
-                    tool_results_for_message.append({
-                        "type": "tool_result",
-                        "tool_use_id": tc["id"],
-                        "content": result_text,
-                        "is_error": is_error,
-                    })
+                    tool_results_for_message.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tc["id"],
+                            "content": result_text,
+                            "is_error": is_error,
+                        }
+                    )
 
-                    all_tool_results.append(ToolResult(
-                        tool_name=tc["name"],
-                        arguments=tc["input"],
-                        result=result_text if not is_error else None,
-                        error=result_text if is_error else None,
-                        duration_ms=duration_ms,
-                    ))
+                    all_tool_results.append(
+                        ToolResult(
+                            tool_name=tc["name"],
+                            arguments=tc["input"],
+                            result=result_text if not is_error else None,
+                            error=result_text if is_error else None,
+                            duration_ms=duration_ms,
+                        )
+                    )
 
                     yield StreamEvent(type="tool_end", tool_name=tc["name"])
 
@@ -1020,12 +1100,14 @@ class AgentRunner:
                     if extracted_facts:
                         for fact_text in extracted_facts:
                             try:
-                                await self._heart.learn(FactInput(
-                                    content=fact_text,
-                                    category="technical",
-                                    confidence=0.3,
-                                    source="pre_prune_extraction",
-                                ))
+                                await self._heart.learn(
+                                    FactInput(
+                                        content=fact_text,
+                                        category="technical",
+                                        confidence=0.3,
+                                        source="pre_prune_extraction",
+                                    )
+                                )
                             except Exception:
                                 logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
             else:
@@ -1072,9 +1154,7 @@ class AgentRunner:
                 thinking_blocks=all_thinking_blocks,
             )
             try:
-                await asyncio.shield(
-                    self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
-                )
+                await asyncio.shield(self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context))
             except (asyncio.CancelledError, Exception):
                 logger.warning("post_turn cleanup interrupted for session %s", session_id)
             self._check_safety_net(turn_context, all_tool_results)
@@ -1174,9 +1254,7 @@ class AgentRunner:
                 total_usage["output_tokens"] += api_response.usage.get("output_tokens", 0)
                 if self._compactor:
                     input_chars = sum(len(str(m.get("content", ""))) for m in messages)
-                    self._compactor.estimator.calibrate(
-                        input_chars, api_response.usage.get("input_tokens", 0)
-                    )
+                    self._compactor.estimator.calibrate(input_chars, api_response.usage.get("input_tokens", 0))
 
             # Extract thinking blocks from this iteration
             for block in api_response.content:
@@ -1191,10 +1269,12 @@ class AgentRunner:
                 return response_text, all_tool_results, total_usage, all_thinking_blocks
 
             # P0-3: Append FULL assistant response (all content blocks)
-            messages.append({
-                "role": "assistant",
-                "content": api_response.content,
-            })
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": api_response.content,
+                }
+            )
 
             # P1-2: Dispatch ALL tool_use blocks, collect results in SINGLE user message
             tool_results_for_message: list[dict[str, Any]] = []
@@ -1211,7 +1291,10 @@ class AgentRunner:
                     gated = False
                     if self._action_gate and ledger:
                         gate_result = await self._action_gate.check(
-                            tool_name, tool_input, ledger, user_message=user_message,
+                            tool_name,
+                            tool_input,
+                            ledger,
+                            user_message=user_message,
                         )
                         if gate_result.approved:
                             logger.info("F026 gate: %s approved (%s)", tool_name, gate_result.reason)
@@ -1239,7 +1322,9 @@ class AgentRunner:
                         # F026: Record in execution ledger (post-dispatch)
                         if ledger:
                             ledger.record(
-                                tool_name, tool_input, result_text,
+                                tool_name,
+                                tool_input,
+                                result_text,
                                 "error" if is_error else "success",
                             )
                     else:
@@ -1247,7 +1332,10 @@ class AgentRunner:
 
                     # F020: SmartCompress — ingestion-time compression
                     compress_result = await smart_compress(
-                        tool_name, tool_input, result_text, self._settings,
+                        tool_name,
+                        tool_input,
+                        result_text,
+                        self._settings,
                         is_error=is_error,
                     )
 
@@ -1255,8 +1343,9 @@ class AgentRunner:
                     if compress_result.original_text and session_id:
                         try:
                             from nous.api.tool_cache import cache_compressed_result
+
                             async with self._heart.db.session() as db_sess:
-                                hash_key = await cache_compressed_result(
+                                hash_key = await cache_compressed_result(  # noqa: F841
                                     db_sess,
                                     agent_id=self._settings.agent_id,
                                     session_id=session_id,
@@ -1268,27 +1357,33 @@ class AgentRunner:
                         except Exception:
                             logger.warning("Failed to cache %s result", tool_name, exc_info=True)
 
-                    tool_results_for_message.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": compress_result.text,
-                        "is_error": is_error,
-                    })
+                    tool_results_for_message.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": compress_result.text,
+                            "is_error": is_error,
+                        }
+                    )
 
                     # Track for post_turn
-                    all_tool_results.append(ToolResult(
-                        tool_name=tool_name,
-                        arguments=tool_input,
-                        result=result_text if not is_error else None,
-                        error=result_text if is_error else None,
-                        duration_ms=duration_ms,
-                    ))
+                    all_tool_results.append(
+                        ToolResult(
+                            tool_name=tool_name,
+                            arguments=tool_input,
+                            result=result_text if not is_error else None,
+                            error=result_text if is_error else None,
+                            duration_ms=duration_ms,
+                        )
+                    )
 
             # Append all tool results as single user message
-            messages.append({
-                "role": "user",
-                "content": tool_results_for_message,
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": tool_results_for_message,
+                }
+            )
 
             total_tool_calls += len(tool_results_for_message)
 
@@ -1312,12 +1407,14 @@ class AgentRunner:
                 if extracted_facts:
                     for fact_text in extracted_facts:
                         try:
-                            await self._heart.learn(FactInput(
-                                content=fact_text,
-                                category="technical",
-                                confidence=0.3,
-                                source="pre_prune_extraction",
-                            ))
+                            await self._heart.learn(
+                                FactInput(
+                                    content=fact_text,
+                                    category="technical",
+                                    confidence=0.3,
+                                    source="pre_prune_extraction",
+                                )
+                            )
                         except Exception:
                             logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
 
@@ -1338,7 +1435,12 @@ class AgentRunner:
                 total_usage["output_tokens"] += final_response.usage.get("output_tokens", 0)
             return self._extract_text(final_response.content), all_tool_results, total_usage, all_thinking_blocks
         except Exception:
-            return "I reached the maximum number of tool iterations. Please try again.", all_tool_results, total_usage, all_thinking_blocks
+            return (
+                "I reached the maximum number of tool iterations. Please try again.",
+                all_tool_results,
+                total_usage,
+                all_thinking_blocks,
+            )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1386,10 +1488,7 @@ Rules:
         go into the dynamic tier. Otherwise returns a flat string (legacy).
         """
         # F036: 3-tier split path
-        if (
-            self._settings.cache_split_system_prompt
-            and turn_context.sections_by_tier
-        ):
+        if self._settings.cache_split_system_prompt and turn_context.sections_by_tier:
             tiers = dict(turn_context.sections_by_tier)  # copy to avoid mutation
 
             # Collect runner-appended dynamic content
@@ -1400,9 +1499,7 @@ Rules:
             if turn_context.diagnostic_nudges:
                 dynamic_extras.append(turn_context.diagnostic_nudges)
             if ledger and self._settings.execution_ledger_enabled:
-                ledger_section = ledger.system_prompt_section(
-                    self._settings.execution_ledger_max_tokens
-                )
+                ledger_section = ledger.system_prompt_section(self._settings.execution_ledger_max_tokens)
                 if ledger_section:
                     dynamic_extras.append(ledger_section)
             if corrections:
@@ -1414,11 +1511,7 @@ Rules:
             if dynamic_extras:
                 existing_dynamic = tiers.get("dynamic", "")
                 extras_text = "\n\n".join(dynamic_extras)
-                tiers["dynamic"] = (
-                    existing_dynamic + "\n\n" + extras_text
-                    if existing_dynamic
-                    else extras_text
-                )
+                tiers["dynamic"] = existing_dynamic + "\n\n" + extras_text if existing_dynamic else extras_text
 
             return tiers
 
@@ -1431,9 +1524,7 @@ Rules:
         if turn_context.diagnostic_nudges:
             parts.append(turn_context.diagnostic_nudges)
         if ledger and self._settings.execution_ledger_enabled:
-            ledger_section = ledger.system_prompt_section(
-                self._settings.execution_ledger_max_tokens
-            )
+            ledger_section = ledger.system_prompt_section(self._settings.execution_ledger_max_tokens)
             if ledger_section:
                 parts.append(ledger_section)
         if corrections:
@@ -1551,8 +1642,7 @@ Rules:
             )
         elif frame_id in _OPTIONAL_DECISION_FRAMES:
             logger.debug(
-                "Safety net: frame=%s, record_decision not called during turn "
-                "(session decision_id=%s).",
+                "Safety net: frame=%s, record_decision not called during turn (session decision_id=%s).",
                 frame_id,
                 turn_context.decision_id,
             )
@@ -1588,9 +1678,7 @@ Rules:
                 mode = self._settings.claim_verification_mode
                 if mode == "enforce":
                     logger.warning("Claim verification failed: %s", verification.correction)
-                    self._pending_corrections.setdefault(session_id, []).append(
-                        verification.correction or ""
-                    )
+                    self._pending_corrections.setdefault(session_id, []).append(verification.correction or "")
                 elif mode == "warn":
                     logger.warning("Claim verification: %s", verification.correction)
                 else:
@@ -1657,9 +1745,7 @@ Rules:
                 if next_task is None:
                     next_task = asyncio.create_task(stream.__anext__())
                 try:
-                    event = await asyncio.wait_for(
-                        asyncio.shield(next_task), timeout=interval
-                    )
+                    event = await asyncio.wait_for(asyncio.shield(next_task), timeout=interval)
                     next_task = None  # consumed
                     yield event
                     break  # got first event, switch to direct passthrough
@@ -1718,7 +1804,10 @@ Rules:
         return {**tool_input, "source_episode_id": active_ep}
 
     async def _dispatch_with_keepalive(
-        self, name: str, args: dict[str, Any], session_id: str | None = None,
+        self,
+        name: str,
+        args: dict[str, Any],
+        session_id: str | None = None,
     ) -> AsyncGenerator[StreamEvent | tuple[str, bool], None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -1739,9 +1828,7 @@ Rules:
         try:
             while not task.done():
                 try:
-                    await asyncio.wait_for(
-                        asyncio.shield(task), timeout=interval
-                    )
+                    await asyncio.wait_for(asyncio.shield(task), timeout=interval)
                 except TimeoutError:
                     if task.done():
                         break
@@ -1753,9 +1840,7 @@ Rules:
             try:
                 result_text, is_error = task.result()
             except TimeoutError:
-                logger.warning(
-                    "Tool '%s' timed out after %ds", name, timeout
-                )
+                logger.warning("Tool '%s' timed out after %ds", name, timeout)
                 result_text = f"Tool '{name}' timed out after {timeout}s"
                 is_error = True
             except Exception as e:
@@ -1797,15 +1882,10 @@ Rules:
     # Conversation persistence (008.1 Phase 3)
     # ------------------------------------------------------------------
 
-    async def _save_conversation(
-        self, agent_id: str, session_id: str, conversation: Conversation
-    ) -> None:
+    async def _save_conversation(self, agent_id: str, session_id: str, conversation: Conversation) -> None:
         """Persist conversation state to Heart after compaction."""
         try:
-            messages_json = [
-                {"role": m.role, "content": m.content}
-                for m in conversation.messages
-            ]
+            messages_json = [{"role": m.role, "content": m.content} for m in conversation.messages]
             await self._heart.save_conversation_state(
                 agent_id=agent_id,
                 session_id=session_id,

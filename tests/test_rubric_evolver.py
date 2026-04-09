@@ -1,11 +1,10 @@
 """Tests for F024 Phase 3b rubric evolver handler."""
+
 import uuid
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from nous.events import Event
 
 
 def _mock_rubric_version(version="1.0.0"):
@@ -13,10 +12,38 @@ def _mock_rubric_version(version="1.0.0"):
     rv.id = uuid.uuid4()
     rv.version = version
     rv.dimensions = [
-        {"name": "Recall", "weight": 0.25, "description": "test", "scoring_criteria": "t", "min_weight": 0.10, "max_weight": 0.40},
-        {"name": "Tool Selection", "weight": 0.25, "description": "test", "scoring_criteria": "t", "min_weight": 0.10, "max_weight": 0.40},
-        {"name": "Confidence Calibration", "weight": 0.25, "description": "test", "scoring_criteria": "t", "min_weight": 0.10, "max_weight": 0.40},
-        {"name": "Proactivity", "weight": 0.25, "description": "test", "scoring_criteria": "t", "min_weight": 0.10, "max_weight": 0.40},
+        {
+            "name": "Recall",
+            "weight": 0.25,
+            "description": "test",
+            "scoring_criteria": "t",
+            "min_weight": 0.10,
+            "max_weight": 0.40,
+        },
+        {
+            "name": "Tool Selection",
+            "weight": 0.25,
+            "description": "test",
+            "scoring_criteria": "t",
+            "min_weight": 0.10,
+            "max_weight": 0.40,
+        },
+        {
+            "name": "Confidence Calibration",
+            "weight": 0.25,
+            "description": "test",
+            "scoring_criteria": "t",
+            "min_weight": 0.10,
+            "max_weight": 0.40,
+        },
+        {
+            "name": "Proactivity",
+            "weight": 0.25,
+            "description": "test",
+            "scoring_criteria": "t",
+            "min_weight": 0.10,
+            "max_weight": 0.40,
+        },
     ]
     rv.outcome_correlations = {}
     rv.created_at = datetime.now(UTC)
@@ -26,8 +53,10 @@ def _mock_rubric_version(version="1.0.0"):
 class _AsyncCtx:
     def __init__(self, s):
         self._s = s
+
     async def __aenter__(self):
         return self._s
+
     async def __aexit__(self, *a):
         pass
 
@@ -75,7 +104,11 @@ class TestGapAnalysis:
 
         episodes = [
             {"episode_id": "a", "scores": {"Recall": 8, "Tool": 8, "Cal": 8, "Pro": 8}, "signals": ["corrected"]},
-            {"episode_id": "b", "scores": {"Recall": 9, "Tool": 7, "Cal": 8, "Pro": 9}, "signals": ["corrected", "reworked"]},
+            {
+                "episode_id": "b",
+                "scores": {"Recall": 9, "Tool": 7, "Cal": 8, "Pro": 9},
+                "signals": ["corrected", "reworked"],
+            },
             {"episode_id": "c", "scores": {"Recall": 3, "Tool": 4, "Cal": 5, "Pro": 3}, "signals": ["corrected"]},
         ]
         gaps = RubricEvolver.find_gap_episodes(episodes, score_threshold=7)

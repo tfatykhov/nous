@@ -1,19 +1,23 @@
 """Tests for dual-track procedure loading (issue #229)."""
-import pytest
-import pytest_asyncio
-from datetime import datetime, timezone
+
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import pytest
+
 from nous.cognitive.context import ContextEngine
-from nous.cognitive.schemas import BuildResult, ContextBudget, FrameSelection
+from nous.cognitive.schemas import BuildResult, FrameSelection
 from nous.config import Settings
 from nous.heart.schemas import ProcedureDetail, ProcedureSummary
 
 
 def _frame(frame_id: str = "task") -> FrameSelection:
     return FrameSelection(
-        frame_id=frame_id, frame_name="Task", confidence=0.9, match_method="test",
+        frame_id=frame_id,
+        frame_name="Task",
+        confidence=0.9,
+        match_method="test",
     )
 
 
@@ -38,7 +42,7 @@ def _make_procedure_detail(name: str, domain: str = "test") -> ProcedureDetail:
         effectiveness=None,
         tags=[],
         active=True,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
 
 
@@ -83,8 +87,11 @@ class TestDualTrackDisabled:
         brain.query = AsyncMock(return_value=[])
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["some-skill"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["some-skill"],
         )
 
         assert isinstance(result, BuildResult)
@@ -101,9 +108,11 @@ class TestDualTrackDisabled:
         brain = MagicMock()
         brain.embeddings = None
         heart = MagicMock()
-        heart.search_procedures = AsyncMock(return_value=[
-            _make_procedure_summary("embed-skill", 0.9),
-        ])
+        heart.search_procedures = AsyncMock(
+            return_value=[
+                _make_procedure_summary("embed-skill", 0.9),
+            ]
+        )
         heart.search_facts = AsyncMock(return_value=[])
         heart.search_episodes = AsyncMock(return_value=[])
         heart.list_facts_by_category = AsyncMock(return_value=[])
@@ -116,8 +125,11 @@ class TestDualTrackDisabled:
         brain.query = AsyncMock(return_value=[])
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=None,
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=None,
         )
 
         assert isinstance(result, BuildResult)
@@ -139,7 +151,7 @@ class TestDualTrackEnabled:
         heart.list_episodes = AsyncMock(return_value=[])
 
         async def _get_by_name(name, session=None):
-            for p in (critic_procs or []):
+            for p in critic_procs or []:
                 if p.name == name:
                     return p
             return None
@@ -168,8 +180,11 @@ class TestDualTrackEnabled:
         engine = self._setup_engine(heart)
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="summarize this",
-            frame=_frame(), critic_skills=["summarize-text"],
+            agent_id="test",
+            session_id="s1",
+            input_text="summarize this",
+            frame=_frame(),
+            critic_skills=["summarize-text"],
         )
 
         proc_ids = result.recalled_ids.get("procedure", [])
@@ -184,8 +199,11 @@ class TestDualTrackEnabled:
         engine = self._setup_engine(heart)
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["my-skill"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["my-skill"],
         )
 
         for mid, score in result.recalled_score_map.items():
@@ -205,15 +223,15 @@ class TestDualTrackEnabled:
         engine = self._setup_engine(heart)
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["shared-skill"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["shared-skill"],
         )
 
         # Should appear exactly once (from Critic track)
-        proc_names = [
-            v for v in result.recalled_content_map.values()
-            if v == "shared-skill"
-        ]
+        proc_names = [v for v in result.recalled_content_map.values() if v == "shared-skill"]
         assert len(proc_names) == 1
 
     @pytest.mark.asyncio
@@ -224,8 +242,11 @@ class TestDualTrackEnabled:
         engine = self._setup_engine(heart)
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["dup-skill", "dup-skill"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["dup-skill", "dup-skill"],
         )
 
         proc_ids = result.recalled_ids.get("procedure", [])
@@ -235,15 +256,16 @@ class TestDualTrackEnabled:
     async def test_unused_critic_slots_rollover(self):
         """Unused Critic slots increase embedding budget."""
         # Critic recommends skill that doesn't exist -> 0 critic procs
-        embed_procs = [
-            _make_procedure_summary(f"embed-{i}", 0.9 - i*0.1) for i in range(5)
-        ]
+        embed_procs = [_make_procedure_summary(f"embed-{i}", 0.9 - i * 0.1) for i in range(5)]
         heart = self._setup_heart(critic_procs=[], embed_procs=embed_procs)
         engine = self._setup_engine(heart)
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["nonexistent"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["nonexistent"],
         )
 
         # With critic_slots=2 (all unused) + embedding_slots=3, total=5
@@ -258,8 +280,11 @@ class TestDualTrackEnabled:
         engine = self._setup_engine(heart)
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["nonexistent-skill"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["nonexistent-skill"],
         )
         assert isinstance(result, BuildResult)
 
@@ -284,6 +309,7 @@ class TestDualTrackLogOnly:
             if name == "log-only-skill":
                 return critic_proc
             return None
+
         heart.get_procedure_by_name = AsyncMock(side_effect=_get_by_name)
 
         settings = Settings(
@@ -297,18 +323,18 @@ class TestDualTrackLogOnly:
         engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
 
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test",
-            frame=_frame(), critic_skills=["log-only-skill"],
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
+            critic_skills=["log-only-skill"],
         )
 
         # get_procedure_by_name WAS called (resolves)
         heart.get_procedure_by_name.assert_called_once()
         # But the skill should NOT appear in recalled IDs (not injected)
-        proc_ids = result.recalled_ids.get("procedure", [])
-        proc_names_in_map = [
-            v for v in result.recalled_content_map.values()
-            if v == "log-only-skill"
-        ]
+        proc_ids = result.recalled_ids.get("procedure", [])  # noqa: F841
+        proc_names_in_map = [v for v in result.recalled_content_map.values() if v == "log-only-skill"]
         assert len(proc_names_in_map) == 0
 
 
@@ -335,6 +361,9 @@ class TestBuildBackwardCompat:
 
         # Call without critic_skills -- must not crash
         result = await engine.build(
-            agent_id="test", session_id="s1", input_text="test", frame=_frame(),
+            agent_id="test",
+            session_id="s1",
+            input_text="test",
+            frame=_frame(),
         )
         assert isinstance(result, BuildResult)

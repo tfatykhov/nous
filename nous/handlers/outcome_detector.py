@@ -6,11 +6,11 @@ Emits: outcome_signals_detected
 Classifies episode outcomes using LLM analysis of the episode summary
 and transcript. Stores structured outcome signals for rubric evolution.
 """
+
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 from uuid import UUID
 
 from nous.config import Settings
@@ -105,21 +105,24 @@ class OutcomeDetector:
 
             logger.info(
                 "F024-3b: Detected %d outcome signals for episode %s: %s",
-                len(signals), episode_id,
+                len(signals),
+                episode_id,
                 [s.get("type") for s in signals],
             )
 
-            await self._bus.emit(Event(
-                type="outcome_signals_detected",
-                agent_id=event.agent_id,
-                session_id=event.session_id,
-                data={
-                    "episode_id": episode_id,
-                    "signals": signals,
-                },
-                trace_id=event.trace_id,       # F035.2: inherit from parent
-                caused_by=event.event_id,      # F035.2: point to parent
-            ))
+            await self._bus.emit(
+                Event(
+                    type="outcome_signals_detected",
+                    agent_id=event.agent_id,
+                    session_id=event.session_id,
+                    data={
+                        "episode_id": episode_id,
+                        "signals": signals,
+                    },
+                    trace_id=event.trace_id,  # F035.2: inherit from parent
+                    caused_by=event.event_id,  # F035.2: point to parent
+                )
+            )
 
         except Exception:
             logger.exception("F024-3b: Failed to detect outcome signals for episode %s", episode_id)

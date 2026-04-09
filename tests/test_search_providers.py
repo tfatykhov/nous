@@ -3,10 +3,10 @@
 All HTTP calls are mocked via unittest.mock.AsyncMock.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
+import pytest
 
 
 def _mock_http(response: MagicMock) -> AsyncMock:
@@ -32,6 +32,7 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None) -> Mag
 class TestSearchResult:
     def test_dataclass_fields(self):
         from nous.api.search_providers import SearchResult
+
         r = SearchResult(title="T", url="https://x.com", snippet="S")
         assert r.title == "T"
         assert r.url == "https://x.com"
@@ -41,6 +42,7 @@ class TestSearchResult:
 
     def test_with_optional_fields(self):
         from nous.api.search_providers import SearchResult
+
         r = SearchResult(title="T", url="https://x.com", snippet="S", score=0.95, provider="tavily")
         assert r.score == 0.95
         assert r.provider == "tavily"
@@ -54,17 +56,23 @@ class TestSearchResult:
 class TestBraveProvider:
     def _make_provider(self, api_key: str = "brave-key"):
         from nous.api.search_providers import BraveProvider
+
         return BraveProvider(api_key=api_key)
 
     @pytest.mark.asyncio
     async def test_successful_search(self):
         provider = self._make_provider()
-        response = _mock_response(200, {
-            "web": {"results": [
-                {"title": "Result 1", "url": "https://example.com", "description": "Desc 1"},
-                {"title": "Result 2", "url": "https://example2.com", "description": "Desc 2"},
-            ]}
-        })
+        response = _mock_response(
+            200,
+            {
+                "web": {
+                    "results": [
+                        {"title": "Result 1", "url": "https://example.com", "description": "Desc 1"},
+                        {"title": "Result 2", "url": "https://example2.com", "description": "Desc 2"},
+                    ]
+                }
+            },
+        )
         http = _mock_http(response)
 
         results = await provider.search("test query", count=5, http=http)
@@ -129,21 +137,25 @@ class TestBraveProvider:
 class TestTavilyProvider:
     def _make_provider(self, api_key: str = "tvly-test"):
         from nous.api.search_providers import TavilyProvider
+
         return TavilyProvider(api_key=api_key)
 
     @pytest.mark.asyncio
     async def test_successful_search(self):
         provider = self._make_provider()
-        response = _mock_response(200, {
-            "results": [
-                {
-                    "title": "Tavily Result",
-                    "url": "https://tavily.com",
-                    "content": "Full content snippet from Tavily",
-                    "score": 0.95,
-                },
-            ]
-        })
+        response = _mock_response(
+            200,
+            {
+                "results": [
+                    {
+                        "title": "Tavily Result",
+                        "url": "https://tavily.com",
+                        "content": "Full content snippet from Tavily",
+                        "score": 0.95,
+                    },
+                ]
+            },
+        )
         http = _mock_http(response)
 
         results = await provider.search("test query", count=5, http=http)
@@ -222,21 +234,25 @@ class TestTavilyProvider:
 class TestExaProvider:
     def _make_provider(self, api_key: str = "exa-test"):
         from nous.api.search_providers import ExaProvider
+
         return ExaProvider(api_key=api_key)
 
     @pytest.mark.asyncio
     async def test_successful_search(self):
         provider = self._make_provider()
-        response = _mock_response(200, {
-            "results": [
-                {
-                    "title": "Deep Research Paper",
-                    "url": "https://arxiv.org/paper",
-                    "text": "Neural embedding search finds conceptually related content",
-                    "score": 0.88,
-                },
-            ]
-        })
+        response = _mock_response(
+            200,
+            {
+                "results": [
+                    {
+                        "title": "Deep Research Paper",
+                        "url": "https://arxiv.org/paper",
+                        "text": "Neural embedding search finds conceptually related content",
+                        "score": 0.88,
+                    },
+                ]
+            },
+        )
         http = _mock_http(response)
 
         results = await provider.search("neural search embeddings", count=5, http=http)

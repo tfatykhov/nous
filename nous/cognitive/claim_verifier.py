@@ -3,6 +3,7 @@
 ClaimVerifier: detects ungrounded action claims in assistant responses.
 IntentTracker: detects ghost planning (describing work without doing it).
 """
+
 from __future__ import annotations
 
 import re
@@ -61,8 +62,7 @@ class ClaimVerifier:
 
     def __init__(self) -> None:
         self._compiled: list[tuple[re.Pattern[str], str]] = [
-            (re.compile(pattern, re.IGNORECASE | re.DOTALL), tool)
-            for pattern, tool in self.ACTION_CLAIM_PATTERNS
+            (re.compile(pattern, re.IGNORECASE | re.DOTALL), tool) for pattern, tool in self.ACTION_CLAIM_PATTERNS
         ]
 
     def verify(
@@ -86,9 +86,7 @@ class ClaimVerifier:
             return VerificationResult(verified=True)
 
         # Build a set of tool names seen in the last 10 ledger entries.
-        recent_ledger_tools: set[str] = {
-            action.tool_name for action in ledger.actions[-10:]
-        }
+        recent_ledger_tools: set[str] = {action.tool_name for action in ledger.actions[-10:]}
         turn_tool_set = set(tool_calls_this_turn)
 
         violations: list[ClaimViolation] = []
@@ -124,9 +122,7 @@ class ClaimVerifier:
 
     def _build_correction(self, violations: list[ClaimViolation]) -> str:
         """Build a correction message describing all ungrounded claims."""
-        lines = [
-            "[Execution Integrity] The previous response contained ungrounded action claims:"
-        ]
+        lines = ["[Execution Integrity] The previous response contained ungrounded action claims:"]
         for v in violations:
             lines.append(
                 f'  - Claimed: "{v.claimed_text}" '
@@ -134,8 +130,7 @@ class ClaimVerifier:
                 "no matching tool call was recorded."
             )
         lines.append(
-            "Do not assert that an action was taken unless the corresponding tool "
-            "was actually called and succeeded."
+            "Do not assert that an action was taken unless the corresponding tool was actually called and succeeded."
         )
         return "\n".join(lines)
 
@@ -153,8 +148,7 @@ class IntentTracker:
 
     def __init__(self) -> None:
         self._compiled: list[re.Pattern[str]] = [
-            re.compile(pattern, re.IGNORECASE | re.DOTALL)
-            for pattern in self.WORK_PRODUCT_SIGNALS
+            re.compile(pattern, re.IGNORECASE | re.DOTALL) for pattern in self.WORK_PRODUCT_SIGNALS
         ]
 
     def check_ghost_planning(
@@ -179,9 +173,7 @@ class IntentTracker:
         if tool_calls_this_turn:
             return False
 
-        signal_count = sum(
-            1 for pattern in self._compiled if pattern.search(response)
-        )
+        signal_count = sum(1 for pattern in self._compiled if pattern.search(response))
         return signal_count >= 2
 
     def build_nudge(self) -> str:

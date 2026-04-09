@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -20,7 +19,6 @@ from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import (
     CheckResult,
-    EscalationConfig,
     Finding,
     FindingState,
     OutcomeSignal,
@@ -29,7 +27,6 @@ from nous.heartbeat.schemas import (
     TuningReport,
 )
 from nous.heartbeat.tuner import HeartbeatTuner
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,10 +115,7 @@ class TestTuningEngine:
     async def test_relax_on_high_negatives(self):
         """When >60% outcomes are negative, tuner relaxes parameters."""
         # 7/10 negative = 70% -> should relax
-        outcomes = (
-            [OutcomeSignal.NEGATIVE] * 7
-            + [OutcomeSignal.POSITIVE] * 3
-        )
+        outcomes = [OutcomeSignal.NEGATIVE] * 7 + [OutcomeSignal.POSITIVE] * 3
         store = _make_store_with_outcomes("tunable_dummy", outcomes)
 
         registry = CheckRegistry()
@@ -140,10 +134,7 @@ class TestTuningEngine:
     async def test_tighten_on_high_positives(self):
         """When >80% outcomes are positive, tuner tightens parameters."""
         # 9/10 positive = 90% -> should tighten
-        outcomes = (
-            [OutcomeSignal.POSITIVE] * 9
-            + [OutcomeSignal.NEGATIVE] * 1
-        )
+        outcomes = [OutcomeSignal.POSITIVE] * 9 + [OutcomeSignal.NEGATIVE] * 1
         store = _make_store_with_outcomes("tunable_dummy", outcomes)
 
         registry = CheckRegistry()
@@ -162,10 +153,7 @@ class TestTuningEngine:
     async def test_no_change_on_balanced(self):
         """When outcomes are balanced, tuner makes no changes."""
         # 5/10 positive, 5/10 negative = balanced -> no change
-        outcomes = (
-            [OutcomeSignal.POSITIVE] * 5
-            + [OutcomeSignal.NEGATIVE] * 5
-        )
+        outcomes = [OutcomeSignal.POSITIVE] * 5 + [OutcomeSignal.NEGATIVE] * 5
         store = _make_store_with_outcomes("tunable_dummy", outcomes)
 
         registry = CheckRegistry()
@@ -218,7 +206,7 @@ class TestParameterBounds:
         registry.register(check)
 
         tuner = HeartbeatTuner()
-        report = await tuner.tune(store, registry)
+        report = await tuner.tune(store, registry)  # noqa: F841
 
         # The param should still be at max (clamped)
         p = check.get_param("threshold")
@@ -235,7 +223,7 @@ class TestParameterBounds:
         check = TunableDummyCheck(param_value=5.0)
         registry.register(check)
 
-        old_value = check.get_param_value("threshold")
+        old_value = check.get_param_value("threshold")  # noqa: F841
         tuner = HeartbeatTuner()
         report = await tuner.tune(store, registry)
 
@@ -260,10 +248,7 @@ class TestParameterBounds:
         report = await tuner.tune(store, registry)
 
         # No adjustments since the only param is pinned
-        effective_adjs = [
-            a for a in report.adjustments
-            if a.direction != "rollback" and a.old_value != a.new_value
-        ]
+        effective_adjs = [a for a in report.adjustments if a.direction != "rollback" and a.old_value != a.new_value]
         assert len(effective_adjs) == 0
         assert check.get_param_value("threshold") == 5.0  # unchanged
 
@@ -305,7 +290,7 @@ class TestCrossCycleRollback:
         registry.register(check)
 
         tuner = HeartbeatTuner()
-        report1 = await tuner.tune(store, registry)
+        report1 = await tuner.tune(store, registry)  # noqa: F841
         adjusted_value = check.get_param_value("threshold")
         assert adjusted_value > 5.0  # was relaxed
 
@@ -456,8 +441,20 @@ class TestTunerIntegration:
 
         # Ingest findings and record negative outcomes
         # Use alphabetic labels to avoid fingerprint collision (numbers get normalized)
-        labels = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot",
-                  "golf", "hotel", "india", "juliet", "kilo", "lima"]
+        labels = [
+            "alpha",
+            "bravo",
+            "charlie",
+            "delta",
+            "echo",
+            "foxtrot",
+            "golf",
+            "hotel",
+            "india",
+            "juliet",
+            "kilo",
+            "lima",
+        ]
         for label in labels:
             f = Finding(source="test", summary=f"Noisy finding {label}", check_name="tunable_dummy")
             store.ingest(f)

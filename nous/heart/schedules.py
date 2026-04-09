@@ -70,7 +70,10 @@ class ScheduleManager:
             await session.refresh(schedule)
             logger.info(
                 "Created %s schedule %s: %s (next: %s)",
-                schedule_type, schedule.id.hex[:8], task[:80], next_fire,
+                schedule_type,
+                schedule.id.hex[:8],
+                task[:80],
+                next_fire,
             )
             return schedule
 
@@ -104,9 +107,7 @@ class ScheduleManager:
                 cron = croniter(schedule.cron_expr, fired_at)
                 schedule.next_fire_at = cron.get_next(datetime)
             elif schedule.interval_seconds:
-                schedule.next_fire_at = fired_at + timedelta(
-                    seconds=schedule.interval_seconds
-                )
+                schedule.next_fire_at = fired_at + timedelta(seconds=schedule.interval_seconds)
             else:
                 # One-shot schedule or missing timing: deactivate
                 schedule.active = False
@@ -115,17 +116,15 @@ class ScheduleManager:
             await session.commit()
             logger.info(
                 "Advanced schedule %s (fire #%d, next: %s)",
-                schedule_id.hex[:8], schedule.fire_count, schedule.next_fire_at,
+                schedule_id.hex[:8],
+                schedule.fire_count,
+                schedule.next_fire_at,
             )
 
     async def deactivate(self, schedule_id: UUID) -> None:
         """Deactivate a schedule."""
         async with self._db.session() as session:
-            await session.execute(
-                update(Schedule)
-                .where(Schedule.id == schedule_id)
-                .values(active=False)
-            )
+            await session.execute(update(Schedule).where(Schedule.id == schedule_id).values(active=False))
             await session.commit()
             logger.info("Deactivated schedule %s", schedule_id.hex[:8])
 

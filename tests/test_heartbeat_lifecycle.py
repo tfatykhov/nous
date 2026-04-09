@@ -3,7 +3,8 @@
 25 test cases across 7 test classes:
 - TestFindingFingerprint (4): stable hash, count-invariant, check-name-scoped, different sources differ
 - TestFindingStoreIngest (5): new->TRIAGE, dup->SUPPRESS, resolved->reopen, flapping->SUPPRESS, startup suppression
-- TestFindingStoreEscalation (4): low escalation after 72h, normal escalation after 24h, high re-alert, accumulation escalation with cooldown
+- TestFindingStoreEscalation (4): low escalation after 72h, normal escalation after 24h,
+  high re-alert, accumulation escalation with cooldown
 - TestFindingStoreLifecycle (3): acknowledge, resolve, dismiss with strong_negative outcome
 - TestOutcomeRecording (3): record_outcome, sweep_weak_negatives, get_outcomes_for_check
 - TestFindingStoreMaintenance (3): prune resolved TTL, prune keeps active, stats
@@ -14,8 +15,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import pytest
-
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.schemas import (
     EscalationConfig,
@@ -23,9 +22,7 @@ from nous.heartbeat.schemas import (
     FindingAction,
     FindingState,
     OutcomeSignal,
-    TrackedFinding,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

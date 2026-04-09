@@ -14,13 +14,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from nous.utils import text_overlap
-
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
 from nous.storage.models import Episode, EpisodeDecision, EpisodeProcedure, Event
+from nous.utils import text_overlap
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +118,7 @@ class EpisodeManager:
     # update_summary()
     # ------------------------------------------------------------------
 
-    async def update_summary(
-        self, episode_id: UUID, summary: dict, session: AsyncSession | None = None
-    ) -> None:
+    async def update_summary(self, episode_id: UUID, summary: dict, session: AsyncSession | None = None) -> None:
         """Store structured summary on episode."""
         if session is None:
             async with self.db.session() as session:
@@ -130,9 +127,7 @@ class EpisodeManager:
                 return
         await self._update_summary(episode_id, summary, session)
 
-    async def _update_summary(
-        self, episode_id: UUID, summary: dict, session: AsyncSession
-    ) -> None:
+    async def _update_summary(self, episode_id: UUID, summary: dict, session: AsyncSession) -> None:
         stmt = select(Episode).where(Episode.id == episode_id)
         result = await session.execute(stmt)
         episode = result.scalar_one_or_none()
@@ -163,9 +158,7 @@ class EpisodeManager:
     # bump_compaction_count()
     # ------------------------------------------------------------------
 
-    async def bump_compaction_count(
-        self, episode_id: UUID, session: AsyncSession | None = None
-    ) -> None:
+    async def bump_compaction_count(self, episode_id: UUID, session: AsyncSession | None = None) -> None:
         """Increment compaction counter on an active episode.
 
         Note: Episode embedding is NOT refreshed here — it still reflects the
@@ -180,9 +173,7 @@ class EpisodeManager:
                 return
         await self._bump_compaction_count(episode_id, session)
 
-    async def _bump_compaction_count(
-        self, episode_id: UUID, session: AsyncSession
-    ) -> None:
+    async def _bump_compaction_count(self, episode_id: UUID, session: AsyncSession) -> None:
         stmt = select(Episode).where(Episode.id == episode_id)
         result = await session.execute(stmt)
         episode = result.scalar_one_or_none()
@@ -379,7 +370,7 @@ class EpisodeManager:
         if outcome is not None:
             stmt = stmt.where(Episode.outcome == outcome)
         else:
-            stmt = stmt.where(Episode.outcome != 'abandoned')
+            stmt = stmt.where(Episode.outcome != "abandoned")
 
         result = await session.execute(stmt)
         episodes = result.scalars().all()
@@ -419,7 +410,16 @@ class EpisodeManager:
         return await self._list_all(limit, offset, outcome, frame, date_from, date_to, sort, order, session)
 
     async def _list_all(
-        self, limit, offset, outcome, frame, date_from, date_to, sort, order, session,
+        self,
+        limit,
+        offset,
+        outcome,
+        frame,
+        date_from,
+        date_to,
+        sort,
+        order,
+        session,
     ) -> tuple[list[EpisodeSummary], int]:
         from sqlalchemy import func as sa_func
 
@@ -559,12 +559,8 @@ class EpisodeManager:
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search_recent_by_embedding(
-                    query_embedding, hours, limit, session
-                )
-        return await self._search_recent_by_embedding(
-            query_embedding, hours, limit, session
-        )
+                return await self._search_recent_by_embedding(query_embedding, hours, limit, session)
+        return await self._search_recent_by_embedding(query_embedding, hours, limit, session)
 
     async def _search_recent_by_embedding(
         self,
@@ -586,12 +582,15 @@ class EpisodeManager:
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """)
-        result = await session.execute(sql, {
-            "embedding": str(query_embedding),
-            "agent_id": self.agent_id,
-            "hours": hours,
-            "limit": limit,
-        })
+        result = await session.execute(
+            sql,
+            {
+                "embedding": str(query_embedding),
+                "agent_id": self.agent_id,
+                "hours": hours,
+                "limit": limit,
+            },
+        )
         return [(row[0], float(row[1])) for row in result.fetchall()]
 
     # ------------------------------------------------------------------

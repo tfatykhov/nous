@@ -17,7 +17,6 @@ def _mock_settings():
 
 
 class TestAgentRunnerFork:
-
     def test_fork_creates_new_runner_with_given_client(self):
         """fork() returns a new AgentRunner using the provided API client."""
         cognitive = MagicMock()

@@ -3,11 +3,10 @@
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
@@ -137,7 +136,7 @@ class TestScheduleModel:
 # SubtaskManager tests
 # ---------------------------------------------------------------------------
 
-from nous.heart.subtasks import SubtaskManager
+from nous.heart.subtasks import SubtaskManager  # noqa: E402
 
 
 @pytest_asyncio.fixture
@@ -283,7 +282,7 @@ class TestSpawnTaskEnhancements:
         heart.subtasks.create = AsyncMock(return_value=mock_subtask)
 
         tools = create_subtask_tools(heart, settings)
-        result = await tools["spawn_task"](
+        result = await tools["spawn_task"](  # noqa: F841
             task="Research topic",
             frame_type="research",
             _session_id="test-session",
@@ -304,7 +303,7 @@ class TestSpawnTaskEnhancements:
         heart.subtasks.create = AsyncMock(return_value=mock_subtask)
 
         tools = create_subtask_tools(heart, settings)
-        result = await tools["spawn_task"](
+        result = await tools["spawn_task"](  # noqa: F841
             task="Quick lookup",
             model="claude-haiku-4-5-20251001",
             _session_id="test-session",
@@ -342,7 +341,7 @@ class TestSpawnTaskEnhancements:
         heart.subtasks.create = AsyncMock(return_value=mock_subtask)
 
         tools = create_subtask_tools(heart, settings)
-        result = await tools["spawn_task"](
+        result = await tools["spawn_task"](  # noqa: F841
             task="Research something",
             frame_type="research",
             _session_id="test-session",
@@ -453,13 +452,15 @@ class TestSubtaskManager:
 
     async def test_create_urgent_priority(self, subtask_mgr: SubtaskManager):
         subtask = await subtask_mgr.create(
-            task="Urgent task", priority="urgent",
+            task="Urgent task",
+            priority="urgent",
         )
         assert subtask.priority == 50
 
     async def test_create_low_priority(self, subtask_mgr: SubtaskManager):
         subtask = await subtask_mgr.create(
-            task="Low priority task", priority="low",
+            task="Low priority task",
+            priority="low",
         )
         assert subtask.priority == 200
 
@@ -537,7 +538,9 @@ class TestSubtaskManager:
         # Manually backdate started_at to simulate stale
         async with subtask_mgr._db.session() as sess:
             from sqlalchemy import update
+
             from nous.storage.models import Subtask as SubtaskModel
+
             await sess.execute(
                 update(SubtaskModel)
                 .where(SubtaskModel.id == subtask.id)
@@ -564,7 +567,7 @@ class TestSubtaskManager:
 # Heart integration tests
 # ---------------------------------------------------------------------------
 
-from nous.heart.heart import Heart
+from nous.heart.heart import Heart  # noqa: E402
 
 
 class TestHeartIntegration:
@@ -598,11 +601,13 @@ class TestSubtaskWorkerPool:
     @pytest.fixture
     def mock_runner(self):
         runner = AsyncMock()
-        runner.run_turn = AsyncMock(return_value=(
-            "Task completed successfully",
-            MagicMock(),  # TurnContext
-            {"input_tokens": 100, "output_tokens": 50},
-        ))
+        runner.run_turn = AsyncMock(
+            return_value=(
+                "Task completed successfully",
+                MagicMock(),  # TurnContext
+                {"input_tokens": 100, "output_tokens": 50},
+            )
+        )
         return runner
 
     @pytest.fixture
@@ -628,9 +633,7 @@ class TestSubtaskWorkerPool:
         yield heart
         await heart.close()
 
-    async def test_execute_subtask_success(
-        self, mock_runner, worker_heart, worker_settings, mock_bus
-    ):
+    async def test_execute_subtask_success(self, mock_runner, worker_heart, worker_settings, mock_bus):
         """Executing a subtask calls runner.run_turn and marks complete."""
         pool = SubtaskWorkerPool(
             runner=mock_runner,
@@ -662,9 +665,7 @@ class TestSubtaskWorkerPool:
         emitted_event = mock_bus.emit.call_args[0][0]
         assert emitted_event.type == "subtask_completed"
 
-    async def test_execute_subtask_failure(
-        self, mock_runner, worker_heart, worker_settings, mock_bus
-    ):
+    async def test_execute_subtask_failure(self, mock_runner, worker_heart, worker_settings, mock_bus):
         """A failing runner marks the subtask as failed and emits error event."""
         mock_runner.run_turn = AsyncMock(side_effect=RuntimeError("LLM API down"))
         pool = SubtaskWorkerPool(
@@ -687,10 +688,9 @@ class TestSubtaskWorkerPool:
         emitted_event = mock_bus.emit.call_args[0][0]
         assert emitted_event.type == "subtask_failed"
 
-    async def test_process_subtask_timeout(
-        self, worker_heart, worker_settings, mock_bus
-    ):
+    async def test_process_subtask_timeout(self, worker_heart, worker_settings, mock_bus):
         """A subtask exceeding its timeout is marked failed."""
+
         # Runner that takes too long
         async def slow_turn(**kwargs):
             await asyncio.sleep(10)
@@ -715,9 +715,7 @@ class TestSubtaskWorkerPool:
         assert updated.status == "failed"
         assert "timed out" in updated.error
 
-    async def test_execute_subtask_no_bus(
-        self, mock_runner, worker_heart, worker_settings
-    ):
+    async def test_execute_subtask_no_bus(self, mock_runner, worker_heart, worker_settings):
         """Worker pool works without event bus (bus=None)."""
         pool = SubtaskWorkerPool(
             runner=mock_runner,
@@ -734,9 +732,7 @@ class TestSubtaskWorkerPool:
         updated = await worker_heart.subtasks.get(subtask.id)
         assert updated.status == "completed"
 
-    async def test_start_reclaims_stale(
-        self, mock_runner, worker_heart, worker_settings
-    ):
+    async def test_start_reclaims_stale(self, mock_runner, worker_heart, worker_settings):
         """start() calls reclaim_stale on startup."""
         pool = SubtaskWorkerPool(
             runner=mock_runner,
@@ -759,9 +755,7 @@ class TestSubtaskWorkerPool:
         assert reclaim_called
         await pool.stop()
 
-    async def test_start_and_stop_workers(
-        self, mock_runner, worker_heart, worker_settings
-    ):
+    async def test_start_and_stop_workers(self, mock_runner, worker_heart, worker_settings):
         """start() spawns workers, stop() cancels them."""
         pool = SubtaskWorkerPool(
             runner=mock_runner,
@@ -775,9 +769,7 @@ class TestSubtaskWorkerPool:
         await pool.stop()
         assert len(pool._workers) == 0
 
-    async def test_telegram_notification_on_success(
-        self, mock_runner, worker_heart, worker_settings
-    ):
+    async def test_telegram_notification_on_success(self, mock_runner, worker_heart, worker_settings):
         """Telegram notification sent on successful completion when configured."""
         worker_settings.telegram_bot_token = "test-token"
         worker_settings.telegram_chat_id = "12345"
@@ -792,7 +784,7 @@ class TestSubtaskWorkerPool:
             http_client=mock_http,
         )
 
-        subtask = await worker_heart.subtasks.create(task="Notify me", notify=True)
+        subtask = await worker_heart.subtasks.create(task="Notify me", notify=True)  # noqa: F841
         dequeued = await worker_heart.subtasks.dequeue("test-worker")
 
         await pool._execute_subtask(dequeued)
@@ -804,9 +796,7 @@ class TestSubtaskWorkerPool:
         assert body["chat_id"] == "12345"
         assert "completed" in body["text"].lower()
 
-    async def test_no_telegram_when_notify_false(
-        self, mock_runner, worker_heart, worker_settings
-    ):
+    async def test_no_telegram_when_notify_false(self, mock_runner, worker_heart, worker_settings):
         """No Telegram notification when subtask.notify is False."""
         worker_settings.telegram_bot_token = "test-token"
         worker_settings.telegram_chat_id = "12345"
@@ -819,7 +809,7 @@ class TestSubtaskWorkerPool:
             http_client=mock_http,
         )
 
-        subtask = await worker_heart.subtasks.create(task="Silent task", notify=False)
+        subtask = await worker_heart.subtasks.create(task="Silent task", notify=False)  # noqa: F841
         dequeued = await worker_heart.subtasks.dequeue("test-worker")
 
         await pool._execute_subtask(dequeued)
@@ -838,7 +828,7 @@ class TestSubtaskWorkerPool:
             bus=mock_bus,
         )
 
-        subtask = await worker_heart.subtasks.create(task="Background work")
+        subtask = await worker_heart.subtasks.create(task="Background work")  # noqa: F841
         dequeued = await worker_heart.subtasks.dequeue("test-worker")
 
         await pool._execute_subtask(dequeued)
@@ -858,8 +848,9 @@ class TestSubtaskWorkerPool:
             bus=mock_bus,
         )
 
-        subtask = await worker_heart.subtasks.create(
-            task="Explicit model work", model="claude-opus-4-20250514",
+        subtask = await worker_heart.subtasks.create(  # noqa: F841
+            task="Explicit model work",
+            model="claude-opus-4-20250514",
         )
         dequeued = await worker_heart.subtasks.dequeue("test-worker")
 
@@ -879,7 +870,7 @@ class TestSubtaskWorkerPool:
             bus=mock_bus,
         )
 
-        subtask = await worker_heart.subtasks.create(
+        subtask = await worker_heart.subtasks.create(  # noqa: F841
             task="Prefix test task",
             parent_session_id="parent-sess-42",
         )
@@ -910,7 +901,9 @@ class TestIntegration:
         """Create -> dequeue -> complete -> verify."""
         heart = Heart(db, settings)
         subtask = await heart.subtasks.create(
-            task="Integration test task", priority="urgent", timeout=60,
+            task="Integration test task",
+            priority="urgent",
+            timeout=60,
         )
         assert subtask.status == "pending"
 
@@ -954,7 +947,7 @@ class TestIntegration:
 # 011.2 — Subtask Result Delivery tests
 # ---------------------------------------------------------------------------
 
-from nous.cognitive.layer import _format_subtask_results
+from nous.cognitive.layer import _format_subtask_results  # noqa: E402
 
 
 class TestSubtaskDelivery:
@@ -973,7 +966,8 @@ class TestSubtaskDelivery:
         assert subtask.delivered is False
 
     async def test_get_undelivered_returns_completed_and_failed(
-        self, subtask_mgr: SubtaskManager,
+        self,
+        subtask_mgr: SubtaskManager,
     ):
         """get_undelivered returns completed/failed subtasks with delivered=False."""
         parent_sid = "parent-session-delivery-test"
@@ -981,7 +975,7 @@ class TestSubtaskDelivery:
         # Create subtasks with parent_session_id
         s1 = await subtask_mgr.create(task="Task A", parent_session_id=parent_sid)
         s2 = await subtask_mgr.create(task="Task B", parent_session_id=parent_sid)
-        s3 = await subtask_mgr.create(task="Task C", parent_session_id=parent_sid)
+        s3 = await subtask_mgr.create(task="Task C", parent_session_id=parent_sid)  # noqa: F841
 
         # Dequeue all
         await subtask_mgr.dequeue("w-0")
@@ -998,14 +992,17 @@ class TestSubtaskDelivery:
         assert task_names == {"Task A", "Task B"}
 
     async def test_get_undelivered_excludes_other_sessions(
-        self, subtask_mgr: SubtaskManager,
+        self,
+        subtask_mgr: SubtaskManager,
     ):
         """get_undelivered only returns subtasks for the given parent_session_id."""
         s1 = await subtask_mgr.create(
-            task="Mine", parent_session_id="session-mine",
+            task="Mine",
+            parent_session_id="session-mine",
         )
         s2 = await subtask_mgr.create(
-            task="Theirs", parent_session_id="session-theirs",
+            task="Theirs",
+            parent_session_id="session-theirs",
         )
         await subtask_mgr.dequeue("w-0")
         await subtask_mgr.dequeue("w-1")
@@ -1017,7 +1014,8 @@ class TestSubtaskDelivery:
         assert undelivered[0].task == "Mine"
 
     async def test_get_undelivered_excludes_already_delivered(
-        self, subtask_mgr: SubtaskManager,
+        self,
+        subtask_mgr: SubtaskManager,
     ):
         """Already-delivered subtasks are not returned."""
         parent_sid = "session-delivered-test"
@@ -1048,7 +1046,8 @@ class TestSubtaskDelivery:
         await subtask_mgr.mark_delivered([])  # should not raise
 
     async def test_get_undelivered_empty_when_no_subtasks(
-        self, subtask_mgr: SubtaskManager,
+        self,
+        subtask_mgr: SubtaskManager,
     ):
         """get_undelivered returns empty list when no subtasks exist."""
         undelivered = await subtask_mgr.get_undelivered("nonexistent-session")
@@ -1074,7 +1073,9 @@ class TestFormatSubtaskResults:
 
     def test_completed_subtask(self):
         s = self._make_subtask(
-            task="Research X", status="completed", result="Found Y",
+            task="Research X",
+            status="completed",
+            result="Found Y",
         )
         output = _format_subtask_results([s])
         assert "=== Completed Subtask ===" in output
@@ -1084,7 +1085,9 @@ class TestFormatSubtaskResults:
 
     def test_failed_subtask(self):
         s = self._make_subtask(
-            task="Analyze Y", status="failed", error="TimeoutError",
+            task="Analyze Y",
+            status="failed",
+            error="TimeoutError",
         )
         output = _format_subtask_results([s])
         assert "=== Failed Subtask ===" in output
@@ -1094,10 +1097,16 @@ class TestFormatSubtaskResults:
 
     def test_mixed_completed_and_failed(self):
         s1 = self._make_subtask(
-            task="Task A", status="completed", result="OK", id_hex="aaaa0001",
+            task="Task A",
+            status="completed",
+            result="OK",
+            id_hex="aaaa0001",
         )
         s2 = self._make_subtask(
-            task="Task B", status="failed", error="Boom", id_hex="bbbb0002",
+            task="Task B",
+            status="failed",
+            error="Boom",
+            id_hex="bbbb0002",
         )
         output = _format_subtask_results([s1, s2])
         assert "=== Completed Subtask ===" in output
@@ -1109,7 +1118,9 @@ class TestFormatSubtaskResults:
 
     def test_none_result_and_error(self):
         s = self._make_subtask(
-            task="Task C", status="completed", result=None,
+            task="Task C",
+            status="completed",
+            result=None,
         )
         output = _format_subtask_results([s])
         assert "Result: None" in output
@@ -1194,7 +1205,7 @@ class TestSubtaskConfigDefaults:
         tools = create_subtask_tools(heart, custom_settings, runner=None)
 
         async def _run():
-            result = await tools["spawn_task"](
+            result = await tools["spawn_task"](  # noqa: F841
                 task="Inline task",
                 await_result=True,
                 _session_id="test",
@@ -1212,11 +1223,13 @@ class TestRunTurnErrorPropagation:
     async def test_run_turn_reraises_after_post_turn(self):
         """run_turn should re-raise API errors so callers can handle them."""
         from nous.api.runner import AgentRunner
-        from nous.cognitive.schemas import TurnContext, FrameSelection
+        from nous.cognitive.schemas import FrameSelection, TurnContext
 
         settings = Settings()
         mock_cognitive = AsyncMock()
-        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test")
+        mock_frame = FrameSelection(
+            frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test"
+        )
         mock_turn_ctx = MagicMock(spec=TurnContext)
         mock_turn_ctx.frame = mock_frame
         mock_turn_ctx.system_prompt = ""
@@ -1251,11 +1264,13 @@ class TestRunTurnErrorPropagation:
     async def test_run_turn_returns_normally_on_success(self):
         """run_turn should return normally when no error occurs."""
         from nous.api.runner import AgentRunner
-        from nous.cognitive.schemas import TurnContext, FrameSelection
+        from nous.cognitive.schemas import FrameSelection, TurnContext
 
         settings = Settings()
         mock_cognitive = AsyncMock()
-        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test")
+        mock_frame = FrameSelection(
+            frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test"
+        )
         mock_turn_ctx = MagicMock(spec=TurnContext)
         mock_turn_ctx.frame = mock_frame
         mock_turn_ctx.system_prompt = ""

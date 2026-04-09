@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.runner import HeartbeatRunner
 from nous.heartbeat.schemas import Finding
 
 
@@ -40,19 +40,28 @@ class TestTriageRouting:
         settings = _mock_settings()
 
         shared_runner = AsyncMock()
-        shared_runner.run_turn = AsyncMock(side_effect=AssertionError(
-            "Shared runner should NOT be called when dedicated client exists"
-        ))
+        shared_runner.run_turn = AsyncMock(
+            side_effect=AssertionError("Shared runner should NOT be called when dedicated client exists")
+        )
 
         dedicated_runner = AsyncMock()
-        dedicated_runner.run_turn = AsyncMock(return_value=(
-            "OK", None, {"input_tokens": 50, "output_tokens": 50},
-        ))
+        dedicated_runner.run_turn = AsyncMock(
+            return_value=(
+                "OK",
+                None,
+                {"input_tokens": 50, "output_tokens": 50},
+            )
+        )
         dedicated_runner.end_conversation = AsyncMock()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=shared_runner,
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=shared_runner,
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
             api_client=AsyncMock(),
         )
         # Simulate what start() does
@@ -73,14 +82,23 @@ class TestTriageRouting:
         settings = _mock_settings()
 
         shared_runner = AsyncMock()
-        shared_runner.run_turn = AsyncMock(return_value=(
-            "OK", None, {"input_tokens": 50, "output_tokens": 50},
-        ))
+        shared_runner.run_turn = AsyncMock(
+            return_value=(
+                "OK",
+                None,
+                {"input_tokens": 50, "output_tokens": 50},
+            )
+        )
         shared_runner.end_conversation = AsyncMock()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=shared_runner,
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=shared_runner,
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
 
         findings = [
@@ -95,13 +113,19 @@ class TestTriageRouting:
         """_get_triage_runner logs warning when api_client set but no dedicated runner."""
         settings = _mock_settings()
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
             api_client=AsyncMock(),
         )
         # Don't call start() — _dedicated_runner stays None
 
         import logging
+
         with caplog.at_level(logging.WARNING, logger="nous.heartbeat.runner"):
             result = hb._get_triage_runner()
 
@@ -124,8 +148,13 @@ class TestDedicatedRunnerCleanup:
         api_client.close = AsyncMock()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
             api_client=api_client,
         )
         hb._dedicated_runner = dedicated_runner
@@ -145,8 +174,13 @@ class TestDedicatedRunnerCleanup:
         api_client.close = AsyncMock()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
             api_client=api_client,
         )
         hb._dedicated_runner = AsyncMock()
@@ -163,8 +197,13 @@ class TestDedicatedRunnerCleanup:
         settings = _mock_settings()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
         hb._task = None
 
@@ -185,8 +224,13 @@ class TestDedicatedRunnerCleanup:
         api_client.close = AsyncMock()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
             api_client=api_client,
         )
         hb._dedicated_runner = dedicated_runner
@@ -213,8 +257,13 @@ class TestStartIntegration:
         shared_runner.fork = MagicMock(return_value=forked_runner)
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=shared_runner,
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=shared_runner,
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
             api_client=api_client,
         )
 
@@ -245,8 +294,13 @@ class TestStartIntegration:
         shared_runner.fork = MagicMock()
 
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=shared_runner,
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=shared_runner,
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
 
         hb._detect_missed_checks = AsyncMock()
@@ -272,8 +326,13 @@ class TestBackwardCompatibility:
         """HeartbeatRunner api_client defaults to None."""
         settings = _mock_settings()
         hb = HeartbeatRunner(
-            settings=settings, registry=CheckRegistry(), runner=AsyncMock(),
-            brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=AsyncMock(),
+            brain=AsyncMock(),
+            heart=AsyncMock(),
+            bus=None,
+            http_client=None,
         )
         assert hb._api_client is None
         assert hb._dedicated_runner is None

@@ -47,9 +47,7 @@ class SubtaskManager:
                 .where(Subtask.status == "pending")
             )
             if count >= _MAX_PENDING:
-                raise ValueError(
-                    f"pending subtask limit ({_MAX_PENDING}) reached"
-                )
+                raise ValueError(f"pending subtask limit ({_MAX_PENDING}) reached")
 
             subtask = Subtask(
                 agent_id=self._agent_id,
@@ -89,9 +87,7 @@ class SubtaskManager:
             subtask.started_at = datetime.now(UTC)
             await session.commit()
             await session.refresh(subtask)
-            logger.info(
-                "Dequeued subtask %s -> %s", subtask.id.hex[:8], worker_id
-            )
+            logger.info("Dequeued subtask %s -> %s", subtask.id.hex[:8], worker_id)
             return subtask
 
     async def complete(self, subtask_id: UUID, result: str) -> None:
@@ -177,11 +173,7 @@ class SubtaskManager:
         if not subtask_ids:
             return
         async with self._db.session() as session:
-            await session.execute(
-                update(Subtask)
-                .where(Subtask.id.in_(subtask_ids))
-                .values(delivered=True)
-            )
+            await session.execute(update(Subtask).where(Subtask.id.in_(subtask_ids)).values(delivered=True))
             await session.commit()
 
     async def reclaim_stale(self) -> int:
@@ -193,9 +185,7 @@ class SubtaskManager:
                 update(Subtask)
                 .where(Subtask.agent_id == self._agent_id)
                 .where(Subtask.status == "running")
-                .where(
-                    Subtask.started_at + Subtask.timeout_seconds * text("interval '1 second'") < now
-                )
+                .where(Subtask.started_at + Subtask.timeout_seconds * text("interval '1 second'") < now)
                 .values(status="pending", worker_id=None, started_at=None)
             )
             await session.commit()
@@ -207,8 +197,6 @@ class SubtaskManager:
         """Count subtasks grouped by status."""
         async with self._db.session() as session:
             result = await session.execute(
-                select(Subtask.status, func.count())
-                .where(Subtask.agent_id == self._agent_id)
-                .group_by(Subtask.status)
+                select(Subtask.status, func.count()).where(Subtask.agent_id == self._agent_id).group_by(Subtask.status)
             )
             return dict(result.all())

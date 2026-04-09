@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,9 +12,7 @@ from nous.handlers import call_background_llm_structured
 def _mock_tool_use_response(tool_input: dict, tool_name: str = "store_result") -> MagicMock:
     """Create a mock API response with a tool_use content block."""
     response = MagicMock()
-    response.content = [
-        {"type": "tool_use", "id": "toolu_test", "name": tool_name, "input": tool_input}
-    ]
+    response.content = [{"type": "tool_use", "id": "toolu_test", "name": tool_name, "input": tool_input}]
     response.stop_reason = "tool_use"
     return response
 

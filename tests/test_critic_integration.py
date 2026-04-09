@@ -1,4 +1,5 @@
 """Integration tests for F024 Critic Agent wiring."""
+
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,11 +32,19 @@ class TestCriticLayerIntegration:
         mock_api = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = [
-            {"type": "text", "text": json.dumps({
-                "complexity": "moderate", "routing": "single",
-                "frames": ["decision"], "skills": [],
-                "rationale": "Decision task", "per_frame_instructions": {},
-            })}
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "complexity": "moderate",
+                        "routing": "single",
+                        "frames": ["decision"],
+                        "skills": [],
+                        "rationale": "Decision task",
+                        "per_frame_instructions": {},
+                    }
+                ),
+            }
         ]
         mock_api.call = AsyncMock(return_value=mock_response)
         critic.set_api_client(mock_api)
@@ -55,11 +64,19 @@ class TestCriticLayerIntegration:
         mock_api = AsyncMock()
         mock_response = MagicMock()
         mock_response.content = [
-            {"type": "text", "text": json.dumps({
-                "complexity": "moderate", "routing": "single",
-                "frames": ["debug"], "skills": [],
-                "rationale": "Troubleshooting", "per_frame_instructions": {},
-            })}
+            {
+                "type": "text",
+                "text": json.dumps(
+                    {
+                        "complexity": "moderate",
+                        "routing": "single",
+                        "frames": ["debug"],
+                        "skills": [],
+                        "rationale": "Troubleshooting",
+                        "per_frame_instructions": {},
+                    }
+                ),
+            }
         ]
         mock_api.call = AsyncMock(return_value=mock_response)
         critic.set_api_client(mock_api)
@@ -97,8 +114,7 @@ class TestRunnerCriticWiring:
         turn_context.frame = MagicMock()
         turn_context.frame.frame_id = "task"
         turn_context.diagnostic_nudges = (
-            "\n\n[DIAGNOSTIC OBSERVATIONS]\n"
-            "[Critic/repetition]: You've searched for similar things."
+            "\n\n[DIAGNOSTIC OBSERVATIONS]\n[Critic/repetition]: You've searched for similar things."
         )
 
         prompt = runner._build_system_prompt(turn_context)

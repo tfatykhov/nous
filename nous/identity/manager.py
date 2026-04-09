@@ -58,8 +58,7 @@ class IdentityManager:
         async def _load(s: AsyncSession) -> dict[str, str]:
             # Review fix P2-3: is_current=True instead of DISTINCT ON
             result = await s.execute(
-                select(AgentIdentity)
-                .where(
+                select(AgentIdentity).where(
                     AgentIdentity.agent_id == self.agent_id,
                     AgentIdentity.is_current == True,  # noqa: E712
                 )
@@ -92,8 +91,7 @@ class IdentityManager:
         async def _update(s: AsyncSession) -> None:
             # Get current version number
             result = await s.execute(
-                select(AgentIdentity)
-                .where(
+                select(AgentIdentity).where(
                     AgentIdentity.agent_id == self.agent_id,
                     AgentIdentity.section == section,
                     AgentIdentity.is_current == True,  # noqa: E712
@@ -137,10 +135,9 @@ class IdentityManager:
         Review fix P1-1/P3-3: Uses is_initiated flag on agents table,
         not identity section count. Avoids partial initiation limbo.
         """
+
         async def _check(s: AsyncSession) -> bool:
-            result = await s.execute(
-                select(Agent.is_initiated).where(Agent.id == self.agent_id)
-            )
+            result = await s.execute(select(Agent.is_initiated).where(Agent.id == self.agent_id))
             row = result.scalar_one_or_none()
             return bool(row)
 
@@ -154,12 +151,9 @@ class IdentityManager:
 
         Review fix P2-1: Uses atomic UPDATE on agents table.
         """
+
         async def _mark(s: AsyncSession) -> None:
-            await s.execute(
-                update(Agent)
-                .where(Agent.id == self.agent_id)
-                .values(is_initiated=True)
-            )
+            await s.execute(update(Agent).where(Agent.id == self.agent_id).values(is_initiated=True))
 
         if session is not None:
             await _mark(session)
@@ -173,6 +167,7 @@ class IdentityManager:
 
         Used by POST /reinitiate to trigger fresh initiation on next conversation.
         """
+
         async def _reset(s: AsyncSession) -> None:
             # Deactivate all current identity sections
             await s.execute(
@@ -184,11 +179,7 @@ class IdentityManager:
                 .values(is_current=False)
             )
             # Reset is_initiated flag
-            await s.execute(
-                update(Agent)
-                .where(Agent.id == self.agent_id)
-                .values(is_initiated=False)
-            )
+            await s.execute(update(Agent).where(Agent.id == self.agent_id).values(is_initiated=False))
 
         self._invalidate_cache()
         if session is not None:
@@ -215,9 +206,7 @@ class IdentityManager:
         )
         return result.scalar_one_or_none() is not None
 
-    async def auto_seed_from_facts(
-        self, heart: Any, session: AsyncSession
-    ) -> bool:
+    async def auto_seed_from_facts(self, heart: Any, session: AsyncSession) -> bool:
         """Auto-seed identity from existing facts for upgrade path.
 
         Review fix P2-2: If heart.facts has preference/person/rule facts
@@ -234,9 +223,15 @@ class IdentityManager:
         # Check for existing user facts
         try:
             # P2-3: Use descriptive queries instead of empty string for meaningful embeddings
-            pref_facts = await heart.search_facts("user preferences and settings", category="preference", limit=20, session=session)
-            person_facts = await heart.search_facts("user personal information", category="person", limit=20, session=session)
-            rule_facts = await heart.search_facts("behavior rules and constraints", category="rule", limit=20, session=session)
+            pref_facts = await heart.search_facts(
+                "user preferences and settings", category="preference", limit=20, session=session
+            )
+            person_facts = await heart.search_facts(
+                "user personal information", category="person", limit=20, session=session
+            )
+            rule_facts = await heart.search_facts(
+                "behavior rules and constraints", category="rule", limit=20, session=session
+            )
         except Exception:
             logger.warning("Failed to search facts for auto-seed")
             return False
@@ -266,7 +261,9 @@ class IdentityManager:
         logger.info(
             "Auto-seeded identity from %d existing facts (person=%d, pref=%d, rule=%d)",
             len(pref_facts) + len(person_facts) + len(rule_facts),
-            len(person_facts), len(pref_facts), len(rule_facts),
+            len(person_facts),
+            len(pref_facts),
+            len(rule_facts),
         )
         return True
 

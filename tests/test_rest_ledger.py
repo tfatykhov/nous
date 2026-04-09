@@ -1,14 +1,11 @@
 """Tests for F032 execution ledger dashboard endpoint."""
 
-from datetime import UTC, datetime
-
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from nous.brain.brain import Brain
 from nous.cognitive.execution_ledger import (
-    ExecutedAction,
     ExecutionLedger,
     redact_key_args,
 )
@@ -48,6 +45,7 @@ def runner():
 @pytest.fixture
 def app(runner, brain, heart, cognitive, db, settings):
     from nous.api.rest import create_app
+
     return create_app(runner, brain, heart, cognitive, db, settings)
 
 
@@ -89,11 +87,14 @@ async def test_ledger_empty(client):
 
 async def test_ledger_with_session(client, runner):
     """Active session returns full action detail."""
-    ledger = _make_ledger("test-session-1", [
-        {"tool_name": "recall_deep", "tool_input": {"query": "test"}, "turn": 1},
-        {"tool_name": "write_file", "tool_input": {"path": "/tmp/f.py"}, "turn": 2},
-        {"tool_name": "bash", "tool_input": {"command": "ls -la"}, "turn": 2, "status": "success"},
-    ])
+    ledger = _make_ledger(
+        "test-session-1",
+        [
+            {"tool_name": "recall_deep", "tool_input": {"query": "test"}, "turn": 1},
+            {"tool_name": "write_file", "tool_input": {"path": "/tmp/f.py"}, "turn": 2},
+            {"tool_name": "bash", "tool_input": {"command": "ls -la"}, "turn": 2, "status": "success"},
+        ],
+    )
     runner._ledgers["test-session-1"] = ledger
 
     resp = await client.get("/dashboard/ledger")
@@ -126,12 +127,15 @@ async def test_ledger_with_session(client, runner):
 
 async def test_ledger_status_counts(client, runner):
     """Verify per-status counts are computed correctly."""
-    ledger = _make_ledger("count-session", [
-        {"tool_name": "recall_deep", "tool_input": {"query": "a"}, "turn": 1, "status": "success"},
-        {"tool_name": "write_file", "tool_input": {"path": "f"}, "turn": 1, "status": "blocked"},
-        {"tool_name": "bash", "tool_input": {"command": "x"}, "turn": 2, "status": "error"},
-        {"tool_name": "bash", "tool_input": {"command": "y"}, "turn": 2, "status": "timeout"},
-    ])
+    ledger = _make_ledger(
+        "count-session",
+        [
+            {"tool_name": "recall_deep", "tool_input": {"query": "a"}, "turn": 1, "status": "success"},
+            {"tool_name": "write_file", "tool_input": {"path": "f"}, "turn": 1, "status": "blocked"},
+            {"tool_name": "bash", "tool_input": {"command": "x"}, "turn": 2, "status": "error"},
+            {"tool_name": "bash", "tool_input": {"command": "y"}, "turn": 2, "status": "timeout"},
+        ],
+    )
     runner._ledgers["count-session"] = ledger
 
     resp = await client.get("/dashboard/ledger")
@@ -144,10 +148,7 @@ async def test_ledger_status_counts(client, runner):
 
 async def test_ledger_action_limit(client, runner):
     """action_limit param truncates actions and sets truncated flag."""
-    actions = [
-        {"tool_name": "recall_deep", "tool_input": {"query": f"q{i}"}, "turn": i}
-        for i in range(10)
-    ]
+    actions = [{"tool_name": "recall_deep", "tool_input": {"query": f"q{i}"}, "turn": i} for i in range(10)]
     ledger = _make_ledger("limit-session", actions)
     runner._ledgers["limit-session"] = ledger
 
@@ -160,9 +161,12 @@ async def test_ledger_action_limit(client, runner):
 
 async def test_ledger_action_limit_max_200(client, runner):
     """action_limit is capped at 200."""
-    ledger = _make_ledger("cap-session", [
-        {"tool_name": "recall_deep", "tool_input": {"query": "q"}, "turn": 1},
-    ])
+    ledger = _make_ledger(
+        "cap-session",
+        [
+            {"tool_name": "recall_deep", "tool_input": {"query": "q"}, "turn": 1},
+        ],
+    )
     runner._ledgers["cap-session"] = ledger
 
     # Even with limit=9999, should be capped at 200
@@ -174,9 +178,12 @@ async def test_ledger_multiple_sessions(client, runner):
     """Multiple sessions are all returned."""
     for i in range(3):
         sid = f"multi-{i}"
-        runner._ledgers[sid] = _make_ledger(sid, [
-            {"tool_name": "recall_deep", "tool_input": {"query": "x"}, "turn": 1},
-        ])
+        runner._ledgers[sid] = _make_ledger(
+            sid,
+            [
+                {"tool_name": "recall_deep", "tool_input": {"query": "x"}, "turn": 1},
+            ],
+        )
 
     resp = await client.get("/dashboard/ledger")
     data = resp.json()

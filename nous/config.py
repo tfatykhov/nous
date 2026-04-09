@@ -96,7 +96,9 @@ class Settings(BaseSettings):
     fact_extraction_enabled: bool = True
     sleep_enabled: bool = True
     decision_review_enabled: bool = True
-    decision_sweep_interval: int = Field(default=3600, description="Seconds between periodic decision review sweeps (default: 1 hour)")
+    decision_sweep_interval: int = Field(
+        default=3600, description="Seconds between periodic decision review sweeps (default: 1 hour)"
+    )
     temporal_context_enabled: bool = True  # 008.6
     github_token: str = Field(
         default="",
@@ -132,9 +134,7 @@ class Settings(BaseSettings):
     effort: Literal["low", "medium", "high", "max"] = "high"
 
     # Context window override (0 = auto-detect from model name)
-    context_window: int = Field(
-        default=0, validation_alias="NOUS_CONTEXT_WINDOW"
-    )
+    context_window: int = Field(default=0, validation_alias="NOUS_CONTEXT_WINDOW")
 
     # API backend: "sdk" (official anthropic SDK) or "httpx" (direct httpx calls)
     api_backend: str = "sdk"
@@ -163,66 +163,30 @@ class Settings(BaseSettings):
     )  # Seconds between keepalive events during tool execution
 
     # SmartCompress (F020 Phase 1)
-    smart_compress_enabled: bool = Field(
-        default=True, description="Enable ingestion-time tool output compression"
-    )
-    smart_compress_min_chars: int = Field(
-        default=500, description="Below this, never compress"
-    )
-    smart_compress_max_k: int = Field(
-        default=50, description="Max items to keep per compressed result"
-    )
-    smart_compress_elbow_threshold: float = Field(
-        default=0.3, description="Score cliff threshold for adaptive K"
-    )
+    smart_compress_enabled: bool = Field(default=True, description="Enable ingestion-time tool output compression")
+    smart_compress_min_chars: int = Field(default=500, description="Below this, never compress")
+    smart_compress_max_k: int = Field(default=50, description="Max items to keep per compressed result")
+    smart_compress_elbow_threshold: float = Field(default=0.3, description="Score cliff threshold for adaptive K")
 
     # F036: Prompt Cache Optimization
-    cache_break_detection_enabled: bool = Field(
-        default=True, validation_alias="NOUS_CACHE_BREAK_DETECTION_ENABLED"
-    )
-    cache_split_system_prompt: bool = Field(
-        default=True, validation_alias="NOUS_CACHE_SPLIT_SYSTEM_PROMPT"
-    )
-    cache_single_breakpoint: bool = Field(
-        default=True, validation_alias="NOUS_CACHE_SINGLE_BREAKPOINT"
-    )
-    tool_schema_cache_enabled: bool = Field(
-        default=True, validation_alias="NOUS_TOOL_SCHEMA_CACHE_ENABLED"
-    )
+    cache_break_detection_enabled: bool = Field(default=True, validation_alias="NOUS_CACHE_BREAK_DETECTION_ENABLED")
+    cache_split_system_prompt: bool = Field(default=True, validation_alias="NOUS_CACHE_SPLIT_SYSTEM_PROMPT")
+    cache_single_breakpoint: bool = Field(default=True, validation_alias="NOUS_CACHE_SINGLE_BREAKPOINT")
+    tool_schema_cache_enabled: bool = Field(default=True, validation_alias="NOUS_TOOL_SCHEMA_CACHE_ENABLED")
 
     # Compaction: Layer 1 (Tool Pruning)
-    tool_pruning_enabled: bool = Field(
-        default=True, validation_alias="NOUS_TOOL_PRUNING_ENABLED"
-    )
-    tool_soft_trim_chars: int = Field(
-        default=4000, validation_alias="NOUS_TOOL_SOFT_TRIM_CHARS"
-    )
-    tool_soft_trim_head: int = Field(
-        default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_HEAD"
-    )
-    tool_soft_trim_tail: int = Field(
-        default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_TAIL"
-    )
-    tool_hard_clear_after: int = Field(
-        default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
-    )
-    keep_last_tool_results: int = Field(
-        default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS"
-    )
-    tool_metadata_degrade_after: int = Field(
-        default=8, validation_alias="NOUS_TOOL_METADATA_DEGRADE_AFTER"
-    )
+    tool_pruning_enabled: bool = Field(default=True, validation_alias="NOUS_TOOL_PRUNING_ENABLED")
+    tool_soft_trim_chars: int = Field(default=4000, validation_alias="NOUS_TOOL_SOFT_TRIM_CHARS")
+    tool_soft_trim_head: int = Field(default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_HEAD")
+    tool_soft_trim_tail: int = Field(default=1500, validation_alias="NOUS_TOOL_SOFT_TRIM_TAIL")
+    tool_hard_clear_after: int = Field(default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER")
+    keep_last_tool_results: int = Field(default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS")
+    tool_metadata_degrade_after: int = Field(default=8, validation_alias="NOUS_TOOL_METADATA_DEGRADE_AFTER")
 
     # Compaction: Layer 2 (History Compaction) — Phase 2
-    compaction_enabled: bool = Field(
-        default=True, validation_alias="NOUS_COMPACTION_ENABLED"
-    )
-    compaction_threshold: int = Field(
-        default=100_000, validation_alias="NOUS_COMPACTION_THRESHOLD"
-    )
-    keep_recent_tokens: int = Field(
-        default=20_000, validation_alias="NOUS_KEEP_RECENT_TOKENS"
-    )
+    compaction_enabled: bool = Field(default=True, validation_alias="NOUS_COMPACTION_ENABLED")
+    compaction_threshold: int = Field(default=100_000, validation_alias="NOUS_COMPACTION_THRESHOLD")
+    keep_recent_tokens: int = Field(default=20_000, validation_alias="NOUS_KEEP_RECENT_TOKENS")
 
     # 011.1: Subtasks & Scheduling
     subtask_enabled: bool = True
@@ -318,7 +282,9 @@ class Settings(BaseSettings):
     # F030: MMR Diversity Re-Ranking
     mmr_enabled: bool = False
     mmr_diversity_weight: float = Field(
-        default=0.7, ge=0.0, le=1.0,
+        default=0.7,
+        ge=0.0,
+        le=1.0,
         description="MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity)",
     )
 
@@ -400,18 +366,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
-        object.__setattr__(self, '_compaction_threshold_explicit',
-                          'compaction_threshold' in self.model_fields_set)
-        object.__setattr__(self, '_keep_recent_explicit',
-                          'keep_recent_tokens' in self.model_fields_set)
+        object.__setattr__(self, "_compaction_threshold_explicit", "compaction_threshold" in self.model_fields_set)
+        object.__setattr__(self, "_keep_recent_explicit", "keep_recent_tokens" in self.model_fields_set)
         return self
 
     @model_validator(mode="after")
     def _validate_keepalive(self) -> "Settings":
         if self.keepalive_interval >= self.tool_timeout:
             raise ValueError(
-                f"keepalive_interval ({self.keepalive_interval}) must be < "
-                f"tool_timeout ({self.tool_timeout})"
+                f"keepalive_interval ({self.keepalive_interval}) must be < tool_timeout ({self.tool_timeout})"
             )
         return self
 
@@ -454,6 +417,7 @@ class Settings(BaseSettings):
         if self.context_window > 0:
             return self.context_window
         from nous.cognitive.schemas import MODEL_CONTEXT_WINDOWS
+
         for key in sorted(MODEL_CONTEXT_WINDOWS, key=len, reverse=True):
             if key in model:
                 return MODEL_CONTEXT_WINDOWS[key]
@@ -461,14 +425,16 @@ class Settings(BaseSettings):
 
     @property
     def effective_compaction_threshold(self) -> int:
-        if getattr(self, '_compaction_threshold_explicit', False):
+        if getattr(self, "_compaction_threshold_explicit", False):
             return self.compaction_threshold
         from nous.cognitive.schemas import COMPACTION_THRESHOLD_RATIO
+
         return int(self._get_context_window(self.model) * COMPACTION_THRESHOLD_RATIO)
 
     @property
     def effective_keep_recent(self) -> int:
-        if getattr(self, '_keep_recent_explicit', False):
+        if getattr(self, "_keep_recent_explicit", False):
             return self.keep_recent_tokens
         from nous.cognitive.schemas import KEEP_RECENT_RATIO
+
         return int(self._get_context_window(self.model) * KEEP_RECENT_RATIO)

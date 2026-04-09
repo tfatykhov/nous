@@ -7,10 +7,9 @@ for JSON serialisation.  They never manage sessions themselves.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any
-
 from collections import Counter, defaultdict
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
     """Return dashboard-level aggregates: deltas, distributions, timeseries, density."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     seven_days_ago = now - timedelta(days=7)
     thirty_days_ago = now - timedelta(days=30)
 
@@ -113,9 +112,7 @@ async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
             """),
             {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
         )
-        timeseries[key] = [
-            {"date": row.day.isoformat(), "count": row.cnt} for row in result
-        ]
+        timeseries[key] = [{"date": row.day.isoformat(), "count": row.cnt} for row in result]
 
     # ── Graph density ──
     density = await compute_graph_density(session, agent_id)
@@ -136,9 +133,7 @@ async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
 # ── Task 6: Graph data (GET /dashboard/graph) ───────────────────────────
 
 
-async def get_graph_data(
-    session: AsyncSession, agent_id: str, *, limit: int = 200
-) -> dict:
+async def get_graph_data(session: AsyncSession, agent_id: str, *, limit: int = 200) -> dict:
     """Return nodes + edges for D3 graph visualization."""
     max_edges = limit * 4
 
@@ -163,16 +158,18 @@ async def get_graph_data(
         tgt = str(e.target_id)
         node_ids.add(src)
         node_ids.add(tgt)
-        edges.append({
-            "id": str(e.id),
-            "source": src,
-            "target": tgt,
-            "source_type": e.source_type,
-            "target_type": e.target_type,
-            "relation": e.relation,
-            "weight": e.weight,
-            "auto_linked": e.auto_linked,
-        })
+        edges.append(
+            {
+                "id": str(e.id),
+                "source": src,
+                "target": tgt,
+                "source_type": e.source_type,
+                "target_type": e.target_type,
+                "relation": e.relation,
+                "weight": e.weight,
+                "auto_linked": e.auto_linked,
+            }
+        )
 
     # Build nodes from source tables
     nodes: list[dict] = []
@@ -209,12 +206,14 @@ async def get_graph_data(
         )
         for row in result:
             if row.id in node_ids:
-                nodes.append({
-                    "id": row.id,
-                    "type": node_type,
-                    "label": row.label or "",
-                    "category": row.category,
-                })
+                nodes.append(
+                    {
+                        "id": row.id,
+                        "type": node_type,
+                        "label": row.label or "",
+                        "category": row.category,
+                    }
+                )
 
     # Orphan counts (nodes with no edges at all — query source tables)
     orphan_counts: dict[str, int] = {}
@@ -303,8 +302,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
         {"agent_id": agent_id},
     )
     confidence_histogram = [
-        {"range": f"{float(row.bin):.1f}-{float(row.bin) + 0.1:.1f}", "count": row.cnt}
-        for row in result
+        {"range": f"{float(row.bin):.1f}-{float(row.bin) + 0.1:.1f}", "count": row.cnt} for row in result
     ]
 
     # Outcome by category
@@ -361,7 +359,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
 
     # Brier score over time: compute running Brier from reviewed decisions
     # Brier score = mean of (confidence - outcome)^2 where outcome is 1 for success, 0 otherwise
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
     result = await session.execute(
         text("""
@@ -442,7 +440,7 @@ async def get_calibration_data(session: AsyncSession, agent_id: str) -> dict:
 
 async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 168) -> dict:
     """Return activity events + censor/schedule/sleep stats for the dashboard."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(hours=hours)
     seven_days_ago = now - timedelta(days=7)
 
@@ -506,8 +504,9 @@ async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 1
         """),
         {"agent_id": agent_id},
     )
-    top_censors = [{"id": row.id, "trigger_pattern": row.trigger_pattern,
-                    "activations": row.activations} for row in result]
+    top_censors = [
+        {"id": row.id, "trigger_pattern": row.trigger_pattern, "activations": row.activations} for row in result
+    ]
 
     censor_stats = {
         "total": censor_row.total,
@@ -551,8 +550,7 @@ async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 1
         """),
         {"agent_id": agent_id},
     )
-    next_fires = [{"id": row.id, "task": row.task,
-                   "next_fire_at": row.next_fire_at.isoformat()} for row in result]
+    next_fires = [{"id": row.id, "task": row.task, "next_fire_at": row.next_fire_at.isoformat()} for row in result]
 
     schedule_stats = {
         "total": sched_row.total,
@@ -607,7 +605,7 @@ async def get_activity_data(session: AsyncSession, agent_id: str, hours: int = 1
 
 async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
     """Return graph health metrics: edge creation, degree distribution, density, orphans."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
 
     # Daily edge creation with auto/manual split (last 30 days)
@@ -652,9 +650,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         """),
         {"agent_id": agent_id},
     )
-    degree_distribution = [
-        {"degree": row.degree, "count": row.node_count} for row in result
-    ]
+    degree_distribution = [{"degree": row.degree, "count": row.node_count} for row in result]
 
     # Graph density
     density = await compute_graph_density(session, agent_id)
@@ -761,7 +757,8 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         {
             "date": row.day.isoformat(),
             "density": round(int(row.cum_edges) / int(row.cum_nodes), 2)
-            if row.cum_nodes and int(row.cum_nodes) > 0 else 0.0,
+            if row.cum_nodes and int(row.cum_nodes) > 0
+            else 0.0,
         }
         for row in result
     ]
@@ -829,10 +826,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         """),
         {"agent_id": agent_id, "since": thirty_days_ago, "now": now},
     )
-    orphan_trend = [
-        {"date": row.day.isoformat(), "count": int(row.orphan_count)}
-        for row in result
-    ]
+    orphan_trend = [{"date": row.day.isoformat(), "count": int(row.orphan_count)} for row in result]
 
     return {
         "daily_edges": daily_edges,
@@ -859,7 +853,7 @@ async def get_admission_data(
     category: str | None = None,
 ) -> dict:
     """Return admission analytics: summary, histogram, dimensions, breakdowns, trends."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(days=days)
 
     # Base filter — all queries add active=true to exclude superseded facts
@@ -877,8 +871,10 @@ async def get_admission_data(
         text(f"""
             SELECT
                 COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL) AS total_scored,
-                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL AND admission_score >= :threshold) AS admitted,
-                COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NOT NULL AND admission_score < :threshold) AS would_reject,
+                COUNT(*) FILTER (WHERE admission_score IS NOT NULL
+                    AND admission_scores IS NOT NULL AND admission_score >= :threshold) AS admitted,
+                COUNT(*) FILTER (WHERE admission_score IS NOT NULL
+                    AND admission_scores IS NOT NULL AND admission_score < :threshold) AS would_reject,
                 COUNT(*) FILTER (WHERE admission_score IS NOT NULL AND admission_scores IS NULL) AS bypassed,
                 AVG(admission_score) FILTER (WHERE admission_scores IS NOT NULL) AS avg_score
             FROM heart.facts
@@ -893,11 +889,9 @@ async def get_admission_data(
         "would_reject": row.would_reject or 0,
         "bypassed": row.bypassed or 0,
         "avg_composite_score": round(float(row.avg_score), 3) if row.avg_score else 0.0,
-        "rejection_rate": round(
-            (row.would_reject or 0) / max(row.total_scored or 1, 1), 3
-        ),
-        "threshold_note": f"Counts based on current threshold ({threshold}). Actual scores were computed at admission time.",
-        "_pre_migration_note": "Facts scored before migration 019 have admission_scores=NULL and are excluded from dimension/bypass stats.",
+        "rejection_rate": round((row.would_reject or 0) / max(row.total_scored or 1, 1), 3),
+        "threshold_note": f"Counts based on current threshold ({threshold}). Actual scores were computed at admission time.",  # noqa: E501
+        "_pre_migration_note": "Facts scored before migration 019 have admission_scores=NULL and are excluded from dimension/bypass stats.",  # noqa: E501
     }
 
     # ── Score distribution (0.05 buckets, cap at 0.95 for score=1.0) ──
@@ -926,7 +920,7 @@ async def get_admission_data(
     # ── Per-dimension stats (JSONB extraction) ──
     dimensions = ["utility", "confidence", "novelty", "recency", "type_prior"]
     dimension_stats: dict = {
-        "_note": "Excludes bypassed facts (admission_scores IS NULL). Only available for facts scored after JSONB migration.",
+        "_note": "Excludes bypassed facts (admission_scores IS NULL). Only available for facts scored after JSONB migration.",  # noqa: E501
     }
     for dim in dimensions:
         result = await session.execute(
@@ -1012,7 +1006,7 @@ async def get_admission_data(
     }
 
     # ── Daily trend (respects source/category filters) ──
-    trend_join = "ON CAST(f.created_at AS date) = CAST(d AS date) AND f.agent_id = :agent_id AND f.admission_score IS NOT NULL AND f.active = true"
+    trend_join = "ON CAST(f.created_at AS date) = CAST(d AS date) AND f.agent_id = :agent_id AND f.admission_score IS NOT NULL AND f.active = true"  # noqa: E501
     trend_params: dict = {"agent_id": agent_id, "since": since, "now": now, "threshold": threshold}
     if source:
         trend_join += " AND f.source = :source"
@@ -1026,8 +1020,10 @@ async def get_admission_data(
             SELECT
                 CAST(d AS date) AS day,
                 COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL) AS scored,
-                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL AND f.admission_score >= :threshold) AS admitted,
-                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL AND f.admission_score < :threshold) AS rejected,
+                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL
+                    AND f.admission_score >= :threshold) AS admitted,
+                COUNT(f.id) FILTER (WHERE f.admission_scores IS NOT NULL
+                    AND f.admission_score < :threshold) AS rejected,
                 COUNT(f.id) FILTER (WHERE f.admission_scores IS NULL AND f.admission_score IS NOT NULL) AS bypassed,
                 AVG(f.admission_score) FILTER (WHERE f.admission_scores IS NOT NULL) AS avg_score
             FROM generate_series(CAST(:since AS date), CAST(:now AS date), '1 day') AS d
@@ -1090,7 +1086,7 @@ async def get_admission_rejected(
     order: str = "asc",
 ) -> dict:
     """Return paginated list of facts below admission threshold."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(days=days)
 
     # Sort allowlist — includes spec alias "composite_score"
@@ -1130,23 +1126,28 @@ async def get_admission_rejected(
             LIMIT :limit OFFSET :offset
         """),
         {
-            "agent_id": agent_id, "since": since, "threshold": threshold,
-            "limit": limit, "offset": offset,
+            "agent_id": agent_id,
+            "since": since,
+            "threshold": threshold,
+            "limit": limit,
+            "offset": offset,
         },
     )
     facts = []
     for row in result:
         content = row.content or ""
-        facts.append({
-            "id": str(row.id),
-            "content_preview": content[:200],
-            "content_full": content,
-            "category": row.category,
-            "source": row.source,
-            "composite_score": round(float(row.admission_score), 3),
-            "scores": row.admission_scores or {},
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-        })
+        facts.append(
+            {
+                "id": str(row.id),
+                "content_preview": content[:200],
+                "content_full": content,
+                "category": row.category,
+                "source": row.source,
+                "composite_score": round(float(row.admission_score), 3),
+                "scores": row.admission_scores or {},
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+        )
 
     return {
         "facts": facts,
@@ -1160,10 +1161,12 @@ async def get_admission_rejected(
 
 
 async def get_rubric_dashboard_data(
-    session: AsyncSession, agent_id: str, settings: Any = None,
+    session: AsyncSession,
+    agent_id: str,
+    settings: Any = None,
 ) -> dict:
     """Return rubric dashboard data: active rubric, signals, history, correlations, config."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     thirty_days_ago = now - timedelta(days=30)
 
     # Active rubric
@@ -1204,18 +1207,22 @@ async def get_rubric_dashboard_data(
     weight_history = []
     for row in result:
         dims = row.dimensions if isinstance(row.dimensions, list) else []
-        version_history.append({
-            "version": row.version,
-            "status": row.status,
-            "change_reason": row.change_reason,
-            "dimension_count": len(dims),
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-        })
-        weight_history.append({
-            "version": row.version,
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-            "weights": {d["name"]: d["weight"] for d in dims if "name" in d and "weight" in d},
-        })
+        version_history.append(
+            {
+                "version": row.version,
+                "status": row.status,
+                "change_reason": row.change_reason,
+                "dimension_count": len(dims),
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+        )
+        weight_history.append(
+            {
+                "version": row.version,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "weights": {d["name"]: d["weight"] for d in dims if "name" in d and "weight" in d},
+            }
+        )
 
     # Outcome signals — totals by type
     result = await session.execute(
@@ -1271,7 +1278,7 @@ async def get_rubric_dashboard_data(
     )
     daily_trend = [
         {
-            "date": row.date.isoformat() if hasattr(row.date, 'isoformat') else str(row.date),
+            "date": row.date.isoformat() if hasattr(row.date, "isoformat") else str(row.date),
             "completed": row.completed,
             "corrected": row.corrected,
             "praised": row.praised,
@@ -1290,12 +1297,14 @@ async def get_rubric_dashboard_data(
             if isinstance(signals, dict):
                 for sig_type, stats in signals.items():
                     if isinstance(stats, dict):
-                        correlations_data.append({
-                            "dimension": dim_name,
-                            "signal_type": sig_type,
-                            "pearson_r": stats.get("pearson_r", 0),
-                            "spearman_rho": stats.get("spearman_rho", 0),
-                        })
+                        correlations_data.append(
+                            {
+                                "dimension": dim_name,
+                                "signal_type": sig_type,
+                                "pearson_r": stats.get("pearson_r", 0),
+                                "spearman_rho": stats.get("spearman_rho", 0),
+                            }
+                        )
                         correlation_sample = max(correlation_sample, stats.get("sample_size", 0))
 
     # Config
@@ -1330,11 +1339,9 @@ async def get_rubric_dashboard_data(
 # ── F034: Heartbeat dashboard data (GET /dashboard/heartbeat) ──────────
 
 
-async def get_heartbeat_dashboard_data(
-    session: AsyncSession, agent_id: str, hours: int = 24
-) -> dict:
+async def get_heartbeat_dashboard_data(session: AsyncSession, agent_id: str, hours: int = 24) -> dict:
     """Return heartbeat tick history, cognitive sessions, and findings aggregates."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     since = now - timedelta(hours=hours)
     seven_days_ago = now - timedelta(days=7)
 
@@ -1353,10 +1360,12 @@ async def get_heartbeat_dashboard_data(
 
     recent_ticks = []
     for row in tick_rows:
-        recent_ticks.append({
-            "created_at": row.created_at.isoformat(),
-            "data": row.data,
-        })
+        recent_ticks.append(
+            {
+                "created_at": row.created_at.isoformat(),
+                "data": row.data,
+            }
+        )
 
     # Recent heartbeat_triage events (cognitive sessions)
     result = await session.execute(
@@ -1374,13 +1383,15 @@ async def get_heartbeat_dashboard_data(
     cognitive_sessions = []
     for row in triage_rows:
         d = row.data or {}
-        cognitive_sessions.append({
-            "timestamp": row.created_at.isoformat(),
-            "session_id": d.get("session_id"),
-            "findings_count": d.get("findings_count", 0),
-            "tokens_used": d.get("tokens_used", 0),
-            "response_summary": d.get("response_summary", ""),
-        })
+        cognitive_sessions.append(
+            {
+                "timestamp": row.created_at.isoformat(),
+                "session_id": d.get("session_id"),
+                "findings_count": d.get("findings_count", 0),
+                "tokens_used": d.get("tokens_used", 0),
+                "response_summary": d.get("response_summary", ""),
+            }
+        )
 
     # Aggregate findings from tick events
     total_findings = 0
@@ -1400,13 +1411,15 @@ async def get_heartbeat_dashboard_data(
 
         # Flatten individual findings for timeline
         for f in d.get("findings") or []:
-            all_findings_flat.append({
-                "source": f.get("source"),
-                "summary": f.get("summary"),
-                "urgency": f.get("urgency"),
-                "check_name": f.get("check_name"),
-                "timestamp": row.created_at.isoformat(),
-            })
+            all_findings_flat.append(
+                {
+                    "source": f.get("source"),
+                    "summary": f.get("summary"),
+                    "urgency": f.get("urgency"),
+                    "check_name": f.get("check_name"),
+                    "timestamp": row.created_at.isoformat(),
+                }
+            )
 
     # Cap timeline to most recent 50
     findings_timeline = all_findings_flat[:50]
@@ -1432,11 +1445,13 @@ async def get_heartbeat_dashboard_data(
     for i in range(7):
         day = (seven_days_ago.date() + timedelta(days=i)).isoformat()
         urg = daily_urgency.get(day, Counter())
-        findings_by_day.append({
-            "date": day,
-            "findings_count": daily_counts.get(day, 0),
-            "by_urgency": {"high": urg.get("high", 0), "normal": urg.get("normal", 0), "low": urg.get("low", 0)},
-        })
+        findings_by_day.append(
+            {
+                "date": day,
+                "findings_count": daily_counts.get(day, 0),
+                "by_urgency": {"high": urg.get("high", 0), "normal": urg.get("normal", 0), "low": urg.get("low", 0)},
+            }
+        )
 
     return {
         "recent_ticks": recent_ticks,

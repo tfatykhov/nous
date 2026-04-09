@@ -1,7 +1,5 @@
 """Integration tests for F021 dashboard endpoint extensions."""
 
-import uuid
-
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -9,7 +7,6 @@ from httpx import ASGITransport, AsyncClient
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.layer import CognitiveLayer
-from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.heart import CensorInput, FactInput
 
 
@@ -39,6 +36,7 @@ async def cognitive(brain, heart, settings):
 @pytest.fixture
 def app(brain, heart, cognitive, db, settings):
     from nous.api.rest import create_app
+
     return create_app(MockAgentRunner(), brain, heart, cognitive, db, settings)
 
 
@@ -150,8 +148,11 @@ async def test_decisions_filter_by_category(client, brain, db):
         await brain.record(
             RecordInput(
                 description="Architecture decision for dashboard test",
-                confidence=0.85, category="architecture", stakes="medium",
-                context="Testing", reasons=[ReasonInput(type="analysis", text="Test")],
+                confidence=0.85,
+                category="architecture",
+                stakes="medium",
+                context="Testing",
+                reasons=[ReasonInput(type="analysis", text="Test")],
             ),
             session=session,
         )

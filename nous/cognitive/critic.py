@@ -6,6 +6,7 @@ first, logging recommendations alongside heuristic choices.
 
 Phase 0: Single LLM call for classification, no parallelism.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -22,11 +23,27 @@ from nous.heart.procedures import ProcedureManager
 
 logger = logging.getLogger(__name__)
 
-_ACTION_SIGNALS = frozenset({
-    "research", "build", "compare", "analyze", "decide",
-    "write", "find", "create", "review", "check", "implement",
-    "design", "debug", "fix", "refactor", "test", "deploy",
-})
+_ACTION_SIGNALS = frozenset(
+    {
+        "research",
+        "build",
+        "compare",
+        "analyze",
+        "decide",
+        "write",
+        "find",
+        "create",
+        "review",
+        "check",
+        "implement",
+        "design",
+        "debug",
+        "fix",
+        "refactor",
+        "test",
+        "deploy",
+    }
+)
 
 
 class CriticAgent:
@@ -41,10 +58,19 @@ class CriticAgent:
     # Tool sets for frame mismatch detection
     _TASK_TOOLS = frozenset({"bash", "write_file"})
     _CONVERSATION_TOOLS = frozenset({"recall_deep", "learn_fact"})
-    _FRUSTRATION_SIGNALS = frozenset({
-        "no", "nope", "wrong", "not what i", "i already", "i said",
-        "no i meant", "that's not", "try again",
-    })
+    _FRUSTRATION_SIGNALS = frozenset(
+        {
+            "no",
+            "nope",
+            "wrong",
+            "not what i",
+            "i already",
+            "i said",
+            "no i meant",
+            "that's not",
+            "try again",
+        }
+    )
 
     _CLASSIFICATION_PROMPT = """\
 You are the Critic Agent for Nous, a cognitive AI system. Your role is to
@@ -92,7 +118,8 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             return "No skills registered.", set()
         try:
             summaries, _total = await self._procedure_manager.list_all(
-                limit=50, active_only=True,
+                limit=50,
+                active_only=True,
             )
             if not summaries:
                 return "No skills registered.", set()
@@ -163,7 +190,8 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         if not self._needs_critic(user_message, tool_call_history or []):
             logger.info(
                 "F024 Critic passthrough: frame=%s, message=%s",
-                heuristic_frame.frame_id, user_message[:80],
+                heuristic_frame.frame_id,
+                user_message[:80],
             )
             return CriticResult(
                 routing=RoutingMode.PASSTHROUGH,
@@ -199,7 +227,9 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             timeout_s = self._settings.critic_max_latency_ms / 1000.0
             logger.info(
                 "F024 Critic calling LLM: model=%s, timeout=%.1fs, prompt_len=%d",
-                self._settings.critic_model, timeout_s, len(prompt),
+                self._settings.critic_model,
+                timeout_s,
+                len(prompt),
             )
             raw_text = await asyncio.wait_for(
                 call_background_llm(
@@ -224,10 +254,13 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             parsed.latency_ms = elapsed
             return parsed
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             elapsed = int(time.time() * 1000) - start_ms
-            logger.warning("CriticAgent classification timed out after %dms (limit=%dms)",
-                           elapsed, self._settings.critic_max_latency_ms)
+            logger.warning(
+                "CriticAgent classification timed out after %dms (limit=%dms)",
+                elapsed,
+                self._settings.critic_max_latency_ms,
+            )
             return CriticResult(
                 routing=RoutingMode.PASSTHROUGH,
                 recommended_frame=heuristic_frame.frame_id,
@@ -336,10 +369,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         name = "repetition"
         if self._on_cooldown(name):
             return self._not_fired(name)
-        recall_queries = [
-            tc.get("query", tc.get("args", ""))
-            for tc in tool_history if tc.get("tool") == "recall_deep"
-        ]
+        recall_queries = [tc.get("query", tc.get("args", "")) for tc in tool_history if tc.get("tool") == "recall_deep"]
         if len(recall_queries) >= 3:
             recent = recall_queries[-3:]
             word_sets = [set(q.lower().split()) for q in recent]
@@ -380,13 +410,14 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             if all(c < 0.4 for c in confidences):
                 return self._fire(
                     name,
-                    "Pause. Multiple recent decisions have low confidence. "
-                    "What are you uncertain about? Ask the user.",
+                    "Pause. Multiple recent decisions have low confidence. What are you uncertain about? Ask the user.",
                 )
         return self._not_fired(name)
 
     def _check_frame_mismatch(
-        self, tool_history: list[dict[str, Any]], current_frame: str,
+        self,
+        tool_history: list[dict[str, Any]],
+        current_frame: str,
     ) -> DiagnosticResult:
         """Task-frame tools in conversation context or vice versa."""
         name = "frame_mismatch"
@@ -396,14 +427,12 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         if current_frame == "conversation" and len(recent_tools & self._TASK_TOOLS) >= 2:
             return self._fire(
                 name,
-                "You're using task-oriented tools in a conversation frame. "
-                "Consider switching to task or debug frame.",
+                "You're using task-oriented tools in a conversation frame. Consider switching to task or debug frame.",
             )
         if current_frame in ("task", "debug") and recent_tools <= self._CONVERSATION_TOOLS and len(recent_tools) >= 2:
             return self._fire(
                 name,
-                "You're only using conversation tools in a task frame. "
-                "The frame may not match the actual work.",
+                "You're only using conversation tools in a task frame. The frame may not match the actual work.",
             )
         return self._not_fired(name)
 
@@ -416,8 +445,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         if len(recent) >= 3 and all(recent[i] > recent[i - 1] * 1.5 for i in range(1, len(recent))):
             return self._fire(
                 name,
-                "Focus. Response length is growing rapidly. "
-                "What was the user's core ask?",
+                "Focus. Response length is growing rapidly. What was the user's core ask?",
             )
         return self._not_fired(name)
 
@@ -427,13 +455,11 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         if self._on_cooldown(name) or len(recent_user_messages) < 2:
             return self._not_fired(name)
         frustration_count = sum(
-            1 for msg in recent_user_messages[-3:]
-            if any(sig in msg.lower() for sig in self._FRUSTRATION_SIGNALS)
+            1 for msg in recent_user_messages[-3:] if any(sig in msg.lower() for sig in self._FRUSTRATION_SIGNALS)
         )
         if frustration_count >= 2:
             return self._fire(
                 name,
-                "The user may be frustrated. Acknowledge, clarify, "
-                "and re-align with their actual request.",
+                "The user may be frustrated. Acknowledge, clarify, and re-align with their actual request.",
             )
         return self._not_fired(name)

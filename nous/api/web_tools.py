@@ -30,14 +30,14 @@ _rate_limit: dict[str, Any] = {"date": "", "count": 0}
 
 # Blocked IP ranges for SSRF protection
 _BLOCKED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),       # Loopback
-    ipaddress.ip_network("10.0.0.0/8"),         # RFC1918
-    ipaddress.ip_network("172.16.0.0/12"),      # RFC1918
-    ipaddress.ip_network("192.168.0.0/16"),     # RFC1918
-    ipaddress.ip_network("169.254.0.0/16"),     # Link-local
-    ipaddress.ip_network("::1/128"),            # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),           # IPv6 unique local
-    ipaddress.ip_network("fe80::/10"),          # IPv6 link-local
+    ipaddress.ip_network("127.0.0.0/8"),  # Loopback
+    ipaddress.ip_network("10.0.0.0/8"),  # RFC1918
+    ipaddress.ip_network("172.16.0.0/12"),  # RFC1918
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC1918
+    ipaddress.ip_network("169.254.0.0/16"),  # Link-local
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),  # IPv6 unique local
+    ipaddress.ip_network("fe80::/10"),  # IPv6 link-local
 ]
 
 # Blocked hostnames (Docker internal services, etc.)
@@ -140,7 +140,10 @@ async def _web_search(
         if _router is not None:
             try:
                 results, provider_name = await _router.search(
-                    query, count=count, http=_http, freshness=freshness,
+                    query,
+                    count=count,
+                    http=_http,
+                    freshness=freshness,
                 )
             except RuntimeError as e:
                 return _mcp_response(f"Search error: {e}")
@@ -156,8 +159,7 @@ async def _web_search(
         # Fallback: direct Brave (no router configured)
         if not _settings.brave_search_api_key:
             return _mcp_response(
-                "Error: No search provider configured. Set TAVILY_API_KEY, "
-                "EXA_API_KEY, or BRAVE_SEARCH_API_KEY."
+                "Error: No search provider configured. Set TAVILY_API_KEY, EXA_API_KEY, or BRAVE_SEARCH_API_KEY."
             )
 
         params: dict[str, Any] = {"q": query, "count": count}
@@ -179,19 +181,18 @@ async def _web_search(
         )
 
         if response.status_code != 200:
-            return _mcp_response(
-                f"Search failed (HTTP {response.status_code}). "
-                "Check BRAVE_SEARCH_API_KEY if 401."
-            )
+            return _mcp_response(f"Search failed (HTTP {response.status_code}). Check BRAVE_SEARCH_API_KEY if 401.")
 
         data = response.json()
         results_list = []
         for item in data.get("web", {}).get("results", [])[:count]:
-            results_list.append({
-                "title": item.get("title", ""),
-                "url": item.get("url", ""),
-                "snippet": item.get("description", ""),
-            })
+            results_list.append(
+                {
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                    "snippet": item.get("description", ""),
+                }
+            )
 
         if not results_list:
             return _mcp_response(f"No results found for: {query}")
@@ -299,17 +300,16 @@ def _extract_readable(html: str) -> str:
     """Extract readable text from HTML using stdlib."""
     # Remove script, style, noscript, nav, header, footer tags
     text = re.sub(
-        r'<(script|style|noscript|nav|header|footer)[^>]*>.*?</\1>',
-        '', html, flags=re.DOTALL | re.IGNORECASE
+        r"<(script|style|noscript|nav|header|footer)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE
     )
     # Remove HTML comments
-    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     # Remove HTML tags
-    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r"<[^>]+>", " ", text)
     # Decode entities
     text = html_module.unescape(text)
     # Clean whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
@@ -370,10 +370,15 @@ def register_web_tools(
     Creates closure wrappers that inject settings, httpx client, and
     optional SearchRouter for multi-tier search (F033).
     """
+
     async def _search(query: str, count: int = 5, freshness: str | None = None) -> dict[str, Any]:
         return await _web_search(
-            query, count, freshness,
-            _settings=settings, _http=http_client, _router=router,
+            query,
+            count,
+            freshness,
+            _settings=settings,
+            _http=http_client,
+            _router=router,
         )
 
     async def _fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:

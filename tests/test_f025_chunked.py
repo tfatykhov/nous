@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 from nous.handlers.episode_summarizer import EpisodeSummarizer
 
 
@@ -49,8 +48,20 @@ class TestMergeSummaries:
     def test_merge_uses_first_title(self):
         summarizer = EpisodeSummarizer.__new__(EpisodeSummarizer)
         summaries = [
-            {"title": "Part 1 Title", "summary": "First part.", "key_points": ["kp1"], "outcome": "ongoing", "topics": ["a"]},
-            {"title": "Part 2 Title", "summary": "Second part.", "key_points": ["kp2"], "outcome": "success", "topics": ["b"]},
+            {
+                "title": "Part 1 Title",
+                "summary": "First part.",
+                "key_points": ["kp1"],
+                "outcome": "ongoing",
+                "topics": ["a"],
+            },
+            {
+                "title": "Part 2 Title",
+                "summary": "Second part.",
+                "key_points": ["kp2"],
+                "outcome": "success",
+                "topics": ["b"],
+            },
         ]
         merged = summarizer._merge_summaries(summaries)
         assert merged["title"] == "Part 1 Title"

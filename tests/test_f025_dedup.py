@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from nous.config import Settings
 from nous.events import Event
@@ -115,6 +116,7 @@ class TestFactDedupBehavior:
     async def test_llm_extraction_path_uses_config_threshold(self):
         """The LLM extraction path should also use the config threshold, not hardcoded 0.85."""
         import inspect
+
         from nous.handlers.fact_extractor import FactExtractor
 
         source = inspect.getsource(FactExtractor.handle)
@@ -124,6 +126,5 @@ class TestFactDedupBehavior:
             if stripped.startswith("#"):
                 continue  # skip comment-only lines
             assert "> 0.85" not in stripped, (
-                f"Found hardcoded '> 0.85' in code line: {stripped!r} "
-                "— should use self._settings.fact_dedup_threshold"
+                f"Found hardcoded '> 0.85' in code line: {stripped!r} — should use self._settings.fact_dedup_threshold"
             )

@@ -1,7 +1,8 @@
 """Tests for F024 Phase 3b RubricManager."""
+
 import uuid
-from datetime import datetime, UTC
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -10,18 +11,40 @@ from nous.cognitive.rubric_schemas import RubricDimension, RubricVersionDetail
 
 def _default_dimensions() -> list[dict]:
     return [
-        {"name": "Recall", "weight": 0.25, "description": "Accuracy and completeness of memory retrieval", "scoring_criteria": "1-10"},
-        {"name": "Tool Selection", "weight": 0.25, "description": "Choosing the right tool for the task", "scoring_criteria": "1-10"},
-        {"name": "Confidence Calibration", "weight": 0.25, "description": "Accuracy of confidence estimates", "scoring_criteria": "1-10"},
-        {"name": "Proactivity", "weight": 0.25, "description": "Anticipating needs without being asked", "scoring_criteria": "1-10"},
+        {
+            "name": "Recall",
+            "weight": 0.25,
+            "description": "Accuracy and completeness of memory retrieval",
+            "scoring_criteria": "1-10",
+        },
+        {
+            "name": "Tool Selection",
+            "weight": 0.25,
+            "description": "Choosing the right tool for the task",
+            "scoring_criteria": "1-10",
+        },
+        {
+            "name": "Confidence Calibration",
+            "weight": 0.25,
+            "description": "Accuracy of confidence estimates",
+            "scoring_criteria": "1-10",
+        },
+        {
+            "name": "Proactivity",
+            "weight": 0.25,
+            "description": "Anticipating needs without being asked",
+            "scoring_criteria": "1-10",
+        },
     ]
 
 
 class AsyncContextMock:
     def __init__(self, session):
         self._session = session
+
     async def __aenter__(self):
         return self._session
+
     async def __aexit__(self, *args):
         pass
 
@@ -30,6 +53,7 @@ class TestRubricManagerGetActive:
     @pytest.mark.asyncio
     async def test_get_active_returns_none_when_no_rubric(self):
         from nous.cognitive.rubric import RubricManager
+
         db = MagicMock()
         mock_session = AsyncMock()
         mock_result = AsyncMock()
@@ -56,7 +80,7 @@ class TestRubricManagerGetActive:
         db.session = MagicMock(return_value=AsyncContextMock(mock_session))
 
         mgr = RubricManager(db=db, agent_id="test")
-        result = await mgr.seed_v1()
+        result = await mgr.seed_v1()  # noqa: F841
         mock_session.add.assert_called_once()
         added_obj = mock_session.add.call_args[0][0]
         assert added_obj.version == "1.0.0"

@@ -121,9 +121,7 @@ def brain_instance():
 
 def test_noise_decision_error_pattern(brain_instance):
     """Description containing error-processing phrases -> noise."""
-    assert brain_instance._is_noise_decision(
-        "I encountered an error processing your request", []
-    )
+    assert brain_instance._is_noise_decision("I encountered an error processing your request", [])
 
 
 def test_noise_decision_filler(brain_instance):
@@ -133,17 +131,11 @@ def test_noise_decision_filler(brain_instance):
 
 def test_noise_decision_quote(brain_instance):
     """Description starting with a quote character -> noise."""
-    assert brain_instance._is_noise_decision(
-        '\u201cUse PostgreSQL for storage\u201d', []
-    )
-    assert brain_instance._is_noise_decision(
-        '"Use PostgreSQL for storage"', []
-    )
+    assert brain_instance._is_noise_decision("\u201cUse PostgreSQL for storage\u201d", [])
+    assert brain_instance._is_noise_decision('"Use PostgreSQL for storage"', [])
 
 
 def test_noise_decision_legitimate(brain_instance):
     """Legitimate decision with reasons -> NOT noise."""
     reasons = [ReasonInput(type="analysis", text="Analyzed trade-offs")]
-    assert not brain_instance._is_noise_decision(
-        "Use FastAPI with gunicorn workers", reasons
-    )
+    assert not brain_instance._is_noise_decision("Use FastAPI with gunicorn workers", reasons)

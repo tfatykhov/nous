@@ -56,10 +56,37 @@ IRREVERSIBLE_TOOLS: set[str] = set()
 # Bash commands whose first token indicates a read-only operation
 _READ_COMMANDS: frozenset[str] = frozenset(
     {
-        "cat", "ls", "ll", "find", "grep", "rg", "awk", "sed", "head", "tail",
-        "wc", "diff", "stat", "file", "echo", "printf", "which", "type",
-        "pwd", "env", "printenv", "less", "more", "sort", "uniq", "cut",
-        "tr", "basename", "dirname", "realpath", "readlink",
+        "cat",
+        "ls",
+        "ll",
+        "find",
+        "grep",
+        "rg",
+        "awk",
+        "sed",
+        "head",
+        "tail",
+        "wc",
+        "diff",
+        "stat",
+        "file",
+        "echo",
+        "printf",
+        "which",
+        "type",
+        "pwd",
+        "env",
+        "printenv",
+        "less",
+        "more",
+        "sort",
+        "uniq",
+        "cut",
+        "tr",
+        "basename",
+        "dirname",
+        "realpath",
+        "readlink",
     }
 )
 
@@ -146,12 +173,17 @@ class ExecutionLedger:
         if status == "blocked":
             logger.info(
                 "F026 ledger: %s BLOCKED (turn %d, %s)",
-                tool_name, self._current_turn, side_effect,
+                tool_name,
+                self._current_turn,
+                side_effect,
             )
         else:
             logger.info(
                 "F026 ledger: %s → %s (turn %d, %s)",
-                tool_name, status, self._current_turn, side_effect,
+                tool_name,
+                status,
+                self._current_turn,
+                side_effect,
             )
         return action
 
@@ -163,10 +195,7 @@ class ExecutionLedger:
     @property
     def has_blocked_actions_this_turn(self) -> bool:
         """True if any action in the current turn has status 'blocked'."""
-        return any(
-            a.status == "blocked" and a.turn == self._current_turn
-            for a in self.actions
-        )
+        return any(a.status == "blocked" and a.turn == self._current_turn for a in self.actions)
 
     def one_line_summary(self) -> str:
         """Human-readable single-line summary, e.g. '12 searches, 3 file writes, 1 bash'."""
@@ -198,7 +227,9 @@ class ExecutionLedger:
             if _estimate_tokens(text) <= max_tokens:
                 logger.info(
                     "F026 ledger prompt: ~%d tokens, %d actions, session=%s",
-                    _estimate_tokens(text), len(self.actions), self.session_id,
+                    _estimate_tokens(text),
+                    len(self.actions),
+                    self.session_id,
                 )
                 return text
 
@@ -206,7 +237,9 @@ class ExecutionLedger:
         text = self._build_section(1, truncate_grouped=True, max_tokens=max_tokens)
         logger.info(
             "F026 ledger prompt (truncated): ~%d tokens, %d actions, session=%s",
-            _estimate_tokens(text), len(self.actions), self.session_id,
+            _estimate_tokens(text),
+            len(self.actions),
+            self.session_id,
         )
         return text
 
@@ -244,10 +277,7 @@ class ExecutionLedger:
         for a in recent_actions:
             arg_str = _format_key_args(a.key_args)
             status_marker = "" if a.status == "success" else f" [{a.status.upper()}]"
-            effect_marker = (
-                "" if a.side_effect_type == "none"
-                else f" ({a.side_effect_type})"
-            )
+            effect_marker = "" if a.side_effect_type == "none" else f" ({a.side_effect_type})"
             line = f"  T{a.turn} {a.tool_name}{arg_str}{effect_marker}{status_marker}"
             if a.status in ("error", "blocked") and a.result_summary:
                 line += f": {a.result_summary[:60]}"

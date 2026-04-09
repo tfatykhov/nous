@@ -46,7 +46,9 @@ class EmbeddingProvider:
                 # 5xx — retry
                 logger.warning(
                     "OpenAI embeddings API returned %d (attempt %d/%d)",
-                    response.status_code, attempt + 1, _MAX_RETRIES,
+                    response.status_code,
+                    attempt + 1,
+                    _MAX_RETRIES,
                 )
                 last_exc = httpx.HTTPStatusError(
                     f"Server error {response.status_code}",
@@ -56,7 +58,9 @@ class EmbeddingProvider:
             except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout) as e:
                 logger.warning(
                     "OpenAI embeddings network error (attempt %d/%d): %s",
-                    attempt + 1, _MAX_RETRIES, e,
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    e,
                 )
                 last_exc = e
 
@@ -67,20 +71,24 @@ class EmbeddingProvider:
 
     async def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
-        response = await self._post_with_retry({
-            "model": self.model,
-            "input": text,
-            "dimensions": self.dimensions,
-        })
+        response = await self._post_with_retry(
+            {
+                "model": self.model,
+                "input": text,
+                "dimensions": self.dimensions,
+            }
+        )
         return response.json()["data"][0]["embedding"]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts (single API call)."""
-        response = await self._post_with_retry({
-            "model": self.model,
-            "input": texts,
-            "dimensions": self.dimensions,
-        })
+        response = await self._post_with_retry(
+            {
+                "model": self.model,
+                "input": texts,
+                "dimensions": self.dimensions,
+            }
+        )
         data = response.json()["data"]
         return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
 

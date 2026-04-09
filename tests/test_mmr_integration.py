@@ -32,10 +32,10 @@ class TestRecallWithMMR:
         heart = _make_heart(mmr_enabled=False)
         session = AsyncMock()
 
-        r1 = FactSummary(id=uuid4(), content="fact1", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.5)
-        r2 = FactSummary(id=uuid4(), content="fact2", subject="s2", category="c2",
-                         confidence=0.7, active=True, score=0.9)
+        r1 = FactSummary(id=uuid4(), content="fact1", subject="s", category="c", confidence=0.8, active=True, score=0.5)
+        r2 = FactSummary(
+            id=uuid4(), content="fact2", subject="s2", category="c2", confidence=0.7, active=True, score=0.9
+        )
 
         heart.facts.search = AsyncMock(return_value=[r1, r2])
         heart.episodes.search = AsyncMock(return_value=[])
@@ -52,18 +52,20 @@ class TestRecallWithMMR:
         heart = _make_heart(mmr_enabled=True)
         session = AsyncMock()
 
-        r1 = FactSummary(id=uuid4(), content="fact1", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.9)
-        r2 = FactSummary(id=uuid4(), content="fact2", subject="s2", category="c2",
-                         confidence=0.7, active=True, score=0.5)
+        r1 = FactSummary(id=uuid4(), content="fact1", subject="s", category="c", confidence=0.8, active=True, score=0.9)
+        r2 = FactSummary(
+            id=uuid4(), content="fact2", subject="s2", category="c2", confidence=0.7, active=True, score=0.5
+        )
 
         heart.facts.search = AsyncMock(return_value=[r1, r2])
         heart.episodes.search = AsyncMock(return_value=[])
         heart.procedures.search = AsyncMock(return_value=[])
         heart.censors.search = AsyncMock(return_value=[])
 
-        with patch("nous.heart.heart.batch_fetch_embeddings") as mock_fetch, \
-             patch("nous.heart.heart.mmr_rerank") as mock_mmr:
+        with (
+            patch("nous.heart.heart.batch_fetch_embeddings") as mock_fetch,
+            patch("nous.heart.heart.mmr_rerank") as mock_mmr,
+        ):
             mock_fetch.return_value = {
                 r1.id: [1.0, 0.0, 0.0],
                 r2.id: [0.0, 1.0, 0.0],
@@ -84,8 +86,9 @@ class TestRecallWithMMR:
         heart = _make_heart(mmr_enabled=True)
         session = AsyncMock()
 
-        r1 = FactSummary(id=uuid4(), content="only fact", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.9)
+        r1 = FactSummary(
+            id=uuid4(), content="only fact", subject="s", category="c", confidence=0.8, active=True, score=0.9
+        )
 
         heart.facts.search = AsyncMock(return_value=[r1])
         heart.episodes.search = AsyncMock(return_value=[])
@@ -104,10 +107,8 @@ class TestRecallWithMMR:
         heart._embeddings.embed = AsyncMock(side_effect=Exception("API down"))
         session = AsyncMock()
 
-        r1 = FactSummary(id=uuid4(), content="f1", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.9)
-        r2 = FactSummary(id=uuid4(), content="f2", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.7)
+        r1 = FactSummary(id=uuid4(), content="f1", subject="s", category="c", confidence=0.8, active=True, score=0.9)
+        r2 = FactSummary(id=uuid4(), content="f2", subject="s", category="c", confidence=0.8, active=True, score=0.7)
 
         heart.facts.search = AsyncMock(return_value=[r1, r2])
         heart.episodes.search = AsyncMock(return_value=[])
@@ -128,10 +129,8 @@ class TestRecallWithMMR:
         heart._embeddings = None
         session = AsyncMock()
 
-        r1 = FactSummary(id=uuid4(), content="f1", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.9)
-        r2 = FactSummary(id=uuid4(), content="f2", subject="s", category="c",
-                         confidence=0.8, active=True, score=0.7)
+        r1 = FactSummary(id=uuid4(), content="f1", subject="s", category="c", confidence=0.8, active=True, score=0.9)
+        r2 = FactSummary(id=uuid4(), content="f2", subject="s", category="c", confidence=0.8, active=True, score=0.7)
 
         heart.facts.search = AsyncMock(return_value=[r1, r2])
         heart.episodes.search = AsyncMock(return_value=[])

@@ -53,6 +53,7 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     if "postgres_only" in item.keywords and not USE_POSTGRES:
         pytest.skip("requires NOUS_TEST_DB=postgres (real PostgreSQL connection)")
 
+
 # ---------------------------------------------------------------------------
 # Mock embedding provider (P1-4 fix: PRNG-seeded, L2-normalized vectors)
 # ---------------------------------------------------------------------------

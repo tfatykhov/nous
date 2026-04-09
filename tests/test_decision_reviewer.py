@@ -9,14 +9,13 @@ All tests use mocks (no real DB) to verify the public contract.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 
 from nous.brain.schemas import (
-    CalibrationReport,
     DecisionDetail,
     DecisionSummary,
     RecordInput,
@@ -24,16 +23,13 @@ from nous.brain.schemas import (
 )
 from nous.config import Settings
 from nous.handlers.decision_reviewer import (
-    CONFIDENCE_THRESHOLD,
     DecisionReviewer,
     EpisodeSignal,
     ErrorSignal,
     FileExistsSignal,
     GitHubSignal,
-    ReviewResult,
 )
 from nous.storage.models import Decision
-
 
 # ---------------------------------------------------------------------------
 # Task 2: ORM Model — Decision accepts session_id and reviewer
@@ -98,9 +94,9 @@ class TestDecisionDetailReviewer:
 
     def test_decision_detail_includes_reviewer(self):
         """DecisionDetail should have a reviewer field."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         dd = DecisionDetail(
             id="00000000-0000-0000-0000-000000000001",
             agent_id="test",
@@ -209,7 +205,7 @@ class TestConfigAdditions:
 # Helpers for Tasks 9-15
 # ===========================================================================
 
-_NOW = datetime.now(timezone.utc)
+_NOW = datetime.now(UTC)
 
 
 def _make_decision(
@@ -255,9 +251,7 @@ class TestErrorSignal:
     async def test_error_keyword_returns_failure(self):
         """Decisions with error keywords in description should be auto-failed."""
         signal = ErrorSignal()
-        result = await signal.check(
-            _make_decision(confidence=0.7, description="This approach failed")
-        )
+        result = await signal.check(_make_decision(confidence=0.7, description="This approach failed"))
         assert result is not None
         assert result.result == "failure"
         assert result.signal_type == "error"
@@ -266,9 +260,7 @@ class TestErrorSignal:
     async def test_normal_decision_returns_none(self):
         """Clean decisions should return None."""
         signal = ErrorSignal()
-        result = await signal.check(
-            _make_decision(confidence=0.8, description="Use Postgres for storage")
-        )
+        result = await signal.check(_make_decision(confidence=0.8, description="Use Postgres for storage"))
         assert result is None
 
 
@@ -331,9 +323,7 @@ class TestFileExistsSignal:
     async def test_existing_file_returns_success(self):
         """When a referenced file exists, should return success."""
         signal = FileExistsSignal()
-        decision = _make_decision(
-            description="Created docs/features/INDEX.md for tracking"
-        )
+        decision = _make_decision(description="Created docs/features/INDEX.md for tracking")
         with patch("nous.handlers.decision_reviewer.Path") as mock_path:
             mock_path.return_value.exists.return_value = True
             # The signal uses Path(path_str).exists(), so we need
@@ -348,9 +338,7 @@ class TestFileExistsSignal:
     async def test_missing_file_returns_none(self):
         """When referenced files don't exist, should return None."""
         signal = FileExistsSignal()
-        decision = _make_decision(
-            description="Created docs/features/INDEX.md for tracking"
-        )
+        decision = _make_decision(description="Created docs/features/INDEX.md for tracking")
         with patch("nous.handlers.decision_reviewer.Path") as mock_path:
             mock_path.return_value.exists.return_value = False
             result = await signal.check(decision)
@@ -558,8 +546,9 @@ class TestReviewEndpoint:
 
     def test_review_input_validates_outcome(self):
         """ReviewInput rejects invalid outcomes."""
-        from nous.brain.schemas import ReviewInput
         import pytest
+
+        from nous.brain.schemas import ReviewInput
 
         with pytest.raises(Exception):
             ReviewInput(outcome="invalid_value")
@@ -622,19 +611,15 @@ class TestRouteOrdering:
 
     def test_unreviewed_before_parameterized(self):
         """The /decisions/unreviewed route must come before /decisions/{id}."""
-        from starlette.routing import Route
 
         # Import and inspect the create_app function source
         import inspect
+
         from nous.api.rest import create_app
 
         source = inspect.getsource(create_app)
         unreviewed_pos = source.index("/decisions/unreviewed")
-        review_pos = source.index('/decisions/{id}/review')
+        review_pos = source.index("/decisions/{id}/review")
         parameterized_pos = source.index('Route("/decisions/{id}"', review_pos + 1)
-        assert unreviewed_pos < parameterized_pos, (
-            "/decisions/unreviewed must be before /decisions/{id}"
-        )
-        assert review_pos < parameterized_pos, (
-            "/decisions/{id}/review must be before /decisions/{id}"
-        )
+        assert unreviewed_pos < parameterized_pos, "/decisions/unreviewed must be before /decisions/{id}"
+        assert review_pos < parameterized_pos, "/decisions/{id}/review must be before /decisions/{id}"

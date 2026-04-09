@@ -59,21 +59,14 @@ class ConversationDeduplicator:
         F12: Falls back to keyword overlap on embedding failure.
         """
         if not memories or not conversation_messages:
-            return [
-                DeduplicationResult(mid, content, 0.0, False)
-                for mid, content in memories
-            ]
+            return [DeduplicationResult(mid, content, 0.0, False) for mid, content in memories]
 
         # Try embedding-based dedup first
         if self._embeddings is not None:
             try:
-                return await self._check_with_embeddings(
-                    memories, conversation_messages
-                )
+                return await self._check_with_embeddings(memories, conversation_messages)
             except Exception:
-                logger.warning(
-                    "Embedding dedup failed, falling back to keyword overlap"
-                )
+                logger.warning("Embedding dedup failed, falling back to keyword overlap")
 
         # Fallback: keyword overlap (F12, F22)
         return self._check_with_keywords(memories, conversation_messages)
@@ -98,12 +91,8 @@ class ConversationDeduplicator:
         results = []
         for i, (mid, content) in enumerate(memories):
             mem_emb = mem_embeddings[i]
-            max_sim = max(
-                self._cosine_similarity(mem_emb, ce) for ce in conv_embeddings
-            )
-            results.append(
-                DeduplicationResult(mid, content, max_sim, max_sim > self._threshold)
-            )
+            max_sim = max(self._cosine_similarity(mem_emb, ce) for ce in conv_embeddings)
+            results.append(DeduplicationResult(mid, content, max_sim, max_sim > self._threshold))
         return results
 
     def _check_with_keywords(
@@ -114,10 +103,7 @@ class ConversationDeduplicator:
         """Keyword-based dedup fallback (F22: inlined, no lazy import)."""
         results = []
         for mid, content in memories:
-            max_overlap = max(
-                self._keyword_overlap(content, msg)
-                for msg in conversation_messages
-            )
+            max_overlap = max(self._keyword_overlap(content, msg) for msg in conversation_messages)
             results.append(
                 DeduplicationResult(
                     mid,

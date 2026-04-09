@@ -96,30 +96,34 @@ class SearchRouter:
         for provider in providers:
             try:
                 results = await provider.search(
-                    query, count=count, http=http, freshness=freshness,
+                    query,
+                    count=count,
+                    http=http,
+                    freshness=freshness,
                 )
                 if results:
                     logger.info(
                         "Search '%s' via %s (%s) — %d results",
-                        query[:50], provider.name, query_type, len(results),
+                        query[:50],
+                        provider.name,
+                        query_type,
+                        len(results),
                     )
                     return results, provider.name
                 logger.debug(
                     "Search '%s' via %s returned empty, trying next",
-                    query[:50], provider.name,
+                    query[:50],
+                    provider.name,
                 )
             except Exception as e:
                 errors.append(f"{provider.name}: {e}")
                 logger.warning(
                     "Search provider %s failed for '%s': %s",
-                    provider.name, query[:50], e,
+                    provider.name,
+                    query[:50],
+                    e,
                 )
 
         if errors:
-            raise RuntimeError(
-                f"All search providers failed for '{query[:80]}'. "
-                f"Errors: {'; '.join(errors)}"
-            )
-        raise RuntimeError(
-            f"No results found for '{query[:80]}' from any provider."
-        )
+            raise RuntimeError(f"All search providers failed for '{query[:80]}'. Errors: {'; '.join(errors)}")
+        raise RuntimeError(f"No results found for '{query[:80]}' from any provider.")

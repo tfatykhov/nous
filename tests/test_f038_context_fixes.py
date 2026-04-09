@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from nous.cognitive.context import ContextEngine, _IDENTITY_OVERLAP_THRESHOLD
+from nous.cognitive.context import _IDENTITY_OVERLAP_THRESHOLD, ContextEngine
 from nous.config import Settings
-from nous.heart.search import _wrap_with_score
 
 
 class FakeItem:
@@ -27,7 +24,7 @@ class FakeItem:
         id=None,
     ):
         self.score = score
-        self.created_at = created_at or datetime.now(timezone.utc)
+        self.created_at = created_at or datetime.now(UTC)
         self.started_at = started_at
         self.category = category
         self.body = body
@@ -68,10 +65,7 @@ class TestProcedureScoreFloor:
             FakeItem(score=0.10),
         ]
         # Apply filter directly (same logic as in build())
-        filtered = [
-            p for p in items
-            if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor
-        ]
+        filtered = [p for p in items if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor]
         assert len(filtered) == 2
         assert all(p.score >= 0.40 for p in filtered)
 
@@ -85,19 +79,13 @@ class TestProcedureScoreFloor:
         assert not engine._has_embeddings
         # Simulate the gated check from build()
         if engine._has_embeddings and engine._settings.procedure_score_floor > 0:
-            items = [
-                p for p in items
-                if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor
-            ]
+            items = [p for p in items if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor]
         assert len(items) == 2  # All kept
 
     def test_procedure_score_floor_exact_boundary(self):
         engine = _make_engine(has_embeddings=True, procedure_score_floor=0.40)
         items = [FakeItem(score=0.40), FakeItem(score=0.3999)]
-        filtered = [
-            p for p in items
-            if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor
-        ]
+        filtered = [p for p in items if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor]
         assert len(filtered) == 1
         assert filtered[0].score == 0.40
 
@@ -106,10 +94,7 @@ class TestProcedureScoreFloor:
         items = [FakeItem(score=0.01)]
         # Floor of 0 means no filtering
         if engine._has_embeddings and engine._settings.procedure_score_floor > 0:
-            items = [
-                p for p in items
-                if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor
-            ]
+            items = [p for p in items if (getattr(p, "score", 0) or 0) >= engine._settings.procedure_score_floor]
         assert len(items) == 1
 
 
@@ -123,7 +108,7 @@ class TestEpisodeRecency:
 
     def test_episode_recency_recent_unchanged(self):
         engine = _make_engine()
-        ep = FakeItem(score=0.80, started_at=datetime.now(timezone.utc))
+        ep = FakeItem(score=0.80, started_at=datetime.now(UTC))
         result = engine._apply_episode_recency([ep])
         # age ~0 days -> decay ~1.0 -> score ~0.80
         assert abs(result[0].score - 0.80) < 0.01
@@ -132,7 +117,7 @@ class TestEpisodeRecency:
         engine = _make_engine()
         ep = FakeItem(
             score=0.80,
-            started_at=datetime.now(timezone.utc) - timedelta(days=60),
+            started_at=datetime.now(UTC) - timedelta(days=60),
         )
         result = engine._apply_episode_recency([ep])
         # age 60 days -> decay = max(0.5, 1.0 - 60/60) = max(0.5, 0.0) = 0.5
@@ -143,7 +128,7 @@ class TestEpisodeRecency:
         engine = _make_engine()
         ep = FakeItem(
             score=0.80,
-            started_at=datetime.now(timezone.utc) - timedelta(days=30),
+            started_at=datetime.now(UTC) - timedelta(days=30),
         )
         result = engine._apply_episode_recency([ep])
         # age 30 days -> decay = max(0.5, 1.0 - 30/60) = max(0.5, 0.5) = 0.5
@@ -154,7 +139,7 @@ class TestEpisodeRecency:
         engine = _make_engine()
         ep = FakeItem(
             score=0.80,
-            started_at=datetime.now(timezone.utc) - timedelta(days=120),
+            started_at=datetime.now(UTC) - timedelta(days=120),
         )
         result = engine._apply_episode_recency([ep])
         # age 120 days -> decay = max(0.5, 1.0 - 120/60) = max(0.5, -1.0) = 0.5
@@ -163,7 +148,7 @@ class TestEpisodeRecency:
 
     def test_episode_recency_none_score_unchanged(self):
         engine = _make_engine()
-        ep = FakeItem(score=None, started_at=datetime.now(timezone.utc) - timedelta(days=30))
+        ep = FakeItem(score=None, started_at=datetime.now(UTC) - timedelta(days=30))
         result = engine._apply_episode_recency([ep])
         assert result[0].score is None
 
@@ -206,12 +191,14 @@ class TestProcedureIdentityDedup:
         procs = [matching_proc, different_proc]
         _effective_identity = engine._identity_prompt
         filtered = [
-            p for p in procs
-            if _effective_identity == "" or
-            __import__("nous.utils", fromlist=["text_overlap"]).text_overlap(
+            p
+            for p in procs
+            if _effective_identity == ""
+            or __import__("nous.utils", fromlist=["text_overlap"]).text_overlap(
                 getattr(p, "body", "") or getattr(p, "steps_text", "") or "",
                 _effective_identity,
-            ) < _IDENTITY_OVERLAP_THRESHOLD
+            )
+            < _IDENTITY_OVERLAP_THRESHOLD
         ]
 
         # The matching procedure should be filtered, different one kept
@@ -220,7 +207,7 @@ class TestProcedureIdentityDedup:
 
     def test_procedure_identity_dedup_no_filter_without_identity(self):
         engine = _make_engine(identity_prompt="")
-        procs = [FakeItem(score=0.80, body="anything")]
+        procs = [FakeItem(score=0.80, body="anything")]  # noqa: F841
         # No identity prompt -> no filtering
         assert engine._identity_prompt == ""
         # The guard in build() checks `if self._identity_prompt`
@@ -230,7 +217,7 @@ class TestProcedureIdentityDedup:
         from nous.utils import text_overlap
 
         identity = "You are Nous, a cognitive agent that records decisions and stores facts."
-        engine = _make_engine(identity_prompt=identity)
+        engine = _make_engine(identity_prompt=identity)  # noqa: F841
 
         # body is empty, steps_text matches identity
         proc = FakeItem(

@@ -14,11 +14,11 @@ import logging
 from typing import Any
 from uuid import UUID
 
+from nous.brain.brain import Brain
+from nous.brain.graph_linker import GraphLinker
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, parse_llm_json
-from nous.brain.brain import Brain
-from nous.brain.graph_linker import GraphLinker
 from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
@@ -128,19 +128,21 @@ class EpisodeSummarizer:
             await self._heart.update_episode_summary(UUID(episode_id), summary)
 
             # Emit for downstream handlers (fact extraction)
-            await self._bus.emit(Event(
-                type="episode_summarized",
-                agent_id=event.agent_id,
-                session_id=event.session_id,
-                data={
-                    "episode_id": episode_id,
-                    "summary": summary,
-                    "candidate_facts": summary.get("candidate_facts", []),
-                    "transcript": transcript,  # F025 P2-E: pass for fact grounding
-                },
-                trace_id=event.trace_id,       # F035.2: inherit from parent
-                caused_by=event.event_id,      # F035.2: point to parent
-            ))
+            await self._bus.emit(
+                Event(
+                    type="episode_summarized",
+                    agent_id=event.agent_id,
+                    session_id=event.session_id,
+                    data={
+                        "episode_id": episode_id,
+                        "summary": summary,
+                        "candidate_facts": summary.get("candidate_facts", []),
+                        "transcript": transcript,  # F025 P2-E: pass for fact grounding
+                    },
+                    trace_id=event.trace_id,  # F035.2: inherit from parent
+                    caused_by=event.event_id,  # F035.2: point to parent
+                )
+            )
 
             logger.info("Episode %s summarized: %s", episode_id, summary.get("title", "?"))
 
@@ -153,7 +155,9 @@ class EpisodeSummarizer:
 
                         # Get facts extracted from this episode
                         from sqlalchemy import select as sa_select
+
                         from nous.storage.models import Fact
+
                         fact_result = await link_session.execute(
                             sa_select(Fact.id).where(Fact.source_episode_id == UUID(episode_id))
                         )
@@ -169,7 +173,9 @@ class EpisodeSummarizer:
                             await link_session.commit()
                             logger.debug(
                                 "F022: Linked episode %s to %d decisions, %d facts",
-                                episode_id, len(decision_ids), len(fact_ids),
+                                episode_id,
+                                len(decision_ids),
+                                len(fact_ids),
                             )
                 except Exception:
                     logger.debug("F022 graph linking failed for episode %s", episode_id)
@@ -325,7 +331,7 @@ class EpisodeSummarizer:
         budget = max_chars - len(first) - len(last) - 50  # buffer for separators
 
         if budget <= 0:
-            return first[:max_chars // 2] + "\n\n" + last[:max_chars // 2]
+            return first[: max_chars // 2] + "\n\n" + last[: max_chars // 2]
 
         # Sort middle turns by score (descending), break ties by original order
         middle = sorted(scored[1:-1], key=lambda x: (-x[0], x[1]))
@@ -360,10 +366,7 @@ class EpisodeSummarizer:
             for decision_id in episode.decision_ids:
                 d = await self._brain.get(decision_id)
                 if d:
-                    lines.append(
-                        f"- [{d.category}/{d.stakes}] {d.description} "
-                        f"(confidence: {d.confidence})"
-                    )
+                    lines.append(f"- [{d.category}/{d.stakes}] {d.description} (confidence: {d.confidence})")
 
             return "\n".join(lines) if len(lines) > 1 else ""
         except Exception:

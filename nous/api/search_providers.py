@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import httpx
@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SearchResult:
     """Normalized search result from any provider."""
+
     title: str
     url: str
     snippet: str
@@ -98,19 +99,19 @@ class BraveProvider:
         )
 
         if response.status_code != 200:
-            raise RuntimeError(
-                f"Brave search failed (HTTP {response.status_code})"
-            )
+            raise RuntimeError(f"Brave search failed (HTTP {response.status_code})")
 
         data = response.json()
         results = []
         for item in data.get("web", {}).get("results", [])[:count]:
-            results.append(SearchResult(
-                title=item.get("title", ""),
-                url=item.get("url", ""),
-                snippet=item.get("description", ""),
-                provider="brave",
-            ))
+            results.append(
+                SearchResult(
+                    title=item.get("title", ""),
+                    url=item.get("url", ""),
+                    snippet=item.get("description", ""),
+                    provider="brave",
+                )
+            )
         return results
 
 
@@ -169,20 +170,20 @@ class TavilyProvider:
         )
 
         if response.status_code != 200:
-            raise RuntimeError(
-                f"Tavily search failed (HTTP {response.status_code})"
-            )
+            raise RuntimeError(f"Tavily search failed (HTTP {response.status_code})")
 
         data = response.json()
         results = []
         for item in data.get("results", [])[:count]:
-            results.append(SearchResult(
-                title=item.get("title", ""),
-                url=item.get("url", ""),
-                snippet=item.get("content", ""),
-                score=item.get("score"),
-                provider="tavily",
-            ))
+            results.append(
+                SearchResult(
+                    title=item.get("title", ""),
+                    url=item.get("url", ""),
+                    snippet=item.get("content", ""),
+                    score=item.get("score"),
+                    provider="tavily",
+                )
+            )
         return results
 
 
@@ -233,7 +234,7 @@ class ExaProvider:
             days_map = {"day": 1, "week": 7, "month": 30}
             days = days_map.get(freshness)
             if days:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+                cutoff = datetime.now(UTC) - timedelta(days=days)
                 payload["start_published_date"] = cutoff.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
         response = await http.post(
@@ -247,18 +248,18 @@ class ExaProvider:
         )
 
         if response.status_code != 200:
-            raise RuntimeError(
-                f"Exa search failed (HTTP {response.status_code})"
-            )
+            raise RuntimeError(f"Exa search failed (HTTP {response.status_code})")
 
         data = response.json()
         results = []
         for item in data.get("results", [])[:count]:
-            results.append(SearchResult(
-                title=item.get("title", ""),
-                url=item.get("url", ""),
-                snippet=item.get("text", ""),
-                score=item.get("score"),
-                provider="exa",
-            ))
+            results.append(
+                SearchResult(
+                    title=item.get("title", ""),
+                    url=item.get("url", ""),
+                    snippet=item.get("text", ""),
+                    score=item.get("score"),
+                    provider="exa",
+                )
+            )
         return results

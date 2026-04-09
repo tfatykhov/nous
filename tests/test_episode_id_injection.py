@@ -11,10 +11,10 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-
 # ---------------------------------------------------------------------------
 # CognitiveLayer.get_active_episode_id()
 # ---------------------------------------------------------------------------
+
 
 def _make_layer():
     """Build a minimal CognitiveLayer with mocked dependencies."""
@@ -51,6 +51,7 @@ def test_get_active_episode_id_isolates_sessions():
 # AgentRunner._maybe_inject_episode_id() helper
 # ---------------------------------------------------------------------------
 
+
 def _make_runner_with_episode(session_id: str, episode_id: str | None):
     """Build a minimal runner stub with a cognitive layer that returns episode_id."""
     from nous.api.runner import AgentRunner
@@ -67,9 +68,7 @@ def _make_runner_with_episode(session_id: str, episode_id: str | None):
 def test_maybe_inject_adds_episode_to_learn_fact():
     ep_id = str(uuid4())
     runner = _make_runner_with_episode("sess-1", ep_id)
-    result = runner._maybe_inject_episode_id(
-        "learn_fact", {"content": "fact", "category": "technical"}, "sess-1"
-    )
+    result = runner._maybe_inject_episode_id("learn_fact", {"content": "fact", "category": "technical"}, "sess-1")
     assert result["source_episode_id"] == ep_id
     assert result["content"] == "fact"
 
@@ -77,9 +76,7 @@ def test_maybe_inject_adds_episode_to_learn_fact():
 def test_maybe_inject_does_not_override_explicit_episode_id():
     runner = _make_runner_with_episode("sess-1", str(uuid4()))
     explicit = str(uuid4())
-    result = runner._maybe_inject_episode_id(
-        "learn_fact", {"content": "fact", "source_episode_id": explicit}, "sess-1"
-    )
+    result = runner._maybe_inject_episode_id("learn_fact", {"content": "fact", "source_episode_id": explicit}, "sess-1")
     assert result["source_episode_id"] == explicit
 
 
@@ -108,6 +105,7 @@ def test_maybe_inject_skips_when_no_session_id():
 # ---------------------------------------------------------------------------
 # run_python episode_id_resolver
 # ---------------------------------------------------------------------------
+
 
 def test_episode_id_resolver_called_with_session_id():
     """Resolver is invoked with _session_id at call time."""

@@ -1,16 +1,16 @@
 """Tests for F022 Phase 2 — cross-type graph linking."""
-import pytest
-import pytest_asyncio
+
 from uuid import uuid4
 
+import pytest
+import pytest_asyncio
 from sqlalchemy import select, text
 
 from nous.brain.brain import Brain
-from nous.brain.graph_linker import common_template_text, GraphLinker
+from nous.brain.graph_linker import GraphLinker, common_template_text
 from nous.brain.schemas import RecordInput
 from nous.config import Settings
 from nous.storage.models import GraphEdge
-
 
 # ---------------------------------------------------------------------------
 # Unit tests (no DB required)
@@ -69,10 +69,7 @@ async def _fix_stale_relation_constraint(db):
     so cross-type relations (discussed_in, extracted_from, etc.) work.
     """
     async with db.engine.begin() as conn:
-        await conn.execute(text(
-            "ALTER TABLE brain.graph_edges "
-            "DROP CONSTRAINT IF EXISTS graph_edges_relation_check"
-        ))
+        await conn.execute(text("ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS graph_edges_relation_check"))
 
 
 @pytest.mark.asyncio
@@ -81,10 +78,15 @@ async def test_link_episode_deterministic(brain, session):
     settings = Settings()
     linker = GraphLinker(brain.db, None, settings, brain.agent_id)
 
-    d1 = await brain.record(RecordInput(
-        description="Episode link test decision",
-        confidence=0.8, category="architecture", stakes="low",
-    ), session=session)
+    d1 = await brain.record(
+        RecordInput(
+            description="Episode link test decision",
+            confidence=0.8,
+            category="architecture",
+            stakes="low",
+        ),
+        session=session,
+    )
 
     episode_id = uuid4()
     fact_id = uuid4()
@@ -102,9 +104,7 @@ async def test_link_episode_deterministic(brain, session):
     assert "extracted_from" in relations
 
     # Verify in DB
-    result = await session.execute(
-        select(GraphEdge).where(GraphEdge.source_id == episode_id)
-    )
+    result = await session.execute(select(GraphEdge).where(GraphEdge.source_id == episode_id))
     db_edges = result.scalars().all()
     assert len(db_edges) == 1  # episode->decision
     assert db_edges[0].relation == "discussed_in"
