@@ -23,8 +23,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from sqlalchemy import func, select
 
 from nous.brain.brain import Brain
 from nous.config import Settings
@@ -32,6 +34,7 @@ from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
+from nous.storage.models import Fact
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +174,25 @@ _CONTRADICTION_RESOLUTION_SCHEMA: dict[str, Any] = {
 }
 
 
+# F027: Tool-use structured output schema for cluster consolidation
+_CLUSTER_MERGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "merged_content": {
+            "type": "string",
+            "description": "Single consolidated fact merging all input facts",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence in the merged fact (0.0 to 1.0)",
+        },
+    },
+    "required": ["merged_content", "confidence"],
+}
+
+
 class SleepHandler:
     """Runs reflection and maintenance during idle periods.
 
@@ -275,6 +297,16 @@ class SleepHandler:
                 success = await self._phase_resolve_contradictions(sleep_stats)
                 if success:
                     phases_completed.append("resolve_contradictions")
+
+            if not self._interrupted:
+                success = await self._phase_stale_scan(sleep_stats)
+                if success:
+                    phases_completed.append("stale_scan")
+
+            if not self._interrupted:
+                success = await self._phase_cluster_consolidation(sleep_stats)
+                if success:
+                    phases_completed.append("cluster_consolidation")
 
             if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
@@ -704,6 +736,145 @@ class SleepHandler:
 
         except Exception:
             logger.warning("Contradiction resolution phase failed", exc_info=True)
+            return False
+
+    async def _phase_stale_scan(self, sleep_stats: dict) -> bool:
+        """F027: Deactivate superseded facts that are stale and low-confidence."""
+        try:
+            async with self._heart.db.session() as session:
+                cutoff = datetime.now(UTC) - timedelta(days=30)
+                stmt = (
+                    select(Fact)
+                    .where(
+                        Fact.agent_id == self._heart.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.superseded_by.isnot(None),
+                        Fact.confidence < 0.5,
+                    )
+                    .where(
+                        (Fact.last_recalled_at.is_(None))
+                        | (Fact.last_recalled_at < cutoff)
+                    )
+                )
+                result = await session.execute(stmt)
+                stale_facts = result.scalars().all()
+
+                count = 0
+                for fact in stale_facts:
+                    fact.active = False
+                    count += 1
+
+                if count > 0:
+                    await session.commit()
+
+                sleep_stats["stale_deactivated"] = count
+                logger.info("F027 stale scan: deactivated %d stale superseded facts", count)
+            return True
+        except Exception:
+            logger.warning("F027 stale scan phase failed", exc_info=True)
+            return False
+
+    async def _phase_cluster_consolidation(self, sleep_stats: dict) -> bool:
+        """F027: Merge clusters of 3+ active facts about the same subject."""
+        if not self._llm:
+            return True
+        try:
+            async with self._heart.db.session() as session:
+                # Find subjects with 3+ active facts
+                stmt = (
+                    select(Fact.subject, func.count().label("cnt"))
+                    .where(
+                        Fact.agent_id == self._heart.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.subject.isnot(None),
+                    )
+                    .group_by(Fact.subject)
+                    .having(func.count() >= 3)
+                    .order_by(func.count().desc())
+                    .limit(5)
+                )
+                result = await session.execute(stmt)
+                clusters = result.all()
+
+            if not clusters:
+                logger.debug("F027 cluster consolidation: no clusters found")
+                sleep_stats["clusters_merged"] = 0
+                return True
+
+            merged_count = 0
+            for subject, _count in clusters:
+                if self._interrupted:
+                    break
+
+                # Fetch facts for this subject
+                async with self._heart.db.session() as session:
+                    fact_result = await session.execute(
+                        select(Fact)
+                        .where(
+                            Fact.agent_id == self._heart.agent_id,
+                            Fact.active == True,  # noqa: E712
+                            Fact.subject == subject,
+                        )
+                        .order_by(Fact.created_at.desc())
+                    )
+                    facts = fact_result.scalars().all()
+
+                if len(facts) < 3:
+                    continue
+
+                facts_text = "\n".join(
+                    f"- [{f.category or 'unknown'}] {f.content}" for f in facts
+                )
+
+                merge_result = await call_background_llm_structured(
+                    client=self._llm,
+                    model=self._settings.background_model,
+                    system_prompt="You are a memory consolidation system. Merge related facts into one.",
+                    user_message=(
+                        f"Subject: {subject}\n\n"
+                        f"Facts to merge:\n{facts_text}\n\n"
+                        f"Create a single consolidated fact that captures all information."
+                    ),
+                    tool_name="merge_facts",
+                    tool_description="Return a single merged fact combining all input facts.",
+                    output_schema=_CLUSTER_MERGE_SCHEMA,
+                    max_tokens=500,
+                )
+
+                if not merge_result or not merge_result.get("merged_content"):
+                    continue
+
+                # Create merged fact
+                merged_detail = await self._heart.learn(FactInput(
+                    subject=subject,
+                    content=merge_result["merged_content"],
+                    source="cluster_consolidation",
+                    confidence=float(merge_result.get("confidence", 0.8)),
+                    category=facts[0].category,
+                ))
+
+                if isinstance(merged_detail, FactRejected):
+                    continue
+
+                # Deactivate originals
+                async with self._heart.db.session() as session:
+                    for fact in facts:
+                        orm_fact = await session.get(Fact, fact.id)
+                        if orm_fact:
+                            orm_fact.superseded_by = merged_detail.id
+                            orm_fact.active = False
+                    await session.commit()
+
+                merged_count += 1
+                sleep_stats.setdefault("facts_created", 0)
+                sleep_stats["facts_created"] += 1
+
+            sleep_stats["clusters_merged"] = merged_count
+            logger.info("F027 cluster consolidation: merged %d clusters", merged_count)
+            return True
+
+        except Exception:
+            logger.warning("F027 cluster consolidation phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:
