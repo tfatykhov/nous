@@ -6,11 +6,13 @@ All methods follow Brain's session injection pattern (P1-1).
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +22,38 @@ from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, Fact
 from nous.heart.search import hybrid_search
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, GraphEdge
+
+if TYPE_CHECKING:
+    from nous.handlers import LLMClient
+
+# F027: Structured output schema for write-time supersession classifier
+_SUPERSESSION_CLASSIFIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "relation": {
+            "type": "string",
+            "enum": ["UPDATE", "CONTRADICTION", "REFINEMENT", "UNRELATED"],
+            "description": (
+                "UPDATE: new fact replaces old (one supersedes the other). "
+                "CONTRADICTION: both claim different truths, neither supersedes. "
+                "REFINEMENT: new fact adds detail to old without replacing it. "
+                "UNRELATED: high similarity is a false positive."
+            ),
+        },
+        "current_fact": {
+            "type": "string",
+            "enum": ["new", "old"],
+            "description": "Which fact contains the current/correct information (relevant for UPDATE only)",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence in this classification (0.0 to 1.0)",
+        },
+    },
+    "required": ["relation", "current_fact", "confidence"],
+}
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +82,11 @@ class FactManager:
         self.embeddings = embeddings
         self.agent_id = agent_id
         self._admission_controller = admission_controller
+
+        # F027: LLM client for write-time supersession classifier.
+        # Injected post-construction in main.py (same pattern as _admission_controller.llm_client).
+        self._llm: LLMClient | None = None
+        self._llm_model: str = "claude-haiku-4-5-20251001"
 
     # ------------------------------------------------------------------
     # Event helper
@@ -97,6 +136,119 @@ class FactManager:
                 await session.execute(stmt)
         except Exception:
             logger.debug("F022 graph edge creation failed for %s->%s", source_id, target_id)
+
+    # ------------------------------------------------------------------
+    # F027: Access tracking
+    # ------------------------------------------------------------------
+
+    async def track_access(self, fact_ids: list[UUID]) -> None:
+        """F027: Update recall_count and last_recalled_at for accessed facts.
+
+        Called fire-and-forget after search returns. Uses its own session
+        so it does not block or interfere with the caller's transaction.
+        """
+        if not fact_ids:
+            return
+        try:
+            async with self.db.session() as session:
+                await session.execute(
+                    update(Fact)
+                    .where(Fact.id.in_(fact_ids))
+                    .values(
+                        recall_count=func.coalesce(Fact.recall_count, 0) + 1,
+                        last_recalled_at=datetime.now(UTC),
+                    )
+                )
+                await session.commit()
+        except Exception:
+            logger.debug("track_access failed for %d facts", len(fact_ids))
+
+    def _fire_track_access(self, fact_ids: list[UUID]) -> None:
+        """Schedule track_access as a background task (fire-and-forget)."""
+        if fact_ids:
+            asyncio.ensure_future(self.track_access(fact_ids))
+
+    # ------------------------------------------------------------------
+    # F027: LLM write-time supersession classifier
+    # ------------------------------------------------------------------
+
+    async def _classify_fact_pair(
+        self,
+        old_content: str,
+        new_content: str,
+    ) -> dict[str, Any] | None:
+        """F027: Classify the semantic relationship between an existing and new fact.
+
+        Returns dict with {relation, current_fact, confidence} or None if LLM
+        unavailable or call fails. Uses call_background_llm_structured for
+        guaranteed JSON output matching _SUPERSESSION_CLASSIFIER_SCHEMA.
+        """
+        if self._llm is None:
+            return None
+
+        from nous.handlers import call_background_llm_structured
+
+        prompt = (
+            f"Existing fact: {old_content[:500]}\n\n"
+            f"New fact: {new_content[:500]}\n\n"
+            "Classify the semantic relationship between these two facts. "
+            "Focus on whether the new fact updates/replaces the old one (UPDATE), "
+            "whether they claim contradictory truths (CONTRADICTION), "
+            "whether the new fact adds detail without replacing (REFINEMENT), "
+            "or whether the similarity is coincidental (UNRELATED)."
+        )
+
+        try:
+            return await call_background_llm_structured(
+                client=self._llm,
+                model=self._llm_model,
+                system_prompt="You are a memory management system classifying relationships between facts.",
+                user_message=prompt,
+                tool_name="classify_fact_relationship",
+                tool_description="Classify the semantic relationship between an existing fact and a new fact.",
+                output_schema=_SUPERSESSION_CLASSIFIER_SCHEMA,
+                max_tokens=200,
+            )
+        except Exception:
+            logger.debug("Supersession classifier LLM call failed")
+            return None
+
+    # ------------------------------------------------------------------
+    # F027: Retrieval soft suppression
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def apply_supersession_filter(results: list[FactSummary]) -> list[FactSummary]:
+        """F027: Apply soft scoring penalties to superseded and low-confidence facts.
+
+        Two-pass filter (Option B from spec):
+        1. Superseded facts: if superseder is in results, drop the old fact entirely;
+           if superseder is absent, apply 0.3× penalty.
+        2. Graduated confidence penalty: score *= confidence for facts with
+           confidence < 0.5 (makes confidence meaningful at retrieval time).
+        """
+        superseder_ids = {r.superseded_by for r in results if r.superseded_by is not None}
+        result_ids = {r.id for r in results}
+
+        filtered: list[FactSummary] = []
+        for r in results:
+            if r.superseded_by is not None:
+                if r.superseded_by in result_ids:
+                    # Superseding fact is present — drop the old one entirely
+                    continue
+                else:
+                    # Superseding fact not in results — soft penalty
+                    if r.score is not None:
+                        r = r.model_copy(update={"score": r.score * 0.3})
+            elif r.confidence < 0.5:
+                # Graduated confidence penalty: low-confidence active facts get penalised
+                if r.score is not None:
+                    r = r.model_copy(update={"score": r.score * r.confidence})
+            filtered.append(r)
+
+        # Re-sort by adjusted score
+        filtered.sort(key=lambda x: x.score or 0.0, reverse=True)
+        return filtered
 
     # ------------------------------------------------------------------
     # learn()
@@ -233,7 +385,7 @@ class FactManager:
         # Subject + similarity supersession (006.2)
         if check_contradictions and input.subject and embedding is not None:
             await self._supersede_by_subject(
-                fact.id, input.subject, embedding, session
+                fact.id, input.subject, embedding, session, new_content=input.content
             )
 
         await self._emit_event(
@@ -252,7 +404,9 @@ class FactManager:
             # Contradiction detection: similarity 0.85-0.95 with different content
             if embedding is not None:
                 safe_excludes = list(exclude_ids) + [fact.id]
-                contradiction = await self._find_contradiction(embedding, fact.content, safe_excludes, session)
+                contradiction = await self._find_contradiction(
+                    embedding, fact.content, safe_excludes, session, new_fact_id=fact.id
+                )
                 if contradiction is not None:
                     detail.contradiction_warning = contradiction
                     logger.info(
@@ -274,12 +428,21 @@ class FactManager:
         new_content: str,
         exclude_ids: list[UUID],
         session: AsyncSession,
+        new_fact_id: UUID | None = None,
     ) -> ContradictionWarning | None:
         """Detect potential contradictions: similar embedding (0.85-0.95) but different content.
 
         A contradiction is when two facts talk about the same thing but say
         different things. High similarity means same topic; below dedup
         threshold means different content.
+
+        F027: When LLM is available, classifies the relationship semantically:
+        - UPDATE: supersede old fact (new supersedes old), apply soft confidence penalty
+        - CONTRADICTION: return ContradictionWarning (existing behavior)
+        - REFINEMENT: create refines edge, both stay active, return None
+        - UNRELATED: return None (false positive)
+        Low-confidence classifications fall back to returning ContradictionWarning
+        for sleep-time F031 resolution.
         """
         if not embedding:
             return None
@@ -319,12 +482,88 @@ class FactManager:
         if row is None:
             return None
 
+        old_fact_id: UUID = row.id
+        old_content: str = row.content
+        similarity: float = float(row.similarity)
+
+        # F027: LLM micro-call to classify the relationship semantically
+        if self._llm is not None and new_fact_id is not None:
+            classification = await self._classify_fact_pair(old_content, new_content)
+            if classification is not None:
+                relation = classification.get("relation", "CONTRADICTION")
+                conf = float(classification.get("confidence", 0.0))
+                current = classification.get("current_fact", "new")
+
+                if relation == "UNRELATED":
+                    logger.debug(
+                        "F027 contradiction-check: LLM classified UNRELATED (sim=%.2f), no action",
+                        similarity,
+                    )
+                    return None
+
+                elif relation == "REFINEMENT":
+                    await self._create_graph_edge(
+                        new_fact_id, old_fact_id, "fact", "fact", "refines", similarity, session
+                    )
+                    logger.info(
+                        "F027 contradiction-check: REFINEMENT — created refines edge %s->%s (sim=%.2f)",
+                        new_fact_id, old_fact_id, similarity,
+                    )
+                    return None
+
+                elif relation == "UPDATE" and conf >= 0.8:
+                    if current == "new":
+                        # New fact supersedes old — set superseded_by + soft confidence penalty
+                        old_fact_orm = await self._get_fact_orm(old_fact_id, session)
+                        if old_fact_orm is not None:
+                            old_fact_orm.superseded_by = new_fact_id
+                            old_fact_orm.active = False
+                            old_confidence = old_fact_orm.confidence or 1.0
+                            old_fact_orm.confidence = max(0.0, old_confidence * 0.3)
+                            await session.flush()
+                        await self._create_graph_edge(
+                            new_fact_id, old_fact_id, "fact", "fact", "supersedes", 1.0, session
+                        )
+                        logger.info(
+                            "F027 contradiction-check: UPDATE (new is current, conf=%.2f) — "
+                            "superseded %s by %s with soft penalty",
+                            conf, old_fact_id, new_fact_id,
+                        )
+                        return None
+                    else:
+                        # Old fact is current — deactivate new fact
+                        new_fact_orm = await self._get_fact_orm(new_fact_id, session)
+                        if new_fact_orm is not None:
+                            new_fact_orm.active = False
+                            new_fact_orm.superseded_by = old_fact_id
+                            await session.flush()
+                        await self._create_graph_edge(
+                            old_fact_id, new_fact_id, "fact", "fact", "supersedes", 1.0, session
+                        )
+                        logger.info(
+                            "F027 contradiction-check: UPDATE (old is current, conf=%.2f) — "
+                            "deactivated new fact %s",
+                            conf, new_fact_id,
+                        )
+                        return None
+
+                elif relation == "UPDATE" and conf < 0.8:
+                    # Low confidence — defer to F031 sleep-time resolution
+                    logger.debug(
+                        "F027 contradiction-check: UPDATE but conf=%.2f < 0.8 — deferring to F031",
+                        conf,
+                    )
+                    # Fall through to return ContradictionWarning
+
+                # For CONTRADICTION (regardless of confidence) or low-confidence UPDATE,
+                # return ContradictionWarning for F031 sleep-time handling
+
         return ContradictionWarning(
-            existing_fact_id=row.id,
-            existing_content=row.content[:500],
-            similarity=float(row.similarity),
-            message=f"Potential contradiction detected (similarity {row.similarity:.2f}). "
-            f"Existing fact: '{row.content[:100]}' — review and resolve.",
+            existing_fact_id=old_fact_id,
+            existing_content=old_content[:500],
+            similarity=similarity,
+            message=f"Potential contradiction detected (similarity {similarity:.2f}). "
+            f"Existing fact: '{old_content[:100]}' — review and resolve.",
         )
 
     async def _check_domain_threshold(
@@ -369,6 +608,7 @@ class FactManager:
         subject: str,
         embedding: list[float],
         session: AsyncSession,
+        new_content: str = "",
     ) -> None:
         """Supersede older facts with same subject AND similar content (006.2).
 
@@ -376,8 +616,9 @@ class FactManager:
         1. Same subject (case-insensitive exact match)
         2. Cosine similarity > 0.80 (content about same aspect)
 
-        This prevents "Nous version 0.2" from nuking "Nous uses PostgreSQL"
-        while correctly superseding "Nous version 0.1".
+        F027: For the ambiguous 0.80-0.95 range, uses an LLM classifier when
+        available to distinguish UPDATE from REFINEMENT or UNRELATED, preventing
+        false supersessions. Falls back to auto-supersede if LLM is unavailable.
         """
         result = await session.execute(
             select(Fact).where(
@@ -390,13 +631,53 @@ class FactManager:
         for old in result.scalars().all():
             if old.embedding is not None:
                 similarity = self._cosine_similarity(embedding, old.embedding)
-                if similarity > 0.80:
-                    old.active = False
-                    old.superseded_by = new_fact_id
-                    logger.info(
-                        "Superseded fact %s (subject=%s, sim=%.2f) by %s",
-                        old.id, subject, similarity, new_fact_id,
-                    )
+                if similarity <= 0.80:
+                    continue
+
+                # F027: Use LLM classifier for ambiguous 0.80-0.95 range
+                if self._llm is not None and new_content and similarity <= 0.95:
+                    classification = await self._classify_fact_pair(old.content, new_content)
+                    if classification is not None:
+                        relation = classification.get("relation", "UPDATE")
+                        conf = float(classification.get("confidence", 0.0))
+                        current = classification.get("current_fact", "new")
+
+                        if relation == "UNRELATED":
+                            logger.debug(
+                                "F027 subject-match: LLM classified UNRELATED (sim=%.2f), skipping supersession",
+                                similarity,
+                            )
+                            continue
+                        elif relation == "REFINEMENT":
+                            # Keep both active; create a refines graph edge
+                            await self._create_graph_edge(
+                                new_fact_id, old.id, "fact", "fact", "refines", similarity, session
+                            )
+                            logger.info(
+                                "F027 subject-match: REFINEMENT — created refines edge %s->%s (sim=%.2f)",
+                                new_fact_id, old.id, similarity,
+                            )
+                            continue
+                        elif relation == "UPDATE" and conf >= 0.8 and current == "old":
+                            # New fact is the stale one — deactivate it, keep old
+                            new_fact_orm = await self._get_fact_orm(new_fact_id, session)
+                            if new_fact_orm is not None:
+                                new_fact_orm.active = False
+                                new_fact_orm.superseded_by = old.id
+                                await session.flush()
+                            logger.info(
+                                "F027 subject-match: UPDATE (old is current) — deactivated new fact %s",
+                                new_fact_id,
+                            )
+                            continue
+                        # For UPDATE (new is current, or low-confidence), fall through to supersede
+
+                old.active = False
+                old.superseded_by = new_fact_id
+                logger.info(
+                    "Superseded fact %s (subject=%s, sim=%.2f) by %s",
+                    old.id, subject, similarity, new_fact_id,
+                )
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -809,7 +1090,7 @@ class FactManager:
         fact_result = await session.execute(select(Fact).where(Fact.id.in_(ids)))
         facts = {f.id: f for f in fact_result.scalars().all()}
 
-        return [
+        summaries = [
             FactSummary(
                 id=f.id,
                 content=f.content,
@@ -818,10 +1099,19 @@ class FactManager:
                 confidence=f.confidence or 1.0,
                 active=f.active if f.active is not None else True,
                 score=scores.get(f.id),
+                superseded_by=f.superseded_by,  # F027: for soft suppression filter
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
         ]
+
+        # F027: Apply soft suppression filter (graduated penalties)
+        summaries = self.apply_supersession_filter(summaries)
+
+        # F027: Fire-and-forget access tracking (recall_count + last_recalled_at)
+        self._fire_track_access([s.id for s in summaries])
+
+        return summaries
 
     async def _search_all(
         self,

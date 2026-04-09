@@ -149,6 +149,10 @@ async def create_components(settings: Settings) -> dict:
             api_client=api_client,
         )
 
+    # F027: Wire supersession classifier LLM client (uses contradiction_model — haiku)
+    heart.facts._llm = api_client
+    heart.facts._llm_model = settings.contradiction_model
+
     rubric_evolver = None
 
     # 006: Register handlers on bus (after cognitive exists for monitor)

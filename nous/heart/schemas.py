@@ -151,6 +151,7 @@ class FactSummary(BaseModel):
     confidence: float
     active: bool
     score: float | None = None
+    superseded_by: UUID | None = None  # F027: for retrieval soft suppression filter
 
 
 # --- Procedures ---

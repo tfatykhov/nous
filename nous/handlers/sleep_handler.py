@@ -23,8 +23,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from sqlalchemy import func, select
 
 from nous.brain.brain import Brain
 from nous.config import Settings
@@ -32,6 +34,7 @@ from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
+from nous.storage.models import Fact
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +174,25 @@ _CONTRADICTION_RESOLUTION_SCHEMA: dict[str, Any] = {
 }
 
 
+# F027: Cluster consolidation schema — merges 3+ same-subject facts into one
+_CLUSTER_MERGE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "merged_content": {
+            "type": "string",
+            "description": "Single consolidated fact capturing all unique information from the cluster",
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+            "description": "Confidence in the merged fact (0.0 to 1.0)",
+        },
+    },
+    "required": ["merged_content", "confidence"],
+}
+
+
 class SleepHandler:
     """Runs reflection and maintenance during idle periods.
 
@@ -275,6 +297,16 @@ class SleepHandler:
                 success = await self._phase_resolve_contradictions(sleep_stats)
                 if success:
                     phases_completed.append("resolve_contradictions")
+
+            if not self._interrupted:
+                success = await self._phase_stale_scan(sleep_stats)
+                if success:
+                    phases_completed.append("stale_scan")
+
+            if not self._interrupted:
+                success = await self._phase_cluster_consolidation(sleep_stats)
+                if success:
+                    phases_completed.append("cluster_consolidation")
 
             if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
@@ -704,6 +736,176 @@ class SleepHandler:
 
         except Exception:
             logger.warning("Contradiction resolution phase failed", exc_info=True)
+            return False
+
+    async def _phase_stale_scan(self, sleep_stats: dict) -> bool:
+        """F027: Deactivate facts that are superseded, rarely accessed, and low confidence.
+
+        Three conditions must ALL be true to deactivate (conservative):
+        1. superseded_by IS NOT NULL — already marked as replaced
+        2. confidence < 0.5 — low remaining confidence
+        3. last_recalled_at < now - 30 days (OR never recalled)
+        """
+        try:
+            cutoff = datetime.now(UTC) - timedelta(days=30)
+            async with self._heart.db.session() as session:
+                stmt = (
+                    select(Fact)
+                    .where(
+                        Fact.agent_id == self._heart.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.superseded_by.isnot(None),
+                        Fact.confidence < 0.5,
+                    )
+                    .where(
+                        (Fact.last_recalled_at.is_(None))
+                        | (Fact.last_recalled_at < cutoff)
+                    )
+                )
+                result = await session.execute(stmt)
+                stale_facts = result.scalars().all()
+
+                count = 0
+                for fact in stale_facts:
+                    fact.active = False
+                    count += 1
+
+                if count > 0:
+                    await session.commit()
+
+            sleep_stats["stale_deactivated"] = count
+            logger.info("F027 stale scan: deactivated %d stale superseded facts", count)
+            return True
+
+        except Exception:
+            logger.warning("Stale scan phase failed", exc_info=True)
+            return False
+
+    async def _phase_cluster_consolidation(self, sleep_stats: dict) -> bool:
+        """F027: Merge clusters of 3+ active facts with the same subject into one.
+
+        Uses an LLM micro-call to produce a merged fact that preserves all unique
+        details from the cluster. Originals are deactivated (soft-delete), not erased.
+        Caps at 5 clusters per sleep cycle to limit LLM usage.
+        """
+        if not self._llm:
+            return True
+
+        try:
+            # Find subjects with 3+ active facts
+            async with self._heart.db.session() as session:
+                cluster_stmt = (
+                    select(Fact.subject, func.count(Fact.id).label("cnt"))
+                    .where(
+                        Fact.agent_id == self._heart.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.subject.isnot(None),
+                    )
+                    .group_by(Fact.subject)
+                    .having(func.count(Fact.id) >= 3)
+                    .order_by(func.count(Fact.id).desc())
+                    .limit(5)
+                )
+                cluster_result = await session.execute(cluster_stmt)
+                clusters = cluster_result.all()
+
+            if not clusters:
+                logger.debug("F027 cluster consolidation: no clusters with 3+ facts")
+                sleep_stats["clusters_merged"] = 0
+                return True
+
+            merged_count = 0
+            for row in clusters:
+                if self._interrupted:
+                    break
+
+                subject = row.subject
+                async with self._heart.db.session() as session:
+                    facts_stmt = (
+                        select(Fact)
+                        .where(
+                            Fact.agent_id == self._heart.agent_id,
+                            Fact.active == True,  # noqa: E712
+                            Fact.subject == subject,
+                        )
+                        .order_by(Fact.created_at.asc())
+                    )
+                    facts_result = await session.execute(facts_stmt)
+                    fact_list = facts_result.scalars().all()
+
+                if len(fact_list) < 3:
+                    continue
+
+                facts_text = "\n".join(
+                    f"{i + 1}. {f.content}" for i, f in enumerate(fact_list)
+                )
+                prompt = (
+                    f"Subject: {subject}\n\n"
+                    f"These {len(fact_list)} facts all concern the same subject:\n\n"
+                    f"{facts_text}\n\n"
+                    "Merge them into a single consolidated fact that preserves ALL unique "
+                    "information. Do not discard any detail; if facts conflict, keep the "
+                    "most recent information."
+                )
+
+                merge_result = await call_background_llm_structured(
+                    client=self._llm,
+                    model=self._settings.background_model,
+                    system_prompt="You are a memory consolidation system merging related facts.",
+                    user_message=prompt,
+                    tool_name="merge_facts",
+                    tool_description="Merge multiple facts about the same subject into one consolidated fact.",
+                    output_schema=_CLUSTER_MERGE_SCHEMA,
+                    max_tokens=400,
+                )
+
+                if not merge_result or not merge_result.get("merged_content"):
+                    continue
+
+                merged_content = merge_result["merged_content"]
+                merged_confidence = float(merge_result.get("confidence", 0.8))
+
+                # Determine the most common category among the cluster
+                categories = [f.category for f in fact_list if f.category]
+                merged_category = max(set(categories), key=categories.count) if categories else None
+
+                try:
+                    # Learn the merged fact (bypasses dedup, which would catch it)
+                    merged = await self._heart.learn(FactInput(
+                        subject=subject,
+                        content=merged_content,
+                        source="cluster_consolidation",
+                        confidence=merged_confidence,
+                        category=merged_category,
+                    ))
+                    if not isinstance(merged, FactRejected):
+                        # Deactivate originals
+                        async with self._heart.db.session() as session:
+                            for f in fact_list:
+                                fact_orm = await session.get(Fact, f.id)
+                                if fact_orm is not None:
+                                    fact_orm.active = False
+                                    fact_orm.superseded_by = merged.id
+                            await session.commit()
+
+                        merged_count += 1
+                        sleep_stats["facts_created"] = sleep_stats.get("facts_created", 0) + 1
+                        logger.info(
+                            "F027 cluster consolidation: merged %d facts about '%s' into %s",
+                            len(fact_list), subject, merged.id,
+                        )
+                except Exception:
+                    logger.warning(
+                        "F027 cluster consolidation: merge failed for subject '%s'",
+                        subject, exc_info=True,
+                    )
+
+            sleep_stats["clusters_merged"] = merged_count
+            logger.info("F027 cluster consolidation: merged %d clusters", merged_count)
+            return True
+
+        except Exception:
+            logger.warning("Cluster consolidation phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:
