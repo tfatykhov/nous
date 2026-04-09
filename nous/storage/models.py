@@ -501,6 +501,7 @@ class ProcedureTaskAffinity(Base):
     failure_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    active: Mapped[bool | None] = mapped_column(Boolean, server_default="true")
 
     # Relationship
     procedure: Mapped["Procedure"] = relationship(back_populates="task_affinities")

@@ -9,6 +9,7 @@ CREATE TABLE heart.procedure_task_affinity (
     success_count INTEGER NOT NULL DEFAULT 0,
     failure_count INTEGER NOT NULL DEFAULT 0,
     last_activated_at TIMESTAMPTZ,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
     agent_id TEXT NOT NULL,
     UNIQUE(procedure_id, frame_type, agent_id)
 );

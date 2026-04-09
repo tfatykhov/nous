@@ -316,6 +316,7 @@ class ProcedureManager:
                 .where(ProcedureTaskAffinity.procedure_id.in_(ids))
                 .where(ProcedureTaskAffinity.frame_type == frame_type)
                 .where(ProcedureTaskAffinity.agent_id == self.agent_id)
+                .where(ProcedureTaskAffinity.active == True)
             )
             for row in affinity_rows.scalars().all():
                 affinity_map[row.procedure_id] = (row.success_count, row.failure_count)
