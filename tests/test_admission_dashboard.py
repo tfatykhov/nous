@@ -23,6 +23,18 @@ def settings(settings):
     return settings.model_copy(update={"agent_id": _ADMISSION_AGENT_ID})
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _ensure_agent(db):
+    """Create test agent in DB so FK constraints pass."""
+    from sqlalchemy import text
+    async with db.session() as session:
+        await session.execute(
+            text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"id": _ADMISSION_AGENT_ID, "name": "Test Admission Agent"},
+        )
+        await session.commit()
+
+
 @pytest_asyncio.fixture
 async def heart_with_shadow_admission(db, mock_embeddings, settings):
     """Heart with shadow mode admission using isolated agent_id."""

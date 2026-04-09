@@ -391,6 +391,7 @@ async def test_events_emitted(heart, session):
         ),
         session=session,
     )
+    await session.flush()  # Ensure event is flushed to DB
 
     # Check for the event
     result = await session.execute(

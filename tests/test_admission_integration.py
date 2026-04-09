@@ -59,9 +59,9 @@ async def test_rejected_fact_not_stored(heart_with_strict_admission, session):
 
 @pytest.mark.asyncio
 async def test_user_direct_bypasses_strict_gate(heart_with_strict_admission, session):
-    """User-invoked learn_fact always bypasses gate."""
+    """User-stated facts always bypass gate (in bypass_sources list)."""
     result = await heart_with_strict_admission.learn(
-        _fact(source="user_direct"),
+        _fact(source="user_stated"),
         session=session,
     )
     assert isinstance(result, FactDetail)
@@ -99,7 +99,7 @@ async def test_supersede_bypasses_gate(heart_with_strict_admission, session):
     """Supersede should bypass the admission gate."""
     # First, store an original fact via bypass
     original = await heart_with_strict_admission.learn(
-        _fact(source="user_direct", content="Tim prefers light mode for his IDE editor"),
+        _fact(source="user_stated", content="Tim prefers light mode for his IDE editor"),
         session=session,
     )
     assert isinstance(original, FactDetail)

@@ -34,8 +34,13 @@ def settings(settings):
 async def seed_rubric(db, settings):
     """Seed a rubric version, an episode, and outcome signals."""
     async with db.session() as session:
-        # Remove any existing active rubric for this agent (e.g. from seed.sql)
         from sqlalchemy import text
+        # Ensure the test agent exists
+        await session.execute(
+            text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"id": settings.agent_id, "name": "Test Rubric Agent"},
+        )
+        # Remove any existing active rubric for this agent
         await session.execute(
             text("DELETE FROM heart.rubric_versions WHERE agent_id = :aid"),
             {"aid": settings.agent_id},

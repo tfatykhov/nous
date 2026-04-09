@@ -32,6 +32,18 @@ def tiered_settings(settings):
     return settings.model_copy(update={"agent_id": _TIERED_AGENT_ID})
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _ensure_agent(db):
+    """Create test agent in DB so FK constraints pass."""
+    from sqlalchemy import text
+    async with db.session() as session:
+        await session.execute(
+            text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+            {"id": _TIERED_AGENT_ID, "name": "Test Tiered Agent"},
+        )
+        await session.commit()
+
+
 @pytest_asyncio.fixture
 async def brain(db, tiered_settings):
     b = Brain(database=db, settings=tiered_settings)
@@ -140,10 +152,25 @@ class TestTier1UserProfile:
             assert "Celsius" not in tier3_facts.content
 
     @pytest.mark.asyncio
-    async def test_no_profile_section_when_empty(self, context_engine, heart, db):
+    async def test_no_profile_section_when_empty(self, db, mock_embeddings):
         """No User Profile section when no preference/person/rule facts exist."""
-        result = await context_engine.build(
-            agent_id="test-agent",
+        # Use a completely fresh agent_id with no facts at all
+        fresh_id = f"test-empty-profile-{_uuid.uuid4().hex[:8]}"
+        from sqlalchemy import text as sql_text
+        async with db.session() as session:
+            await session.execute(
+                sql_text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+                {"id": fresh_id, "name": "Empty Profile Agent"},
+            )
+            await session.commit()
+
+        fresh_settings = Settings().model_copy(update={"agent_id": fresh_id})
+        fresh_brain = Brain(database=db, settings=fresh_settings)
+        fresh_heart = Heart(db, fresh_settings, embedding_provider=mock_embeddings)
+        fresh_engine = ContextEngine(fresh_brain, fresh_heart, fresh_settings, identity_prompt="You are Nous.")
+
+        result = await fresh_engine.build(
+            agent_id=fresh_id,
             session_id="test-session",
             input_text="hello",
             frame=_frame(),
@@ -151,6 +178,8 @@ class TestTier1UserProfile:
 
         labels = [s.label for s in result.sections]
         assert "User Profile" not in labels
+        await fresh_brain.close()
+        await fresh_heart.close()
 
 
 # ---------------------------------------------------------------------------
@@ -174,33 +203,60 @@ class TestTier3Thresholds:
 
 class TestListByCategory:
     @pytest.mark.asyncio
-    async def test_returns_matching_categories(self, heart, db):
+    async def test_returns_matching_categories(self, db, mock_embeddings):
         """list_facts_by_category returns only facts in specified categories."""
+        # Use fresh agent_id to avoid accumulation from other tests
+        fresh_id = f"test-list-cat-{_uuid.uuid4().hex[:8]}"
+        from sqlalchemy import text as sql_text
         async with db.session() as session:
-            await heart.learn(
+            await session.execute(
+                sql_text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+                {"id": fresh_id, "name": "List Category Agent"},
+            )
+            await session.commit()
+
+        fresh_settings = Settings().model_copy(update={"agent_id": fresh_id})
+        fresh_heart = Heart(db, fresh_settings, embedding_provider=mock_embeddings)
+
+        async with db.session() as session:
+            await fresh_heart.learn(
                 FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="Tim"),
                 session=session,
             )
-            await heart.learn(
+            await fresh_heart.learn(
                 FactInput(content="Nous uses Postgres as its primary database", category="technical", subject="Nous"),
                 session=session,
             )
             await session.commit()
 
-        facts = await heart.list_facts_by_category(categories=["preference", "person", "rule"])
+        facts = await fresh_heart.list_facts_by_category(categories=["preference", "person", "rule"])
         assert len(facts) == 1
         assert "Celsius" in facts[0].content
+        await fresh_heart.close()
 
     @pytest.mark.asyncio
-    async def test_excludes_inactive(self, heart, db):
+    async def test_excludes_inactive(self, db, mock_embeddings):
         """list_facts_by_category skips inactive facts by default."""
+        fresh_id = f"test-list-inact-{_uuid.uuid4().hex[:8]}"
+        from sqlalchemy import text as sql_text
         async with db.session() as session:
-            result = await heart.learn(
+            await session.execute(
+                sql_text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb) ON CONFLICT (id) DO NOTHING"),
+                {"id": fresh_id, "name": "List Inactive Agent"},
+            )
+            await session.commit()
+
+        fresh_settings = Settings().model_copy(update={"agent_id": fresh_id})
+        fresh_heart = Heart(db, fresh_settings, embedding_provider=mock_embeddings)
+
+        async with db.session() as session:
+            result = await fresh_heart.learn(
                 FactInput(content="Old preference that is no longer relevant", category="preference", subject="Tim"),
                 session=session,
             )
-            await heart.deactivate_fact(result.id, session=session)
+            await fresh_heart.deactivate_fact(result.id, session=session)
             await session.commit()
 
-        facts = await heart.list_facts_by_category(categories=["preference"])
+        facts = await fresh_heart.list_facts_by_category(categories=["preference"])
         assert len(facts) == 0
+        await fresh_heart.close()
