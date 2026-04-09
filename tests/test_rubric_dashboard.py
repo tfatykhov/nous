@@ -9,6 +9,9 @@ from httpx import ASGITransport, AsyncClient
 
 from nous.storage.models import Episode, OutcomeSignal, RubricVersion
 
+# Unique agent_id to isolate from seed data and other tests
+_RUBRIC_AGENT_ID = f"test-rubric-dash-{uuid.uuid4().hex[:8]}"
+
 
 class MockAgentRunner:
     def __init__(self):
@@ -19,6 +22,12 @@ class MockAgentRunner:
 
     async def close(self):
         pass
+
+
+@pytest.fixture
+def settings(settings):
+    """Override settings with unique agent_id."""
+    return settings.model_copy(update={"agent_id": _RUBRIC_AGENT_ID})
 
 
 @pytest_asyncio.fixture
@@ -94,7 +103,14 @@ async def test_get_rubric_dashboard_data(db, settings, seed_rubric):
 
 # --- Task 2: REST endpoint tests ---
 
-# brain, heart, db, settings fixtures come from conftest.py — do NOT redefine heart.
+
+@pytest_asyncio.fixture
+async def heart(db, mock_embeddings, settings):
+    from nous.heart import Heart
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    yield h
+    await h.close()
+
 
 @pytest_asyncio.fixture
 async def brain(db, settings):

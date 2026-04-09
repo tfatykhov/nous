@@ -8,30 +8,47 @@ Verifies:
 """
 
 
+import uuid as _uuid
+
 import pytest
 import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import ContextBudget, FrameSelection
-from nous.heart import FactInput
+from nous.config import Settings
+from nous.heart import FactInput, Heart
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures — use unique agent_id to isolate from other tests' data
 # ---------------------------------------------------------------------------
+
+_TIERED_AGENT_ID = f"test-tiered-context-{_uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def tiered_settings(settings):
+    return settings.model_copy(update={"agent_id": _TIERED_AGENT_ID})
 
 
 @pytest_asyncio.fixture
-async def brain(db, settings):
-    b = Brain(database=db, settings=settings)
+async def brain(db, tiered_settings):
+    b = Brain(database=db, settings=tiered_settings)
     yield b
     await b.close()
 
 
 @pytest_asyncio.fixture
-async def context_engine(brain, heart, settings):
-    return ContextEngine(brain, heart, settings, identity_prompt="You are Nous.")
+async def heart(db, mock_embeddings, tiered_settings):
+    h = Heart(db, tiered_settings, embedding_provider=mock_embeddings)
+    yield h
+    await h.close()
+
+
+@pytest_asyncio.fixture
+async def context_engine(brain, heart, tiered_settings):
+    return ContextEngine(brain, heart, tiered_settings, identity_prompt="You are Nous.")
 
 
 def _frame(frame_id: str = "task") -> FrameSelection:

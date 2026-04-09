@@ -912,7 +912,9 @@ class TestIntegration:
 
     async def test_full_subtask_lifecycle(self, db, settings):
         """Create -> dequeue -> complete -> verify."""
-        heart = Heart(db, settings)
+        import uuid as _uuid
+        iso_settings = settings.model_copy(update={"agent_id": f"test-subtask-lifecycle-{_uuid.uuid4().hex[:8]}"})
+        heart = Heart(db, iso_settings)
         subtask = await heart.subtasks.create(
             task="Integration test task", priority="urgent", timeout=60,
         )

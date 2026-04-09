@@ -9,8 +9,39 @@ from sqlalchemy import text
 
 from nous.brain.brain import Brain
 from nous.cognitive.layer import CognitiveLayer
-from nous.heart import FactInput
+from nous.config import Settings
+from nous.heart import FactInput, Heart
 from nous.storage.models import Fact
+
+# Unique agent_id to isolate from seed data and other tests
+_ADMISSION_AGENT_ID = f"test-admission-{uuid.uuid4().hex[:8]}"
+
+
+@pytest.fixture
+def settings(settings):
+    """Override settings with unique agent_id to isolate from seed data."""
+    return settings.model_copy(update={"agent_id": _ADMISSION_AGENT_ID})
+
+
+@pytest_asyncio.fixture
+async def heart_with_shadow_admission(db, mock_embeddings, settings):
+    """Heart with shadow mode admission using isolated agent_id."""
+    from nous.heart.admission import AdmissionConfig, AdmissionController
+
+    config = AdmissionConfig(shadow_mode=True, utility_llm_enabled=False)
+    controller = AdmissionController(config=config)
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    h.facts._admission_controller = controller
+    yield h
+    await h.close()
+
+
+@pytest_asyncio.fixture
+async def heart(db, mock_embeddings, settings):
+    """Heart with isolated agent_id."""
+    h = Heart(db, settings, embedding_provider=mock_embeddings)
+    yield h
+    await h.close()
 
 
 # ---------------------------------------------------------------------------

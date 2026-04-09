@@ -25,7 +25,8 @@ async def session(db):
 
 @pytest_asyncio.fixture
 async def schedule_mgr(db):
-    return ScheduleManager(db, "test-agent")
+    import uuid
+    return ScheduleManager(db, f"test-sched-{uuid.uuid4().hex[:8]}")
 
 
 class TestScheduleManager:
@@ -242,7 +243,8 @@ class TestTaskScheduler:
 
     @pytest.fixture
     def scheduler_settings(self):
-        return Settings(schedule_check_interval=1)
+        import uuid
+        return Settings(schedule_check_interval=1, agent_id=f"test-scheduler-{uuid.uuid4().hex[:8]}")
 
     @pytest_asyncio.fixture
     async def scheduler_heart(self, db, scheduler_settings):

@@ -740,7 +740,7 @@ async def test_block_censor_conditional_unblock(heart, session):
     """Block censor with unblock_pattern downgrades to warn when pattern matches action results."""
     from nous.heart.schemas import FactInput
     await heart.learn(
-        FactInput(content="Allowed admin: admin@company.com, ops@company.com", category="access", subject="admin-list"),
+        FactInput(content="Allowed admin admin@company.com ops@company.com access list", category="access", subject="admin-list"),
         session=session,
     )
 
@@ -748,7 +748,7 @@ async def test_block_censor_conditional_unblock(heart, session):
         trigger_pattern="delete.*production",
         reason="Production deletion requires admin access",
         action="block",
-        trigger_action={"tool": "search_facts", "args": {"query": "allowed admin access", "limit": 5}},
+        trigger_action={"tool": "recall", "args": {"query": "Allowed admin admin@company.com ops@company.com access list", "limit": 5}},
         unblock_pattern=r"admin@company\.com",
         action_instruction="Contact infrastructure team if you need access.",
     )

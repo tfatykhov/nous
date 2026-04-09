@@ -58,7 +58,7 @@ class TestDispatchWithKeepalive:
     async def test_slow_tool_emits_keepalives(self, runner):
         """Tools taking longer than keepalive_interval emit keepalive events."""
 
-        async def slow_dispatch(name, args):
+        async def slow_dispatch(name, args, **kwargs):
             await asyncio.sleep(2.5)  # 2.5s with 1s interval = 2 keepalives
             return ("done", False)
 
@@ -80,7 +80,7 @@ class TestDispatchWithKeepalive:
     async def test_tool_timeout_returns_error(self, runner):
         """Tools exceeding tool_timeout are cancelled with an error."""
 
-        async def hanging_dispatch(name, args):
+        async def hanging_dispatch(name, args, **kwargs):
             await asyncio.sleep(100)  # Way beyond 5s timeout
             return ("never", False)
 
@@ -101,7 +101,7 @@ class TestDispatchWithKeepalive:
     async def test_tool_exception_returns_error(self, runner):
         """Tool exceptions are caught and returned as errors."""
 
-        async def failing_dispatch(name, args):
+        async def failing_dispatch(name, args, **kwargs):
             raise RuntimeError("tool broke")
 
         runner._dispatcher.dispatch = failing_dispatch
@@ -120,7 +120,7 @@ class TestDispatchWithKeepalive:
     async def test_keepalive_event_format(self, runner):
         """Keepalive events have correct StreamEvent format."""
 
-        async def slow_dispatch(name, args):
+        async def slow_dispatch(name, args, **kwargs):
             await asyncio.sleep(1.5)
             return ("ok", False)
 
@@ -144,7 +144,7 @@ class TestDispatchWithKeepalive:
         task_started = asyncio.Event()
         task_cancelled = asyncio.Event()
 
-        async def slow_dispatch(name, args):
+        async def slow_dispatch(name, args, **kwargs):
             task_started.set()
             try:
                 await asyncio.sleep(100)
