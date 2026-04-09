@@ -223,14 +223,13 @@ class TestCheckRateLimit:
         wt = _import_web_tools()
         settings = _make_settings(web_search_daily_limit=5)
 
-        # Day 1: exhaust limit
-        wt._rate_limit["date"] = "2026-02-24"
-        wt._rate_limit["count"] = 5
-        assert wt._check_rate_limit(settings) is not None  # Blocked
+        # Day 1: exhaust limit (patch time to consistent date)
+        with patch.object(wt.time, "strftime", return_value="2026-02-24"):
+            wt._rate_limit["date"] = "2026-02-24"
+            wt._rate_limit["count"] = 5
+            assert wt._check_rate_limit(settings) is not None  # Blocked
 
-        # Day 2: simulate date change by setting a different date
-        # _check_rate_limit reads time.strftime internally, so we manipulate _rate_limit directly
-        # to simulate what happens when the date changes
+        # Day 2: simulate date change
         wt._rate_limit["date"] = "2026-02-24"
         wt._rate_limit["count"] = 5
 

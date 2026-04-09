@@ -295,9 +295,13 @@ class TestCompact:
         for i in range(10):
             conv.turn_contexts.append(
                 TurnContext(
-                    frame=FrameSelection(frame_id="conversation", confidence=0.9, reasoning="test"),
-                    session_id="test",
-                    agent_id="test",
+                    frame=FrameSelection(
+                        frame_id="conversation",
+                        frame_name="Conversation",
+                        confidence=0.9,
+                        match_method="default",
+                    ),
+                    system_prompt="test",
                 )
             )
         messages = _make_messages(conv)

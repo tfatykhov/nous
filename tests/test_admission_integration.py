@@ -43,7 +43,7 @@ async def test_rejected_fact_not_stored(heart_with_strict_admission, session):
     """Low-quality fact with strict threshold should be rejected."""
     result = await heart_with_strict_admission.learn(
         _fact(
-            content="ok",
+            content="A vague low quality reflection from sleep cycle",
             category=None,
             subject=None,
             confidence=0.3,
@@ -72,7 +72,7 @@ async def test_shadow_mode_admits_all(heart_with_shadow_admission, session):
     """Shadow mode stores all facts regardless of score."""
     result = await heart_with_shadow_admission.learn(
         _fact(
-            content="ok",
+            content="A vague low quality shadow mode test fact",
             category=None,
             subject=None,
             confidence=0.1,
@@ -99,7 +99,7 @@ async def test_supersede_bypasses_gate(heart_with_strict_admission, session):
     """Supersede should bypass the admission gate."""
     # First, store an original fact via bypass
     original = await heart_with_strict_admission.learn(
-        _fact(source="user_direct", content="Tim prefers light mode"),
+        _fact(source="user_direct", content="Tim prefers light mode for his IDE editor"),
         session=session,
     )
     assert isinstance(original, FactDetail)
@@ -108,7 +108,7 @@ async def test_supersede_bypasses_gate(heart_with_strict_admission, session):
     new_result = await heart_with_strict_admission.facts.supersede(
         original.id,
         FactInput(
-            content="Tim prefers dark mode",
+            content="Tim prefers dark mode for his IDE editor",
             category="preference",
             subject="Tim",
             source="fact_extractor",

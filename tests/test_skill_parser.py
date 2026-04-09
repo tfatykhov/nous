@@ -677,7 +677,7 @@ class TestActiveFilter:
 
         with patch("nous.heart.procedures.hybrid_search", new_callable=AsyncMock) as mock_hs:
             mock_hs.return_value = []
-            await mgr._search("test query", 10, None, mock_session)
+            await mgr._search("test query", 10, None, None, mock_session)
 
             _, kwargs = mock_hs.call_args
             assert "active" in kwargs.get("extra_where", "")

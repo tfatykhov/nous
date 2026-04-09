@@ -183,7 +183,7 @@ async def test_learn_fact_no_frame_backward_compat(db, session, mock_embeddings)
     from nous.heart.schemas import FactInput
 
     mgr = FactManager(db, mock_embeddings, "test-agent")
-    inp = FactInput(content="Python is dynamically typed", category="tech")
+    inp = FactInput(content="Python is a dynamically typed programming language", category="tech")
     detail = await mgr.learn(inp, session=session)
     assert detail is not None
 

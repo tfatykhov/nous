@@ -45,10 +45,20 @@ def _mock_settings(**overrides) -> MagicMock:
 
 
 def _mock_llm_client(text: str = "", status_code: int = 200) -> AsyncMock:
+    """Create mock LLM client.
+
+    When text is valid JSON, returns tool_use format (for call_background_llm_structured).
+    Otherwise returns text format (for call_background_llm).
+    """
     client = AsyncMock()
     if status_code == 200:
         response = MagicMock()
-        response.content = [{"type": "text", "text": text}]
+        # Try to parse as JSON for structured responses (tool_use format)
+        try:
+            parsed = json.loads(text)
+            response.content = [{"type": "tool_use", "id": "test", "name": "store_reflection", "input": parsed}]
+        except (json.JSONDecodeError, TypeError):
+            response.content = [{"type": "text", "text": text}]
         client.call = AsyncMock(return_value=response)
     else:
         client.call = AsyncMock(side_effect=RuntimeError(f"API error ({status_code})"))

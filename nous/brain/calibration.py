@@ -58,10 +58,16 @@ class CalibrationEngine:
         )
 
         # --- Total and reviewed counts ---
+        # Exclude abandoned decisions (outcome='failure', confidence=0.0) from
+        # reviewed count, consistent with the Brier score filter
         count_result = await session.execute(
             select(
                 func.count().label("total"),
-                func.count().filter(Decision.outcome != "pending").label("reviewed"),
+                func.count().filter(
+                    (Decision.outcome != "pending")
+                    & (Decision.outcome.is_not(None))
+                    & ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
+                ).label("reviewed"),
             ).where(Decision.agent_id == agent_id)
         )
         counts = count_result.one()

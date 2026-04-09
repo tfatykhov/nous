@@ -142,7 +142,7 @@ from nous.heart.subtasks import SubtaskManager
 
 @pytest_asyncio.fixture
 async def subtask_mgr(db):
-    return SubtaskManager(db, "test-agent")
+    return SubtaskManager(db, f"test-subtask-{uuid.uuid4().hex[:8]}")
 
 
 class TestWorkerEnhancements:
@@ -331,7 +331,7 @@ class TestSpawnTaskEnhancements:
 
         assert "subtask" in result["content"][0]["text"].lower()
 
-    async def test_spawn_frame_type_applies_default_model(self, settings):
+    async def test_spawn_frame_type_applies_default_model(self):
         """research frame_type should auto-apply haiku model when no model specified."""
         from nous.api.tools import create_subtask_tools
 
@@ -341,7 +341,10 @@ class TestSpawnTaskEnhancements:
         mock_subtask.id = uuid.uuid4()
         heart.subtasks.create = AsyncMock(return_value=mock_subtask)
 
-        tools = create_subtask_tools(heart, settings)
+        test_settings = Settings(
+            frame_default_models={"research": "claude-haiku-4-5-20251001"},
+        )
+        tools = create_subtask_tools(heart, test_settings)
         result = await tools["spawn_task"](
             task="Research something",
             frame_type="research",
@@ -624,6 +627,7 @@ class TestSubtaskWorkerPool:
 
     @pytest_asyncio.fixture
     async def worker_heart(self, db, worker_settings):
+        worker_settings.agent_id = f"test-worker-{uuid.uuid4().hex[:8]}"
         heart = Heart(db, worker_settings)
         yield heart
         await heart.close()
@@ -1216,13 +1220,14 @@ class TestRunTurnErrorPropagation:
 
         settings = Settings()
         mock_cognitive = AsyncMock()
-        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test")
+        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern")
         mock_turn_ctx = MagicMock(spec=TurnContext)
         mock_turn_ctx.frame = mock_frame
         mock_turn_ctx.system_prompt = ""
         mock_turn_ctx.recalled_decision_ids = []
         mock_turn_ctx.active_censors = []
         mock_turn_ctx.decision_id = None
+        mock_turn_ctx.censor_blocked = False
         mock_cognitive.pre_turn = AsyncMock(return_value=mock_turn_ctx)
         mock_cognitive.post_turn = AsyncMock()
         mock_brain = MagicMock()
@@ -1255,13 +1260,14 @@ class TestRunTurnErrorPropagation:
 
         settings = Settings()
         mock_cognitive = AsyncMock()
-        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern", reasoning="test")
+        mock_frame = FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="pattern")
         mock_turn_ctx = MagicMock(spec=TurnContext)
         mock_turn_ctx.frame = mock_frame
         mock_turn_ctx.system_prompt = ""
         mock_turn_ctx.recalled_decision_ids = []
         mock_turn_ctx.active_censors = []
         mock_turn_ctx.decision_id = None
+        mock_turn_ctx.censor_blocked = False
         mock_cognitive.pre_turn = AsyncMock(return_value=mock_turn_ctx)
         mock_cognitive.post_turn = AsyncMock()
         mock_brain = MagicMock()

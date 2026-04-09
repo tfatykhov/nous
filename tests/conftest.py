@@ -114,9 +114,11 @@ async def db():
         yield database
         await database.disconnect()
     else:
-        from sqlite_compat import TestDatabase
+        from sqlite_compat import TestDatabase, create_test_engine, create_tables
 
-        database = TestDatabase()
+        engine = await create_test_engine()
+        await create_tables(engine)
+        database = TestDatabase(engine)
         await database.connect()
         yield database
         await database.disconnect()

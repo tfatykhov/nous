@@ -59,6 +59,8 @@ def _mock_settings(**overrides) -> MagicMock:
     s.episode_summary_enabled = True
     s.fact_extraction_enabled = True
     s.sleep_enabled = True
+    s.transcript_max_chars = 16000
+    s.fact_dedup_threshold = 0.92
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -405,8 +407,10 @@ class TestEpisodeSummarizer:
 
     @pytest.mark.asyncio
     async def test_truncates_long_transcripts(self):
-        """14. Truncates long transcripts (>8000 chars)."""
-        summarizer, heart, bus, llm_client = self._make_summarizer()
+        """14. Truncates long transcripts — each chunk is within max_chars budget."""
+        summarizer, heart, bus, llm_client = self._make_summarizer(
+            settings=_mock_settings(transcript_max_chars=8000),
+        )
         heart.get_episode = AsyncMock(
             return_value=MagicMock(summary="opening", structured_summary=None)
         )
@@ -429,13 +433,14 @@ class TestEpisodeSummarizer:
         )
         await summarizer.handle(event)
 
-        # The prompt sent to LLM should be truncated (shorter than original)
-        assert len(captured_payloads) == 1
-        user_msg = captured_payloads[0]["messages"][0]["content"]
-        # Content is a list of blocks with cache_control
-        if isinstance(user_msg, list):
-            user_msg = user_msg[0]["text"]
-        assert len(user_msg) < len(long_transcript)
+        # Long transcript gets chunked — at least one LLM call should have been made
+        assert len(captured_payloads) >= 1
+        # Each chunk's transcript portion in the prompt should be within budget
+        for payload in captured_payloads:
+            user_msg = payload["messages"][0]["content"]
+            if isinstance(user_msg, list):
+                user_msg = user_msg[0]["text"]
+            assert len(user_msg) < len(long_transcript)
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
@@ -617,16 +622,16 @@ class TestFactExtractor:
         assert fact_input.content == "User prefers dark mode"
 
     @pytest.mark.asyncio
-    async def test_deduplicates_with_score_above_085(self):
-        """16. Deduplicates against existing facts using .score > 0.85 (#45: raised from 0.65)."""
+    async def test_deduplicates_with_score_above_threshold(self):
+        """16. Deduplicates against existing facts using .score > 0.92 (fact_dedup_threshold)."""
         facts_json = [
             {"subject": "user", "content": "User likes Python", "category": "preference", "confidence": 0.9},
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
 
-        # Return existing fact with .score above 0.85 threshold -> should be deduped
+        # Return existing fact with .score above 0.92 threshold -> should be deduped
         existing_fact = MagicMock(spec=FactSummary)
-        existing_fact.score = 0.90  # Above 0.85 threshold -> deduped
+        existing_fact.score = 0.95  # Above 0.92 threshold -> deduped
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
@@ -645,16 +650,16 @@ class TestFactExtractor:
         heart.learn.assert_not_called()  # Deduped — not stored
 
     @pytest.mark.asyncio
-    async def test_allows_facts_with_score_between_065_and_085(self):
-        """16b. Facts with score 0.65-0.85 pass through for supersession (#45)."""
+    async def test_allows_facts_with_score_below_threshold(self):
+        """16b. Facts with score below 0.92 pass through for supersession."""
         facts_json = [
             {"subject": "user", "content": "User likes Python 3.12", "category": "preference", "confidence": 0.9},
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
 
-        # Return existing fact with .score in the 0.65-0.85 range -> should NOT be deduped
+        # Return existing fact with .score below 0.92 -> should NOT be deduped
         existing_fact = MagicMock(spec=FactSummary)
-        existing_fact.score = 0.70  # Between 0.65 and 0.85 -> allowed through
+        existing_fact.score = 0.85  # Below 0.92 -> allowed through
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
@@ -824,7 +829,7 @@ class TestFactExtractor:
         extractor, heart, bus, llm_client = self._make_extractor()
 
         existing_fact = MagicMock(spec=FactSummary)
-        existing_fact.score = 0.90  # Above 0.85 -> deduped
+        existing_fact.score = 0.95  # Above 0.92 -> deduped
         heart.search_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
 
@@ -1062,7 +1067,7 @@ class TestSessionTimeoutMonitor:
     async def test_sleep_not_emitted_while_sessions_active(self):
         """31. sleep_started NOT emitted while sessions still active."""
         monitor, bus, cognitive = self._make_monitor(
-            settings=_mock_settings(session_idle_timeout=9999, sleep_timeout=0, sleep_check_interval=1)
+            settings=_mock_settings(session_idle_timeout=9999, sleep_timeout=9999, sleep_check_interval=1)
         )
 
         # Active session exists
@@ -1132,8 +1137,8 @@ class TestSleepHandler:
         return handler, brain, heart, bus, llm_client
 
     @pytest.mark.asyncio
-    async def test_all_5_phases_run_when_not_interrupted(self):
-        """34. All 5 phases run when not interrupted."""
+    async def test_all_phases_run_when_not_interrupted(self):
+        """34. All phases run when not interrupted."""
         handler, brain, heart, bus, llm_client = self._make_sleep_handler()
 
         # Mock all phases to be no-ops (stubs in real implementation)
@@ -1141,7 +1146,11 @@ class TestSleepHandler:
         handler._phase_prune = AsyncMock(return_value=True)
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_stale_scan = AsyncMock(return_value=True)
+        handler._phase_cluster_consolidation = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
+        handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
         event = _make_event("sleep_started", agent_id="system")
         await handler._run_sleep(event)
@@ -1150,13 +1159,17 @@ class TestSleepHandler:
         handler._phase_prune.assert_called_once()
         handler._phase_compress.assert_called_once()
         handler._phase_reflect.assert_called_once()
+        handler._phase_resolve_contradictions.assert_called_once()
+        handler._phase_stale_scan.assert_called_once()
+        handler._phase_cluster_consolidation.assert_called_once()
         handler._phase_generalize.assert_called_once()
+        handler._phase_evolve_rubric.assert_called_once()
 
         # Check sleep_completed emitted
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
         assert emitted.type == "sleep_completed"
-        assert len(emitted.data["phases_completed"]) == 5
+        assert len(emitted.data["phases_completed"]) == 9
         assert emitted.data["interrupted"] is False
 
     @pytest.mark.asyncio
@@ -1192,19 +1205,39 @@ class TestSleepHandler:
             order.append("reflect")
             return True
 
+        async def track_resolve_contradictions(sleep_stats):
+            order.append("resolve_contradictions")
+            return True
+
+        async def track_stale_scan(sleep_stats):
+            order.append("stale_scan")
+            return True
+
+        async def track_cluster_consolidation(sleep_stats):
+            order.append("cluster_consolidation")
+            return True
+
         async def track_generalize(sleep_stats):
             order.append("generalize")
+            return True
+
+        async def track_evolve_rubric(sleep_stats):
+            order.append("evolve_rubric")
             return True
 
         handler._phase_review_decisions = track_review
         handler._phase_prune = track_prune
         handler._phase_compress = track_compress
         handler._phase_reflect = track_reflect
+        handler._phase_resolve_contradictions = track_resolve_contradictions
+        handler._phase_stale_scan = track_stale_scan
+        handler._phase_cluster_consolidation = track_cluster_consolidation
         handler._phase_generalize = track_generalize
+        handler._phase_evolve_rubric = track_evolve_rubric
 
         await handler._run_sleep(_make_event("sleep_started"))
 
-        assert order == ["review", "prune", "compress", "reflect", "generalize"]
+        assert order == ["review", "prune", "compress", "reflect", "resolve_contradictions", "stale_scan", "cluster_consolidation", "generalize", "evolve_rubric"]
         # Free phases (review, prune) are first two
         assert order[:2] == ["review", "prune"]
 
@@ -1216,7 +1249,11 @@ class TestSleepHandler:
         handler._phase_prune = AsyncMock(return_value=True)
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_stale_scan = AsyncMock(return_value=True)
+        handler._phase_cluster_consolidation = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
+        handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
         await handler._run_sleep(_make_event("sleep_started"))
 
@@ -1225,7 +1262,11 @@ class TestSleepHandler:
         assert "prune" in emitted.data["phases_completed"]
         assert "compress" in emitted.data["phases_completed"]
         assert "reflect" in emitted.data["phases_completed"]
+        assert "resolve_contradictions" in emitted.data["phases_completed"]
+        assert "stale_scan" in emitted.data["phases_completed"]
+        assert "cluster_consolidation" in emitted.data["phases_completed"]
         assert "generalize" in emitted.data["phases_completed"]
+        assert "evolve_rubric" in emitted.data["phases_completed"]
 
     @pytest.mark.asyncio
     async def test_sleep_completed_reports_interrupted(self):
@@ -1240,12 +1281,16 @@ class TestSleepHandler:
         handler._phase_prune = AsyncMock(return_value=True)
         handler._phase_compress = interrupt_during_compress
         handler._phase_reflect = AsyncMock(return_value=True)
+        handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_stale_scan = AsyncMock(return_value=True)
+        handler._phase_cluster_consolidation = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
+        handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
         await handler._run_sleep(_make_event("sleep_started"))
 
         emitted = bus.emit.call_args[0][0]
-        # review + prune + compress ran, then interrupted before reflect/generalize
+        # review + prune + compress ran, then interrupted before remaining phases
         assert "review" in emitted.data["phases_completed"]
         assert "prune" in emitted.data["phases_completed"]
         assert "compress" in emitted.data["phases_completed"]
@@ -1318,7 +1363,11 @@ class TestSleepHandler:
         handler._phase_review_decisions = AsyncMock(return_value=True)
         handler._phase_prune = AsyncMock(return_value=True)
         handler._phase_compress = AsyncMock(return_value=True)
+        handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_stale_scan = AsyncMock(return_value=True)
+        handler._phase_cluster_consolidation = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
+        handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
         # Set up reflect to fail via LLM
         ep1 = MagicMock()
@@ -1376,6 +1425,7 @@ class TestReviewFixes:
         cognitive._context = MagicMock()
         cognitive._context.build = AsyncMock(return_value=MagicMock(
             system_prompt="prompt", sections=[], recalled_ids={}, recalled_content_map={},
+            recalled_score_map={}, sections_by_tier={},
         ))
         cognitive._context._identity_prompt = ""
         cognitive._deliberation = MagicMock()

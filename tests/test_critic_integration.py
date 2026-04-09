@@ -100,6 +100,8 @@ class TestRunnerCriticWiring:
             "\n\n[DIAGNOSTIC OBSERVATIONS]\n"
             "[Critic/repetition]: You've searched for similar things."
         )
+        # Disable cache split to get a flat string result
+        turn_context.sections_by_tier = None
 
         prompt = runner._build_system_prompt(turn_context)
         assert "[DIAGNOSTIC OBSERVATIONS]" in prompt
@@ -121,6 +123,8 @@ class TestRunnerCriticWiring:
         turn_context.frame = MagicMock()
         turn_context.frame.frame_id = "task"
         turn_context.diagnostic_nudges = ""
+        # Disable cache split to get a flat string result
+        turn_context.sections_by_tier = None
 
         prompt = runner._build_system_prompt(turn_context)
         assert "[DIAGNOSTIC OBSERVATIONS]" not in prompt

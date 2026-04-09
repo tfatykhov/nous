@@ -3,12 +3,18 @@ import pytest
 import pytest_asyncio
 
 from nous.brain.brain import Brain
+from nous.brain.schemas import ReasonInput
 from nous.brain.spreading_activation import (
     compute_graph_density,
     should_use_spreading_activation,
     spreading_activation_search,
 )
 from nous.config import Settings
+
+
+def _reasons():
+    """Provide default reasons to pass noise decision filter."""
+    return [ReasonInput(type="analysis", text="Test decision for graph density")]
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +62,7 @@ class TestDensityGate:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_density_zero_when_empty(session):
     """Empty graph has density 0."""
@@ -63,13 +70,14 @@ async def test_density_zero_when_empty(session):
     assert density == 0.0
 
 
+@pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_density_with_edges(brain, session):
     """Density = edges / unique_nodes."""
     from nous.brain.schemas import RecordInput
 
     def _input(desc):
-        return RecordInput(description=desc, confidence=0.8, category="architecture", stakes="low")
+        return RecordInput(description=desc, confidence=0.8, category="architecture", stakes="low", reasons=_reasons())
 
     d1 = await brain.record(_input("Density A"), session=session)
     d2 = await brain.record(_input("Density B"), session=session)
@@ -84,6 +92,7 @@ async def test_density_with_edges(brain, session):
     assert density == pytest.approx(1.0, abs=0.1)
 
 
+@pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_spreading_activation_empty_seeds(session):
     """Empty seed list returns empty results."""
@@ -92,13 +101,18 @@ async def test_spreading_activation_empty_seeds(session):
     assert results == []
 
 
+@pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_spreading_activation_returns_seeds(brain, session):
     """Spreading activation returns at least the seed nodes."""
     from nous.brain.schemas import RecordInput
 
     d1 = await brain.record(
-        RecordInput(description="SA test", confidence=0.8, category="architecture", stakes="low"),
+        RecordInput(
+            description="Spreading activation test decision for graph traversal",
+            confidence=0.8, category="architecture", stakes="low",
+            reasons=_reasons(),
+        ),
         session=session,
     )
 

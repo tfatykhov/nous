@@ -30,6 +30,7 @@ async def schedule_mgr(db):
 
 class TestScheduleManager:
 
+    @pytest.mark.postgres_only
     async def test_create_once_schedule(self, schedule_mgr: ScheduleManager):
         fire_at = datetime.now(UTC) + timedelta(hours=2)
         schedule = await schedule_mgr.create(
@@ -67,6 +68,7 @@ class TestScheduleManager:
                 schedule_type="recurring",
             )
 
+    @pytest.mark.postgres_only
     async def test_get_due_schedules(self, schedule_mgr: ScheduleManager):
         # Create schedule due in the past
         past = datetime.now(UTC) - timedelta(minutes=5)
@@ -87,6 +89,7 @@ class TestScheduleManager:
         assert len(due) == 1
         assert due[0].task == "Overdue task"
 
+    @pytest.mark.postgres_only
     async def test_advance_recurring_schedule(self, schedule_mgr: ScheduleManager):
         schedule = await schedule_mgr.create(
             task="Recurring",
@@ -127,6 +130,7 @@ class TestScheduleManager:
         updated = await schedule_mgr.get(schedule.id)
         assert updated.active is False
 
+    @pytest.mark.postgres_only
     async def test_list_active_schedules(self, schedule_mgr: ScheduleManager):
         await schedule_mgr.create(
             task="Active",
@@ -144,6 +148,7 @@ class TestScheduleManager:
         assert len(active) == 1
         assert active[0].task == "Active"
 
+    @pytest.mark.postgres_only
     async def test_list_all_schedules(self, schedule_mgr: ScheduleManager):
         await schedule_mgr.create(
             task="A", schedule_type="recurring", interval_seconds=3600,
@@ -172,6 +177,7 @@ class TestScheduleManager:
         result = await schedule_mgr.get(uuid.uuid4())
         assert result is None
 
+    @pytest.mark.postgres_only
     async def test_advance_cron_schedule(self, schedule_mgr: ScheduleManager):
         schedule = await schedule_mgr.create(
             task="Cron recurring",
@@ -244,6 +250,7 @@ class TestTaskScheduler:
         yield heart
         await heart.close()
 
+    @pytest.mark.postgres_only
     async def test_fires_due_once_schedule(self, scheduler_heart, scheduler_settings):
         """A due once-schedule creates a subtask and deactivates."""
         scheduler = TaskScheduler(scheduler_heart, scheduler_settings)
@@ -270,6 +277,7 @@ class TestTaskScheduler:
         updated = await scheduler_heart.schedules.get(schedule.id)
         assert updated.active is False
 
+    @pytest.mark.postgres_only
     async def test_fires_and_advances_recurring(self, scheduler_heart, scheduler_settings):
         """A due recurring schedule creates a subtask and advances next_fire_at."""
         scheduler = TaskScheduler(scheduler_heart, scheduler_settings)
@@ -321,6 +329,7 @@ class TestTaskScheduler:
         subtasks = await scheduler_heart.subtasks.list(status="pending")
         assert len(subtasks) == 0
 
+    @pytest.mark.postgres_only
     async def test_handles_queue_full_gracefully(self, scheduler_heart, scheduler_settings):
         """When subtask queue is full, scheduler logs warning and continues."""
         scheduler = TaskScheduler(scheduler_heart, scheduler_settings)

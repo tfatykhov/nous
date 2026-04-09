@@ -80,7 +80,7 @@ async def test_learn_with_provenance(heart, session):
 
 async def test_confirm_fact(heart, session):
     """confirmation_count increments, last_confirmed updates."""
-    inp = _fact_input(content="Fact to confirm for testing")
+    inp = _fact_input(content="Fact to confirm for testing purposes")
     detail = await heart.learn(inp, session=session)
 
     assert detail.confirmation_count == 0
@@ -102,15 +102,15 @@ async def test_confirm_fact(heart, session):
 
 async def test_supersede_chain(heart, session):
     """A superseded by B, B by C. A and B inactive, C active."""
-    fact_a = await heart.learn(_fact_input(content="Fact A original version"), session=session)
+    fact_a = await heart.learn(_fact_input(content="Fact A original version for supersede chain test"), session=session)
     fact_b = await heart.supersede_fact(
         fact_a.id,
-        _fact_input(content="Fact B replaces A"),
+        _fact_input(content="Fact B replaces A in supersede chain test"),
         session=session,
     )
     fact_c = await heart.supersede_fact(
         fact_b.id,
-        _fact_input(content="Fact C replaces B"),
+        _fact_input(content="Fact C replaces B in supersede chain test"),
         session=session,
     )
 
@@ -140,7 +140,7 @@ async def test_supersede_chain(heart, session):
 async def test_contradict_reduces_confidence(heart, session):
     """Original confidence drops by 0.2."""
     original = await heart.learn(
-        _fact_input(content="Earth is flat", confidence=0.8),
+        _fact_input(content="Earth is flat according to ancient beliefs", confidence=0.8),
         session=session,
     )
 
@@ -166,7 +166,7 @@ async def test_contradict_reduces_confidence(heart, session):
 async def test_contradict_floor_zero(heart, session):
     """Confidence can't go below 0.0."""
     original = await heart.learn(
-        _fact_input(content="Very uncertain claim", confidence=0.1),
+        _fact_input(content="Very uncertain claim about something obscure", confidence=0.1),
         session=session,
     )
 
@@ -263,7 +263,7 @@ async def test_dedup_exclude_ids(heart, session):
     """Verify exclude_ids prevents supersede/contradict dedup collision."""
     # Learn a fact
     original = await heart.learn(
-        _fact_input(content="Exclude IDs dedup test fact"),
+        _fact_input(content="Exclude IDs dedup test fact for verification"),
         session=session,
     )
 
@@ -271,7 +271,7 @@ async def test_dedup_exclude_ids(heart, session):
     # confirm the original instead of creating a new fact
     new_fact = await heart.supersede_fact(
         original.id,
-        _fact_input(content="Exclude IDs dedup test fact"),
+        _fact_input(content="Exclude IDs dedup test fact for verification"),
         session=session,
     )
 
@@ -295,12 +295,12 @@ async def test_contradict_creates_graph_edge(heart, session):
     from sqlalchemy import select
 
     f1 = await heart.learn(
-        _fact_input(content="Tim prefers Celsius", subject="Tim"),
+        _fact_input(content="Tim prefers Celsius for temperature readings", subject="Tim"),
         session=session,
     )
     f2 = await heart.contradict_fact(
         f1.id,
-        _fact_input(content="Tim uses Fahrenheit", subject="Tim"),
+        _fact_input(content="Tim uses Fahrenheit for temperature readings", subject="Tim"),
         session=session,
     )
 
@@ -323,12 +323,12 @@ async def test_supersede_creates_graph_edge(heart, session):
     from sqlalchemy import select
 
     f1 = await heart.learn(
-        _fact_input(content="Python 3.11 is latest", subject="Python"),
+        _fact_input(content="Python 3.11 is the latest stable release", subject="Python"),
         session=session,
     )
     f2 = await heart.supersede_fact(
         f1.id,
-        _fact_input(content="Python 3.12 is latest", subject="Python"),
+        _fact_input(content="Python 3.12 is the latest stable release", subject="Python"),
         session=session,
     )
 

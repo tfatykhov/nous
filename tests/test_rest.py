@@ -29,6 +29,8 @@ class MockAgentRunner:
         self.run_turn_calls: list[tuple] = []
         self.end_conversation_calls: list[tuple] = []
         self._conversations: dict = {}
+        self._ledgers: dict = {}
+        self._pending_corrections: dict = {}
         self.preset_response = "This is a test response from Nous."
         self.preset_context = TurnContext(
             system_prompt="You are Nous.",
@@ -43,7 +45,7 @@ class MockAgentRunner:
             context_token_estimate=100,
         )
 
-    async def run_turn(self, session_id, user_message, agent_id=None):
+    async def run_turn(self, session_id, user_message, agent_id=None, **kwargs):
         self.run_turn_calls.append((session_id, user_message, agent_id))
         return self.preset_response, self.preset_context, {"input_tokens": 100, "output_tokens": 50}
 

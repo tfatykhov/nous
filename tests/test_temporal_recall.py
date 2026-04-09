@@ -245,6 +245,13 @@ class TestTemporalContextTier:
 
         s = MagicMock()
         s.temporal_context_enabled = True
+        s.relevance_floor_enabled = False
+        s.staleness_penalty_enabled = False
+        s.context_budget_overrides = None
+        s.budget_scale_enabled = False
+        s.anti_hallucination_prompt = False
+        s.identity_prompt = ""
+        s.context_window = 0
         return s
 
     @pytest.fixture
@@ -253,6 +260,13 @@ class TestTemporalContextTier:
 
         s = MagicMock()
         s.temporal_context_enabled = False
+        s.relevance_floor_enabled = False
+        s.staleness_penalty_enabled = False
+        s.context_budget_overrides = None
+        s.budget_scale_enabled = False
+        s.anti_hallucination_prompt = False
+        s.identity_prompt = ""
+        s.context_window = 0
         return s
 
     @pytest.fixture
@@ -590,6 +604,13 @@ class TestBudgetBoost:
         from unittest.mock import MagicMock
         s = MagicMock()
         s.temporal_context_enabled = True
+        s.relevance_floor_enabled = False
+        s.staleness_penalty_enabled = False
+        s.context_budget_overrides = None
+        s.budget_scale_enabled = False
+        s.anti_hallucination_prompt = False
+        s.identity_prompt = ""
+        s.context_window = 0
         return s
 
     @pytest.fixture

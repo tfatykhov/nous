@@ -119,7 +119,7 @@ async def _insert_event(session, event_type="turn_completed", days_ago=0, data=N
     await session.execute(
         text("""
             INSERT INTO nous_system.events (id, agent_id, event_type, data, created_at)
-            VALUES (:id, :agent_id, :etype, :data::jsonb, :created)
+            VALUES (:id, :agent_id, :etype, CAST(:data AS jsonb), :created)
         """),
         {
             "id": uuid.uuid4(), "agent_id": AGENT_ID,

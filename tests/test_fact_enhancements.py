@@ -80,7 +80,7 @@ async def test_contradiction_warning_fields(fact_manager: FactManager, session: 
     # We need to manually test the _find_contradiction method with controlled data
     # Store a fact with known embedding
     fact1 = await fact_manager.learn(
-        FactInput(content="The sky is blue", category="nature"),
+        FactInput(content="The sky is blue on clear sunny days", category="nature"),
         session=session,
     )
 

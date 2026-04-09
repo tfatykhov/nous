@@ -8,6 +8,7 @@ Key MockEmbeddingProvider behavior:
 - Different text = cosine ~0.0 (no match)
 """
 
+import pytest
 from sqlalchemy import select
 
 from nous.heart import (
@@ -734,6 +735,7 @@ async def test_block_censor_with_action_enriches_reason(heart, session):
     assert result is not None
 
 
+@pytest.mark.postgres_only
 async def test_block_censor_conditional_unblock(heart, session):
     """Block censor with unblock_pattern downgrades to warn when pattern matches action results."""
     from nous.heart.schemas import FactInput

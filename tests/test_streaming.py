@@ -311,6 +311,8 @@ def _make_mock_cognitive():
     turn_context.recalled_decision_ids = []
     turn_context.recalled_fact_ids = []
     turn_context.recalled_episode_ids = []
+    turn_context.censor_blocked = False
+    turn_context.censor_block_reason = None
     cognitive.pre_turn.return_value = turn_context
     cognitive.post_turn.return_value = MagicMock()
     return cognitive, turn_context
@@ -323,6 +325,15 @@ def _make_mock_settings():
     settings.max_tokens = 4096
     settings.max_turns = 10
     settings.agent_id = "test-agent"
+    settings.compaction_enabled = False
+    settings.effective_compaction_threshold = 100000
+    settings.effective_keep_recent_tokens = 10000
+    settings.tool_pruning_enabled = False
+    settings.tool_metadata_degrade_after = 8
+    settings.tool_hard_clear_after = 12
+    settings.keep_last_tool_results = 2
+    settings.tool_timeout = 120
+    settings.keepalive_interval = 10
     return settings
 
 
@@ -672,7 +683,7 @@ class TestStreamingMessage:
 
         await sm.update("Hello")
 
-        bot._send.assert_called_once_with(123, "Hello")
+        bot._send.assert_called_once_with(123, "Hello", parse_mode=None)
         assert sm.message_id == 42
 
     @pytest.mark.asyncio
@@ -750,6 +761,7 @@ class TestStreamingMessage:
                 "chat_id": 123,
                 "message_id": 42,
                 "text": "Hello world",
+                "parse_mode": "HTML",
             },
         )
 

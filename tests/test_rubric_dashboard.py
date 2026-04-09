@@ -25,6 +25,12 @@ class MockAgentRunner:
 async def seed_rubric(db, settings):
     """Seed a rubric version, an episode, and outcome signals."""
     async with db.session() as session:
+        # Remove any existing active rubric for this agent (e.g. from seed.sql)
+        from sqlalchemy import text
+        await session.execute(
+            text("DELETE FROM heart.rubric_versions WHERE agent_id = :aid"),
+            {"aid": settings.agent_id},
+        )
         rv = RubricVersion(
             agent_id=settings.agent_id,
             version="1.0.0",
@@ -127,8 +133,21 @@ async def test_dashboard_rubric_endpoint(client, seed_rubric):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_rubric_endpoint_empty(client):
+async def test_dashboard_rubric_endpoint_empty(client, db, settings):
     """Returns gracefully when no rubric data exists."""
+    # Remove any existing rubric for this agent (e.g. from seed.sql)
+    from sqlalchemy import text
+    async with db.session() as session:
+        await session.execute(
+            text("DELETE FROM heart.outcome_signals WHERE agent_id = :aid"),
+            {"aid": settings.agent_id},
+        )
+        await session.execute(
+            text("DELETE FROM heart.rubric_versions WHERE agent_id = :aid"),
+            {"aid": settings.agent_id},
+        )
+        await session.commit()
+
     resp = await client.get("/dashboard/rubric")
     assert resp.status_code == 200
     data = resp.json()

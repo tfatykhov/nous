@@ -54,6 +54,8 @@ def _make_cognitive_layer():
     mock_heart = MagicMock()
     mock_heart._episodes = MagicMock()
     mock_heart._episodes.embeddings = None
+    mock_heart.episodes = MagicMock()
+    mock_heart.episodes.embeddings = None
     mock_heart.start_episode = AsyncMock()
     mock_heart.end_episode = AsyncMock()
     mock_heart.deactivate_episode = AsyncMock()
@@ -175,12 +177,12 @@ class TestEpisodeSignificance:
         result = layer._should_create_episode(sid, "Hello!")
         assert result is True
 
-    # 2. Second turn, no tools, short content -> False
+    # 2. Second turn, no tools, short content -> True (threshold is now 1)
     def test_second_turn_no_tools_short_content_skips(self):
-        """Second turn with no tools and short content is not significant.
+        """Second turn with no tools and short content is now significant.
 
-        After first turn completes: turn_count=1, no tools used, combined
-        content well below 200 chars. Not enough signals for significance.
+        After first turn completes: turn_count=1, which meets the
+        _MIN_TURNS_WITHOUT_TOOLS threshold of 1. Always creates episode.
         """
         layer = _make_cognitive_layer()
         sid = f"test-{uuid.uuid4().hex[:8]}"
@@ -194,7 +196,7 @@ class TestEpisodeSignificance:
         )
 
         result = layer._should_create_episode(sid, "OK")
-        assert result is False
+        assert result is True
 
     # 3. Second turn, tools used -> True
     def test_second_turn_with_tools_creates_episode(self):
@@ -357,7 +359,7 @@ class TestEpisodeDedup:
         # Enable embeddings so dedup check runs
         mock_embeddings = MagicMock()
         mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart._episodes.embeddings = mock_embeddings
+        layer._heart.episodes.embeddings = mock_embeddings
 
         # No similar episodes found
         layer._heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
@@ -373,7 +375,7 @@ class TestEpisodeDedup:
 
         mock_embeddings = MagicMock()
         mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart._episodes.embeddings = mock_embeddings
+        layer._heart.episodes.embeddings = mock_embeddings
 
         # Return a match above the 0.85 threshold
         matching_episode_id = uuid.uuid4()
@@ -392,7 +394,7 @@ class TestEpisodeDedup:
 
         mock_embeddings = MagicMock()
         mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart._episodes.embeddings = mock_embeddings
+        layer._heart.episodes.embeddings = mock_embeddings
 
         # Return a match below the 0.85 threshold
         matching_episode_id = uuid.uuid4()
@@ -414,7 +416,7 @@ class TestEpisodeDedup:
 
         mock_embeddings = MagicMock()
         mock_embeddings.embed = AsyncMock(side_effect=RuntimeError("API down"))
-        layer._heart._episodes.embeddings = mock_embeddings
+        layer._heart.episodes.embeddings = mock_embeddings
 
         result = await layer._is_duplicate_episode("Build something")
         assert result is False
@@ -427,7 +429,7 @@ class TestEpisodeDedup:
 
         mock_embeddings = MagicMock()
         mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart._episodes.embeddings = mock_embeddings
+        layer._heart.episodes.embeddings = mock_embeddings
 
         layer._heart.search_recent_episodes_by_embedding = AsyncMock(
             return_value=[]
@@ -467,7 +469,9 @@ class TestEpisodeDedup:
         layer._frames = MagicMock()
         layer._frames.select = AsyncMock(return_value=mock_frame)
         layer._intent_classifier = MagicMock()
-        layer._intent_classifier.classify = MagicMock(return_value=MagicMock())
+        mock_signals = MagicMock()
+        mock_signals.temporal_recency = 0.0
+        layer._intent_classifier.classify = MagicMock(return_value=mock_signals)
         layer._intent_classifier.plan_retrieval = MagicMock(return_value=MagicMock())
         layer._context = MagicMock()
         layer._context.build = AsyncMock(
@@ -476,6 +480,8 @@ class TestEpisodeDedup:
                 sections=[],
                 recalled_ids={},
                 recalled_content_map={},
+                recalled_score_map={},
+                sections_by_tier={},
             )
         )
         layer._deliberation = MagicMock()
@@ -500,7 +506,7 @@ class TestEpisodeDedup:
 
         mock_embeddings = MagicMock()
         mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart._episodes.embeddings = mock_embeddings
+        layer._heart.episodes.embeddings = mock_embeddings
 
         # The search method filters by 48h window and finds nothing
         # (the similar episode exists but is older than 48h)

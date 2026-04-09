@@ -32,12 +32,18 @@ async def test_extensions(db):
 
 
 async def test_all_tables_exist(db):
-    """All 18 tables exist in correct schemas."""
+    """All 31 tables exist in correct schemas."""
     expected = {
-        # nous_system (3)
+        # nous_system (7)
         ("nous_system", "agents"),
         ("nous_system", "frames"),
         ("nous_system", "events"),
+        ("nous_system", "agent_identity"),
+        ("nous_system", "schema_migrations"),
+        ("nous_system", "config"),
+        ("nous_system", "behavior_snapshots"),
+        ("nous_system", "context_log"),
+        ("nous_system", "dynamic_checks"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
@@ -47,7 +53,7 @@ async def test_all_tables_exist(db):
         ("brain", "graph_edges"),
         ("brain", "guardrails"),
         ("brain", "calibration_snapshots"),
-        # heart (7)
+        # heart (12)
         ("heart", "episodes"),
         ("heart", "episode_decisions"),
         ("heart", "facts"),
@@ -55,6 +61,13 @@ async def test_all_tables_exist(db):
         ("heart", "episode_procedures"),
         ("heart", "censors"),
         ("heart", "working_memory"),
+        ("heart", "tool_cache"),
+        ("heart", "subtasks"),
+        ("heart", "schedules"),
+        ("heart", "conversation_state"),
+        ("heart", "rubric_versions"),
+        ("heart", "outcome_signals"),
+        ("heart", "procedure_task_affinity"),
     }
     async with db.engine.connect() as conn:
         result = await conn.execute(
@@ -117,7 +130,7 @@ async def test_seed_guardrails(db):
     assert guardrails["no-high-stakes-low-confidence"]["severity"] == "block"
     assert guardrails["no-critical-without-review"]["condition"] == {"cel": "decision.stakes == 'critical'"}
     assert guardrails["require-reasons"]["condition"] == {"cel": "decision.reason_count < 1"}
-    assert guardrails["low-quality-recording"]["condition"] == {"cel": "decision.quality_score < 0.5"}
+    assert guardrails["low-quality-recording"]["condition"] == {"cel": "decision.quality_score < 0.55"}
 
 
 async def test_updated_at_trigger(session):

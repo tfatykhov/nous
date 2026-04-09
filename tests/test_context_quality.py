@@ -48,8 +48,11 @@ class TestTextOverlap:
         assert text_overlap("", "") == 0.0
 
     def test_short_words_filtered(self):
-        # "a", "is", "in", "the" are all < 3 chars, filtered out
-        assert text_overlap("a is in the", "a is in the") == 0.0
+        # "a", "is", "in" are < 3 chars and filtered out; "the" is 3 chars and kept
+        # words_a = {"the"}, words_b = {"the"} -> overlap = 1.0
+        assert text_overlap("a is in the", "a is in the") == 1.0
+        # All truly short words (< 3 chars) produce 0.0
+        assert text_overlap("a is in", "a is in") == 0.0
 
     def test_stop_word_resistance(self):
         # "show me brain status" vs "show me heart status"
@@ -623,9 +626,13 @@ class TestInformationalDetection:
         assert layer._is_informational(result) is True
 
     def test_short_response_with_tools_not_filtered(self, layer):
-        """Short response WITH tools -> NOT informational (tool did real work)."""
+        """Short response WITH tools -> NOT informational (tool did real work).
+
+        Uses text that doesn't match any keyword pattern — "Done." now matches
+        the _INFO_PATTERNS list, so we use neutral short text instead.
+        """
         result = MockTurnResult(
-            response_text="Done.",
+            response_text="Applied the fix.",
             tool_results=[MockToolResult(tool_name="bash")],
         )
         assert layer._is_informational(result) is False

@@ -45,7 +45,7 @@ class MockCognitiveLayer:
             context_token_estimate=100,
         )
 
-    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False):
+    async def pre_turn(self, agent_id, session_id, user_input, session=None, *, conversation_messages=None, user_id=None, user_display_name=None, skip_episode=False, is_subtask=False):
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 
@@ -202,22 +202,17 @@ async def test_run_turn_calls_post_turn(runner, mock_cognitive):
 
 
 async def test_run_turn_api_error(runner_error, mock_cognitive):
-    """API error -> error message returned, post_turn still called with error."""
+    """API error -> exception re-raised after post_turn cleanup."""
     session_id = f"test-{uuid.uuid4().hex[:8]}"
-    response_text, turn_context, _usage = await runner_error.run_turn(session_id, "Hello!")
-
-    # Should return error fallback message
-    assert "error" in response_text.lower()
+    with pytest.raises(RuntimeError, match="API call failed"):
+        await runner_error.run_turn(session_id, "Hello!")
 
     # post_turn should still be called (per spec: always called, even on error)
     assert len(mock_cognitive.post_turn_calls) == 1
-    _, _, turn_result, _ = mock_cognitive.post_turn_calls[0]
-    assert turn_result.error is not None
-    assert "API call failed" in turn_result.error
 
 
 async def test_run_turn_history_capped(runner):
-    """Messages capped at last 20 for API call via _format_messages."""
+    """When compaction is disabled, messages capped at last 20 via _format_messages."""
     session_id = f"test-{uuid.uuid4().hex[:8]}"
 
     # Send 15 turns (30 messages total)
@@ -225,9 +220,15 @@ async def test_run_turn_history_capped(runner):
         await runner.run_turn(session_id, f"Message {i}")
 
     conv = runner._conversations[session_id]
-    formatted = runner._format_messages(conv)
-    # Should be capped at 20 messages
-    assert len(formatted) <= 20
+
+    # With compaction enabled (default), all messages are kept
+    formatted_all = runner._format_messages(conv)
+    assert len(formatted_all) == 30
+
+    # With compaction disabled, should be capped at 20
+    runner._settings.compaction_enabled = False
+    formatted_capped = runner._format_messages(conv)
+    assert len(formatted_capped) <= 20
 
 
 # ---------------------------------------------------------------------------
@@ -723,23 +724,20 @@ def test_payload_adaptive_with_effort():
     assert payload["output_config"] == {"effort": "medium"}
 
 
-def test_payload_effort_skipped_for_opus():
-    """effort parameter omitted when model is opus (unsupported)."""
-    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-opus-4-6")
+def test_payload_effort_skipped_for_haiku():
+    """effort parameter omitted when model is haiku (unsupported)."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-haiku-4-5-20251001")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
     payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
     assert "output_config" not in payload
 
 
-def test_payload_effort_skipped_for_opus_override():
-    """effort parameter omitted when model_override is opus."""
-    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium")
+def test_payload_effort_included_for_opus():
+    """effort parameter included for opus (now supported)."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-opus-4-6")
     r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
-    payload = r._build_api_payload(
-        "system", [{"role": "user", "content": "hi"}],
-        model_override="claude-opus-4-6",
-    )
-    assert "output_config" not in payload
+    payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
+    assert payload["output_config"] == {"effort": "medium"}
 
 
 # ---------------------------------------------------------------------------

@@ -697,7 +697,7 @@ class TestSelfInitiatedCheck:
     def test_looks_like_pending_matches(self):
         """49. _looks_like_pending detects known markers."""
         assert SelfInitiatedCheck._looks_like_pending("TODO: check the report") is True
-        assert SelfInitiatedCheck._looks_like_pending("need to follow-up with Tim") is True
+        assert SelfInitiatedCheck._looks_like_pending("need to follow up on Tim's request") is True
         assert SelfInitiatedCheck._looks_like_pending("This is pending review") is True
         assert SelfInitiatedCheck._looks_like_pending("remind me about the meeting") is True
         assert SelfInitiatedCheck._looks_like_pending("Action needed on PR") is True

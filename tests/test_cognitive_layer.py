@@ -206,13 +206,14 @@ async def test_post_turn_assesses(cognitive, session):
     assert assessment.surprise_level == 0.0
 
 
+@pytest.mark.postgres_only
 async def test_post_turn_finalizes_deliberation(cognitive, brain, session):
     """If decision_id exists, post_turn calls Brain.update() to finalize."""
     sid = f"test-post-final-{uuid.uuid4().hex[:8]}"
     ctx = await cognitive.pre_turn("nous-default", sid, "should we use Redis?", session=session)
     assert ctx.decision_id is not None
 
-    turn_result = TurnResult(response_text="Redis is a good choice for caching.")
+    turn_result = TurnResult(response_text="After evaluating the trade-offs between Redis and Memcached, Redis is the better choice for our caching layer because it supports complex data structures and persistence.")
 
     await cognitive.post_turn("nous-default", sid, turn_result, ctx, session=session)
 
@@ -290,12 +291,20 @@ async def test_post_turn_emits_event(cognitive, session):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.postgres_only
 async def test_end_session_closes_episode(cognitive, heart, session):
     """end_session ends the active episode with 'completed'."""
     sid = f"test-end-ep-{uuid.uuid4().hex[:8]}"
-    await cognitive.pre_turn("nous-default", sid, "build something", session=session)
+    ctx = await cognitive.pre_turn("nous-default", sid, "build something important for the project", session=session)
     assert sid in cognitive._active_episodes
     episode_id = cognitive._active_episodes[sid]
+
+    # Do a post_turn to make the session non-trivial (otherwise trivial episodes are soft-deleted)
+    turn_result = TurnResult(
+        response_text="I've analyzed the requirements and built the initial implementation with proper error handling and test coverage.",
+        tool_results=[ToolResult(tool_name="write_file", arguments={"path": "/test"}, result="ok")],
+    )
+    await cognitive.post_turn("nous-default", sid, turn_result, ctx, session=session)
 
     await cognitive.end_session("nous-default", sid, session=session)
 
@@ -335,11 +344,19 @@ async def test_end_session_idempotent(cognitive, session):
     await cognitive.end_session("nous-default", sid, session=session)
 
 
+@pytest.mark.postgres_only
 async def test_end_session_with_reflection(cognitive, heart, session):
     """Reflection text stored as episode lessons."""
     sid = f"test-end-reflect-{uuid.uuid4().hex[:8]}"
-    await cognitive.pre_turn("nous-default", sid, "build something", session=session)
+    ctx = await cognitive.pre_turn("nous-default", sid, "build something important for the project", session=session)
     episode_id = cognitive._active_episodes[sid]
+
+    # Do a post_turn to make the session non-trivial (otherwise trivial episodes are soft-deleted)
+    turn_result = TurnResult(
+        response_text="I've analyzed the requirements and built the initial implementation with proper error handling and test coverage.",
+        tool_results=[ToolResult(tool_name="write_file", arguments={"path": "/test"}, result="ok")],
+    )
+    await cognitive.post_turn("nous-default", sid, turn_result, ctx, session=session)
 
     await cognitive.end_session(
         "nous-default",

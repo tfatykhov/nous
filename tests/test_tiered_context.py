@@ -72,12 +72,12 @@ class TestTier1UserProfile:
     async def test_profile_facts_in_context(self, context_engine, heart, db):
         """Preference/person/rule facts appear in User Profile section."""
         async with db.session() as session:
-            await heart.store_fact(
-                FactInput(content="Tim prefers Celsius", category="preference", subject="Tim"),
+            await heart.learn(
+                FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="Tim"),
                 session=session,
             )
-            await heart.store_fact(
-                FactInput(content="Tim lives in Silver Spring MD", category="person", subject="Tim"),
+            await heart.learn(
+                FactInput(content="Tim lives in Silver Spring MD in the United States", category="person", subject="Tim"),
                 session=session,
             )
             await session.commit()
@@ -100,12 +100,12 @@ class TestTier1UserProfile:
     async def test_profile_facts_excluded_from_tier3(self, context_engine, heart, db):
         """Preference facts should NOT appear in Relevant Facts (Tier 3)."""
         async with db.session() as session:
-            await heart.store_fact(
-                FactInput(content="Tim prefers Celsius", category="preference", subject="Tim"),
+            await heart.learn(
+                FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="Tim"),
                 session=session,
             )
-            await heart.store_fact(
-                FactInput(content="Nous uses PostgreSQL", category="technical", subject="Nous"),
+            await heart.learn(
+                FactInput(content="Nous uses PostgreSQL as its primary database", category="technical", subject="Nous"),
                 session=session,
             )
             await session.commit()
@@ -160,12 +160,12 @@ class TestListByCategory:
     async def test_returns_matching_categories(self, heart, db):
         """list_facts_by_category returns only facts in specified categories."""
         async with db.session() as session:
-            await heart.store_fact(
-                FactInput(content="Tim prefers Celsius", category="preference", subject="Tim"),
+            await heart.learn(
+                FactInput(content="Tim prefers Celsius for all temperature readings", category="preference", subject="Tim"),
                 session=session,
             )
-            await heart.store_fact(
-                FactInput(content="Nous uses Postgres", category="technical", subject="Nous"),
+            await heart.learn(
+                FactInput(content="Nous uses Postgres as its primary database", category="technical", subject="Nous"),
                 session=session,
             )
             await session.commit()
@@ -178,8 +178,8 @@ class TestListByCategory:
     async def test_excludes_inactive(self, heart, db):
         """list_facts_by_category skips inactive facts by default."""
         async with db.session() as session:
-            result = await heart.store_fact(
-                FactInput(content="Old preference", category="preference", subject="Tim"),
+            result = await heart.learn(
+                FactInput(content="Old preference that is no longer relevant", category="preference", subject="Tim"),
                 session=session,
             )
             await heart.deactivate_fact(result.id, session=session)
