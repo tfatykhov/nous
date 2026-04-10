@@ -81,6 +81,7 @@ function dagStatusBadge(status) {
         pending: '#6b6b8a',
         ready: '#22d3ee',
         running: '#fbbf24',
+        awaiting_check: '#f59e0b',
         completed: '#4ade80',
         failed: '#f87171',
         blocked: '#991b1b',
@@ -402,6 +403,7 @@ function showDagGraph(dag) {
         pending: '#6b6b8a',
         ready: '#22d3ee',
         running: '#fbbf24',
+        awaiting_check: '#f59e0b',
         completed: '#4ade80',
         failed: '#f87171',
         blocked: '#991b1b',
@@ -472,6 +474,9 @@ function showDagGraph(dag) {
         var g = d3.select(this);
         var color = statusColors[d.status] || '#6b6b8a';
         var isRunning = d.status === 'running';
+        var isAwaitingCheck = d.status === 'awaiting_check';
+        var nodeAnimation = isRunning ? 'pulse-running 1.5s infinite' :
+            isAwaitingCheck ? 'pulse-awaiting 3s infinite' : 'none';
 
         if (d.node_type === 'check') {
             // Diamond
@@ -480,7 +485,7 @@ function showDagGraph(dag) {
                 .attr('fill', color + '30')
                 .attr('stroke', color)
                 .attr('stroke-width', 2)
-                .style('animation', isRunning ? 'pulse-running 1.5s infinite' : 'none');
+                .style('animation', nodeAnimation);
         } else if (d.node_type === 'gate') {
             // Hexagon
             var r = nodeRadius;
@@ -494,7 +499,7 @@ function showDagGraph(dag) {
                 .attr('fill', color + '30')
                 .attr('stroke', color)
                 .attr('stroke-width', 2)
-                .style('animation', isRunning ? 'pulse-running 1.5s infinite' : 'none');
+                .style('animation', nodeAnimation);
         } else if (d.node_type === 'callback') {
             // Triangle
             g.append('polygon')
@@ -502,7 +507,7 @@ function showDagGraph(dag) {
                 .attr('fill', color + '30')
                 .attr('stroke', color)
                 .attr('stroke-width', 2)
-                .style('animation', isRunning ? 'pulse-running 1.5s infinite' : 'none');
+                .style('animation', nodeAnimation);
         } else {
             // Circle (subtask - default)
             g.append('circle')
@@ -510,7 +515,7 @@ function showDagGraph(dag) {
                 .attr('fill', color + '30')
                 .attr('stroke', color)
                 .attr('stroke-width', 2)
-                .style('animation', isRunning ? 'pulse-running 1.5s infinite' : 'none');
+                .style('animation', nodeAnimation);
         }
 
         // Label
@@ -556,6 +561,16 @@ function showNodeDetail(node, panel) {
         html += '<div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">';
         html += '<div style="color:var(--red);font-size:11px;margin-bottom:4px">Error</div>';
         html += '<pre style="font-size:11px;white-space:pre-wrap;word-break:break-word;background:rgba(248,113,113,0.05);padding:8px;border-radius:4px;color:var(--red)">' + escapeHtml(node.error) + '</pre>';
+        html += '</div>';
+    }
+    if (node.completion_check) {
+        html += '<div style="margin-top:8px; padding:8px; background:rgba(245,158,11,0.1); border-radius:4px;">';
+        html += '<div style="font-size:11px; color:#f59e0b; margin-bottom:4px;">Completion Check</div>';
+        html += '<div style="font-size:11px; color:#e2e8f0; font-family:monospace; word-break:break-all;">' +
+            escapeHtml(node.completion_check.length > 120 ? node.completion_check.substring(0, 120) + '...' : node.completion_check) + '</div>';
+        if (node.check_attempts !== undefined && node.check_attempts !== null) {
+            html += '<div style="font-size:11px; color:#94a3b8; margin-top:4px;">Polls: ' + node.check_attempts + '</div>';
+        }
         html += '</div>';
     }
 

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -23,6 +25,10 @@ _TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled"})
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
+
+# Completion check polling
+_CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
+DAG_STATUS_BASE_DIR = Path(tempfile.gettempdir()) / "nous-workspace" / "dag-status"
 
 
 class DAGOrchestrator:
@@ -113,6 +119,9 @@ class DAGOrchestrator:
             check_name=None,
             started_at=None,
             completed_at=None,
+            check_attempts=0,
+            last_check_at=None,
+            awaiting_check_at=None,
         )
 
         # Unblock dependent nodes that were blocked by this failure
@@ -134,6 +143,9 @@ class DAGOrchestrator:
         """Core state machine: sync → budget → failures → launch → complete."""
         # 1. Sync node statuses from underlying primitives
         await self._sync_node_statuses(dag)
+
+        # 1.5 Poll awaiting_check nodes
+        await self._poll_awaiting_checks(dag)
 
         # 2. Check token budget
         if dag.token_budget:
@@ -189,14 +201,26 @@ class DAGOrchestrator:
             return
 
         if subtask.status == "completed":
-            await self._store.update_node(
-                node.id,
-                status="completed",
-                result=subtask.result,
-                completed_at=datetime.now(UTC),
-            )
-            node.status = "completed"
-            node.result = subtask.result
+            if node.completion_check and node.completion_check.strip():
+                # Subtask done but external process may still be running
+                now = datetime.now(UTC)
+                await self._store.update_node(
+                    node.id,
+                    status="awaiting_check",
+                    result=subtask.result,
+                    awaiting_check_at=now,
+                )
+                node.status = "awaiting_check"
+                node.result = subtask.result
+            else:
+                await self._store.update_node(
+                    node.id,
+                    status="completed",
+                    result=subtask.result,
+                    completed_at=datetime.now(UTC),
+                )
+                node.status = "completed"
+                node.result = subtask.result
         elif subtask.status == "failed":
             await self._store.update_node(
                 node.id,
@@ -234,6 +258,135 @@ class DAGOrchestrator:
                 completed_at=datetime.now(UTC),
             )
             node.status = "completed"
+
+    async def _poll_awaiting_checks(self, dag: ExecutionDAG) -> None:
+        """Poll completion_check commands for nodes in awaiting_check status."""
+        for node in dag.nodes:
+            if node.status != "awaiting_check":
+                continue
+
+            cmd = node.completion_check
+            if not cmd or not cmd.strip():
+                # No valid check command — mark completed
+                await self._store.update_node(
+                    node.id, status="completed", completed_at=datetime.now(UTC),
+                )
+                node.status = "completed"
+                continue
+
+            # Check interval throttle
+            if node.completion_check_interval and node.last_check_at:
+                last = node.last_check_at
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=UTC)
+                elapsed = (datetime.now(UTC) - last).total_seconds()
+                if elapsed < node.completion_check_interval:
+                    continue
+
+            # Check timeout (based on awaiting_check_at, not started_at)
+            ref_time = node.awaiting_check_at or node.started_at
+            if ref_time:
+                if ref_time.tzinfo is None:
+                    ref_time = ref_time.replace(tzinfo=UTC)
+                elapsed_total = (datetime.now(UTC) - ref_time).total_seconds()
+                if elapsed_total > node.timeout_seconds:
+                    await self._store.update_node(
+                        node.id,
+                        status="failed",
+                        error=f"Completion check timed out after {node.timeout_seconds}s ({node.check_attempts} attempts)",
+                        completed_at=datetime.now(UTC),
+                    )
+                    node.status = "failed"
+                    continue
+
+            # Check max attempts
+            if node.max_check_attempts and node.check_attempts >= node.max_check_attempts:
+                await self._store.update_node(
+                    node.id,
+                    status="failed",
+                    error=f"Completion check exceeded max attempts ({node.max_check_attempts})",
+                    completed_at=datetime.now(UTC),
+                )
+                node.status = "failed"
+                continue
+
+            # Run the completion check
+            try:
+                passed = await self._run_completion_check(node)
+                attempts = (node.check_attempts or 0) + 1
+                now = datetime.now(UTC)
+
+                if passed:
+                    result = await self._read_node_result(node, dag)
+                    await self._store.update_node(
+                        node.id,
+                        status="completed",
+                        result=result,
+                        check_attempts=attempts,
+                        last_check_at=now,
+                        completed_at=now,
+                    )
+                    node.status = "completed"
+                    node.result = result
+                    logger.info(
+                        "Completion check passed for node %s (attempt %d)",
+                        node.name, attempts,
+                    )
+                else:
+                    await self._store.update_node(
+                        node.id, check_attempts=attempts, last_check_at=now,
+                    )
+                    node.check_attempts = attempts
+                    node.last_check_at = now
+                    logger.debug(
+                        "Completion check pending for node %s (attempt %d)",
+                        node.name, attempts,
+                    )
+            except Exception:
+                logger.exception(
+                    "Error polling completion check for node %s", node.name
+                )
+
+    async def _run_completion_check(self, node: DAGNode) -> bool:
+        """Run a completion_check shell command. Returns True if exit code is 0."""
+        cmd = node.completion_check
+        if not cmd:
+            return True
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=_CHECK_CMD_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                logger.warning(
+                    "Completion check command timed out (%.0fs) for node %s",
+                    _CHECK_CMD_TIMEOUT, node.name,
+                )
+                return False
+
+            return proc.returncode == 0
+        except Exception as e:
+            logger.error("Completion check error for node %s: %s", node.name, e)
+            return False
+
+    async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
+        """Read result from status file convention, fall back to node's existing result."""
+        status_dir = DAG_STATUS_BASE_DIR / dag.id.hex[:8] / node.name
+        result_file = status_dir / "result"
+        try:
+            if result_file.exists():
+                content = result_file.read_text().strip()
+                if content:
+                    return content
+        except OSError:
+            pass
+        return node.result
 
     async def _propagate_failures(self, dag: ExecutionDAG) -> None:
         """Transitively block nodes whose predecessors have failed."""
@@ -492,7 +645,7 @@ class DAGOrchestrator:
         """Cancel pending/ready nodes when budget is exceeded."""
         cancelled_any = False
         for node in dag.nodes:
-            if node.status in ("pending", "ready"):
+            if node.status in ("pending", "ready", "awaiting_check"):
                 await self._store.update_node(
                     node.id, status="cancelled", error="Token budget exceeded"
                 )
@@ -500,7 +653,7 @@ class DAGOrchestrator:
                 cancelled_any = True
 
         # If there are still running nodes, let them finish
-        has_running = any(n.status == "running" for n in dag.nodes)
+        has_running = any(n.status in ("running", "awaiting_check") for n in dag.nodes)
         if not has_running:
             # Determine final status
             has_completed = any(n.status == "completed" for n in dag.nodes)

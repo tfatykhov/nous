@@ -846,7 +846,7 @@ class DAGNode(Base):
     __tablename__ = "dag_nodes"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'ready', 'running', 'completed', 'failed', 'blocked', 'cancelled')",
+            "status IN ('pending', 'ready', 'running', 'awaiting_check', 'completed', 'failed', 'blocked', 'cancelled')",
             name="chk_dag_node_status",
         ),
         CheckConstraint(
@@ -886,6 +886,14 @@ class DAGNode(Base):
         Integer, nullable=False, default=120, server_default="120"
     )
     completion_condition: Mapped[str | None] = mapped_column(String(100))
+    completion_check: Mapped[str | None] = mapped_column(Text)
+    completion_check_interval: Mapped[int | None] = mapped_column(Integer)
+    max_check_attempts: Mapped[int | None] = mapped_column(Integer)
+    check_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    awaiting_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     tokens_used: Mapped[int] = mapped_column(
@@ -903,6 +911,7 @@ class DAGNode(Base):
         kwargs.setdefault("wave", 0)
         kwargs.setdefault("timeout_seconds", 120)
         kwargs.setdefault("tokens_used", 0)
+        kwargs.setdefault("check_attempts", 0)
         super().__init__(**kwargs)
 
 

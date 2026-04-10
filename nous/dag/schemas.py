@@ -40,6 +40,7 @@ class DAGNodeStatus(str, Enum):
     pending = "pending"
     ready = "ready"
     running = "running"
+    awaiting_check = "awaiting_check"
     completed = "completed"
     failed = "failed"
     blocked = "blocked"
@@ -73,6 +74,18 @@ class DAGNodeSpec(BaseModel):
     model: str | None = Field(None, description="LLM model override")
     timeout_seconds: int = Field(120, ge=1, le=600, description="Execution timeout")
     completion_condition: str | None = Field(None, description="Optional completion condition")
+    completion_check: str | None = Field(
+        None,
+        description="Shell command polled each tick. Exit 0 = done, non-zero = still running."
+    )
+    completion_check_interval: int | None = Field(
+        None, ge=1,
+        description="Seconds between completion check polls. Default: every tick."
+    )
+    max_check_attempts: int | None = Field(
+        None, ge=1,
+        description="Max poll attempts before failure. Default: unlimited (timeout-based)."
+    )
 
 
 # ---------------------------------------------------------------------------
