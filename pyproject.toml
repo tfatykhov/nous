@@ -58,3 +58,8 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.22.1",
+]

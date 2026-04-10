@@ -160,6 +160,7 @@ nous/
 | 012.3 | Programmatic Tool Calling (run_python with memory functions in scope) | — |
 | F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
 | F038 | Memory Quality & Context Loading Fixes (quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency, user_direct bonus, task synthesis, context dedup, bash hints) | #258 |
+| F038 | Unified DAG Orchestration (DAGStore, DAGOrchestrator, DAG tools, dashboard tab) | #289 |
 
 ## How to Work
 
@@ -363,6 +364,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CACHE_SPLIT_SYSTEM_PROMPT` | `true` | Enable 3-tier system prompt splitting (F036) |
 | `NOUS_CACHE_SINGLE_BREAKPOINT` | `true` | Use single cache breakpoint strategy (F036) |
 | `NOUS_TOOL_SCHEMA_CACHE_ENABLED` | `true` | Cache tool schemas per frame (F036) |
+| `NOUS_DAG_ENABLED` | `true` | Enable DAG orchestration (F038) |
 
 ### REST Endpoints
 
