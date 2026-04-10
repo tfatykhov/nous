@@ -258,6 +258,38 @@ class TestDAGOrchestratorCancel:
         for node in fetched.nodes:
             assert node.status == "cancelled"
 
+    @pytest.mark.asyncio
+    async def test_cancel_dag_cancels_running_subtask(self, store, orchestrator, subtask_mgr):
+        """cancel_dag calls cancel on running subtasks, not just pending."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        subtask_mgr.get.return_value = SimpleNamespace(id=research.subtask_id, status="running")
+
+        subtask_mgr.cancel.reset_mock()
+        await orchestrator.cancel_dag(dag.id, reason="User cancelled")
+
+        subtask_mgr.cancel.assert_called_once_with(research.subtask_id)
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_dag_noop(self, store, orchestrator):
+        """cancel_dag on completed DAG is a no-op."""
+        dag = await store.create(_single_callback_request())
+        await orchestrator.start_dag(dag.id)
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "completed"
+        original_summary = fetched.result_summary
+
+        await orchestrator.cancel_dag(dag.id, reason="too late")
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "completed"
+        assert fetched.result_summary == original_summary
+
 
 class TestDAGOrchestratorBudget:
     """Test token budget enforcement."""
@@ -609,7 +641,7 @@ class TestDAGCompletionCheck:
 
         fetched = await store.get_dag(dag.id)
         node = next(n for n in fetched.nodes if n.name == "retryable")
-        assert node.status == "ready"
+        assert node.status == "pending"
         assert node.check_attempts == 0
         assert node.last_check_at is None
         assert node.awaiting_check_at is None
@@ -646,3 +678,258 @@ class TestDAGCompletionCheck:
         fetched = await store.get_dag(dag.id)
         async_job = next(n for n in fetched.nodes if n.name == "async-job")
         assert async_job.status == "awaiting_check"
+
+
+class TestDAGRetryNode:
+    """Test retry_node correctness."""
+
+    @pytest.mark.asyncio
+    async def test_retry_node_resets_to_pending(self, store, orchestrator, subtask_mgr):
+        """retry_node resets to pending so _find_ready_nodes picks it up."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+
+        # Simulate research subtask failed
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id, status="failed", result=None, error="OOM"
+        )
+        await orchestrator.tick()
+
+        # Verify failed
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "failed"
+
+        # Retry
+        await orchestrator.retry_node(dag.id, "research")
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "pending"  # Must be pending, not ready
+
+        # Tick should pick it up and launch
+        subtask_mgr.create.reset_mock()
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=uuid.uuid4(), status="pending", result=None, error=None
+        )
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "running"
+        subtask_mgr.create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retry_node_not_failed_raises(self, store, orchestrator):
+        """retry_node on non-failed node raises ValueError."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        with pytest.raises(ValueError, match="expected failed"):
+            await orchestrator.retry_node(dag.id, "research")
+
+    @pytest.mark.asyncio
+    async def test_retry_node_unknown_raises(self, store, orchestrator):
+        """retry_node on unknown node raises ValueError."""
+        dag = await store.create(_two_subtask_request())
+        with pytest.raises(ValueError, match="not found"):
+            await orchestrator.retry_node(dag.id, "nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_retry_only_unblocks_downstream(self, store, orchestrator, subtask_mgr):
+        """retry_node only unblocks nodes downstream of the retried node."""
+        # DAG: A -> B, C -> D  (two independent chains)
+        request = DAGCreateRequest(
+            name="selective-unblock",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask, instructions="B"),
+                DAGNodeSpec(name="c", type=DAGNodeType.subtask, instructions="C"),
+                DAGNodeSpec(name="d", type=DAGNodeType.subtask, instructions="D"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="a", to_node="b", edge_type="dependency"),
+                DAGEdgeSpec(from_node="c", to_node="d", edge_type="dependency"),
+            ],
+        )
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+
+        # Both A and C are wave-0, running. Simulate both fail.
+        async def mock_get(sid):
+            return SimpleNamespace(id=sid, status="failed", result=None, error="fail")
+        subtask_mgr.get = AsyncMock(side_effect=mock_get)
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert next(n for n in fetched.nodes if n.name == "b").status == "blocked"
+        assert next(n for n in fetched.nodes if n.name == "d").status == "blocked"
+
+        # Retry only A
+        await orchestrator.retry_node(dag.id, "a")
+
+        fetched = await store.get_dag(dag.id)
+        assert next(n for n in fetched.nodes if n.name == "b").status == "pending"
+        assert next(n for n in fetched.nodes if n.name == "d").status == "blocked"  # Still blocked
+
+
+class TestDAGCancelCascade:
+    """Test cancel_cascade edge semantics."""
+
+    @pytest.mark.asyncio
+    async def test_cancel_cascade_produces_cancelled_not_blocked(self, store, orchestrator, subtask_mgr):
+        """cancel_cascade edges set downstream to cancelled, not blocked."""
+        # main -> cleanup (cancel_cascade), main -> dep-node (dependency)
+        # cleanup and dep-node must be wave-1 (depend on main) so they stay pending
+        # while main runs. We use dependency edges for wave ordering and
+        # cancel_cascade for the cascade semantics on cleanup.
+        request = DAGCreateRequest(
+            name="cascade-test",
+            nodes=[
+                DAGNodeSpec(name="main", type=DAGNodeType.subtask, instructions="Main"),
+                DAGNodeSpec(name="cleanup", type=DAGNodeType.subtask, instructions="Cleanup"),
+                DAGNodeSpec(name="dep-node", type=DAGNodeType.subtask, instructions="Depends"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="main", to_node="cleanup", edge_type="cancel_cascade"),
+                DAGEdgeSpec(from_node="main", to_node="dep-node", edge_type="dependency"),
+            ],
+        )
+
+        # Make create() return unique subtask IDs for each call
+        subtask_ids = iter([uuid.uuid4(), uuid.uuid4()])
+        subtask_mgr.create.side_effect = lambda **kw: SimpleNamespace(
+            id=next(subtask_ids), status="pending"
+        )
+
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        main_node = next(n for n in fetched.nodes if n.name == "main")
+        cleanup_node = next(n for n in fetched.nodes if n.name == "cleanup")
+        main_sid = main_node.subtask_id
+
+        # Only main's subtask fails; cleanup is wave-0 too (cancel_cascade
+        # doesn't count for waves), so we need per-subtask_id mock results.
+        async def selective_get(sid):
+            if sid == main_sid:
+                return SimpleNamespace(id=sid, status="failed", result=None, error="fail")
+            # cleanup subtask is still running
+            return SimpleNamespace(id=sid, status="running", result=None, error=None)
+
+        subtask_mgr.get = AsyncMock(side_effect=selective_get)
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        cleanup = next(n for n in fetched.nodes if n.name == "cleanup")
+        dep_node = next(n for n in fetched.nodes if n.name == "dep-node")
+
+        assert cleanup.status == "cancelled"  # cancel_cascade -> cancelled
+        assert dep_node.status == "blocked"   # dependency -> blocked
+
+
+class TestDAGEdgeCases:
+    """Test edge cases and coverage gaps."""
+
+    @pytest.mark.asyncio
+    async def test_subtask_deleted_mid_run(self, store, orchestrator, subtask_mgr):
+        """Subtask externally deleted -> node fails."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        subtask_mgr.get.return_value = None
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "failed"
+        assert "deleted" in research.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_gate_node_auto_passes(self, store, orchestrator, subtask_mgr):
+        """Gate node auto-completes when launched."""
+        request = DAGCreateRequest(
+            name="gate-test",
+            nodes=[
+                DAGNodeSpec(name="setup", type=DAGNodeType.subtask, instructions="Setup"),
+                DAGNodeSpec(name="gate", type=DAGNodeType.gate, instructions="Approval gate"),
+                DAGNodeSpec(name="deploy", type=DAGNodeType.subtask, instructions="Deploy"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="setup", to_node="gate", edge_type="dependency"),
+                DAGEdgeSpec(from_node="gate", to_node="deploy", edge_type="dependency"),
+            ],
+        )
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        setup = next(n for n in fetched.nodes if n.name == "setup")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=setup.subtask_id, status="completed", result="Done", error=None
+        )
+
+        subtask_mgr.create.reset_mock()
+        await orchestrator.tick()  # setup completes, gate auto-passes
+
+        fetched = await store.get_dag(dag.id)
+        gate = next(n for n in fetched.nodes if n.name == "gate")
+        assert gate.status == "completed"
+        assert "auto-passed" in gate.result.lower()
+
+        # Second tick picks up deploy (gate completed on previous tick)
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        deploy = next(n for n in fetched.nodes if n.name == "deploy")
+        assert deploy.status == "running"
+
+    @pytest.mark.asyncio
+    async def test_context_flow_injects_predecessor_result(self, store, orchestrator, subtask_mgr):
+        """context_flow edge injects predecessor result into subtask instructions."""
+        request = DAGCreateRequest(
+            name="context-flow-test",
+            nodes=[
+                DAGNodeSpec(name="research", type=DAGNodeType.subtask, instructions="Research topic"),
+                DAGNodeSpec(name="write", type=DAGNodeType.subtask, instructions="Write report"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="research", to_node="write", edge_type="context_flow"),
+            ],
+        )
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id, status="completed", result="KEY_FINDING_XYZ", error=None
+        )
+
+        subtask_mgr.create.reset_mock()
+        await orchestrator.tick()
+
+        # Verify the "write" subtask was created with the predecessor's result
+        assert subtask_mgr.create.called
+        # Get the task= keyword argument
+        call_kwargs = subtask_mgr.create.call_args
+        task_arg = call_kwargs.kwargs.get("task", "") if call_kwargs.kwargs else ""
+        assert "KEY_FINDING_XYZ" in task_arg
+        assert "Context from prior steps" in task_arg
+
+    @pytest.mark.asyncio
+    async def test_start_dag_not_found_raises(self, store, orchestrator):
+        """start_dag on non-existent DAG raises ValueError."""
+        with pytest.raises(ValueError, match="not found"):
+            await orchestrator.start_dag(uuid.uuid4())
+
+    @pytest.mark.asyncio
+    async def test_start_dag_already_running_raises(self, store, orchestrator):
+        """start_dag on already-running DAG raises ValueError."""
+        dag = await store.create(_single_callback_request())
+        await orchestrator.start_dag(dag.id)
+        with pytest.raises(ValueError, match="expected pending"):
+            await orchestrator.start_dag(dag.id)

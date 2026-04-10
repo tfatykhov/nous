@@ -130,6 +130,26 @@ class TestDagCreateTool:
         assert result["content"][0]["type"] == "text"
         assert isinstance(result["content"][0]["text"], str)
 
+    @pytest.mark.asyncio
+    async def test_dag_create_handles_db_error(self, tools, dag_store, dag_orchestrator):
+        """dag_create catches non-ValueError exceptions and returns clean error."""
+        original_create = dag_store.create
+        async def broken_create(req):
+            raise RuntimeError("DB connection lost")
+        dag_store.create = broken_create
+
+        handler = tools._handlers["dag_create"]
+        result = await handler(
+            name="broken-dag",
+            nodes=_simple_nodes(),
+            edges=[],
+        )
+        text = result["content"][0]["text"]
+        assert "Error" in text
+        assert "DB connection lost" in text
+
+        dag_store.create = original_create  # Restore
+
 
 # ------------------------------------------------------------------
 # dag_manage

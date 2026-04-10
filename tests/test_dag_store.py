@@ -189,3 +189,35 @@ class TestDAGStoreMaxActive:
         # The next one should fail
         with pytest.raises(ValueError, match="Active DAG limit reached"):
             await store.create(_simple_request("one-too-many"))
+
+
+class TestDAGStoreIsolation:
+    """Test agent_id isolation."""
+
+    @pytest.mark.asyncio
+    async def test_update_node_cross_agent_rejected(self, db):
+        """update_node cannot modify nodes belonging to another agent's DAG."""
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}")
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}")
+
+        dag = await store_a.create(_simple_request("isolation-test"))
+        node_id = dag.nodes[0].id
+
+        # Agent B tries to update Agent A's node
+        await store_b.update_node(node_id, status="failed", error="hijacked")
+
+        # Should not have changed
+        fetched = await store_a.get_dag(dag.id)
+        assert fetched.nodes[0].status == "ready"  # Unchanged
+        assert fetched.nodes[0].error is None
+
+    @pytest.mark.asyncio
+    async def test_get_dag_cross_agent_rejected(self, db):
+        """get_dag returns None for another agent's DAG."""
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}")
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}")
+
+        dag = await store_a.create(_simple_request("cross-agent-test"))
+
+        fetched = await store_b.get_dag(dag.id)
+        assert fetched is None
