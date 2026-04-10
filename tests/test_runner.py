@@ -724,6 +724,25 @@ def test_payload_adaptive_with_effort():
     assert payload["output_config"] == {"effort": "medium"}
 
 
+def test_payload_thinking_skipped_for_haiku():
+    """thinking params omitted when model is haiku (unsupported)."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="adaptive", model="claude-haiku-4-5-20251001")
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload("system", [{"role": "user", "content": "hi"}])
+    assert "thinking" not in payload
+
+
+def test_payload_thinking_skipped_for_haiku_model_override():
+    """thinking params omitted when model_override is haiku (subtask worker path)."""
+    s = Settings(ANTHROPIC_API_KEY="test-key", thinking_mode="adaptive", model="claude-opus-4-6")
+    r = AgentRunner(MockCognitiveLayer(), MockBrain(), MockHeart(), s)
+    payload = r._build_api_payload(
+        "system", [{"role": "user", "content": "hi"}],
+        model_override="claude-haiku-4-5-20251001",
+    )
+    assert "thinking" not in payload
+
+
 def test_payload_effort_skipped_for_haiku():
     """effort parameter omitted when model is haiku (unsupported)."""
     s = Settings(ANTHROPIC_API_KEY="test-key", effort="medium", model="claude-haiku-4-5-20251001")
