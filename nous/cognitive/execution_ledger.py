@@ -45,10 +45,14 @@ WRITE_TOOLS: set[str] = {
     "schedule_task",
     "cancel_task",
     "run_python",  # Can call learn_fact() and modify state
+    "heartbeat_check_manage",
+    "heartbeat_check_create",
 }
 
 # External side effects — extend when email/notification tools are registered
-EXTERNAL_TOOLS: set[str] = set()
+EXTERNAL_TOOLS: set[str] = {
+    "send_file",  # Sends files to Telegram
+}
 
 # Irreversible — extend when irreversible tools are registered
 IRREVERSIBLE_TOOLS: set[str] = set()
@@ -82,6 +86,9 @@ _KEY_ARGS: dict[str, list[str]] = {
     "web_fetch": ["url"],
     "run_python": [],  # Too large to summarize — spec says skip
     "get_procedure": ["name", "procedure_name"],
+    "heartbeat_check_manage": ["action", "name"],
+    "heartbeat_check_create": ["name", "prompt"],
+    "send_file": ["file_path"],
 }
 
 
@@ -292,12 +299,10 @@ class ExecutionLedger:
             for name in key_names:
                 if name in args:
                     result[name] = str(args[name])[:80]
-                    break  # Only first matching key
         else:
-            # Fallback: first arg, truncated
-            for k, v in args.items():
+            # Fallback: capture up to 5 args for unknown tools
+            for k, v in list(args.items())[:5]:
                 result[k] = str(v)[:80]
-                break
 
         return result
 

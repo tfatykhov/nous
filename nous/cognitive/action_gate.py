@@ -134,10 +134,15 @@ class ActionGate:
         # Summarize new args the same way the ledger summarizes recorded args
         new_key_args = ledger._summarize_args(tool_name, tool_input)  # noqa: SLF001
 
+        turn_window = self._settings.action_gating_turn_window
+        min_turn = ledger.current_turn - turn_window
+
         recent = [
             a
             for a in ledger.actions[-20:]
-            if a.tool_name == tool_name and a.status == "success"
+            if a.tool_name == tool_name
+            and a.status == "success"
+            and a.turn > min_turn
         ]
 
         for prior in recent:
@@ -201,20 +206,22 @@ class ActionGate:
         prior_args: dict[str, str],
         new_args: dict[str, str],
     ) -> bool:
-        """Return True if ANY shared key has matching values.
+        """Return True if ALL shared keys have matching values.
 
         Comparison is case-insensitive with whitespace stripped.  Keys that
-        represent file paths (``path``, ``file``, ``command``) receive
-        additional normalisation: trailing slashes are removed and leading
-        ``./`` is stripped so ``./foo.py`` and ``foo.py`` are treated as
-        identical.
+        represent file paths (``path``, ``file``) receive additional
+        normalisation: trailing slashes are removed and leading ``./`` is
+        stripped so ``./foo.py`` and ``foo.py`` are treated as identical.
+
+        Returns False when there are no shared keys.
         """
-        PATH_KEYS = {"path", "file"}
+        PATH_KEYS = {"path", "file", "file_path"}
 
-        for key in prior_args:
-            if key not in new_args:
-                continue
+        shared_keys = set(prior_args) & set(new_args)
+        if not shared_keys:
+            return False
 
+        for key in shared_keys:
             prior_val = prior_args[key].strip().lower()
             new_val = new_args[key].strip().lower()
 
@@ -222,10 +229,10 @@ class ActionGate:
                 prior_val = prior_val.rstrip("/").removeprefix("./")
                 new_val = new_val.rstrip("/").removeprefix("./")
 
-            if prior_val == new_val:
-                return True
+            if prior_val != new_val:
+                return False
 
-        return False
+        return True
 
     def _build_gate_prompt(
         self,

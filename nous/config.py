@@ -314,6 +314,7 @@ class Settings(BaseSettings):
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"
     action_gating_model: str = "claude-haiku-4-5-20251001"
     action_gating_external_only: bool = False  # True = skip Tier 2, only gate external/irreversible
+    action_gating_turn_window: int = 5  # Only block duplicates within this many turns
 
     # F030: MMR Diversity Re-Ranking
     mmr_enabled: bool = False

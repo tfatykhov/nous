@@ -59,6 +59,7 @@ def _make_settings(**kwargs) -> types.SimpleNamespace:
         "action_gating_model": "claude-haiku-4-5-20251001",
         "action_gating_enabled": True,
         "action_gating_external_only": False,
+        "action_gating_turn_window": 5,
     }
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -254,12 +255,12 @@ class TestSummarizeArgs:
         assert "foo" in result
         assert result["foo"] == "bar"
 
-    def test_summarize_args_prefer_first_matching_key(self):
-        """For write_file, 'path' is preferred over 'file_path'."""
+    def test_summarize_args_captures_all_matching_keys(self):
+        """For write_file, both 'path' and 'file_path' are captured."""
         ledger = _make_ledger()
         result = ledger._summarize_args("write_file", {"path": "p.txt", "file_path": "fp.txt"})
         assert result.get("path") == "p.txt"
-        assert "file_path" not in result
+        assert result.get("file_path") == "fp.txt"
 
 
 class TestHasBlockedActionsThisTurn:
