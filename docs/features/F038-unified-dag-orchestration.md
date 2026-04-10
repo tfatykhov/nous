@@ -584,8 +584,48 @@ if critic_result.dependency_type == "phased":
 ### Phase 3: Dashboard & Observability
 
 **New files:**
-- Dashboard panel for DAG visualization (node graph with status colors)
-- DAG execution history and post-mortems
+- `static/dashboard/js/dag.js` — DAG dashboard tab (D3 node graph + status panels)
+- Query function `get_dag_dashboard_data()` in `nous/api/dashboard_queries.py`
+
+**Modified files:**
+- `nous/api/rest.py` — `GET /dashboard/dag` endpoint + route registration
+- `static/dashboard/index.html` — Nav link + view container + script include
+- `static/dashboard/css/dashboard.css` — DAG-specific styles (node colors, edge paths)
+
+**Dashboard Sections:**
+
+1. **Status Banner** — Active DAGs count, total nodes running, budget utilization pill
+2. **Stat Cards** (4-grid):
+   - Active DAGs (with running/pending breakdown)
+   - Nodes Completed (24h)
+   - Success Rate (completed / total finished DAGs)
+   - Avg Completion Time
+3. **Active DAG List** — Table with columns: Name, Status (badge), Source, Nodes (progress bar: completed/total), Created, Actions (view graph, cancel)
+4. **DAG Detail View** — D3 force-directed node graph:
+   - Nodes colored by status: pending (gray), ready (blue), running (amber pulse), completed (green), failed (red), blocked (dark red), cancelled (muted)
+   - Nodes shaped by type: circle (subtask), diamond (check), hexagon (gate), triangle (callback)
+   - Edges styled by type: solid (dependency), dashed (cancel_cascade), dotted with arrow (context_flow)
+   - Wave lanes (horizontal grouping by wave number)
+   - Click node → side panel with: name, type, status, instructions preview, result/error, timing, linked primitive ID
+5. **DAG History** — Recent completed/failed/cancelled DAGs with expandable post-mortem
+6. **Budget Chart** — Doughnut chart showing token consumption vs budget per active DAG
+
+**Auto-refresh:** 15 seconds (DAGs advance on heartbeat ticks, faster refresh than heartbeat's 30s)
+
+**REST Endpoint:**
+```
+GET /dashboard/dag
+Response: {
+  "active_dags": [...],       // Currently running DAGs with full node/edge data
+  "recent_dags": [...],       // Last 20 completed/failed/cancelled DAGs
+  "stats": {
+    "active_count": int,
+    "nodes_completed_24h": int,
+    "success_rate": float,
+    "avg_completion_seconds": float
+  }
+}
+```
 
 **Estimated effort:** ~6-8 hours
 

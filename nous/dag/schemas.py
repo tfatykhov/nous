@@ -148,13 +148,13 @@ class DAGCreateRequest(BaseModel):
         Returns a dict mapping node name -> wave number.
         Raises ValueError if the graph contains a cycle.
         """
-        # Build adjacency and in-degree maps (only dependency edges)
+        # Build adjacency and in-degree maps (dependency + context_flow edges)
         name_set = {n.name for n in self.nodes}
         adj: dict[str, list[str]] = {n.name: [] for n in self.nodes}
         in_degree: dict[str, int] = {n.name: 0 for n in self.nodes}
 
         for edge in self.edges:
-            if edge.edge_type == "dependency":
+            if edge.edge_type in ("dependency", "context_flow"):
                 adj[edge.from_node].append(edge.to_node)
                 in_degree[edge.to_node] += 1
 

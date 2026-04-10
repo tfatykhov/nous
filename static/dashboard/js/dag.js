@@ -171,7 +171,7 @@ function renderDag(container, data) {
                 '<div style="font-size:11px;color:var(--muted);margin-top:2px">' + completedNodes + '/' + totalNodes + ' nodes</div>' +
                 '</td>';
             html += '<td style="color:var(--muted);font-size:12px">' + dagHumanizeAgo(dag.created_at) + '</td>';
-            html += '<td><button class="btn-small dag-graph-btn" data-dag-idx="' + idx + '">View Graph</button></td>';
+            html += '<td><button class="btn btn-sm dag-graph-btn" data-dag-idx="' + idx + '">View Graph</button></td>';
             html += '</tr>';
         });
         html += '</tbody></table>';
@@ -184,7 +184,7 @@ function renderDag(container, data) {
     html += '<div id="dag-graph-section" class="chart-card mb-24" style="display:none">';
     html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
     html += '<h3 id="dag-graph-title">DAG Graph</h3>';
-    html += '<button class="btn-small" id="dag-graph-close">Close</button>';
+    html += '<button class="btn btn-sm" id="dag-graph-close">Close</button>';
     html += '</div>';
     html += '<div class="dag-graph-container" id="dag-graph-container">';
     html += '<div class="dag-node-detail" id="dag-node-detail"></div>';

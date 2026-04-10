@@ -115,6 +115,17 @@ class DAGOrchestrator:
             completed_at=None,
         )
 
+        # Unblock dependent nodes that were blocked by this failure
+        for other in dag.nodes:
+            if other.status == "blocked":
+                await self._store.update_node(
+                    other.id, status="pending", error=None
+                )
+
+        # Reactivate DAG if it was marked failed
+        if dag.status in ("failed", "partial"):
+            await self._store.update_dag_status(dag_id, "running")
+
     # ------------------------------------------------------------------
     # Internal: DAG advancement
     # ------------------------------------------------------------------
