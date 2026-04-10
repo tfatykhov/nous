@@ -1940,3 +1940,95 @@ body {
 .obs-handler-dot.good { background: var(--green); }
 .obs-handler-dot.warn { background: var(--yellow); }
 .obs-handler-dot.bad { background: var(--red); }
+
+/* ── F038: DAG Orchestrator ─────────────────────────────────────────── */
+
+.dag-graph-container {
+    position: relative;
+    min-height: 400px;
+    background: var(--surface);
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.dag-node { cursor: pointer; }
+.dag-node:hover { opacity: 0.85; }
+
+.dag-node-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    text-anchor: middle;
+    fill: var(--text);
+    pointer-events: none;
+}
+
+.dag-edge { fill: none; stroke-width: 1.5; }
+.dag-edge.dependency { stroke: var(--muted); }
+.dag-edge.cancel_cascade { stroke: var(--red); stroke-dasharray: 6 3; }
+.dag-edge.context_flow { stroke: var(--accent); stroke-dasharray: 2 4; }
+
+.dag-node-detail {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 280px;
+    height: 100%;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    padding: 16px;
+    overflow-y: auto;
+    display: none;
+    font-size: 13px;
+    z-index: 10;
+}
+.dag-node-detail.visible { display: block; }
+
+.dag-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.06);
+    overflow: hidden;
+}
+.dag-progress-fill {
+    height: 100%;
+    border-radius: 3px;
+    background: var(--green);
+    transition: width 0.3s ease;
+}
+
+.dag-list-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+.dag-list-table th {
+    text-align: left;
+    padding: 8px 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+}
+.dag-list-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.dag-list-table tr:hover td {
+    background: rgba(255,255,255,0.02);
+}
+
+.dag-wave-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    fill: var(--muted);
+    font-weight: 600;
+}
+
+@keyframes pulse-running {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}

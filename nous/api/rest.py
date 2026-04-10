@@ -1475,6 +1475,20 @@ def create_app(
             "timeline": timeline,
         })
 
+    # --- F038: DAG Orchestration dashboard ---
+
+    async def dashboard_dag(request: Request) -> JSONResponse:
+        """GET /dashboard/dag - DAG orchestration overview for dashboard."""
+        try:
+            from nous.api.dashboard_queries import get_dag_dashboard_data
+
+            async with database.session() as session:
+                data = await get_dag_dashboard_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard DAG error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -2369,6 +2383,8 @@ def create_app(
         Route("/dashboard/observability", dashboard_observability),
         # F036.1: Cache dashboard
         Route("/dashboard/cache", dashboard_cache),
+        # F038: DAG orchestration dashboard
+        Route("/dashboard/dag", dashboard_dag),
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
