@@ -11,6 +11,8 @@
 var _dagRefreshInterval = null;
 var _dagRefreshInFlight = false;
 var _dagAbortController = null;
+var _dagExpandedIds = new Set();   // Recent DAG detail rows that are open
+var _dagActiveGraphId = null;      // Active DAG whose graph is displayed
 
 Dashboard.registerView('dag', async function (container) {
     Dashboard.showLoading(container);
@@ -136,6 +138,12 @@ function renderDag(container, data) {
     var activeDags = data.active_dags || [];
     var recentDags = data.recent_dags || [];
 
+    // Prune expanded IDs that no longer exist in data
+    var recentIds = new Set(recentDags.map(function (d) { return d.id; }));
+    _dagExpandedIds.forEach(function (id) {
+        if (!recentIds.has(id)) _dagExpandedIds.delete(id);
+    });
+
     var html = '<div class="view-header">' +
         '<h1>DAG Orchestrator</h1>' +
         '<p class="view-subtitle">Unified execution DAGs, node progress, and graph visualization</p>' +
@@ -195,16 +203,56 @@ function renderDag(container, data) {
     html += '<div class="chart-card mb-24"><h3>Recent DAGs</h3>';
     if (recentDags.length > 0) {
         html += '<table class="dag-list-table">';
-        html += '<thead><tr><th>Name</th><th>Status</th><th>Nodes</th><th>Tokens</th><th>Completed</th></tr></thead>';
+        html += '<thead><tr><th></th><th>Name</th><th>Status</th><th>Nodes</th><th>Tokens</th><th>Completed</th></tr></thead>';
         html += '<tbody>';
         recentDags.forEach(function (dag) {
-            html += '<tr>';
-            html += '<td>' + escapeHtml(dag.name) + '</td>';
+            var isOpen = _dagExpandedIds.has(dag.id);
+            var arrowChar = isOpen ? '\u25BC' : '\u25B6';
+
+            html += '<tr class="dag-recent-row" data-dag-id="' + escapeHtml(dag.id) + '" style="cursor:pointer">';
+            html += '<td class="dag-expand-arrow" style="width:20px;font-size:10px;color:var(--muted)">' + arrowChar + '</td>';
+            html += '<td><strong>' + escapeHtml(dag.name) + '</strong></td>';
             html += '<td>' + dagStatusBadge(dag.status) + '</td>';
             html += '<td style="font-size:12px">' + (dag.completed_count || 0) + '/' + (dag.node_count || 0) + '</td>';
             html += '<td style="font-size:12px;color:var(--muted)">' + Dashboard.formatNumber(dag.tokens_consumed || 0) + '</td>';
             html += '<td style="font-size:12px;color:var(--muted)">' + dagHumanizeAgo(dag.completed_at) + '</td>';
             html += '</tr>';
+
+            // Detail row
+            html += '<tr class="dag-detail-row" data-dag-id="' + escapeHtml(dag.id) + '" style="display:' + (isOpen ? 'table-row' : 'none') + '">';
+            html += '<td colspan="6" style="padding:0">';
+            html += '<div class="dag-detail-content">';
+
+            // Source + duration
+            var duration = '';
+            if (dag.created_at && dag.completed_at) {
+                var secs = (new Date(dag.completed_at) - new Date(dag.created_at)) / 1000;
+                duration = dagHumanizeDuration(secs);
+            }
+            html += '<div class="dag-detail-grid">';
+            html += '<div><span class="dag-detail-label">Source</span><span>' + escapeHtml(dag.source || '--') + '</span></div>';
+            html += '<div><span class="dag-detail-label">Duration</span><span>' + (duration || '--') + '</span></div>';
+            html += '<div><span class="dag-detail-label">Token Budget</span><span>' + Dashboard.formatNumber(dag.token_budget || 0) + '</span></div>';
+            html += '<div><span class="dag-detail-label">Created</span><span>' + dagHumanizeAgo(dag.created_at) + '</span></div>';
+            html += '</div>';
+
+            // Result summary
+            if (dag.result_summary) {
+                html += '<div class="dag-detail-section">';
+                html += '<div class="dag-detail-label">Result Summary</div>';
+                html += '<div class="dag-detail-text">' + escapeHtml(dag.result_summary) + '</div>';
+                html += '</div>';
+            }
+
+            // Postmortem
+            if (dag.postmortem) {
+                html += '<div class="dag-detail-section">';
+                html += '<div class="dag-detail-label">Postmortem</div>';
+                html += '<div class="dag-detail-text dag-detail-postmortem">' + escapeHtml(dag.postmortem) + '</div>';
+                html += '</div>';
+            }
+
+            html += '</div></td></tr>';
         });
         html += '</tbody></table>';
     } else {
@@ -228,17 +276,52 @@ function renderDag(container, data) {
         btn.addEventListener('click', function () {
             var idx = parseInt(btn.getAttribute('data-dag-idx'), 10);
             var dag = activeDags[idx];
-            if (dag) showDagGraph(dag);
+            if (dag) {
+                _dagActiveGraphId = dag.id;
+                showDagGraph(dag);
+            }
         });
     });
 
     var closeBtn = document.getElementById('dag-graph-close');
     if (closeBtn) {
         closeBtn.addEventListener('click', function () {
+            _dagActiveGraphId = null;
             var section = document.getElementById('dag-graph-section');
             if (section) section.style.display = 'none';
         });
     }
+
+    // Re-open active graph after refresh
+    if (_dagActiveGraphId) {
+        var graphDag = activeDags.find(function (d) { return d.id === _dagActiveGraphId; });
+        if (graphDag) {
+            showDagGraph(graphDag);
+        } else {
+            _dagActiveGraphId = null;
+        }
+    }
+
+    // -- Wire up recent DAG detail toggles --
+    var recentRows = container.querySelectorAll('.dag-recent-row');
+    recentRows.forEach(function (row) {
+        row.addEventListener('click', function () {
+            var dagId = row.getAttribute('data-dag-id');
+            var detailRow = container.querySelector('.dag-detail-row[data-dag-id="' + dagId + '"]');
+            var arrow = row.querySelector('.dag-expand-arrow');
+            if (!detailRow) return;
+
+            if (_dagExpandedIds.has(dagId)) {
+                _dagExpandedIds.delete(dagId);
+                detailRow.style.display = 'none';
+                if (arrow) arrow.textContent = '\u25B6';
+            } else {
+                _dagExpandedIds.add(dagId);
+                detailRow.style.display = 'table-row';
+                if (arrow) arrow.textContent = '\u25BC';
+            }
+        });
+    });
 
     // -- Create budget chart --
     if (dagsWithBudget.length > 0) {
