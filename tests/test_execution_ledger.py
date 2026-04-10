@@ -153,11 +153,11 @@ class TestSummarizeArgsAllTools:
 
     def test_learn_fact_subject(self):
         result = self._s("learn_fact", {"subject": "Paris", "content": "is capital"})
-        assert result == {"subject": "Paris"}
+        assert result == {"subject": "Paris", "content": "is capital"}
 
     def test_learn_fact_content_fallback(self):
         result = self._s("learn_fact", {"content": "important", "fact": "f"})
-        assert result == {"content": "important"}
+        assert result == {"content": "important", "fact": "f"}
 
     def test_learn_fact_fact_key(self):
         result = self._s("learn_fact", {"fact": "some fact"})
@@ -165,7 +165,7 @@ class TestSummarizeArgsAllTools:
 
     def test_learn_skill_name(self):
         result = self._s("learn_skill", {"name": "my_skill", "url": "http://x"})
-        assert result == {"name": "my_skill"}
+        assert result == {"name": "my_skill", "url": "http://x"}
 
     def test_learn_skill_url_fallback(self):
         result = self._s("learn_skill", {"url": "http://example.com"})
@@ -189,15 +189,15 @@ class TestSummarizeArgsAllTools:
 
     def test_create_censor_name(self):
         result = self._s("create_censor", {"name": "no-pii", "expression": "..."})
-        assert result == {"name": "no-pii"}
+        assert result == {"name": "no-pii", "expression": "..."}
 
     def test_store_identity_section(self):
         result = self._s("store_identity", {"section": "bio", "key": "name"})
-        assert result == {"section": "bio"}
+        assert result == {"section": "bio", "key": "name"}
 
     def test_spawn_task_description(self):
         result = self._s("spawn_task", {"description": "do stuff", "task": "t"})
-        assert result == {"description": "do stuff"}
+        assert result == {"description": "do stuff", "task": "t"}
 
     def test_schedule_task_description(self):
         result = self._s("schedule_task", {"description": "daily run"})
@@ -231,9 +231,9 @@ class TestSummarizeArgsAllTools:
 
     def test_unknown_tool_uses_first_arg(self):
         result = self._s("mystery_tool", {"alpha": "a", "beta": "b"})
-        # Should use first key only
-        assert len(result) == 1
-        assert "alpha" in result
+        # Fallback captures up to 5 args for unknown tools
+        assert len(result) == 2
+        assert result == {"alpha": "a", "beta": "b"}
 
     def test_empty_args_unknown_tool(self):
         result = self._s("mystery_tool", {})
@@ -248,10 +248,9 @@ class TestSummarizeArgsAllTools:
 class TestClassifySideEffectSets:
     """Verify that EXTERNAL_TOOLS and IRREVERSIBLE_TOOLS sets are respected."""
 
-    def test_external_tools_set_currently_empty(self):
-        # The sets are intentionally empty; verify classifying an unknown tool
-        # that's NOT in either set falls through to "write"
-        assert len(EXTERNAL_TOOLS) == 0
+    def test_external_tools_set(self):
+        # send_file is external (Telegram); IRREVERSIBLE is still empty
+        assert EXTERNAL_TOOLS == {"send_file"}
         assert len(IRREVERSIBLE_TOOLS) == 0
 
     def test_monkey_patch_external_tool(self, monkeypatch):
