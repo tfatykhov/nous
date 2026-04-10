@@ -436,6 +436,7 @@ async def create_components(settings: Settings) -> dict:
             logger.debug("TaskScheduler not available yet")
 
     # F034: Heartbeat proactive monitoring
+    dynamic_loader = None
     heartbeat_runner = None
     if settings.heartbeat_enabled:
         try:
@@ -509,6 +510,32 @@ async def create_components(settings: Settings) -> dict:
         from nous.api.tools import register_heartbeat_tools
         register_heartbeat_tools(dispatcher, heartbeat_runner.dynamic_loader)
 
+    # F038: DAG Orchestration
+    dag_orchestrator = None
+    if settings.dag_enabled:
+        try:
+            from nous.dag.store import DAGStore
+            from nous.dag.orchestrator import DAGOrchestrator
+
+            dag_store = DAGStore(database, agent_id=settings.agent_id)
+            dag_orchestrator = DAGOrchestrator(
+                store=dag_store,
+                subtask_mgr=heart.subtasks,
+                dynamic_loader=dynamic_loader,
+                bus=bus,
+            )
+
+            if heartbeat_runner is not None:
+                heartbeat_runner.dag_orchestrator = dag_orchestrator
+                logger.info("F038: DAG orchestrator wired to heartbeat runner")
+
+            from nous.api.tools import register_dag_tools
+            register_dag_tools(dispatcher, dag_store, dag_orchestrator)
+
+            logger.info("F038: DAG orchestration enabled")
+        except ImportError:
+            logger.debug("F038: DAG module not available yet")
+
     return {
         "database": database,
         "brain": brain,
@@ -530,6 +557,7 @@ async def create_components(settings: Settings) -> dict:
         "rubric_manager": rubric_manager,
         "rubric_evolver": rubric_evolver if bus else None,
         "heartbeat_runner": heartbeat_runner,
+        "dag_orchestrator": dag_orchestrator,
         "context_logger": context_logger,
     }
 
