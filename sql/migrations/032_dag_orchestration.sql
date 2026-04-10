@@ -65,8 +65,4 @@ CREATE TABLE IF NOT EXISTS nous_system.dag_edges (
 CREATE INDEX idx_dag_edges_dag ON nous_system.dag_edges (dag_id);
 CREATE INDEX idx_dag_edges_to ON nous_system.dag_edges (to_node_id);
 
-INSERT INTO nous_system.migrations (version, description)
-VALUES (32, 'F038: DAG orchestration tables')
-ON CONFLICT DO NOTHING;
-
 COMMIT;

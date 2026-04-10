@@ -213,14 +213,16 @@ class DAGOrchestrator:
 
         check = self._dynamic_loader._registry.get_check(node.check_name)
         if check is None:
-            # Check was unregistered — treat as failure
+            # Check was unregistered — for DAG-managed checks this means
+            # self-disable completed (DynamicCheckLoader unregisters on disable).
+            # Treat as successful completion, not failure.
             await self._store.update_node(
                 node.id,
-                status="failed",
-                error="Underlying check was unregistered",
+                status="completed",
+                result="Check completed (self-disabled)",
                 completed_at=datetime.now(UTC),
             )
-            node.status = "failed"
+            node.status = "completed"
             return
 
         # Use check.active to detect disabled checks (review fix)

@@ -1930,34 +1930,28 @@ def register_dag_tools(
             return {"content": [{"type": "text", "text": f"Error: {e}"}]}
 
     dispatcher.register("dag_create", dag_create, {
-        "name": "dag_create",
+        "type": "object",
         "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "DAG name"},
-                "description": {"type": "string"},
-                "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "completion_condition": {"type": "string"}}, "required": ["name", "type", "instructions"]}},
-                "edges": {"type": "array", "items": {"type": "object", "properties": {"from_node": {"type": "string"}, "to_node": {"type": "string"}, "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow"]}}, "required": ["from_node", "to_node"]}},
-                "source": {"type": "string"},
-                "token_budget": {"type": "integer"},
-            },
-            "required": ["name", "nodes", "edges"],
+        "properties": {
+            "name": {"type": "string", "description": "DAG name"},
+            "description": {"type": "string"},
+            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "completion_condition": {"type": "string"}}, "required": ["name", "type", "instructions"]}},
+            "edges": {"type": "array", "items": {"type": "object", "properties": {"from_node": {"type": "string"}, "to_node": {"type": "string"}, "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow"]}}, "required": ["from_node", "to_node"]}},
+            "source": {"type": "string"},
+            "token_budget": {"type": "integer"},
         },
+        "required": ["name", "nodes", "edges"],
     })
 
     dispatcher.register("dag_manage", dag_manage, {
-        "name": "dag_manage",
+        "type": "object",
         "description": "List, inspect, cancel, or retry nodes in DAGs.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["list", "status", "cancel", "retry_node"]},
-                "dag_id": {"type": "string"},
-                "node_name": {"type": "string"},
-            },
-            "required": ["action"],
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "status", "cancel", "retry_node"]},
+            "dag_id": {"type": "string"},
+            "node_name": {"type": "string"},
         },
+        "required": ["action"],
     })
 
     logger.info("F038: Registered dag_create and dag_manage tools")
