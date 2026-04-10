@@ -1798,3 +1798,186 @@ def register_heartbeat_tools(dispatcher: ToolDispatcher, loader: "Any") -> None:
         },
         "required": ["action"],
     })
+
+
+# ---------------------------------------------------------------------------
+# DAG orchestration tools (F038)
+# ---------------------------------------------------------------------------
+
+
+def register_dag_tools(
+    dispatcher: ToolDispatcher,
+    store: "Any",
+    orchestrator: "Any",
+) -> None:
+    """F038: Register DAG orchestration tools."""
+    from nous.dag.schemas import DAGCreateRequest, DAGEdgeSpec, DAGNodeSpec, DAGNodeType
+
+    async def dag_create(**kwargs: Any) -> dict:
+        """Create a DAG with dependency-tracked nodes."""
+        try:
+            # Parse nodes
+            node_specs: list[DAGNodeSpec] = []
+            for n in kwargs.get("nodes", []):
+                node_specs.append(DAGNodeSpec(
+                    name=n["name"],
+                    type=DAGNodeType(n["type"]),
+                    instructions=n.get("instructions", ""),
+                    description=n.get("description", ""),
+                    tools=n.get("tools"),
+                    frame_type=n.get("frame_type"),
+                    model=n.get("model"),
+                    timeout_seconds=n.get("timeout_seconds", 120),
+                    completion_condition=n.get("completion_condition"),
+                ))
+
+            # Parse edges
+            edge_specs: list[DAGEdgeSpec] = []
+            for e in kwargs.get("edges", []):
+                edge_specs.append(DAGEdgeSpec(
+                    from_node=e["from_node"],
+                    to_node=e["to_node"],
+                    edge_type=e.get("edge_type", "dependency"),
+                ))
+
+            request = DAGCreateRequest(
+                name=kwargs["name"],
+                description=kwargs.get("description", ""),
+                source=kwargs.get("source", "conversation"),
+                token_budget=kwargs.get("token_budget"),
+                nodes=node_specs,
+                edges=edge_specs,
+            )
+
+            dag = await store.create(request)
+            await orchestrator.start_dag(dag.id)
+
+            # Compute wave summary
+            waves = request.compute_waves()
+            wave_groups: dict[int, list[str]] = {}
+            for name, wave in waves.items():
+                wave_groups.setdefault(wave, []).append(name)
+
+            lines = [f"Created DAG '{dag.name}' ({str(dag.id)[:8]})"]
+            lines.append(f"  {len(dag.nodes)} nodes, {len(dag.edges)} edges")
+            for w in sorted(wave_groups):
+                lines.append(f"  Wave {w}: {', '.join(wave_groups[w])}")
+            lines.append("Status: running")
+
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error creating DAG: {e}"}]}
+
+    async def dag_manage(**kwargs: Any) -> dict:
+        """List, inspect, cancel, or retry nodes in DAGs."""
+        action = kwargs["action"]
+        dag_id_str = kwargs.get("dag_id")
+
+        try:
+            if action == "list":
+                dags = await store.get_active_dags()
+                if not dags:
+                    return {"content": [{"type": "text", "text": "No active DAGs."}]}
+                lines = [f"Active DAGs ({len(dags)}):"]
+                for d in dags:
+                    completed = sum(1 for n in d.nodes if n.status == "completed")
+                    total = len(d.nodes)
+                    lines.append(f"  {str(d.id)[:8]} | {d.name} | {d.status} | {completed}/{total} nodes done")
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+            if not dag_id_str:
+                return {"content": [{"type": "text", "text": "Error: dag_id required for this action"}]}
+
+            # Support 8-char prefix lookup
+            dag = await _resolve_dag(store, dag_id_str)
+            if dag is None:
+                return {"content": [{"type": "text", "text": f"Error: DAG '{dag_id_str}' not found"}]}
+
+            if action == "status":
+                status_icons = {
+                    "completed": "+", "failed": "X", "running": ">",
+                    "ready": "~", "pending": ".", "blocked": "!", "cancelled": "-",
+                }
+                lines = [
+                    f"DAG: {dag.name} ({str(dag.id)[:8]})",
+                    f"Status: {dag.status}",
+                    f"Nodes ({len(dag.nodes)}):",
+                ]
+                for node in sorted(dag.nodes, key=lambda n: (n.wave or 0, n.name)):
+                    icon = status_icons.get(node.status, "?")
+                    wave_str = f"w{node.wave}" if node.wave is not None else "w?"
+                    line = f"  [{icon}] {node.name} ({node.node_type}, {wave_str}) — {node.status}"
+                    if node.error:
+                        line += f" | error: {node.error[:80]}"
+                    lines.append(line)
+                return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+            elif action == "cancel":
+                await orchestrator.cancel_dag(dag.id, reason="cancelled by user")
+                return {"content": [{"type": "text", "text": f"Cancelled DAG '{dag.name}' ({str(dag.id)[:8]})"}]}
+
+            elif action == "retry_node":
+                node_name = kwargs.get("node_name")
+                if not node_name:
+                    return {"content": [{"type": "text", "text": "Error: node_name required for retry_node"}]}
+                await orchestrator.retry_node(dag.id, node_name)
+                return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to ready for retry"}]}
+
+            else:
+                return {"content": [{"type": "text", "text": f"Error: unknown action '{action}'"}]}
+
+        except ValueError as e:
+            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
+
+    dispatcher.register("dag_create", dag_create, {
+        "type": "object",
+        "description": "Create a DAG to orchestrate subtasks and checks with dependency tracking.",
+        "properties": {
+            "name": {"type": "string", "description": "DAG name"},
+            "description": {"type": "string"},
+            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "completion_condition": {"type": "string"}}, "required": ["name", "type", "instructions"]}},
+            "edges": {"type": "array", "items": {"type": "object", "properties": {"from_node": {"type": "string"}, "to_node": {"type": "string"}, "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow"]}}, "required": ["from_node", "to_node"]}},
+            "source": {"type": "string"},
+            "token_budget": {"type": "integer"},
+        },
+        "required": ["name", "nodes", "edges"],
+    })
+
+    dispatcher.register("dag_manage", dag_manage, {
+        "type": "object",
+        "description": "List, inspect, cancel, or retry nodes in DAGs.",
+        "properties": {
+            "action": {"type": "string", "enum": ["list", "status", "cancel", "retry_node"]},
+            "dag_id": {"type": "string"},
+            "node_name": {"type": "string"},
+        },
+        "required": ["action"],
+    })
+
+    logger.info("F038: Registered dag_create and dag_manage tools")
+
+
+async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
+    """Resolve a DAG by full UUID or 8-char prefix."""
+    from uuid import UUID as _UUID
+
+    # Try full UUID first
+    try:
+        dag_id = _UUID(dag_id_str)
+        return await store.get_dag(dag_id)
+    except ValueError:
+        pass
+
+    # Try prefix match against active DAGs
+    dags = await store.get_active_dags()
+    matches = [d for d in dags if str(d.id).startswith(dag_id_str)]
+    if len(matches) == 1:
+        return matches[0]
+
+    # Also check recent DAGs for status/retry on completed/failed
+    recent = await store.get_recent_dags(limit=20)
+    matches = [d for d in recent if str(d.id).startswith(dag_id_str)]
+    if len(matches) == 1:
+        return matches[0]
+
+    return None

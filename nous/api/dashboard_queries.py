@@ -1445,3 +1445,203 @@ async def get_heartbeat_dashboard_data(
         "findings_by_day": findings_by_day,
         "findings_timeline": findings_timeline,
     }
+
+
+# ── F038: DAG Orchestration Dashboard ──────────────────────────────────────
+
+
+def _dag_iso(val: Any) -> str | None:
+    """Convert a datetime or string to ISO string, or None."""
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
+
+
+async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[str, Any]:
+    """Return DAG orchestration dashboard data: active DAGs, recent DAGs, stats."""
+    now = datetime.now(timezone.utc)
+    twenty_four_hours_ago = now - timedelta(hours=24)
+
+    # ── Active DAGs (pending / running) ──
+    result = await session.execute(
+        text("""
+            SELECT id, name, description, status, source, created_at,
+                   started_at, token_budget, tokens_consumed
+            FROM nous_system.execution_dags
+            WHERE agent_id = :agent_id AND status IN ('pending', 'running')
+            ORDER BY created_at DESC
+        """),
+        {"agent_id": agent_id},
+    )
+    active_dag_rows = result.all()
+
+    active_dags: list[dict] = []
+    for dag_row in active_dag_rows:
+        dag_id = str(dag_row.id)
+
+        # Nodes for this DAG
+        node_result = await session.execute(
+            text("""
+                SELECT id, name, description, node_type, wave, status,
+                       result, error, tokens_used, started_at, completed_at
+                FROM nous_system.dag_nodes
+                WHERE dag_id = :dag_id
+                ORDER BY wave, name
+            """),
+            {"dag_id": dag_id},
+        )
+        nodes = []
+        for n in node_result:
+            nodes.append({
+                "id": str(n.id),
+                "name": n.name,
+                "description": n.description or "",
+                "node_type": n.node_type,
+                "wave": n.wave,
+                "status": n.status,
+                "result": (n.result or "")[:200],
+                "error": (n.error or "")[:200],
+                "tokens_used": n.tokens_used or 0,
+                "started_at": _dag_iso(n.started_at),
+                "completed_at": _dag_iso(n.completed_at),
+            })
+
+        # Edges for this DAG
+        edge_result = await session.execute(
+            text("""
+                SELECT id, from_node_id, to_node_id, edge_type
+                FROM nous_system.dag_edges
+                WHERE dag_id = :dag_id
+            """),
+            {"dag_id": dag_id},
+        )
+        edges = [
+            {
+                "id": str(e.id),
+                "from_node_id": str(e.from_node_id),
+                "to_node_id": str(e.to_node_id),
+                "edge_type": e.edge_type,
+            }
+            for e in edge_result
+        ]
+
+        active_dags.append({
+            "id": dag_id,
+            "name": dag_row.name,
+            "description": dag_row.description or "",
+            "status": dag_row.status,
+            "source": dag_row.source,
+            "created_at": _dag_iso(dag_row.created_at),
+            "started_at": _dag_iso(dag_row.started_at),
+            "token_budget": dag_row.token_budget,
+            "tokens_consumed": dag_row.tokens_consumed or 0,
+            "nodes": nodes,
+            "edges": edges,
+        })
+
+    # ── Recent completed/failed/cancelled DAGs (last 20) ──
+    result = await session.execute(
+        text("""
+            SELECT d.id, d.name, d.status, d.source, d.created_at, d.completed_at,
+                   d.token_budget, d.tokens_consumed, d.result_summary, d.postmortem,
+                   (SELECT COUNT(*) FROM nous_system.dag_nodes n WHERE n.dag_id = d.id) AS node_count,
+                   (SELECT COUNT(*) FROM nous_system.dag_nodes n WHERE n.dag_id = d.id AND n.status = 'completed') AS completed_count
+            FROM nous_system.execution_dags d
+            WHERE d.agent_id = :agent_id AND d.status IN ('completed', 'failed', 'cancelled', 'partial')
+            ORDER BY d.completed_at DESC NULLS LAST
+            LIMIT 20
+        """),
+        {"agent_id": agent_id},
+    )
+    recent_dags = [
+        {
+            "id": str(row.id),
+            "name": row.name,
+            "status": row.status,
+            "source": row.source,
+            "created_at": _dag_iso(row.created_at),
+            "completed_at": _dag_iso(row.completed_at),
+            "token_budget": row.token_budget,
+            "tokens_consumed": row.tokens_consumed or 0,
+            "result_summary": row.result_summary,
+            "postmortem": row.postmortem,
+            "node_count": row.node_count,
+            "completed_count": row.completed_count,
+        }
+        for row in result
+    ]
+
+    # ── Stats ──
+    # Active count
+    result = await session.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM nous_system.execution_dags
+            WHERE agent_id = :agent_id AND status IN ('pending', 'running')
+        """),
+        {"agent_id": agent_id},
+    )
+    active_count = result.scalar_one()
+
+    # Nodes completed in 24h
+    result = await session.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM nous_system.dag_nodes n
+            JOIN nous_system.execution_dags d ON d.id = n.dag_id
+            WHERE d.agent_id = :agent_id
+              AND n.status = 'completed'
+              AND n.completed_at >= :since
+        """),
+        {"agent_id": agent_id, "since": twenty_four_hours_ago},
+    )
+    nodes_completed_24h = result.scalar_one()
+
+    # Success rate: count completed vs total finished
+    result = await session.execute(
+        text("""
+            SELECT
+                COUNT(*) AS total_finished,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed
+            FROM nous_system.execution_dags
+            WHERE agent_id = :agent_id AND status IN ('completed', 'failed', 'cancelled', 'partial')
+        """),
+        {"agent_id": agent_id},
+    )
+    stats_row = result.one()
+    total_finished = stats_row.total_finished or 0
+    completed_count_stat = stats_row.completed or 0
+    success_rate = (completed_count_stat / total_finished) if total_finished > 0 else 0.0
+
+    # Average completion time — compute in Python for cross-DB compat
+    result = await session.execute(
+        text("""
+            SELECT created_at, completed_at
+            FROM nous_system.execution_dags
+            WHERE agent_id = :agent_id AND completed_at IS NOT NULL
+              AND status IN ('completed', 'failed', 'cancelled', 'partial')
+        """),
+        {"agent_id": agent_id},
+    )
+    durations: list[float] = []
+    for row in result:
+        try:
+            ca = row.created_at if hasattr(row.created_at, 'timestamp') else datetime.fromisoformat(str(row.created_at))
+            co = row.completed_at if hasattr(row.completed_at, 'timestamp') else datetime.fromisoformat(str(row.completed_at))
+            durations.append((co - ca).total_seconds())
+        except Exception:
+            pass
+    avg_seconds = sum(durations) / len(durations) if durations else 0.0
+
+    return {
+        "active_dags": active_dags,
+        "recent_dags": recent_dags,
+        "stats": {
+            "active_count": active_count,
+            "nodes_completed_24h": nodes_completed_24h,
+            "success_rate": round(success_rate, 3),
+            "avg_completion_seconds": round(avg_seconds, 1),
+        },
+    }

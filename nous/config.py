@@ -388,6 +388,9 @@ class Settings(BaseSettings):
     context_log_max_total: int = 50
     context_log_retention_days: int = 30
 
+    # F038: DAG Orchestration
+    dag_enabled: bool = True
+
     # F024 Phase 3b: Self-Modifying Rubrics
     rubric_enabled: bool = True
     rubric_outcome_detection_enabled: bool = True

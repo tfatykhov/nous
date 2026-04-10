@@ -65,6 +65,8 @@ class HeartbeatRunner:
         self._dynamic_loader = dynamic_loader
         self._dedicated_runner: AgentRunner | None = None
 
+        self.dag_orchestrator: object | None = None  # F038: injected by main.py
+
         self._task: asyncio.Task | None = None
         self._running = False
         self._tick_count: int = 0
@@ -154,6 +156,13 @@ class HeartbeatRunner:
                     await self._tick(urgent_only=True)
                 else:
                     await self._tick()
+
+                # F038: Advance DAG orchestrator
+                if self.dag_orchestrator is not None:
+                    try:
+                        await self.dag_orchestrator.tick()
+                    except Exception:
+                        logger.exception("F038: DAG orchestrator tick failed")
 
                 # F034.5: Periodic dynamic check sync
                 if (

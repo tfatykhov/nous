@@ -1,0 +1,111 @@
+"""Tests for F038 DAG Orchestration dashboard query function."""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+import pytest_asyncio
+
+from nous.dag.schemas import (
+    DAGCreateRequest,
+    DAGEdgeSpec,
+    DAGNodeSpec,
+    DAGNodeType,
+)
+from nous.dag.store import DAGStore
+
+
+@pytest.mark.asyncio
+async def test_get_dag_dashboard_data_empty(db):
+    from nous.api.dashboard_queries import get_dag_dashboard_data
+
+    agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
+    async with db.session() as session:
+        data = await get_dag_dashboard_data(session, agent_id)
+    assert data["stats"]["active_count"] == 0
+    assert data["active_dags"] == []
+    assert data["recent_dags"] == []
+
+
+@pytest.mark.asyncio
+async def test_get_dag_dashboard_data_with_dag(db):
+    agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
+    store = DAGStore(db, agent_id=agent_id)
+    req = DAGCreateRequest(
+        name="dashboard-test",
+        nodes=[
+            DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+            DAGNodeSpec(name="b", type=DAGNodeType.check, instructions="B"),
+        ],
+        edges=[DAGEdgeSpec(from_node="a", to_node="b")],
+    )
+    dag = await store.create(req)
+    await store.update_dag_status(dag.id, "running")
+
+    from nous.api.dashboard_queries import get_dag_dashboard_data
+
+    async with db.session() as session:
+        data = await get_dag_dashboard_data(session, agent_id)
+
+    assert data["stats"]["active_count"] == 1
+    assert len(data["active_dags"]) == 1
+    assert data["active_dags"][0]["name"] == "dashboard-test"
+    assert len(data["active_dags"][0]["nodes"]) == 2
+    assert len(data["active_dags"][0]["edges"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_dag_dashboard_recent_dags(db):
+    """Completed DAGs appear in recent_dags, not active_dags."""
+    agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
+    store = DAGStore(db, agent_id=agent_id)
+    req = DAGCreateRequest(
+        name="completed-dag",
+        nodes=[
+            DAGNodeSpec(name="task1", type=DAGNodeType.subtask, instructions="Do it"),
+        ],
+    )
+    dag = await store.create(req)
+    await store.update_dag_status(dag.id, "running")
+    await store.update_dag_status(dag.id, "completed")
+
+    from nous.api.dashboard_queries import get_dag_dashboard_data
+
+    async with db.session() as session:
+        data = await get_dag_dashboard_data(session, agent_id)
+
+    assert data["stats"]["active_count"] == 0
+    assert len(data["active_dags"]) == 0
+    assert len(data["recent_dags"]) == 1
+    assert data["recent_dags"][0]["name"] == "completed-dag"
+    assert data["recent_dags"][0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_get_dag_dashboard_stats_success_rate(db):
+    """Success rate is computed from completed vs total finished."""
+    agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
+    store = DAGStore(db, agent_id=agent_id)
+
+    # Create and complete 2 DAGs, fail 1
+    for i, status in enumerate(["completed", "completed", "failed"]):
+        req = DAGCreateRequest(
+            name=f"dag-{i}",
+            nodes=[
+                DAGNodeSpec(name="t", type=DAGNodeType.subtask, instructions="X"),
+            ],
+        )
+        dag = await store.create(req)
+        await store.update_dag_status(dag.id, "running")
+        await store.update_dag_status(dag.id, status)
+
+    from nous.api.dashboard_queries import get_dag_dashboard_data
+
+    async with db.session() as session:
+        data = await get_dag_dashboard_data(session, agent_id)
+
+    # 2 completed out of 3 finished = 0.667
+    assert data["stats"]["success_rate"] == pytest.approx(0.667, abs=0.01)
+    assert data["stats"]["active_count"] == 0
+    assert len(data["recent_dags"]) == 3

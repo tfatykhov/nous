@@ -76,6 +76,15 @@
                 </svg>
                 <span>Cache</span>
             </a>
+            <a href="#/dag" class="nav-link" data-view="dag" aria-label="DAG Orchestrator">
+                <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="5" cy="6" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="19" cy="18" r="2"/>
+                    <circle cx="5" cy="18" r="2"/><circle cx="12" cy="18" r="2"/>
+                    <line x1="5" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="12" y2="16"/>
+                    <line x1="7" y1="7" x2="17" y2="17"/><line x1="14" y1="7" x2="17" y2="16"/>
+                </svg>
+                <span>DAG Orchestrator</span>
+            </a>
         </div>
         <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar">
             <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
@@ -103,6 +112,7 @@
         <div id="view-rubric" class="view"></div>
         <div id="view-execution" class="view"></div>
         <div id="view-cache" class="view"></div>
+        <div id="view-dag" class="view"></div>
     </main>
 
     <script src="lib/chart.min.js"></script>
@@ -120,5 +130,6 @@
     <script src="js/ledger.js"></script>
     <script src="js/observability.js"></script>
     <script src="js/cache.js"></script>
+    <script src="js/dag.js"></script>
 </body>
 </html>
