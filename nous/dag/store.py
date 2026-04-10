@@ -77,6 +77,9 @@ class DAGStore:
                     model=spec.model,
                     timeout_seconds=spec.timeout_seconds,
                     completion_condition=spec.completion_condition,
+                    completion_check=spec.completion_check,
+                    completion_check_interval=spec.completion_check_interval,
+                    max_check_attempts=spec.max_check_attempts,
                 )
                 session.add(node)
                 node_map[spec.name] = node

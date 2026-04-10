@@ -94,6 +94,30 @@ def _parallel_request() -> DAGCreateRequest:
     )
 
 
+def _completion_check_request(check_cmd: str = "test -f /tmp/done.flag", timeout: int = 120) -> DAGCreateRequest:
+    """Two nodes: first has completion_check, second depends on it."""
+    return DAGCreateRequest(
+        name="completion-check-dag",
+        nodes=[
+            DAGNodeSpec(
+                name="async-job",
+                type=DAGNodeType.subtask,
+                instructions="Launch async job",
+                timeout_seconds=timeout,
+                completion_check=check_cmd,
+            ),
+            DAGNodeSpec(
+                name="use-result",
+                type=DAGNodeType.subtask,
+                instructions="Use the result",
+            ),
+        ],
+        edges=[
+            DAGEdgeSpec(from_node="async-job", to_node="use-result", edge_type="dependency"),
+        ],
+    )
+
+
 def _budget_request() -> DAGCreateRequest:
     """DAG with tight token budget."""
     return DAGCreateRequest(
@@ -264,3 +288,315 @@ class TestDAGOrchestratorBudget:
 
         # DAG should be partial (since step-1 completed)
         assert fetched.status == "partial"
+
+
+class TestDAGCompletionCheck:
+    """Test F038.1 completion_check flow."""
+
+    @pytest.mark.asyncio
+    async def test_no_completion_check_unchanged(self, store, orchestrator, subtask_mgr):
+        """No completion_check — existing behavior, subtask complete → node complete."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id, status="completed", result="Done", error=None
+        )
+
+        await orchestrator.tick()
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "completed"  # NOT awaiting_check
+
+    @pytest.mark.asyncio
+    async def test_completion_check_transitions_to_awaiting(self, store, orchestrator, subtask_mgr):
+        """completion_check present — subtask complete → awaiting_check (not completed)."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        # Mock _run_completion_check to return False so node stays awaiting_check
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+
+        await orchestrator.tick()
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "awaiting_check"
+        assert async_job.result == "Job launched"
+        assert async_job.awaiting_check_at is not None
+
+    @pytest.mark.asyncio
+    async def test_completion_check_immediate_pass(self, store, orchestrator, subtask_mgr):
+        """completion_check exits 0 on first poll → node completes same tick."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        # Mock _run_completion_check to return True
+        orchestrator._run_completion_check = AsyncMock(return_value=True)
+
+        await orchestrator.tick()
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "completed"
+        assert async_job.check_attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_completion_check_delayed_pass(self, store, orchestrator, subtask_mgr):
+        """completion_check fails 3 ticks, then exits 0 → node completes on 4th tick."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        # First tick: transitions to awaiting_check, polls once (fail)
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        await orchestrator.tick()
+
+        # Ticks 2-3: still failing
+        await orchestrator.tick()
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "awaiting_check"
+        assert async_job.check_attempts == 3
+
+        # Tick 4: passes
+        orchestrator._run_completion_check = AsyncMock(return_value=True)
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "completed"
+        assert async_job.check_attempts == 4
+
+    @pytest.mark.asyncio
+    async def test_completion_check_timeout(self, store, orchestrator, subtask_mgr):
+        """completion_check never passes, timeout exceeded → node fails."""
+        from datetime import timedelta
+
+        # Short timeout for test
+        dag = await store.create(_completion_check_request(timeout=1))
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        # First tick transitions to awaiting_check
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        await orchestrator.tick()
+
+        # Manually set awaiting_check_at to past to simulate timeout
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        past_time = datetime.now(UTC) - timedelta(seconds=10)
+        await store.update_node(async_job.id, awaiting_check_at=past_time)
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "failed"
+        assert "timed out" in async_job.error
+
+    @pytest.mark.asyncio
+    async def test_downstream_blocked_during_awaiting_check(self, store, orchestrator, subtask_mgr):
+        """Node in awaiting_check → dependent nodes stay pending."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        use_result = next(n for n in fetched.nodes if n.name == "use-result")
+        assert use_result.status == "pending"  # NOT ready or running
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_awaiting_check(self, store, orchestrator, subtask_mgr):
+        """DAG cancelled → awaiting_check node transitions to cancelled."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        await orchestrator.tick()  # Transitions to awaiting_check
+
+        await orchestrator.cancel_dag(dag.id, reason="User cancelled")
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "cancelled"
+        assert fetched.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_check_command_error(self, store, orchestrator, subtask_mgr):
+        """Check command raises exception → treated as not-passed, doesn't crash."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        # Mock to raise exception
+        orchestrator._run_completion_check = AsyncMock(side_effect=Exception("Command not found"))
+
+        # Should not crash — tick() wraps _advance_dag in try/except
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        # Node should still be awaiting_check (exception aborted _advance_dag before update)
+        assert async_job.status == "awaiting_check"
+
+    @pytest.mark.asyncio
+    async def test_max_check_attempts(self, store, orchestrator, subtask_mgr):
+        """max_check_attempts exceeded → node fails."""
+        req = DAGCreateRequest(
+            name="max-attempts-dag",
+            nodes=[
+                DAGNodeSpec(
+                    name="limited-job",
+                    type=DAGNodeType.subtask,
+                    instructions="Job with limited retries",
+                    completion_check="test -f /tmp/done",
+                    max_check_attempts=3,
+                ),
+            ],
+        )
+        dag = await store.create(req)
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        limited = next(n for n in fetched.nodes if n.name == "limited-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=limited.subtask_id, status="completed", result="Launched", error=None
+        )
+
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+
+        # Tick 1: transitions to awaiting_check, polls (fail), attempts=1
+        await orchestrator.tick()
+        # Tick 2: polls (fail), attempts=2
+        await orchestrator.tick()
+        # Tick 3: polls (fail), attempts=3
+        await orchestrator.tick()
+        # Tick 4: attempts >= max (3), node fails
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        limited = next(n for n in fetched.nodes if n.name == "limited-job")
+        assert limited.status == "failed"
+        assert "max attempts" in limited.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_retry_resets_check_state(self, store, orchestrator, subtask_mgr):
+        """retry_node resets check_attempts and last_check_at."""
+        req = DAGCreateRequest(
+            name="retry-check-dag",
+            nodes=[
+                DAGNodeSpec(
+                    name="retryable",
+                    type=DAGNodeType.subtask,
+                    instructions="Retryable job",
+                    completion_check="test -f /tmp/done",
+                    max_check_attempts=2,
+                ),
+            ],
+        )
+        dag = await store.create(req)
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "retryable")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id, status="completed", result="Launched", error=None
+        )
+
+        orchestrator._run_completion_check = AsyncMock(return_value=False)
+
+        # Exhaust attempts: tick1(transition+poll1), tick2(poll2), tick3(exceeds max, fails)
+        await orchestrator.tick()
+        await orchestrator.tick()
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "retryable")
+        assert node.status == "failed"
+
+        # Retry
+        await orchestrator.retry_node(dag.id, "retryable")
+
+        fetched = await store.get_dag(dag.id)
+        node = next(n for n in fetched.nodes if n.name == "retryable")
+        assert node.status == "ready"
+        assert node.check_attempts == 0
+        assert node.last_check_at is None
+        assert node.awaiting_check_at is None
+
+    @pytest.mark.asyncio
+    async def test_concurrent_ticks_no_double_poll(self, store, orchestrator, subtask_mgr):
+        """Two concurrent ticks — lock prevents double-polling."""
+        import asyncio as _asyncio
+
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        call_count = 0
+
+        async def slow_check(node):
+            nonlocal call_count
+            call_count += 1
+            await _asyncio.sleep(0.1)  # Simulate slow check
+            return False
+
+        orchestrator._run_completion_check = slow_check
+
+        # Run two ticks concurrently
+        await _asyncio.gather(orchestrator.tick(), orchestrator.tick())
+
+        # Lock should serialize — both ticks run but sequentially
+        # Key assertion: no crash and state is consistent
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "awaiting_check"

@@ -143,6 +143,7 @@ class TestEnums:
             DAGNodeStatus.pending,
             DAGNodeStatus.ready,
             DAGNodeStatus.running,
+            DAGNodeStatus.awaiting_check,
             DAGNodeStatus.completed,
             DAGNodeStatus.failed,
             DAGNodeStatus.blocked,

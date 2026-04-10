@@ -1829,6 +1829,9 @@ def register_dag_tools(
                     model=n.get("model"),
                     timeout_seconds=n.get("timeout_seconds", 120),
                     completion_condition=n.get("completion_condition"),
+                    completion_check=n.get("completion_check"),
+                    completion_check_interval=n.get("completion_check_interval"),
+                    max_check_attempts=n.get("max_check_attempts"),
                 ))
 
             # Parse edges
@@ -1897,6 +1900,7 @@ def register_dag_tools(
                 status_icons = {
                     "completed": "+", "failed": "X", "running": ">",
                     "ready": "~", "pending": ".", "blocked": "!", "cancelled": "-",
+                    "awaiting_check": "*",
                 }
                 lines = [
                     f"DAG: {dag.name} ({str(dag.id)[:8]})",
@@ -1907,6 +1911,8 @@ def register_dag_tools(
                     icon = status_icons.get(node.status, "?")
                     wave_str = f"w{node.wave}" if node.wave is not None else "w?"
                     line = f"  [{icon}] {node.name} ({node.node_type}, {wave_str}) — {node.status}"
+                    if node.status == "awaiting_check" and hasattr(node, 'check_attempts'):
+                        line += f" | polls: {node.check_attempts}"
                     if node.error:
                         line += f" | error: {node.error[:80]}"
                     lines.append(line)
@@ -1935,7 +1941,7 @@ def register_dag_tools(
         "properties": {
             "name": {"type": "string", "description": "DAG name"},
             "description": {"type": "string"},
-            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "completion_condition": {"type": "string"}}, "required": ["name", "type", "instructions"]}},
+            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "completion_condition": {"type": "string"}, "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = done, non-zero = still running."}, "completion_check_interval": {"type": "integer", "description": "Seconds between completion check polls (default: every tick)"}, "max_check_attempts": {"type": "integer", "description": "Max poll attempts before node fails"}}, "required": ["name", "type", "instructions"]}},
             "edges": {"type": "array", "items": {"type": "object", "properties": {"from_node": {"type": "string"}, "to_node": {"type": "string"}, "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow"]}}, "required": ["from_node", "to_node"]}},
             "source": {"type": "string"},
             "token_budget": {"type": "integer"},
