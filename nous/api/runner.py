@@ -565,8 +565,12 @@ class AgentRunner:
         if stream:
             payload["stream"] = True
 
+        # Resolve effective model once for capability guards below
+        effective_model = payload["model"]
+
         # Extended thinking (skip for utility calls like reflection)
-        if not skip_thinking:
+        # Haiku 4.5 does NOT support thinking — only Sonnet 4.6+ and Opus 4.6+.
+        if not skip_thinking and "haiku" not in effective_model:
             if self._settings.thinking_mode == "adaptive":
                 payload["thinking"] = {"type": "adaptive"}
             elif self._settings.thinking_mode == "manual":
@@ -577,7 +581,6 @@ class AgentRunner:
 
         # Effort parameter ("high" is API default, so only send if different)
         # Supported by Sonnet 4.6 and Opus 4.6. Haiku 4.5 does NOT support it.
-        effective_model = payload["model"]
         if (
             self._settings.effort != "high"
             and "haiku" not in effective_model
