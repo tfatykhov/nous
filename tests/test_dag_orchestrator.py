@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
-from nous.dag.orchestrator import DAGOrchestrator
+from nous.dag.orchestrator import CheckResult, DAGOrchestrator
 from nous.dag.schemas import (
     DAGCreateRequest,
     DAGEdgeSpec,
@@ -323,7 +323,7 @@ class TestDAGCompletionCheck:
         )
 
         # Mock _run_completion_check to return False so node stays awaiting_check
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
 
         await orchestrator.tick()
         fetched = await store.get_dag(dag.id)
@@ -345,7 +345,7 @@ class TestDAGCompletionCheck:
         )
 
         # Mock _run_completion_check to return True
-        orchestrator._run_completion_check = AsyncMock(return_value=True)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
 
         await orchestrator.tick()
         fetched = await store.get_dag(dag.id)
@@ -366,7 +366,7 @@ class TestDAGCompletionCheck:
         )
 
         # First tick: transitions to awaiting_check, polls once (fail)
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
         await orchestrator.tick()
 
         # Ticks 2-3: still failing
@@ -379,7 +379,7 @@ class TestDAGCompletionCheck:
         assert async_job.check_attempts == 3
 
         # Tick 4: passes
-        orchestrator._run_completion_check = AsyncMock(return_value=True)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
         await orchestrator.tick()
 
         fetched = await store.get_dag(dag.id)
@@ -403,7 +403,7 @@ class TestDAGCompletionCheck:
         )
 
         # First tick transitions to awaiting_check
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
         await orchestrator.tick()
 
         # Manually set awaiting_check_at to past to simulate timeout
@@ -431,7 +431,7 @@ class TestDAGCompletionCheck:
             id=async_job.subtask_id, status="completed", result="Job launched", error=None
         )
 
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
         await orchestrator.tick()
 
         fetched = await store.get_dag(dag.id)
@@ -450,7 +450,7 @@ class TestDAGCompletionCheck:
             id=async_job.subtask_id, status="completed", result="Job launched", error=None
         )
 
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
         await orchestrator.tick()  # Transitions to awaiting_check
 
         await orchestrator.cancel_dag(dag.id, reason="User cancelled")
@@ -484,6 +484,52 @@ class TestDAGCompletionCheck:
         assert async_job.status == "awaiting_check"
 
     @pytest.mark.asyncio
+    async def test_completion_check_definitive_failure(self, store, orchestrator, subtask_mgr):
+        """completion_check exits 1 → node fails immediately without further polling."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        # First tick transitions to awaiting_check, then check returns "failed"
+        orchestrator._run_completion_check = AsyncMock(
+            return_value=CheckResult("failed", "15 test failures")
+        )
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        assert async_job.status == "failed"
+        assert "15 test failures" in async_job.error
+        assert async_job.check_attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_completion_check_failure_blocks_downstream(self, store, orchestrator, subtask_mgr):
+        """completion_check definitive failure → dependent nodes get blocked."""
+        dag = await store.create(_completion_check_request())
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        async_job = next(n for n in fetched.nodes if n.name == "async-job")
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=async_job.subtask_id, status="completed", result="Job launched", error=None
+        )
+
+        orchestrator._run_completion_check = AsyncMock(
+            return_value=CheckResult("failed", "CI failed")
+        )
+        await orchestrator.tick()  # transitions to awaiting_check + fails
+        await orchestrator.tick()  # propagate failures
+
+        fetched = await store.get_dag(dag.id)
+        use_result = next(n for n in fetched.nodes if n.name == "use-result")
+        assert use_result.status in ("blocked", "cancelled")
+
+    @pytest.mark.asyncio
     async def test_max_check_attempts(self, store, orchestrator, subtask_mgr):
         """max_check_attempts exceeded → node fails."""
         req = DAGCreateRequest(
@@ -507,7 +553,7 @@ class TestDAGCompletionCheck:
             id=limited.subtask_id, status="completed", result="Launched", error=None
         )
 
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
 
         # Tick 1: transitions to awaiting_check, polls (fail), attempts=1
         await orchestrator.tick()
@@ -547,7 +593,7 @@ class TestDAGCompletionCheck:
             id=node.subtask_id, status="completed", result="Launched", error=None
         )
 
-        orchestrator._run_completion_check = AsyncMock(return_value=False)
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
 
         # Exhaust attempts: tick1(transition+poll1), tick2(poll2), tick3(exceeds max, fails)
         await orchestrator.tick()
@@ -588,7 +634,7 @@ class TestDAGCompletionCheck:
             nonlocal call_count
             call_count += 1
             await _asyncio.sleep(0.1)  # Simulate slow check
-            return False
+            return CheckResult("pending")
 
         orchestrator._run_completion_check = slow_check
 
