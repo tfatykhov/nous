@@ -7,7 +7,8 @@ import logging
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from nous.dag.store import DAGStore
@@ -29,6 +30,16 @@ _BUDGET_WARNING_RATIO = 0.80
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
 DAG_STATUS_BASE_DIR = Path(tempfile.gettempdir()) / "nous-workspace" / "dag-status"
+
+CheckStatus = Literal["success", "failed", "pending"]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckResult:
+    """Result of a completion_check command invocation."""
+
+    status: CheckStatus
+    detail: str = ""
 
 
 class DAGOrchestrator:
@@ -312,11 +323,11 @@ class DAGOrchestrator:
 
             # Run the completion check
             try:
-                passed = await self._run_completion_check(node)
+                check = await self._run_completion_check(node)
                 attempts = (node.check_attempts or 0) + 1
                 now = datetime.now(UTC)
 
-                if passed:
+                if check.status == "success":
                     result = await self._read_node_result(node, dag)
                     await self._store.update_node(
                         node.id,
@@ -331,6 +342,21 @@ class DAGOrchestrator:
                     logger.info(
                         "Completion check passed for node %s (attempt %d)",
                         node.name, attempts,
+                    )
+                elif check.status == "failed":
+                    error_msg = f"Completion check failed: {check.detail}" if check.detail else "Completion check failed (exit code 1)"
+                    await self._store.update_node(
+                        node.id,
+                        status="failed",
+                        error=error_msg,
+                        check_attempts=attempts,
+                        last_check_at=now,
+                        completed_at=now,
+                    )
+                    node.status = "failed"
+                    logger.warning(
+                        "Completion check definitively failed for node %s (attempt %d): %s",
+                        node.name, attempts, check.detail,
                     )
                 else:
                     await self._store.update_node(
@@ -347,11 +373,18 @@ class DAGOrchestrator:
                     "Error polling completion check for node %s", node.name
                 )
 
-    async def _run_completion_check(self, node: DAGNode) -> bool:
-        """Run a completion_check shell command. Returns True if exit code is 0."""
+    async def _run_completion_check(self, node: DAGNode) -> CheckResult:
+        """Run a completion_check shell command.
+
+        Exit code semantics:
+            0 → success (done)
+            1 → failed (definitively)
+            2 → pending (still running, keep polling)
+        Any other exit code or error is treated as pending.
+        """
         cmd = node.completion_check
         if not cmd:
-            return True
+            return CheckResult("success")
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -360,7 +393,9 @@ class DAGOrchestrator:
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                await asyncio.wait_for(proc.communicate(), timeout=_CHECK_CMD_TIMEOUT)
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
+                )
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
@@ -368,12 +403,19 @@ class DAGOrchestrator:
                     "Completion check command timed out (%.0fs) for node %s",
                     _CHECK_CMD_TIMEOUT, node.name,
                 )
-                return False
+                return CheckResult("pending", "command timed out")
 
-            return proc.returncode == 0
+            if proc.returncode == 0:
+                return CheckResult("success")
+            elif proc.returncode == 1:
+                detail = (stderr or b"").decode(errors="replace").strip()
+                return CheckResult("failed", detail or "exit code 1")
+            else:
+                # Exit code 2 or anything else → still pending
+                return CheckResult("pending")
         except Exception as e:
             logger.error("Completion check error for node %s: %s", node.name, e)
-            return False
+            return CheckResult("pending", str(e))
 
     async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
         """Read result from status file convention, fall back to node's existing result."""

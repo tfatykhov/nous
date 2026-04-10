@@ -76,7 +76,7 @@ class DAGNodeSpec(BaseModel):
     completion_condition: str | None = Field(None, description="Optional completion condition")
     completion_check: str | None = Field(
         None,
-        description="Shell command polled each tick. Exit 0 = done, non-zero = still running."
+        description="Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."
     )
     completion_check_interval: int | None = Field(
         None, ge=1,
