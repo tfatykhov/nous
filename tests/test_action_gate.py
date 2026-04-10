@@ -35,6 +35,7 @@ def _make_settings(**kwargs) -> types.SimpleNamespace:
         "action_gating_model": "claude-haiku-4-5-20251001",
         "action_gating_enabled": True,
         "action_gating_external_only": False,
+        "action_gating_turn_window": 5,
     }
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -212,12 +213,20 @@ class TestArgsSimilar:
         gate = self._gate()
         assert gate._args_similar({"command": "./foo"}, {"command": "foo"}) is False
 
-    def test_any_key_match_triggers_similar(self):
-        # If path matches, result is True even if query differs
+    def test_all_shared_keys_must_match(self):
+        # ALL shared keys must match — path matches but query differs → False
         gate = self._gate()
         assert gate._args_similar(
             {"path": "out.txt", "query": "a"},
             {"path": "out.txt", "query": "b"},
+        ) is False
+
+    def test_all_shared_keys_matching_returns_true(self):
+        # ALL shared keys match → True
+        gate = self._gate()
+        assert gate._args_similar(
+            {"path": "out.txt", "query": "a"},
+            {"path": "out.txt", "query": "a"},
         ) is True
 
     def test_empty_dicts(self):
@@ -675,3 +684,140 @@ class TestConsistencyCheckDuplicateReport:
             "write_file", {"path": "output/report.txt"}, ledger
         )
         assert result.approved is False
+
+
+# ===========================================================================
+# Issue #285: Multi-target scenarios (acceptance criteria)
+# ===========================================================================
+
+
+class TestMultiTargetNotBlocked:
+    """Disabling two different heartbeat checks in the same turn should not be blocked."""
+
+    @pytest.mark.asyncio
+    async def test_different_heartbeat_checks_not_blocked(self):
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record(
+            "heartbeat_check_manage",
+            {"action": "disable", "name": "ci-schema-sync-monitor"},
+            "ok",
+            "success",
+        )
+        result = await gate.check(
+            "heartbeat_check_manage",
+            {"action": "disable", "name": "pr-fixes-monitor"},
+            ledger,
+        )
+        assert result.approved is True
+
+    @pytest.mark.asyncio
+    async def test_same_heartbeat_check_still_blocked(self):
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record(
+            "heartbeat_check_manage",
+            {"action": "disable", "name": "ci-schema-sync-monitor"},
+            "ok",
+            "success",
+        )
+        result = await gate.check(
+            "heartbeat_check_manage",
+            {"action": "disable", "name": "ci-schema-sync-monitor"},
+            ledger,
+        )
+        assert result.approved is False
+        assert "Duplicate" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_different_bash_targets_not_blocked(self):
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record(
+            "bash",
+            {"command": "psql -c 'UPDATE dynamic_checks SET enabled=false WHERE name=$$ci-schema$$'"},
+            "ok",
+            "success",
+        )
+        result = await gate.check(
+            "bash",
+            {"command": "psql -c 'UPDATE dynamic_checks SET enabled=false WHERE name=$$pr-fixes$$'"},
+            ledger,
+        )
+        assert result.approved is True
+
+    @pytest.mark.asyncio
+    async def test_exact_duplicate_bash_still_blocked(self):
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        cmd = "psql -c 'UPDATE dynamic_checks SET enabled=false WHERE name=$$check-a$$'"
+        ledger.record("bash", {"command": cmd}, "ok", "success")
+        result = await gate.check("bash", {"command": cmd}, ledger)
+        assert result.approved is False
+
+
+# ===========================================================================
+# Issue #285: Turn-distance window
+# ===========================================================================
+
+
+class TestTurnWindow:
+    @pytest.mark.asyncio
+    async def test_old_action_beyond_window_not_blocked(self):
+        """Action beyond turn window should not be blocked."""
+        gate = ActionGate(_make_settings(action_gating_turn_window=5))
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record("write_file", {"path": "f.txt"}, "ok", "success")
+        ledger.set_turn(7)  # 6 turns later, beyond window of 5
+        result = await gate.check("write_file", {"path": "f.txt"}, ledger)
+        assert result.approved is True
+
+    @pytest.mark.asyncio
+    async def test_recent_action_within_window_blocked(self):
+        """Action within turn window should still be blocked."""
+        gate = ActionGate(_make_settings(action_gating_turn_window=5))
+        ledger = _ledger()
+        ledger.set_turn(3)
+        ledger.record("write_file", {"path": "f.txt"}, "ok", "success")
+        ledger.set_turn(7)  # 4 turns later, within window of 5
+        result = await gate.check("write_file", {"path": "f.txt"}, ledger)
+        assert result.approved is False
+
+    @pytest.mark.asyncio
+    async def test_turn_window_boundary_exact(self):
+        """Action exactly at window boundary (turn > min_turn) should be blocked."""
+        gate = ActionGate(_make_settings(action_gating_turn_window=5))
+        ledger = _ledger()
+        ledger.set_turn(3)
+        ledger.record("write_file", {"path": "f.txt"}, "ok", "success")
+        ledger.set_turn(8)  # 5 turns later, min_turn=3, turn 3 is NOT > 3
+        result = await gate.check("write_file", {"path": "f.txt"}, ledger)
+        assert result.approved is True  # Boundary: exactly at window edge passes
+
+    @pytest.mark.asyncio
+    async def test_turn_window_same_turn_blocked(self):
+        """Action on the same turn is always within window."""
+        gate = ActionGate(_make_settings(action_gating_turn_window=5))
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record("learn_fact", {"subject": "sky", "content": "blue"}, "ok", "success")
+        result = await gate.check(
+            "learn_fact", {"subject": "sky", "content": "blue"}, ledger
+        )
+        assert result.approved is False
+
+    @pytest.mark.asyncio
+    async def test_turn_window_configurable(self):
+        """A window of 1 only blocks actions from the current or previous turn."""
+        gate = ActionGate(_make_settings(action_gating_turn_window=1))
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record("write_file", {"path": "f.txt"}, "ok", "success")
+        ledger.set_turn(3)  # 2 turns later, beyond window of 1
+        result = await gate.check("write_file", {"path": "f.txt"}, ledger)
+        assert result.approved is True

@@ -319,6 +319,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_ACTION_GATING_MODE` | `enforce` | Action gating mode (shadow/warn/enforce) |
 | `NOUS_ACTION_GATING_MODEL` | `claude-haiku-4-5-20251001` | Model for Tier 3 LLM gate |
 | `NOUS_ACTION_GATING_EXTERNAL_ONLY` | `false` | Skip Tier 2, only gate external/irreversible |
+| `NOUS_ACTION_GATING_TURN_WINDOW` | `5` | Only block duplicates within this many turns |
 | `NOUS_PROCEDURE_SCORE_FLOOR` | `0.40` | Minimum score for procedures when embeddings enabled (F038) |
 | `NOUS_MMR_ENABLED` | `false` | Enable MMR diversity re-ranking in recall_deep |
 | `NOUS_MMR_DIVERSITY_WEIGHT` | `0.7` | MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity) |
