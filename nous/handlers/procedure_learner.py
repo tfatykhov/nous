@@ -228,16 +228,24 @@ class ProcedureLearner:
             # Fetch reviewed successful decisions — pass filters to DB
             # to avoid the window problem where 100 most recent are all pending.
             # Issue #188 Bug 1: was list_decisions(limit=100) with no filters.
+            # Budget-based fetch: fill the full window with successes first,
+            # then use remaining budget for partials so skewed distributions
+            # don't shrink the total candidate pool below _TOTAL_WINDOW.
+            _TOTAL_WINDOW = 100
             decisions_success, _ = await self._brain.list_decisions(
-                limit=50, outcome="success", reviewed=True
+                limit=_TOTAL_WINDOW, outcome="success", reviewed=True
             )
-            decisions_partial, _ = await self._brain.list_decisions(
-                limit=50, outcome="partial", reviewed=True
-            )
+            _remaining = max(0, _TOTAL_WINDOW - len(decisions_success))
+            if _remaining > 0:
+                decisions_partial, _ = await self._brain.list_decisions(
+                    limit=_remaining, outcome="partial", reviewed=True
+                )
+            else:
+                decisions_partial = []
             successful = list(decisions_success) + list(decisions_partial)
             logger.info(
-                "Decision pathway: %d success + %d partial = %d reviewed decisions",
-                len(decisions_success), len(decisions_partial), len(successful),
+                "Decision pathway: %d success + %d partial = %d reviewed decisions (window=%d)",
+                len(decisions_success), len(decisions_partial), len(successful), _TOTAL_WINDOW,
             )
             if len(successful) < self._settings.procedure_cluster_min_size:
                 logger.info(
