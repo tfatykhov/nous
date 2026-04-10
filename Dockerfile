@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     tesseract-ocr \
     redis-tools \
+    sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # Create workspace directory
@@ -26,6 +27,16 @@ RUN pip install --no-cache-dir ".[runtime,agent]"
 
 COPY sql/ sql/
 COPY static/ static/
+
+# Install Claude Code globally (npm), then create claude-runner user with access to it.
+# runner.sh runs Claude Code as claude-runner to bypass root restriction on
+# --dangerously-skip-permissions.
+RUN npm install -g @anthropic-ai/claude-code
+
+RUN useradd --create-home --shell /bin/bash claude-runner \
+    && chown -R claude-runner:claude-runner /tmp/nous-workspace \
+    && chmod -R a+rX "$(npm root -g)" \
+    && echo "claude-runner ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
 HEALTHCHECK --interval=30s --timeout=10s \
   CMD curl -f http://localhost:8000/health || exit 1
