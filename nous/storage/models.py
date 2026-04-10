@@ -772,3 +772,175 @@ class DynamicCheckModel(Base):
     metadata_: Mapped[dict] = mapped_column(
         "metadata", JSONB, server_default="{}"
     )
+
+
+# ---------------------------------------------------------------------------
+# F038: Unified DAG Orchestration
+# ---------------------------------------------------------------------------
+
+
+class ExecutionDAG(Base):
+    """Top-level DAG orchestration unit."""
+
+    __tablename__ = "execution_dags"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed', 'cancelled', 'partial')",
+            name="chk_dag_status",
+        ),
+        CheckConstraint(
+            "source IN ('conversation', 'critic', 'heartbeat', 'schedule')",
+            name="chk_dag_source",
+        ),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=""
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    source: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="conversation", server_default="conversation"
+    )
+    original_request: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    token_budget: Mapped[int | None] = mapped_column(Integer)
+    tokens_consumed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    result_summary: Mapped[str | None] = mapped_column(Text)
+    postmortem: Mapped[dict | None] = mapped_column(JSONB)
+
+    nodes: Mapped[list["DAGNode"]] = relationship(
+        "DAGNode",
+        back_populates="dag",
+        cascade="all, delete-orphan",
+        order_by="DAGNode.wave, DAGNode.name",
+    )
+    edges: Mapped[list["DAGEdge"]] = relationship(
+        "DAGEdge", back_populates="dag", cascade="all, delete-orphan"
+    )
+
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault("description", "")
+        kwargs.setdefault("status", "pending")
+        kwargs.setdefault("source", "conversation")
+        kwargs.setdefault("tokens_consumed", 0)
+        super().__init__(**kwargs)
+
+
+class DAGNode(Base):
+    """Individual execution unit within a DAG."""
+
+    __tablename__ = "dag_nodes"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'ready', 'running', 'completed', 'failed', 'blocked', 'cancelled')",
+            name="chk_dag_node_status",
+        ),
+        CheckConstraint(
+            "node_type IN ('subtask', 'check', 'gate', 'callback')",
+            name="chk_dag_node_type",
+        ),
+        UniqueConstraint("dag_id", "name", name="uq_dag_node_name"),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    dag_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nous_system.execution_dags.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, default="", server_default=""
+    )
+    node_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    subtask_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    check_name: Mapped[str | None] = mapped_column(String(200))
+    wave: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", server_default="pending"
+    )
+    instructions: Mapped[str | None] = mapped_column(Text)
+    tools: Mapped[list | None] = mapped_column(JSONB)
+    frame_type: Mapped[str | None] = mapped_column(String(30))
+    model: Mapped[str | None] = mapped_column(String(100))
+    timeout_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=120, server_default="120"
+    )
+    completion_condition: Mapped[str | None] = mapped_column(String(100))
+    result: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    tokens_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    injected_context: Mapped[str | None] = mapped_column(Text)
+
+    dag: Mapped["ExecutionDAG"] = relationship("ExecutionDAG", back_populates="nodes")
+
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault("description", "")
+        kwargs.setdefault("status", "pending")
+        kwargs.setdefault("wave", 0)
+        kwargs.setdefault("timeout_seconds", 120)
+        kwargs.setdefault("tokens_used", 0)
+        super().__init__(**kwargs)
+
+
+class DAGEdge(Base):
+    """Dependency/cascade/context relationship between DAG nodes."""
+
+    __tablename__ = "dag_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "dag_id", "from_node_id", "to_node_id", "edge_type", name="uq_dag_edge"
+        ),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    dag_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nous_system.execution_dags.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    from_node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nous_system.dag_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    to_node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nous_system.dag_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    edge_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="dependency", server_default="dependency"
+    )
+
+    dag: Mapped["ExecutionDAG"] = relationship("ExecutionDAG", back_populates="edges")
+
+    def __init__(self, **kwargs: object) -> None:
+        kwargs.setdefault("edge_type", "dependency")
+        super().__init__(**kwargs)
