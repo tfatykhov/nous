@@ -310,8 +310,8 @@ class CognitiveLayer:
         # Issue #229: Initialize critic skills (populated only in advised mode)
         _critic_skills: list[str] = []
 
-        # F024: Track user messages for frustration detection
-        if self._critic and self._settings.critic_enabled:
+        # Track user messages for frustration detection (F024) and correction detection (F039)
+        if (self._critic and self._settings.critic_enabled) or self._settings.correction_extraction_enabled:
             user_msgs = self._session_user_messages.setdefault(session_id, [])
             user_msgs.append(user_input)
             if len(user_msgs) > 5:
@@ -760,6 +760,24 @@ class CognitiveLayer:
             )
         except Exception:
             logger.warning("Learning failed during post_turn")
+
+        # 2b. F039: Real-time correction detection
+        try:
+            user_msgs = self._session_user_messages.get(session_id, [])
+            if user_msgs:
+                correction = await self._monitor.detect_and_extract_correction(
+                    user_message=user_msgs[-1],
+                    ai_response=turn_result.response_text,
+                    session_id=session_id,
+                    session=session,
+                )
+                if correction:
+                    logger.info(
+                        "F039: Correction detected and extracted: %s",
+                        correction.get("principle", "")[:80],
+                    )
+        except Exception:
+            logger.warning("F039: Correction detection failed in post_turn")
 
         # 3. DELIBERATION — finalize if decision exists
         if decision_id:

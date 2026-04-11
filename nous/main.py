@@ -202,6 +202,19 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("OutcomeDetector not available yet")
 
+        # F039: Correction learning pipeline
+        try:
+            from nous.handlers.correction_extractor import CorrectionExtractor
+
+            if settings.correction_extraction_enabled:
+                CorrectionExtractor(
+                    db=database, settings=settings, bus=bus,
+                    llm_client=api_client, heart=heart,
+                    agent_id=settings.agent_id,
+                )
+        except ImportError:
+            logger.debug("CorrectionExtractor not available yet")
+
         # F024 Phase 3b: Rubric evolver (triggered via REST or sleep handler)
         rubric_evolver = None
         try:
@@ -307,6 +320,11 @@ async def create_components(settings: Settings) -> dict:
             await session_monitor.start()
         if decision_reviewer:
             await decision_reviewer.start()
+
+    # F039: Wire LLM client into monitor for inline correction detection
+    # (outside bus guard — inline corrections work independently of event bus)
+    if settings.correction_extraction_enabled and cognitive._monitor is not None:
+        cognitive._monitor._llm_client = api_client
 
     # F011: Bootstrap local skills (one-time, only if DB has no skills)
     try:

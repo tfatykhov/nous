@@ -391,6 +391,9 @@ class Settings(BaseSettings):
     # F038: DAG Orchestration
     dag_enabled: bool = True
 
+    # F039: Correction Learning Pipeline
+    correction_extraction_enabled: bool = True
+
     # F024 Phase 3b: Self-Modifying Rubrics
     rubric_enabled: bool = True
     rubric_outcome_detection_enabled: bool = True

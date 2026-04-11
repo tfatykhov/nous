@@ -256,6 +256,24 @@ class RubricManager:
             for r in rows
         ]
 
+    async def load_correction_context(self, task_description: str, limit: int = 5) -> list[str]:
+        """F039: Load correction-sourced facts relevant to evaluation context.
+
+        Returns a list of fact content strings from corrections.
+        """
+        from nous.storage.models import Fact
+
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(Fact).where(
+                    Fact.agent_id == self.agent_id,
+                    Fact.active == True,  # noqa: E712
+                    Fact.source.in_(["correction_extraction", "inline_correction"]),
+                ).order_by(Fact.learned_at.desc()).limit(limit)
+            )
+            rows = result.scalars().all()
+        return [r.content for r in rows]
+
     def to_detail(self, rv: RubricVersion) -> RubricVersionDetail:
         """Convert ORM model to Pydantic DTO."""
         dims = [RubricDimension(**d) for d in rv.dimensions]
