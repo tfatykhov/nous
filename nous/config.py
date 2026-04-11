@@ -272,6 +272,25 @@ class Settings(BaseSettings):
     spreading_activation_beta: float = 0.3
     spreading_activation_gamma: float = 0.2
 
+    # F040: Graph densification — backfill
+    graph_backfill_enabled: bool = True
+    graph_backfill_max_facts: int = 50
+    graph_backfill_max_decisions: int = 30
+    graph_backfill_max_episodes: int = 30
+    graph_backfill_max_procedures: int = 20
+
+    # F040: Per-relation thresholds
+    graph_threshold_fact_fact: float = 0.82
+    graph_threshold_fact_decision: float = 0.72
+    graph_threshold_fact_episode: float = 0.70
+    graph_threshold_decision_decision: float = 0.78
+    graph_threshold_episode_episode: float = 0.75
+    graph_threshold_procedure_any: float = 0.70
+
+    # F040: Graph health monitoring
+    graph_health_orphan_warn_threshold: float = 0.40
+    graph_health_check_enabled: bool = True
+
     # F012: Procedure Learning (K-Line auto-creation)
     procedure_learning_enabled: bool = True
     procedure_cluster_min_size: int = 3
