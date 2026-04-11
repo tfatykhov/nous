@@ -178,7 +178,10 @@ async def create_components(settings: Settings) -> dict:
             from nous.handlers.episode_summarizer import EpisodeSummarizer
 
             if settings.episode_summary_enabled:
-                EpisodeSummarizer(heart, brain, settings, bus, api_client, graph_linker=graph_linker)
+                episode_summarizer = EpisodeSummarizer(heart, brain, settings, bus, api_client, graph_linker=graph_linker)
+                # F040: Inject embedder for episode↔episode semantic linking
+                if embedding_provider is not None:
+                    episode_summarizer._embedder = embedding_provider
         except ImportError:
             logger.debug("EpisodeSummarizer not available yet")
 
@@ -240,6 +243,38 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("FactGraphLinker not available yet")
 
+        # F040: Wire graph densifier
+        graph_densifier = None
+        try:
+            from nous.brain.graph_densifier import GraphDensifier
+            if graph_linker is not None and settings.graph_backfill_enabled:
+                graph_densifier = GraphDensifier(
+                    db=database, graph_linker=graph_linker,
+                    embedder=embedding_provider, settings=settings,
+                    agent_id=settings.agent_id,
+                )
+                logger.debug("F040: GraphDensifier created")
+        except ImportError:
+            logger.debug("GraphDensifier not available yet")
+
+        # F040: Wire decision reverse-linking
+        try:
+            from nous.handlers.decision_graph_linker import DecisionGraphLinker
+            if graph_linker is not None and settings.cross_type_linking_enabled:
+                DecisionGraphLinker(brain, graph_linker, embedding_provider, settings, bus)
+                logger.debug("F040: DecisionGraphLinker wired")
+        except ImportError:
+            logger.debug("DecisionGraphLinker not available yet")
+
+        # F040: Wire procedure graph linking
+        try:
+            from nous.handlers.procedure_graph_linker import ProcedureGraphLinker
+            if graph_linker is not None and settings.cross_type_linking_enabled:
+                ProcedureGraphLinker(graph_linker, embedding_provider, settings, bus)
+                logger.debug("F040: ProcedureGraphLinker wired")
+        except ImportError:
+            logger.debug("ProcedureGraphLinker not available yet")
+
         try:
             from nous.handlers.knowledge_extractor import KnowledgeExtractor
 
@@ -267,6 +302,10 @@ async def create_components(settings: Settings) -> dict:
         # F024-3b: Wire rubric evolver into sleep handler
         if sleep_handler is not None and rubric_evolver is not None:
             sleep_handler._rubric_evolver = rubric_evolver
+
+        # F040: Wire graph densifier into sleep handler
+        if sleep_handler is not None and graph_densifier is not None:
+            sleep_handler._graph_densifier = graph_densifier
 
         # F012: Wire procedure learner into sleep handler + monitor
         procedure_learner = None
