@@ -109,3 +109,45 @@ async def test_get_dag_dashboard_stats_success_rate(db):
     assert data["stats"]["success_rate"] == pytest.approx(0.667, abs=0.01)
     assert data["stats"]["active_count"] == 0
     assert len(data["recent_dags"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_dag_dashboard_node_and_edge_fields(db):
+    """Active DAG nodes and edges have correct field structure."""
+    agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
+    store = DAGStore(db, agent_id=agent_id)
+    req = DAGCreateRequest(
+        name="field-test",
+        nodes=[
+            DAGNodeSpec(name="alpha", type=DAGNodeType.subtask, instructions="A"),
+            DAGNodeSpec(name="beta", type=DAGNodeType.subtask, instructions="B"),
+        ],
+        edges=[DAGEdgeSpec(from_node="alpha", to_node="beta")],
+    )
+    dag = await store.create(req)
+    await store.update_dag_status(dag.id, "running")
+
+    from nous.api.dashboard_queries import get_dag_dashboard_data
+
+    async with db.session() as session:
+        data = await get_dag_dashboard_data(session, agent_id)
+
+    assert len(data["active_dags"]) == 1
+    dag_data = data["active_dags"][0]
+
+    # Verify dag_id is a string
+    assert isinstance(dag_data["id"], str)
+
+    # Verify nodes have expected fields
+    assert len(dag_data["nodes"]) == 2
+    node = dag_data["nodes"][0]
+    assert "id" in node
+    assert "name" in node
+    assert "status" in node
+    assert "wave" in node
+
+    # Verify edges have expected fields
+    assert len(dag_data["edges"]) == 1
+    edge = dag_data["edges"][0]
+    assert "from_node_id" in edge
+    assert "to_node_id" in edge

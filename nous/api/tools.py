@@ -1855,6 +1855,10 @@ def register_dag_tools(
             dag = await store.create(request)
             await orchestrator.start_dag(dag.id)
 
+            # Re-fetch to get actual status
+            started_dag = await store.get_dag(dag.id)
+            actual_status = started_dag.status if started_dag else "unknown"
+
             # Compute wave summary
             waves = request.compute_waves()
             wave_groups: dict[int, list[str]] = {}
@@ -1865,10 +1869,11 @@ def register_dag_tools(
             lines.append(f"  {len(dag.nodes)} nodes, {len(dag.edges)} edges")
             for w in sorted(wave_groups):
                 lines.append(f"  Wave {w}: {', '.join(wave_groups[w])}")
-            lines.append("Status: running")
+            lines.append(f"Status: {actual_status}")
 
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
-        except ValueError as e:
+        except Exception as e:
+            logger.exception("dag_create failed")
             return {"content": [{"type": "text", "text": f"Error creating DAG: {e}"}]}
 
     async def dag_manage(**kwargs: Any) -> dict:
@@ -1927,12 +1932,13 @@ def register_dag_tools(
                 if not node_name:
                     return {"content": [{"type": "text", "text": "Error: node_name required for retry_node"}]}
                 await orchestrator.retry_node(dag.id, node_name)
-                return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to ready for retry"}]}
+                return {"content": [{"type": "text", "text": f"Reset node '{node_name}' to pending for retry"}]}
 
             else:
                 return {"content": [{"type": "text", "text": f"Error: unknown action '{action}'"}]}
 
-        except ValueError as e:
+        except Exception as e:
+            logger.exception("dag_manage failed")
             return {"content": [{"type": "text", "text": f"Error: {e}"}]}
 
     dispatcher.register("dag_create", dag_create, {
@@ -1964,7 +1970,11 @@ def register_dag_tools(
 
 
 async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
-    """Resolve a DAG by full UUID or 8-char prefix."""
+    """Resolve a DAG by full UUID or 8-char prefix.
+
+    Raises ValueError if prefix matches multiple DAGs.
+    Returns None if no match found.
+    """
     from uuid import UUID as _UUID
 
     # Try full UUID first
@@ -1979,11 +1989,18 @@ async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
     matches = [d for d in dags if str(d.id).startswith(dag_id_str)]
     if len(matches) == 1:
         return matches[0]
+    if len(matches) > 1:
+        ids = ", ".join(str(d.id)[:8] for d in matches)
+        raise ValueError(f"Prefix '{dag_id_str}' is ambiguous, matches: {ids}")
 
     # Also check recent DAGs for status/retry on completed/failed
     recent = await store.get_recent_dags(limit=20)
-    matches = [d for d in recent if str(d.id).startswith(dag_id_str)]
+    finished = [d for d in recent if d.status not in ("pending", "running")]
+    matches = [d for d in finished if str(d.id).startswith(dag_id_str)]
     if len(matches) == 1:
         return matches[0]
+    if len(matches) > 1:
+        ids = ", ".join(str(d.id)[:8] for d in matches)
+        raise ValueError(f"Prefix '{dag_id_str}' is ambiguous, matches: {ids}")
 
     return None

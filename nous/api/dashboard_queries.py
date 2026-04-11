@@ -1479,7 +1479,8 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
 
     active_dags: list[dict] = []
     for dag_row in active_dag_rows:
-        dag_id = str(dag_row.id)
+        dag_id_str = str(dag_row.id)
+        dag_id_uuid = dag_row.id  # Keep UUID for SQL binds
 
         # Nodes for this DAG
         node_result = await session.execute(
@@ -1490,7 +1491,7 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
                 WHERE dag_id = :dag_id
                 ORDER BY wave, name
             """),
-            {"dag_id": dag_id},
+            {"dag_id": dag_id_uuid},
         )
         nodes = []
         for n in node_result:
@@ -1515,7 +1516,7 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
                 FROM nous_system.dag_edges
                 WHERE dag_id = :dag_id
             """),
-            {"dag_id": dag_id},
+            {"dag_id": dag_id_uuid},
         )
         edges = [
             {
@@ -1528,7 +1529,7 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
         ]
 
         active_dags.append({
-            "id": dag_id,
+            "id": dag_id_str,
             "name": dag_row.name,
             "description": dag_row.description or "",
             "status": dag_row.status,

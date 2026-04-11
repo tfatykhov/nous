@@ -74,29 +74,34 @@ class DAGOrchestrator:
 
     async def start_dag(self, dag_id: UUID) -> None:
         """Transition a pending DAG to running and launch wave-0 nodes."""
-        dag = await self._store.get_dag(dag_id)
-        if dag is None:
-            raise ValueError(f"DAG {dag_id} not found")
-        if dag.status != "pending":
-            raise ValueError(f"DAG {dag_id} is {dag.status}, expected pending")
+        async with self._lock:
+            dag = await self._store.get_dag(dag_id)
+            if dag is None:
+                raise ValueError(f"DAG {dag_id} not found")
+            if dag.status != "pending":
+                raise ValueError(f"DAG {dag_id} is {dag.status}, expected pending")
 
-        await self._store.update_dag_status(dag_id, "running")
+            await self._store.update_dag_status(dag_id, "running")
 
-        # Re-fetch to get updated status
-        dag = await self._store.get_dag(dag_id)
-        if dag is None:
-            return
+            # Re-fetch to get updated status
+            dag = await self._store.get_dag(dag_id)
+            if dag is None:
+                return
 
-        # Launch wave-0 ready nodes
-        for node in dag.nodes:
-            if node.status == "ready":
-                await self._launch_node(node, dag)
+            # Launch wave-0 ready nodes
+            for node in dag.nodes:
+                if node.status == "ready":
+                    await self._launch_node(node, dag)
 
     async def cancel_dag(self, dag_id: UUID, reason: str = "cancelled") -> None:
         """Cancel a DAG and all non-terminal nodes."""
         dag = await self._store.get_dag(dag_id)
         if dag is None:
             raise ValueError(f"DAG {dag_id} not found")
+
+        # Don't cancel already-terminal DAGs
+        if dag.status in ("completed", "failed", "cancelled"):
+            return
 
         for node in dag.nodes:
             if node.status not in _TERMINAL:
@@ -123,7 +128,7 @@ class DAGOrchestrator:
 
         await self._store.update_node(
             node.id,
-            status="ready",
+            status="pending",  # was "ready" — _find_ready_nodes only checks "pending"
             error=None,
             result=None,
             subtask_id=None,
@@ -135,11 +140,45 @@ class DAGOrchestrator:
             awaiting_check_at=None,
         )
 
-        # Unblock dependent nodes that were blocked by this failure
-        for other in dag.nodes:
-            if other.status == "blocked":
+        # Selectively unblock only nodes downstream of the retried node
+        # that have no other failed predecessors
+        dep_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
+        for edge in dag.edges:
+            if edge.edge_type in ("dependency", "cancel_cascade"):
+                dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
+
+        # Forward reachability from retried node
+        adj: dict[str, list[str]] = {str(n.id): [] for n in dag.nodes}
+        for edge in dag.edges:
+            if edge.edge_type in ("dependency", "cancel_cascade"):
+                adj[str(edge.from_node_id)].append(str(edge.to_node_id))
+
+        reachable: set[str] = set()
+        stack = [str(node.id)]
+        while stack:
+            nid = stack.pop()
+            for child in adj.get(nid, []):
+                if child not in reachable:
+                    reachable.add(child)
+                    stack.append(child)
+
+        # IDs of nodes that are still failed (excluding the one being retried)
+        still_failed = {
+            str(n.id)
+            for n in dag.nodes
+            if n.status == "failed" and n.id != node.id
+        }
+
+        node_by_id = {str(n.id): n for n in dag.nodes}
+        for nid in reachable:
+            n = node_by_id[nid]
+            if n.status not in ("blocked", "cancelled"):
+                continue
+            # Only unblock if no other failed predecessor exists
+            other_failed_preds = dep_map[nid] & still_failed
+            if not other_failed_preds:
                 await self._store.update_node(
-                    other.id, status="pending", error=None
+                    n.id, status="pending", error=None
                 )
 
         # Reactivate DAG if it was marked failed
@@ -246,7 +285,8 @@ class DAGOrchestrator:
         if not self._dynamic_loader:
             return
 
-        check = self._dynamic_loader._registry.get_check(node.check_name)
+        registry = getattr(self._dynamic_loader, '_registry', None)
+        check = registry.get_check(node.check_name) if registry else None
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
@@ -431,14 +471,17 @@ class DAGOrchestrator:
         return node.result
 
     async def _propagate_failures(self, dag: ExecutionDAG) -> None:
-        """Transitively block nodes whose predecessors have failed."""
-        # Build dependency map: node_id -> set of predecessor node_ids
+        """Transitively block/cancel nodes whose predecessors have failed."""
+        # Build separate maps for dependency and cancel_cascade edges
         dep_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
+        cancel_map: dict[str, set[str]] = {str(n.id): set() for n in dag.nodes}
         node_by_id: dict[str, DAGNode] = {str(n.id): n for n in dag.nodes}
 
         for edge in dag.edges:
-            if edge.edge_type in ("dependency", "cancel_cascade"):
+            if edge.edge_type == "dependency":
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
+            elif edge.edge_type == "cancel_cascade":
+                cancel_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
         # Find all failed node IDs
         failed_ids: set[str] = set()
@@ -449,20 +492,40 @@ class DAGOrchestrator:
         if not failed_ids:
             return
 
-        # Transitively find all nodes that depend on failed nodes
+        # Find nodes to cancel (cancel_cascade edges — direct only)
+        to_cancel: set[str] = set()
+        for node_id, predecessors in cancel_map.items():
+            node = node_by_id[node_id]
+            if node.status in _TERMINAL:
+                continue
+            if predecessors & failed_ids:
+                to_cancel.add(node_id)
+
+        # Transitively find nodes to block (dependency edges)
+        # Treat both failed and cancel_cascade-cancelled nodes as "poison"
+        poison = failed_ids | to_cancel
         to_block: set[str] = set()
         changed = True
         while changed:
             changed = False
             for node_id, predecessors in dep_map.items():
                 node = node_by_id[node_id]
-                if node.status in _TERMINAL or node_id in to_block:
+                if node.status in _TERMINAL or node_id in to_block or node_id in to_cancel:
                     continue
-                if predecessors & (failed_ids | to_block):
+                if predecessors & (poison | to_block):
                     to_block.add(node_id)
                     changed = True
 
-        # Block the affected nodes
+        # Apply cancelled status (cancel_cascade targets)
+        for node_id in to_cancel:
+            node = node_by_id[node_id]
+            await self._cancel_node(node)
+            await self._store.update_node(
+                node.id, status="cancelled", error="Cancelled by predecessor failure"
+            )
+            node.status = "cancelled"
+
+        # Apply blocked status (dependency descendants)
         for node_id in to_block:
             node = node_by_id[node_id]
             await self._store.update_node(
@@ -637,9 +700,8 @@ class DAGOrchestrator:
         """Cancel the underlying primitive for a node."""
         if node.node_type == "subtask" and node.subtask_id and self._subtask_mgr:
             try:
-                from nous.storage.models import Subtask
                 subtask = await self._subtask_mgr.get(node.subtask_id)
-                if subtask and subtask.status == "pending":
+                if subtask and subtask.status in ("pending", "running"):
                     await self._subtask_mgr.cancel(node.subtask_id)
             except Exception:
                 logger.debug("Could not cancel subtask %s", node.subtask_id)
@@ -695,7 +757,7 @@ class DAGOrchestrator:
                 cancelled_any = True
 
         # If there are still running nodes, let them finish
-        has_running = any(n.status in ("running", "awaiting_check") for n in dag.nodes)
+        has_running = any(n.status == "running" for n in dag.nodes)
         if not has_running:
             # Determine final status
             has_completed = any(n.status == "completed" for n in dag.nodes)

@@ -200,13 +200,20 @@ class DAGStore:
             await session.commit()
 
     async def update_node(self, node_id: UUID, **kwargs: object) -> None:
-        """Update any fields on a DAG node."""
+        """Update any fields on a DAG node (agent-scoped)."""
         if not kwargs:
             return
         async with self._db.session() as session:
             await session.execute(
                 update(DAGNode)
                 .where(DAGNode.id == node_id)
+                .where(
+                    DAGNode.dag_id.in_(
+                        select(ExecutionDAG.id).where(
+                            ExecutionDAG.agent_id == self._agent_id
+                        )
+                    )
+                )
                 .values(**kwargs)
             )
             await session.commit()
