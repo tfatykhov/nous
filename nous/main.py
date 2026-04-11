@@ -238,6 +238,7 @@ async def create_components(settings: Settings) -> dict:
 
             if graph_linker is not None and settings.cross_type_linking_enabled:
                 heart._bus = bus  # Inject bus for fact_learned emission
+                brain._bus = bus  # F040: Inject bus for decision_recorded emission
                 FactGraphLinker(graph_linker, settings, bus)
                 logger.debug("F022: FactGraphLinker wired — fact->decision linking enabled")
         except ImportError:

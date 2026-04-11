@@ -32,7 +32,7 @@ def handler(settings, bus):
 async def test_graph_densification_phase_runs(handler):
     """Graph densification phase runs backfill and cluster discovery when densifier is wired."""
     densifier = MagicMock()
-    densifier.run_backfill_cycle = AsyncMock(return_value={"edges_created": 5, "by_type": {"fact": 3, "decision": 2}})
+    densifier.run_backfill_cycle = AsyncMock(return_value={"facts": 3, "decisions": 2, "episodes": 0, "procedures": 0})
     densifier.discover_clusters = AsyncMock(return_value=3)
     handler._graph_densifier = densifier
 
@@ -42,7 +42,7 @@ async def test_graph_densification_phase_runs(handler):
     assert result is True
     densifier.run_backfill_cycle.assert_awaited_once()
     densifier.discover_clusters.assert_awaited_once_with(max_bridges=20)
-    assert sleep_stats["orphan_edges_created"] == 5
+    assert sleep_stats["orphan_edges_created"] == 5  # sum(3+2+0+0)
     assert sleep_stats["bridge_edges_created"] == 3
 
 
@@ -95,7 +95,7 @@ async def test_graph_densification_phase_handles_errors(handler):
 async def test_graph_densification_partial_failure(handler):
     """Backfill succeeds but discover_clusters raises — stats still has backfill result."""
     densifier = MagicMock()
-    densifier.run_backfill_cycle = AsyncMock(return_value={"edges_created": 7, "by_type": {"fact": 7}})
+    densifier.run_backfill_cycle = AsyncMock(return_value={"facts": 7, "decisions": 0, "episodes": 0, "procedures": 0})
     densifier.discover_clusters = AsyncMock(side_effect=RuntimeError("cluster error"))
     handler._graph_densifier = densifier
 

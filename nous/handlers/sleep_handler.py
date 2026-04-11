@@ -890,7 +890,8 @@ class SleepHandler:
         try:
             self._graph_densifier._interrupted = self._interrupted
             result = await self._graph_densifier.run_backfill_cycle()
-            sleep_stats["orphan_edges_created"] = result["edges_created"]
+            total_edges = sum(result.values())
+            sleep_stats["orphan_edges_created"] = total_edges
 
             if not self._interrupted:
                 self._graph_densifier._interrupted = self._interrupted
@@ -899,7 +900,7 @@ class SleepHandler:
 
             logger.info(
                 "F040 graph densification: %d backfill edges, %d bridge edges",
-                result["edges_created"],
+                total_edges,
                 sleep_stats.get("bridge_edges_created", 0),
             )
             return True
