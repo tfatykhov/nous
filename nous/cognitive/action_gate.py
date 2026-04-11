@@ -14,13 +14,39 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from nous.cognitive.execution_ledger import classify_side_effect
+from nous.cognitive.execution_ledger import ExecutedAction, classify_side_effect
 
 if TYPE_CHECKING:
     from nous.cognitive.execution_ledger import ExecutionLedger
     from nous.config import Settings
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# F026.1: Iterative command patterns
+# ---------------------------------------------------------------------------
+
+# First token of bash commands that are inherently iterative (build/test/lint)
+ITERATIVE_COMMAND_TOKENS: frozenset[str] = frozenset({
+    "make", "cmake", "ninja",           # Build systems
+    "pytest", "python", "node",          # Test runners
+    "npm", "yarn", "pnpm", "bun",       # JS package managers / runners
+    "cargo", "go", "mvn", "gradle",     # Language build tools
+    "docker", "docker-compose",          # Container builds
+    "gcc", "g++", "clang", "rustc",     # Compilers
+    "tsc", "eslint", "ruff", "mypy",    # Linters / type checkers
+    "terraform", "ansible",              # IaC tools
+    "gh",                                # GitHub CLI (PR creation retries)
+})
+
+# Sub-commands for multi-token tools that indicate iterative use
+ITERATIVE_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "npm": frozenset({"run", "test", "build", "start"}),
+    "cargo": frozenset({"build", "test", "check", "run", "clippy"}),
+    "go": frozenset({"build", "test", "run", "vet"}),
+    "docker": frozenset({"build", "run"}),
+    "gh": frozenset({"pr", "issue"}),
+}
 
 
 @dataclass
@@ -130,36 +156,118 @@ class ActionGate:
         tool_input: dict,
         ledger: ExecutionLedger,
     ) -> GateResult:
-        """Block duplicate successful writes with identical arguments."""
-        # Summarize new args the same way the ledger summarizes recorded args
+        """Multi-layer duplicate detection with change-awareness (F026.1)."""
         new_key_args = ledger._summarize_args(tool_name, tool_input)  # noqa: SLF001
 
         turn_window = self._settings.action_gating_turn_window
         min_turn = ledger.current_turn - turn_window
 
-        recent = [
-            a
-            for a in ledger.actions[-20:]
-            if a.tool_name == tool_name
-            and a.status == "success"
-            and a.turn > min_turn
-        ]
+        # Find all matching prior successes in window
+        matches: list[tuple[int, ExecutedAction]] = []
+        actions_slice = ledger.actions[-20:]
+        offset = max(0, len(ledger.actions) - 20)
+        for i, action in enumerate(actions_slice):
+            if (
+                action.tool_name == tool_name
+                and action.status == "success"
+                and action.turn > min_turn
+                and self._args_similar(action.key_args, new_key_args)
+            ):
+                matches.append((offset + i, action))
 
-        for prior in recent:
-            if self._args_similar(prior.key_args, new_key_args):
-                return GateResult(
-                    approved=False,
-                    reason=(
-                        f"Duplicate: {tool_name} already succeeded with the same"
-                        f" arguments on turn {prior.turn}"
-                    ),
-                    suggestion=(
-                        "If you intend a different outcome, adjust the arguments"
-                        " or confirm the first result was incorrect."
-                    ),
+        if not matches:
+            return GateResult(approved=True, reason="no-duplicates")
+
+        # --- Layer 1: Change-Aware Bypass ---
+        if self._settings.action_gating_change_aware:
+            last_match_abs_idx = matches[-1][0]
+            if self._has_state_change_since(ledger, last_match_abs_idx):
+                logger.info(
+                    "F026.1 change-aware bypass: %s allowed (state changed since action #%d)",
+                    tool_name, last_match_abs_idx,
                 )
+                return GateResult(approved=True, reason="state-changed-since-last-run")
 
-        return GateResult(approved=True, reason="consistency-pass")
+        # --- Layer 2 + 3: Threshold Check ---
+        repeat_thresh, hard_thresh = self._effective_thresholds(tool_name, tool_input)
+        count = len(matches)
+
+        if count < repeat_thresh:
+            return GateResult(approved=True, reason=f"under-threshold({count}/{repeat_thresh})")
+
+        if count < hard_thresh:
+            logger.warning(
+                "F026.1 repeat warning: %s called %d/%d times (hard limit: %d)",
+                tool_name, count, repeat_thresh, hard_thresh,
+            )
+            return GateResult(
+                approved=True,
+                reason=f"at-threshold-warning({count}/{hard_thresh})",
+                suggestion=(
+                    f"You've run {tool_name} with the same arguments {count} times "
+                    f"in the last {turn_window} turns. If you're stuck, try a different approach."
+                ),
+            )
+
+        # --- Layer 4: Hard Block ---
+        logger.warning(
+            "F026.1 doom-loop block: %s called %d times, no state changes", tool_name, count,
+        )
+        return GateResult(
+            approved=False,
+            reason=(
+                f"Doom-loop protection: {tool_name} called {count} times with identical "
+                f"arguments and no intervening state changes in the last {turn_window} turns."
+            ),
+            suggestion=(
+                "You appear to be stuck in a loop. Try:\n"
+                "1. Change your approach — different command, different file\n"
+                "2. Read the error output carefully — what's actually failing?\n"
+                "3. Ask the user for guidance if you're blocked"
+            ),
+        )
+
+    def _has_state_change_since(self, ledger: ExecutionLedger, last_match_idx: int) -> bool:
+        """Check if any successful write/external action occurred after last_match_idx."""
+        intervening = ledger.actions[last_match_idx + 1:]
+        return any(
+            a.side_effect_type in ("write", "external")
+            and a.status == "success"
+            for a in intervening
+        )
+
+    def _is_iterative_command(self, tool_name: str, tool_input: dict) -> bool:
+        """Return True if this tool call is a known-iterative pattern."""
+        if tool_name == "write_file":
+            return True
+
+        if tool_name == "bash":
+            command = tool_input.get("command", "")
+            tokens = command.strip().split()
+            if not tokens:
+                return False
+            first = tokens[0].lower()
+            # Check subcommands first — tools with subcommand entries
+            # are only iterative for specific subcommands
+            if first in ITERATIVE_SUBCOMMANDS:
+                if len(tokens) > 1:
+                    return tokens[1].lower() in ITERATIVE_SUBCOMMANDS[first]
+                return False
+            if first in ITERATIVE_COMMAND_TOKENS:
+                return True
+
+        return False
+
+    def _effective_thresholds(self, tool_name: str, tool_input: dict) -> tuple[int, int]:
+        """Return (repeat_threshold, hard_block_threshold) for this call."""
+        base_repeat = self._settings.action_gating_repeat_threshold
+        base_hard = self._settings.action_gating_hard_block_threshold
+
+        if self._is_iterative_command(tool_name, tool_input):
+            multiplier = self._settings.action_gating_iterative_multiplier
+            return (int(base_repeat * multiplier), int(base_hard * multiplier))
+
+        return (base_repeat, base_hard)
 
     # ------------------------------------------------------------------
     # Tier 3: full LLM gate

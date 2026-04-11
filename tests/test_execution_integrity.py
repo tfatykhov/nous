@@ -60,6 +60,11 @@ def _make_settings(**kwargs) -> types.SimpleNamespace:
         "action_gating_enabled": True,
         "action_gating_external_only": False,
         "action_gating_turn_window": 5,
+        # F026.1 defaults
+        "action_gating_change_aware": True,
+        "action_gating_repeat_threshold": 3,
+        "action_gating_hard_block_threshold": 5,
+        "action_gating_iterative_multiplier": 2.0,
     }
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -573,21 +578,19 @@ class TestActionGate:
         ledger = self._ledger()
         result = await gate.check("write_file", {"path": "new_file.txt"}, ledger)
         assert result.approved is True
-        assert result.reason == "consistency-pass"
+        assert result.reason == "no-duplicates"
 
     @pytest.mark.asyncio
-    async def test_write_duplicate_blocked(self):
-        """Same write_file(path=X) after a successful write is blocked."""
+    async def test_write_duplicate_allowed_under_threshold(self):
+        """Same write_file(path=X) after a successful write is allowed (F026.1 threshold)."""
         settings = _make_settings()
         gate = ActionGate(settings)
         ledger = self._ledger()
         # Record the first write as successful
         ledger.record("write_file", {"path": "report.txt"}, "ok", "success")
-        # Attempt the same write again
+        # Attempt the same write again — write_file is iterative, threshold 6
         result = await gate.check("write_file", {"path": "report.txt"}, ledger)
-        assert result.approved is False
-        assert "Duplicate" in result.reason
-        assert result.suggestion is not None
+        assert result.approved is True
 
     @pytest.mark.asyncio
     async def test_write_duplicate_not_blocked_on_error(self):
@@ -602,7 +605,7 @@ class TestActionGate:
 
     @pytest.mark.asyncio
     async def test_args_similar_summarized_comparison(self):
-        """Consistency check summarizes new args the same way as recorded args."""
+        """Consistency check summarizes new args and detects match (F026.1 allows under threshold)."""
         settings = _make_settings()
         gate = ActionGate(settings)
         ledger = self._ledger()
@@ -610,17 +613,19 @@ class TestActionGate:
         ledger.record("write_file", {"path": "output/report.txt", "content": "data"}, "ok", "success")
         # Check with same path (content differs but path is the key)
         result = await gate.check("write_file", {"path": "output/report.txt", "content": "new data"}, ledger)
-        assert result.approved is False
+        # write_file is iterative → threshold 6, only 1 match → allowed
+        assert result.approved is True
 
     @pytest.mark.asyncio
     async def test_args_similar_case_insensitive(self):
-        """Path comparison is case-insensitive."""
+        """Path comparison is case-insensitive — match detected (allowed under threshold)."""
         settings = _make_settings()
         gate = ActionGate(settings)
         ledger = self._ledger()
         ledger.record("write_file", {"path": "Report.TXT"}, "ok", "success")
         result = await gate.check("write_file", {"path": "report.txt"}, ledger)
-        assert result.approved is False
+        # write_file is iterative → threshold 6, only 1 match → allowed
+        assert result.approved is True
 
     @pytest.mark.asyncio
     async def test_external_with_no_gate_model_fails_open(self):

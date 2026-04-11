@@ -316,6 +316,12 @@ class Settings(BaseSettings):
     action_gating_external_only: bool = False  # True = skip Tier 2, only gate external/irreversible
     action_gating_turn_window: int = 5  # Only block duplicates within this many turns
 
+    # F026.1: Change-aware duplicate detection
+    action_gating_change_aware: bool = True  # Layer 1: check for intervening state changes
+    action_gating_repeat_threshold: int = 3  # Layer 2: identical calls allowed before warning
+    action_gating_hard_block_threshold: int = 5  # Layer 2/4: identical calls before hard block
+    action_gating_iterative_multiplier: float = 2.0  # Layer 3: threshold multiplier for iterative commands
+
     # F030: MMR Diversity Re-Ranking
     mmr_enabled: bool = False
     mmr_diversity_weight: float = Field(
