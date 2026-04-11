@@ -221,6 +221,7 @@ class SleepHandler:
         self._sleep_task: asyncio.Task | None = None
         self._procedure_learner = None  # F012: Set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
+        self._graph_densifier = None  # F040: Set externally if enabled
         # F035.1: Observability tracking
         self._total_sleeps: int = 0
         self._last_sleep_at: datetime | None = None
@@ -307,6 +308,11 @@ class SleepHandler:
                 success = await self._phase_cluster_consolidation(sleep_stats)
                 if success:
                     phases_completed.append("cluster_consolidation")
+
+            if not self._interrupted:
+                success = await self._phase_graph_densification(sleep_stats)
+                if success:
+                    phases_completed.append("graph_densification")
 
             if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
@@ -875,6 +881,30 @@ class SleepHandler:
 
         except Exception:
             logger.warning("F027 cluster consolidation phase failed", exc_info=True)
+            return False
+
+    async def _phase_graph_densification(self, sleep_stats: dict) -> bool:
+        """F040 Phase: Connect orphan nodes to the knowledge graph."""
+        if not self._settings.graph_backfill_enabled or not self._graph_densifier:
+            return True
+        try:
+            self._graph_densifier._interrupted = self._interrupted
+            result = await self._graph_densifier.run_backfill_cycle()
+            sleep_stats["orphan_edges_created"] = result["edges_created"]
+
+            if not self._interrupted:
+                self._graph_densifier._interrupted = self._interrupted
+                bridges = await self._graph_densifier.discover_clusters(max_bridges=20)
+                sleep_stats["bridge_edges_created"] = bridges
+
+            logger.info(
+                "F040 graph densification: %d backfill edges, %d bridge edges",
+                result["edges_created"],
+                sleep_stats.get("bridge_edges_created", 0),
+            )
+            return True
+        except Exception:
+            logger.warning("F040 graph densification phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:
