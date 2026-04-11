@@ -20,7 +20,7 @@ from nous.heart.schemas import CensorInput, FactInput
 
 logger = logging.getLogger(__name__)
 
-# F055: Patterns indicating user corrections
+# F039: Patterns indicating user corrections
 _CORRECTION_PATTERNS = [
     "no, actually", "that's wrong", "that's not right", "not what i",
     "you misunderstood", "i meant", "correction:", "no no",
@@ -64,7 +64,7 @@ class MonitorEngine:
         self._last_errors: dict[str, list[dict]] = {}
         self._session_procedure_counts: dict[str, int] = {}
         self._procedure_learner = None  # Set externally if F012 enabled
-        self._llm_client = None  # Set externally if F055 correction extraction enabled
+        self._llm_client = None  # Set externally if F039 correction extraction enabled
 
     async def assess(
         self,
@@ -303,7 +303,7 @@ class MonitorEngine:
         session_id: str,
         session: AsyncSession | None = None,
     ) -> dict | None:
-        """F055: Detect if user_message is a correction and extract the principle.
+        """F039: Detect if user_message is a correction and extract the principle.
 
         Returns extraction dict with keys: principle, subject, is_censor,
         censor_pattern, confidence — or None if no correction detected.
@@ -316,7 +316,7 @@ class MonitorEngine:
             return None
 
         if not self._llm_client:
-            logger.debug("F055: Correction pattern matched but no LLM client available")
+            logger.debug("F039: Correction pattern matched but no LLM client available")
             return None
 
         from nous.handlers import call_background_llm, parse_llm_json
@@ -366,7 +366,7 @@ class MonitorEngine:
             if extraction.get("is_censor") and extraction.get("censor_pattern"):
                 censor_input = CensorInput(
                     trigger_pattern=extraction["censor_pattern"],
-                    reason=f"F055: Inline correction — {principle[:100]}",
+                    reason=f"F039: Inline correction — {principle[:100]}",
                     action="warn",
                 )
                 await self._heart.add_censor(censor_input, session=session)
@@ -374,7 +374,7 @@ class MonitorEngine:
             return extraction
 
         except Exception:
-            logger.warning("F055: Inline correction extraction failed")
+            logger.warning("F039: Inline correction extraction failed")
             return None
 
     def _error_to_censor_text(self, tool_result: ToolResult) -> str:

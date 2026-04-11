@@ -202,7 +202,7 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("OutcomeDetector not available yet")
 
-        # F055: Correction learning pipeline
+        # F039: Correction learning pipeline
         try:
             from nous.handlers.correction_extractor import CorrectionExtractor
 
@@ -215,7 +215,7 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("CorrectionExtractor not available yet")
 
-        # F055: Wire LLM client into monitor for inline correction detection
+        # F039: Wire LLM client into monitor for inline correction detection
         if settings.correction_extraction_enabled and cognitive._monitor is not None:
             cognitive._monitor._llm_client = api_client
 

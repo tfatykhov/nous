@@ -1,4 +1,4 @@
-"""Tests for F055 correction extractor handler."""
+"""Tests for F039 correction extractor handler."""
 
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch

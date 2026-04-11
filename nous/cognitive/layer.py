@@ -761,7 +761,7 @@ class CognitiveLayer:
         except Exception:
             logger.warning("Learning failed during post_turn")
 
-        # 2b. F055: Real-time correction detection
+        # 2b. F039: Real-time correction detection
         try:
             user_msgs = self._session_user_messages.get(session_id, [])
             if user_msgs:
@@ -773,11 +773,11 @@ class CognitiveLayer:
                 )
                 if correction:
                     logger.info(
-                        "F055: Correction detected and extracted: %s",
+                        "F039: Correction detected and extracted: %s",
                         correction.get("principle", "")[:80],
                     )
         except Exception:
-            logger.warning("F055: Correction detection failed in post_turn")
+            logger.warning("F039: Correction detection failed in post_turn")
 
         # 3. DELIBERATION — finalize if decision exists
         if decision_id:

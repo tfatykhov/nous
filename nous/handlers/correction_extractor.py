@@ -1,4 +1,4 @@
-"""F055 — Correction Learning Pipeline: Batch Extractor.
+"""F039 — Correction Learning Pipeline: Batch Extractor.
 
 Listens to: outcome_signals_detected
 Extracts generalizable principles from user corrections and stores them
@@ -92,7 +92,7 @@ class CorrectionExtractor:
                     if not summary and episode.summary:
                         summary = {"summary": episode.summary}
         except Exception:
-            logger.warning("F055: Failed to fetch episode %s", episode_id)
+            logger.warning("F039: Failed to fetch episode %s", episode_id)
 
         # Extract a principle for each corrected signal
         for sig in corrected_signals:
@@ -119,20 +119,20 @@ class CorrectionExtractor:
                     tags=["correction", "auto:f055"],
                 )
                 await self._heart.learn(fact_input)
-                logger.info("F055: Stored correction fact: %s", principle[:80])
+                logger.info("F039: Stored correction fact: %s", principle[:80])
 
                 # Optionally create censor for "never do" patterns
                 if extraction.get("is_censor") and extraction.get("censor_pattern"):
                     censor_input = CensorInput(
                         trigger_pattern=extraction["censor_pattern"],
-                        reason=f"F055: Learned from correction — {principle[:100]}",
+                        reason=f"F039: Learned from correction — {principle[:100]}",
                         action="warn",
                     )
                     await self._heart.add_censor(censor_input)
-                    logger.info("F055: Created censor for correction: %s", extraction["censor_pattern"])
+                    logger.info("F039: Created censor for correction: %s", extraction["censor_pattern"])
 
             except Exception:
-                logger.exception("F055: Failed to extract correction principle")
+                logger.exception("F039: Failed to extract correction principle")
 
     async def _extract_principle(
         self,
@@ -166,5 +166,5 @@ class CorrectionExtractor:
 
             return parse_llm_json(raw)
         except Exception:
-            logger.warning("F055: LLM extraction failed for correction principle")
+            logger.warning("F039: LLM extraction failed for correction principle")
             return None

@@ -257,7 +257,7 @@ class RubricManager:
         ]
 
     async def load_correction_context(self, task_description: str, limit: int = 5) -> list[str]:
-        """F055: Load correction-sourced facts relevant to evaluation context.
+        """F039: Load correction-sourced facts relevant to evaluation context.
 
         Returns a list of fact content strings from corrections.
         """

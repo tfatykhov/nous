@@ -1,4 +1,4 @@
-"""Tests for F055 inline correction detection in MonitorEngine."""
+"""Tests for F039 inline correction detection in MonitorEngine."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
