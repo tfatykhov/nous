@@ -161,6 +161,7 @@ nous/
 | F025 | Amnesia Prevention Phase 2+3 (staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence) | — |
 | F038 | Memory Quality & Context Loading Fixes (quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency, user_direct bonus, task synthesis, context dedup, bash hints) | #258 |
 | F038 | Unified DAG Orchestration (DAGStore, DAGOrchestrator, DAG tools, dashboard tab) | #289 |
+| F040 | Graph Densification (orphan backfill, reverse linking, per-relation thresholds, density dashboard, cluster discovery) | — |
 
 ## How to Work
 
@@ -366,6 +367,19 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_TOOL_SCHEMA_CACHE_ENABLED` | `true` | Cache tool schemas per frame (F036) |
 | `NOUS_DAG_ENABLED` | `true` | Enable DAG orchestration (F038) |
 | `NOUS_CORRECTION_EXTRACTION_ENABLED` | `true` | Enable correction learning pipeline (F039) |
+| `NOUS_GRAPH_BACKFILL_ENABLED` | `true` | Enable graph densification backfill during sleep (F040) |
+| `NOUS_GRAPH_BACKFILL_MAX_FACTS` | `50` | Max orphan facts to process per sleep cycle |
+| `NOUS_GRAPH_BACKFILL_MAX_DECISIONS` | `30` | Max orphan decisions to process per sleep cycle |
+| `NOUS_GRAPH_BACKFILL_MAX_EPISODES` | `30` | Max orphan episodes to process per sleep cycle |
+| `NOUS_GRAPH_BACKFILL_MAX_PROCEDURES` | `20` | Max orphan procedures to process per sleep cycle |
+| `NOUS_GRAPH_THRESHOLD_FACT_FACT` | `0.82` | Same-type threshold for fact↔fact linking |
+| `NOUS_GRAPH_THRESHOLD_FACT_DECISION` | `0.72` | Cross-type threshold for fact→decision linking |
+| `NOUS_GRAPH_THRESHOLD_FACT_EPISODE` | `0.70` | Cross-type threshold for fact→episode linking |
+| `NOUS_GRAPH_THRESHOLD_DECISION_DECISION` | `0.78` | Same-type threshold for decision↔decision linking |
+| `NOUS_GRAPH_THRESHOLD_EPISODE_EPISODE` | `0.75` | Same-type threshold for episode↔episode linking |
+| `NOUS_GRAPH_THRESHOLD_PROCEDURE_ANY` | `0.70` | Threshold for procedure→fact/decision linking |
+| `NOUS_GRAPH_HEALTH_ORPHAN_WARN_THRESHOLD` | `0.40` | Orphan rate threshold for health warnings |
+| `NOUS_GRAPH_HEALTH_CHECK_ENABLED` | `true` | Enable graph health monitoring |
 
 ### REST Endpoints
 
@@ -416,6 +430,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | GET | `/dashboard/admission/rejected` | Rejected admission entries |
 | GET | `/dashboard/ledger` | Execution ledger dashboard data |
 | GET | `/dashboard/heartbeat` | Heartbeat dashboard data |
+| GET | `/dashboard/density` | Graph density dashboard data (F040) |
 | GET | `/heartbeat/status` | Heartbeat status, checks, budget |
 | POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
 | PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |
