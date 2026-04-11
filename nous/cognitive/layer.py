@@ -310,8 +310,8 @@ class CognitiveLayer:
         # Issue #229: Initialize critic skills (populated only in advised mode)
         _critic_skills: list[str] = []
 
-        # F024: Track user messages for frustration detection
-        if self._critic and self._settings.critic_enabled:
+        # Track user messages for frustration detection (F024) and correction detection (F039)
+        if (self._critic and self._settings.critic_enabled) or self._settings.correction_extraction_enabled:
             user_msgs = self._session_user_messages.setdefault(session_id, [])
             user_msgs.append(user_input)
             if len(user_msgs) > 5:

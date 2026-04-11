@@ -234,4 +234,4 @@ class TestCorrectionPatternMatching:
 
             fact_input = heart.learn.call_args[0][0]
             assert fact_input.source == "inline_correction"
-            assert "auto:f055" in fact_input.tags
+            assert "auto:f039" in fact_input.tags

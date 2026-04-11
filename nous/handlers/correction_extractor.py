@@ -84,7 +84,12 @@ class CorrectionExtractor:
 
                 from nous.storage.models import Episode
 
-                result = await session.execute(select(Episode).where(Episode.id == UUID(episode_id)))
+                result = await session.execute(
+                    select(Episode).where(
+                        Episode.id == UUID(episode_id),
+                        Episode.agent_id == self._agent_id,
+                    )
+                )
                 episode = result.scalar_one_or_none()
                 if episode:
                     transcript = episode.transcript or ""
@@ -116,7 +121,7 @@ class CorrectionExtractor:
                     subject=extraction.get("subject"),
                     confidence=max(0.0, min(1.0, float(extraction.get("confidence", 0.7)))),
                     source="correction_extraction",
-                    tags=["correction", "auto:f055"],
+                    tags=["correction", "auto:f039"],
                 )
                 await self._heart.learn(fact_input)
                 logger.info("F039: Stored correction fact: %s", principle[:80])

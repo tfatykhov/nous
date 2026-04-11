@@ -358,7 +358,7 @@ class MonitorEngine:
                 subject=extraction.get("subject"),
                 confidence=max(0.0, min(1.0, float(extraction.get("confidence", 0.7)))),
                 source="inline_correction",
-                tags=["correction", "auto:f055"],
+                tags=["correction", "auto:f039"],
             )
             await self._heart.learn(fact_input, session=session)
 
