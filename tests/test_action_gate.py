@@ -966,6 +966,47 @@ class TestIsIterativeCommand:
         gate = self._gate()
         assert gate._is_iterative_command("bash", {"command": "go mod tidy"}) is False
 
+    def test_cmd_key_is_iterative(self):
+        """bash tool_input with 'cmd' key (alternative to 'command') is recognised."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"cmd": "pytest tests/"}) is True
+
+    def test_cmd_key_non_iterative(self):
+        """bash tool_input with 'cmd' key for non-iterative command."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"cmd": "rm -rf /tmp"}) is False
+
+    def test_env_prefix_pytest_is_iterative(self):
+        """Env var prefix like PYTHONPATH=. before pytest is still iterative."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "PYTHONPATH=. pytest tests/"}) is True
+
+    def test_multiple_env_prefixes_iterative(self):
+        """Multiple env vars before command still detected as iterative."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "CC=gcc CFLAGS=-O2 make build"}) is True
+
+    def test_env_prefix_non_iterative(self):
+        """Env var prefix before non-iterative command stays non-iterative."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "FOO=bar rm -rf /tmp"}) is False
+
+    def test_only_env_vars_not_iterative(self):
+        """Command that is only env var assignments (no actual command) is not iterative."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "FOO=bar"}) is False
+
+    def test_cmd_key_with_env_prefix(self):
+        """Combinatorial: cmd key + env prefix both handled together."""
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"cmd": "PYTHONPATH=. pytest tests/"}) is True
+
+    def test_equals_in_non_env_token_not_stripped(self):
+        """Tokens with = that aren't POSIX env vars (e.g. flags) are not stripped."""
+        gate = self._gate()
+        # awk -F= is not an env var assignment — first token 'awk' should be checked
+        assert gate._is_iterative_command("bash", {"command": "awk -F= '{print}'"}) is False
+
 
 # ===========================================================================
 # F026.1: _effective_thresholds

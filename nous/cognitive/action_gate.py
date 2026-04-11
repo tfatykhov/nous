@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # F026.1: Iterative command patterns
 # ---------------------------------------------------------------------------
+
+# POSIX env var assignment prefix (e.g. PYTHONPATH=., CC=gcc)
+_ENV_VAR_PREFIX = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 # First token of bash commands that are inherently iterative (build/test/lint)
 ITERATIVE_COMMAND_TOKENS: frozenset[str] = frozenset({
@@ -242,8 +246,14 @@ class ActionGate:
             return True
 
         if tool_name == "bash":
-            command = tool_input.get("command", "")
+            # Support both "command" and "cmd" keys (matches execution_ledger)
+            command = tool_input.get("command") or tool_input.get("cmd", "")
             tokens = command.strip().split()
+            if not tokens:
+                return False
+            # Skip leading env var assignments (e.g. PYTHONPATH=. pytest)
+            while tokens and _ENV_VAR_PREFIX.match(tokens[0]):
+                tokens = tokens[1:]
             if not tokens:
                 return False
             first = tokens[0].lower()
