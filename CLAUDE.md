@@ -365,6 +365,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CACHE_SINGLE_BREAKPOINT` | `true` | Use single cache breakpoint strategy (F036) |
 | `NOUS_TOOL_SCHEMA_CACHE_ENABLED` | `true` | Cache tool schemas per frame (F036) |
 | `NOUS_DAG_ENABLED` | `true` | Enable DAG orchestration (F038) |
+| `NOUS_CORRECTION_EXTRACTION_ENABLED` | `true` | Enable correction learning pipeline (F039) |
 
 ### REST Endpoints
 
