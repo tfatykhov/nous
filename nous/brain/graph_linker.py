@@ -23,6 +23,38 @@ from nous.storage.models import GraphEdge
 
 logger = logging.getLogger(__name__)
 
+# F040: Per-relation weight multipliers for edge confidence scoring.
+# Certain relation types are inherently stronger signals than others.
+RELATION_WEIGHT_MULTIPLIERS: dict[str, float] = {
+    "supports": 1.0,
+    "contradicts": 1.0,
+    "supersedes": 0.9,
+    "related_to": 0.8,
+    "caused_by": 1.0,
+    "informed_by": 0.9,
+    "evidence_for": 1.0,
+    "discussed_in": 0.7,
+    "extracted_from": 0.7,
+}
+
+
+def edge_confidence(
+    similarity: float,
+    shared_tags: int,
+    shared_subject: bool,
+    temporal_proximity_days: float,
+) -> float:
+    """Compute a multi-signal confidence score for a candidate edge.
+
+    Combines embedding similarity with tag overlap, subject match, and
+    temporal proximity into a single [0, 1] score.
+    """
+    score = similarity * 0.6
+    score += min(shared_tags * 0.05, 0.15)
+    score += 0.10 if shared_subject else 0.0
+    score += max(0, 0.15 - temporal_proximity_days * 0.001)
+    return min(score, 1.0)
+
 
 def common_template_text(node_type: str, content: str) -> str:
     """Format content using common template for cross-type embedding comparison."""
@@ -43,6 +75,54 @@ class GraphLinker:
         self.embedder = embedder
         self.settings = settings
         self.agent_id = agent_id
+
+    async def create_edge(
+        self,
+        source_id: UUID,
+        target_id: UUID,
+        source_type: str,
+        target_type: str,
+        relation: str,
+        weight: float,
+        session: AsyncSession,
+    ) -> GraphEdgeInfo | None:
+        """Create a graph edge with relation-aware weight multiplier.
+
+        Applies RELATION_WEIGHT_MULTIPLIERS to the raw weight and uses
+        ON CONFLICT DO NOTHING to skip duplicates.  Returns the edge info
+        on success, or None if the edge already exists.
+        """
+        multiplier = RELATION_WEIGHT_MULTIPLIERS.get(relation, 0.8)
+        adjusted_weight = weight * multiplier
+
+        stmt = (
+            pg_insert(GraphEdge)
+            .values(
+                source_id=source_id,
+                target_id=target_id,
+                source_type=source_type,
+                target_type=target_type,
+                agent_id=self.agent_id,
+                relation=relation,
+                weight=adjusted_weight,
+                auto_linked=True,
+            )
+            .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
+        )
+        result = await session.execute(stmt)
+
+        if result.rowcount == 0:
+            return None
+
+        return GraphEdgeInfo(
+            source_id=source_id,
+            target_id=target_id,
+            source_type=source_type,
+            target_type=target_type,
+            relation=relation,
+            weight=adjusted_weight,
+            auto_linked=True,
+        )
 
     async def link_fact_to_decisions(
         self,
