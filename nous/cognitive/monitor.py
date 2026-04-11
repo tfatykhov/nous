@@ -16,9 +16,17 @@ from nous.brain.brain import Brain
 from nous.cognitive.schemas import Assessment, FrameSelection, ToolResult, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
-from nous.heart.schemas import CensorInput
+from nous.heart.schemas import CensorInput, FactInput
 
 logger = logging.getLogger(__name__)
+
+# F055: Patterns indicating user corrections
+_CORRECTION_PATTERNS = [
+    "no, actually", "that's wrong", "that's not right", "not what i",
+    "you misunderstood", "i meant", "correction:", "no no",
+    "wrong,", "that's incorrect", "don't do that", "never do that",
+    "stop doing", "i said", "i already told you",
+]
 
 # Patterns that indicate transient errors (shouldn't create censors)
 _TRANSIENT_PATTERNS = [
@@ -56,6 +64,7 @@ class MonitorEngine:
         self._last_errors: dict[str, list[dict]] = {}
         self._session_procedure_counts: dict[str, int] = {}
         self._procedure_learner = None  # Set externally if F012 enabled
+        self._llm_client = None  # Set externally if F055 correction extraction enabled
 
     async def assess(
         self,
@@ -286,6 +295,87 @@ class MonitorEngine:
                 count = self._session_procedure_counts.get(session_id, 0)
                 self._session_procedure_counts[session_id] = count + 1
                 logger.info("Created recovery procedure from %d error→recovery pairs", len(pairs))
+
+    async def detect_and_extract_correction(
+        self,
+        user_message: str,
+        ai_response: str,
+        session_id: str,
+        session: AsyncSession | None = None,
+    ) -> dict | None:
+        """F055: Detect if user_message is a correction and extract the principle.
+
+        Returns extraction dict with keys: principle, subject, is_censor,
+        censor_pattern, confidence — or None if no correction detected.
+        """
+        if not self._settings.correction_extraction_enabled:
+            return None
+
+        lower = user_message.lower()
+        if not any(p in lower for p in _CORRECTION_PATTERNS):
+            return None
+
+        if not self._llm_client:
+            logger.debug("F055: Correction pattern matched but no LLM client available")
+            return None
+
+        from nous.handlers import call_background_llm, parse_llm_json
+
+        prompt = (
+            "The user corrected the AI in this exchange:\n\n"
+            f"User: {user_message[:1000]}\n"
+            f"AI response: {ai_response[:1000]}\n\n"
+            "Extract:\n"
+            '1. principle: A generalizable rule the AI should follow (1-2 sentences)\n'
+            '2. subject: What topic/domain this rule applies to\n'
+            '3. is_censor: true if this is a "never do X" pattern, false if "prefer X over Y"\n'
+            '4. censor_pattern: If is_censor=true, a short trigger phrase\n'
+            '5. confidence: 0.0-1.0 how generalizable this rule is\n\n'
+            "Return ONLY valid JSON."
+        )
+
+        try:
+            raw = await call_background_llm(
+                self._llm_client,
+                self._settings.background_model,
+                "You are a correction analysis system. Respond only with JSON.",
+                prompt,
+                max_tokens=512,
+            )
+            if not raw:
+                return None
+
+            extraction = parse_llm_json(raw)
+
+            principle = extraction.get("principle", "")
+            if not principle or len(principle) < 30:
+                return None
+
+            # Store as fact
+            fact_input = FactInput(
+                content=principle,
+                category="rule",
+                subject=extraction.get("subject"),
+                confidence=max(0.0, min(1.0, float(extraction.get("confidence", 0.7)))),
+                source="inline_correction",
+                tags=["correction", "auto:f055"],
+            )
+            await self._heart.learn(fact_input, session=session)
+
+            # Optionally create censor
+            if extraction.get("is_censor") and extraction.get("censor_pattern"):
+                censor_input = CensorInput(
+                    trigger_pattern=extraction["censor_pattern"],
+                    reason=f"F055: Inline correction — {principle[:100]}",
+                    action="warn",
+                )
+                await self._heart.add_censor(censor_input, session=session)
+
+            return extraction
+
+        except Exception:
+            logger.warning("F055: Inline correction extraction failed")
+            return None
 
     def _error_to_censor_text(self, tool_result: ToolResult) -> str:
         """Convert a tool error to a censor trigger pattern.

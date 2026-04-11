@@ -90,6 +90,19 @@ class RubricEvolver:
                 logger.info("F024-3b: Rate limited — %d versions this week", len(recent_versions))
                 return None
 
+        # F055: Load correction context for evaluation awareness
+        try:
+            correction_facts = await self._rubric.load_correction_context(
+                task_description="general evaluation patterns",
+            )
+            if correction_facts:
+                logger.info(
+                    "F055: Found %d correction-sourced facts for evaluation context",
+                    len(correction_facts),
+                )
+        except Exception:
+            logger.debug("F055: Failed to load correction context")
+
         dim_names = [d["name"] for d in active.dimensions]
         episodes = self._build_episodes_for_correlation(signals, dim_names)
 
