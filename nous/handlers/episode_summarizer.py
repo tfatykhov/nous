@@ -97,6 +97,7 @@ class EpisodeSummarizer:
         self._bus = bus
         self._llm = llm_client
         self._graph_linker = graph_linker
+        self._embedder = None  # F040: Set externally for episode↔episode linking
         bus.on("session_ended", self.handle)
 
     async def handle(self, event: Event) -> None:
@@ -174,8 +175,69 @@ class EpisodeSummarizer:
                 except Exception:
                     logger.debug("F022 graph linking failed for episode %s", episode_id)
 
+                # F040: Semantic episode↔episode linking
+                summary_text = summary.get("summary", "")
+                if summary_text:
+                    await self._link_similar_episodes(UUID(episode_id), summary_text)
+
         except Exception:
             logger.exception("Failed to summarize episode %s", episode_id)
+
+    async def _link_similar_episodes(self, episode_id: UUID, summary_text: str) -> int:
+        """F040: Find and link semantically similar episodes."""
+        if not self._graph_linker or not self._embedder or not summary_text:
+            return 0
+        try:
+            from nous.brain.graph_linker import common_template_text
+            from sqlalchemy import text as sa_text
+
+            template = common_template_text("episode", summary_text)
+            ep_emb = await self._embedder.embed(template)
+            emb_str = "[" + ",".join(str(float(v)) for v in ep_emb) + "]"
+
+            threshold = getattr(self._settings, "graph_threshold_episode_episode", 0.75)
+
+            async with self._graph_linker.db.session() as session:
+                sql = sa_text("""
+                    SELECT id,
+                           1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+                    FROM heart.episodes
+                    WHERE agent_id = :agent_id
+                      AND id != :episode_id
+                      AND embedding IS NOT NULL
+                      AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :threshold
+                    ORDER BY embedding <=> CAST(:embedding AS vector)
+                    LIMIT 3
+                """)
+                result = await session.execute(sql, {
+                    "embedding": emb_str,
+                    "agent_id": self._graph_linker.agent_id,
+                    "episode_id": episode_id,
+                    "threshold": threshold * 0.9,
+                })
+
+                edges_created = 0
+                for row in result:
+                    if row.similarity >= threshold:
+                        edge = await self._graph_linker.create_edge(
+                            source_id=episode_id, target_id=row.id,
+                            source_type="episode", target_type="episode",
+                            relation="related_to", weight=float(row.similarity),
+                            session=session,
+                        )
+                        if edge:
+                            edges_created += 1
+
+                if edges_created > 0:
+                    await session.commit()
+                    logger.debug(
+                        "F040: Linked episode %s to %d similar episodes",
+                        episode_id, edges_created,
+                    )
+                return edges_created
+        except Exception:
+            logger.debug("F040: Episode semantic linking failed for %s", episode_id)
+            return 0
 
     async def _generate_summary(self, transcript: str, decision_context: str = "") -> dict[str, Any] | None:
         """Generate structured summary from transcript using LLM.
