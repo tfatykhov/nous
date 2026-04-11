@@ -36,6 +36,11 @@ def _make_settings(**kwargs) -> types.SimpleNamespace:
         "action_gating_enabled": True,
         "action_gating_external_only": False,
         "action_gating_turn_window": 5,
+        # F026.1 defaults
+        "action_gating_change_aware": True,
+        "action_gating_repeat_threshold": 3,
+        "action_gating_hard_block_threshold": 5,
+        "action_gating_iterative_multiplier": 2.0,
     }
     defaults.update(kwargs)
     return types.SimpleNamespace(**defaults)
@@ -389,17 +394,17 @@ class TestActionGateCheckTier2:
         ledger = _ledger()
         result = await gate.check("write_file", {"path": "new.txt"}, ledger)
         assert result.approved is True
-        assert result.reason == "consistency-pass"
+        assert result.reason == "no-duplicates"
 
     @pytest.mark.asyncio
-    async def test_duplicate_write_blocked(self):
+    async def test_duplicate_write_allowed_under_threshold(self):
+        """With F026.1, a single duplicate is under the repeat threshold (3) and allowed."""
         gate = ActionGate(_make_settings())
         ledger = _ledger()
         ledger.record("write_file", {"path": "dup.txt"}, "ok", "success")
         result = await gate.check("write_file", {"path": "dup.txt"}, ledger)
-        assert result.approved is False
-        assert "Duplicate" in result.reason
-        assert result.suggestion is not None
+        # write_file is iterative → threshold is 6 (3 * 2.0), so 1 match is allowed
+        assert result.approved is True
 
     @pytest.mark.asyncio
     async def test_duplicate_check_ignores_failed_writes(self):
@@ -658,17 +663,20 @@ class TestActionGateFullGateDirect:
 
 
 class TestConsistencyCheckDuplicateReport:
-    def test_duplicate_reason_mentions_tool_and_turn(self):
+    def test_doom_loop_reason_mentions_tool(self):
+        """When hard block triggers, reason mentions the tool name."""
+        # write_file is iterative → hard threshold = 10
+        # Use same turn so all actions are within window
         gate = ActionGate(_make_settings())
         ledger = _ledger()
-        ledger.set_turn(3)
-        ledger.record("write_file", {"path": "out.txt"}, "ok", "success")
-        ledger.set_turn(5)
+        ledger.set_turn(1)
+        for _ in range(10):
+            ledger.record("write_file", {"path": "out.txt"}, "ok", "success")
 
         result = gate._consistency_check("write_file", {"path": "out.txt"}, ledger)
         assert result.approved is False
         assert "write_file" in result.reason
-        assert "3" in result.reason  # turn 3
+        assert "Doom-loop" in result.reason
 
     def test_no_duplicate_empty_ledger(self):
         gate = ActionGate(_make_settings())
@@ -676,14 +684,16 @@ class TestConsistencyCheckDuplicateReport:
         result = gate._consistency_check("learn_fact", {"subject": "new"}, ledger)
         assert result.approved is True
 
-    def test_duplicate_with_path_normalization(self):
+    def test_single_duplicate_with_path_normalization_allowed(self):
+        """Single duplicate is under threshold — allowed with F026.1."""
         gate = ActionGate(_make_settings())
         ledger = _ledger()
         ledger.record("write_file", {"path": "./output/report.txt/"}, "ok", "success")
         result = gate._consistency_check(
             "write_file", {"path": "output/report.txt"}, ledger
         )
-        assert result.approved is False
+        # write_file is iterative → threshold = 6, only 1 match → allowed
+        assert result.approved is True
 
 
 # ===========================================================================
@@ -713,23 +723,26 @@ class TestMultiTargetNotBlocked:
         assert result.approved is True
 
     @pytest.mark.asyncio
-    async def test_same_heartbeat_check_still_blocked(self):
+    async def test_same_heartbeat_check_blocked_at_threshold(self):
+        """Same heartbeat check repeated at hard_block_threshold times is blocked."""
         gate = ActionGate(_make_settings())
         ledger = _ledger()
+        # Use same turn so all actions are within window
         ledger.set_turn(1)
-        ledger.record(
-            "heartbeat_check_manage",
-            {"action": "disable", "name": "ci-schema-sync-monitor"},
-            "ok",
-            "success",
-        )
+        for _ in range(5):
+            ledger.record(
+                "heartbeat_check_manage",
+                {"action": "disable", "name": "ci-schema-sync-monitor"},
+                "ok",
+                "success",
+            )
         result = await gate.check(
             "heartbeat_check_manage",
             {"action": "disable", "name": "ci-schema-sync-monitor"},
             ledger,
         )
         assert result.approved is False
-        assert "Duplicate" in result.reason
+        assert "Doom-loop" in result.reason
 
     @pytest.mark.asyncio
     async def test_different_bash_targets_not_blocked(self):
@@ -750,14 +763,16 @@ class TestMultiTargetNotBlocked:
         assert result.approved is True
 
     @pytest.mark.asyncio
-    async def test_exact_duplicate_bash_still_blocked(self):
+    async def test_exact_duplicate_bash_allowed_under_threshold(self):
+        """Single duplicate bash is under threshold with F026.1."""
         gate = ActionGate(_make_settings())
         ledger = _ledger()
         ledger.set_turn(1)
         cmd = "psql -c 'UPDATE dynamic_checks SET enabled=false WHERE name=$$check-a$$'"
         ledger.record("bash", {"command": cmd}, "ok", "success")
         result = await gate.check("bash", {"command": cmd}, ledger)
-        assert result.approved is False
+        # psql is not iterative → threshold = 3, only 1 match → allowed
+        assert result.approved is True
 
 
 # ===========================================================================
@@ -778,15 +793,16 @@ class TestTurnWindow:
         assert result.approved is True
 
     @pytest.mark.asyncio
-    async def test_recent_action_within_window_blocked(self):
-        """Action within turn window should still be blocked."""
+    async def test_recent_action_within_window_allowed_under_threshold(self):
+        """Single duplicate within window is allowed (under threshold with F026.1)."""
         gate = ActionGate(_make_settings(action_gating_turn_window=5))
         ledger = _ledger()
         ledger.set_turn(3)
         ledger.record("write_file", {"path": "f.txt"}, "ok", "success")
         ledger.set_turn(7)  # 4 turns later, within window of 5
         result = await gate.check("write_file", {"path": "f.txt"}, ledger)
-        assert result.approved is False
+        # write_file is iterative → threshold = 6, only 1 match → allowed
+        assert result.approved is True
 
     @pytest.mark.asyncio
     async def test_turn_window_boundary_exact(self):
@@ -800,8 +816,8 @@ class TestTurnWindow:
         assert result.approved is True  # Boundary: exactly at window edge passes
 
     @pytest.mark.asyncio
-    async def test_turn_window_same_turn_blocked(self):
-        """Action on the same turn is always within window."""
+    async def test_turn_window_same_turn_allowed_under_threshold(self):
+        """Single duplicate on same turn is allowed (under threshold with F026.1)."""
         gate = ActionGate(_make_settings(action_gating_turn_window=5))
         ledger = _ledger()
         ledger.set_turn(1)
@@ -809,7 +825,8 @@ class TestTurnWindow:
         result = await gate.check(
             "learn_fact", {"subject": "sky", "content": "blue"}, ledger
         )
-        assert result.approved is False
+        # learn_fact is not iterative → threshold = 3, only 1 match → allowed
+        assert result.approved is True
 
     @pytest.mark.asyncio
     async def test_turn_window_configurable(self):
@@ -821,3 +838,410 @@ class TestTurnWindow:
         ledger.set_turn(3)  # 2 turns later, beyond window of 1
         result = await gate.check("write_file", {"path": "f.txt"}, ledger)
         assert result.approved is True
+
+
+# ===========================================================================
+# F026.1: _has_state_change_since
+# ===========================================================================
+
+
+class TestHasStateChangeSince:
+    def _gate(self) -> ActionGate:
+        return ActionGate(_make_settings())
+
+    def test_intervening_write_returns_true(self):
+        gate = self._gate()
+        ledger = _ledger()
+        # action 0: bash build (the match)
+        ledger.record("bash", {"command": "make build"}, "ok", "success")
+        # action 1: write_file (intervening state change)
+        ledger.record("write_file", {"path": "foo.c"}, "ok", "success")
+        assert gate._has_state_change_since(ledger, 0) is True
+
+    def test_no_intervening_write_returns_false(self):
+        gate = self._gate()
+        ledger = _ledger()
+        # action 0: bash build
+        ledger.record("bash", {"command": "make build"}, "ok", "success")
+        # action 1: read_file (not a state change)
+        ledger.record("read_file", {"path": "foo.c"}, "contents", "success")
+        assert gate._has_state_change_since(ledger, 0) is False
+
+    def test_failed_write_returns_false(self):
+        gate = self._gate()
+        ledger = _ledger()
+        ledger.record("bash", {"command": "make build"}, "ok", "success")
+        # Failed write — state didn't actually change
+        ledger.record("write_file", {"path": "foo.c"}, "error", "error")
+        assert gate._has_state_change_since(ledger, 0) is False
+
+    def test_intervening_external_returns_true(self):
+        gate = self._gate()
+        ledger = _ledger()
+        ledger.record("bash", {"command": "make build"}, "ok", "success")
+        ledger.record("bash", {"command": "curl -X POST http://api.example.com"}, "ok", "success")
+        assert gate._has_state_change_since(ledger, 0) is True
+
+    def test_no_actions_after_returns_false(self):
+        gate = self._gate()
+        ledger = _ledger()
+        ledger.record("bash", {"command": "make build"}, "ok", "success")
+        assert gate._has_state_change_since(ledger, 0) is False
+
+
+# ===========================================================================
+# F026.1: _is_iterative_command
+# ===========================================================================
+
+
+class TestIsIterativeCommand:
+    def _gate(self) -> ActionGate:
+        return ActionGate(_make_settings())
+
+    def test_make_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "make build"}) is True
+
+    def test_pytest_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "pytest tests/"}) is True
+
+    def test_cargo_build_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "cargo build"}) is True
+
+    def test_cargo_unknown_subcommand_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "cargo install foo"}) is False
+
+    def test_docker_build_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "docker build ."}) is True
+
+    def test_docker_unknown_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "docker rm container"}) is False
+
+    def test_write_file_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("write_file", {"path": "foo.py"}) is True
+
+    def test_rm_rf_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "rm -rf /tmp"}) is False
+
+    def test_learn_fact_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("learn_fact", {"subject": "test"}) is False
+
+    def test_empty_bash_command_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": ""}) is False
+
+    def test_bash_no_command_key_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {}) is False
+
+    def test_gcc_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "gcc -o main main.c"}) is True
+
+    def test_npm_run_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "npm run build"}) is True
+
+    def test_npm_install_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "npm install"}) is False
+
+    def test_ruff_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "ruff check ."}) is True
+
+    def test_go_test_is_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "go test ./..."}) is True
+
+    def test_go_mod_not_iterative(self):
+        gate = self._gate()
+        assert gate._is_iterative_command("bash", {"command": "go mod tidy"}) is False
+
+
+# ===========================================================================
+# F026.1: _effective_thresholds
+# ===========================================================================
+
+
+class TestEffectiveThresholds:
+    def _gate(self, **kwargs) -> ActionGate:
+        return ActionGate(_make_settings(**kwargs))
+
+    def test_base_thresholds_for_non_iterative(self):
+        gate = self._gate()
+        repeat, hard = gate._effective_thresholds("learn_fact", {"subject": "test"})
+        assert repeat == 3
+        assert hard == 5
+
+    def test_elevated_thresholds_for_iterative(self):
+        gate = self._gate()
+        repeat, hard = gate._effective_thresholds("bash", {"command": "make build"})
+        assert repeat == 6  # 3 * 2.0
+        assert hard == 10  # 5 * 2.0
+
+    def test_write_file_gets_iterative_thresholds(self):
+        gate = self._gate()
+        repeat, hard = gate._effective_thresholds("write_file", {"path": "foo.py"})
+        assert repeat == 6
+        assert hard == 10
+
+    def test_custom_settings_honored(self):
+        gate = self._gate(
+            action_gating_repeat_threshold=2,
+            action_gating_hard_block_threshold=4,
+            action_gating_iterative_multiplier=3.0,
+        )
+        repeat, hard = gate._effective_thresholds("bash", {"command": "pytest tests/"})
+        assert repeat == 6  # 2 * 3.0
+        assert hard == 12  # 4 * 3.0
+
+    def test_custom_non_iterative_thresholds(self):
+        gate = self._gate(
+            action_gating_repeat_threshold=2,
+            action_gating_hard_block_threshold=4,
+        )
+        repeat, hard = gate._effective_thresholds("learn_fact", {"subject": "x"})
+        assert repeat == 2
+        assert hard == 4
+
+
+# ===========================================================================
+# F026.1: Full _consistency_check integration tests
+# ===========================================================================
+
+
+class TestConsistencyCheckF0261:
+    """Integration tests for the 4-layer consistency check."""
+
+    def test_debug_loop_build_edit_build_allowed(self):
+        """Layer 1: build → edit → build should be allowed (state changed)."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record("bash", {"command": "make build"}, "error: foo.c", "success")
+        ledger.set_turn(2)
+        ledger.record("write_file", {"path": "foo.c"}, "ok", "success")
+        ledger.set_turn(3)
+
+        result = gate._consistency_check("bash", {"command": "make build"}, ledger)
+        assert result.approved is True
+        assert result.reason == "state-changed-since-last-run"
+
+    def test_doom_loop_blocked(self):
+        """Layer 4: 5x same command with no writes → BLOCKED."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        # Use same turn so all actions are within window
+        ledger.set_turn(1)
+        for _ in range(5):
+            ledger.record("bash", {"command": "echo hello"}, "hello", "success")
+
+        result = gate._consistency_check("bash", {"command": "echo hello"}, ledger)
+        assert result.approved is False
+        assert "Doom-loop" in result.reason
+        assert result.suggestion is not None
+        assert "stuck in a loop" in result.suggestion
+
+    def test_warn_at_threshold(self):
+        """Layer 2: 3rd identical call → allowed with warning (base threshold = 3)."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        # Use same turn so all actions are within window
+        ledger.set_turn(1)
+        for _ in range(3):
+            ledger.record("learn_fact", {"subject": "sky"}, "ok", "success")
+
+        result = gate._consistency_check("learn_fact", {"subject": "sky"}, ledger)
+        assert result.approved is True
+        assert "at-threshold-warning" in result.reason
+        assert result.suggestion is not None
+        assert "learn_fact" in result.suggestion
+
+    def test_under_threshold_no_warning(self):
+        """Layer 2: 2nd identical call → allowed silently (under threshold 3)."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        for _ in range(2):
+            ledger.record("learn_fact", {"subject": "sky"}, "ok", "success")
+
+        result = gate._consistency_check("learn_fact", {"subject": "sky"}, ledger)
+        assert result.approved is True
+        assert "under-threshold" in result.reason
+        assert result.suggestion is None
+
+    def test_iterative_command_gets_higher_threshold(self):
+        """Layer 3: make build gets 2x threshold (6 allowed, blocked at 10)."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        # Use same turn so all actions are within window
+        ledger.set_turn(1)
+        for _ in range(6):
+            ledger.record("bash", {"command": "make build"}, "error", "success")
+
+        result = gate._consistency_check("bash", {"command": "make build"}, ledger)
+        # 6 matches, iterative threshold = 6 → at-threshold-warning (allowed with warning)
+        assert result.approved is True
+        assert "at-threshold-warning" in result.reason
+
+    def test_iterative_command_blocked_at_hard_limit(self):
+        """Layer 4: iterative command blocked at elevated hard limit (10)."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        # Use same turn so all actions are within window
+        ledger.set_turn(1)
+        for _ in range(10):
+            ledger.record("bash", {"command": "make build"}, "error", "success")
+
+        result = gate._consistency_check("bash", {"command": "make build"}, ledger)
+        assert result.approved is False
+        assert "Doom-loop" in result.reason
+
+    def test_write_file_same_path_iterative_threshold(self):
+        """write_file is iterative → gets elevated threshold."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        # Use same turn so all actions are within window
+        ledger.set_turn(1)
+        for _ in range(5):
+            ledger.record("write_file", {"path": "app.py"}, "ok", "success")
+
+        result = gate._consistency_check("write_file", {"path": "app.py"}, ledger)
+        # 5 matches, iterative threshold = 6 → under threshold → allowed
+        assert result.approved is True
+        assert "under-threshold" in result.reason
+
+    def test_change_aware_false_disables_layer1(self):
+        """When change_aware=False, Layer 1 is skipped entirely."""
+        gate = ActionGate(_make_settings(action_gating_change_aware=False))
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record("bash", {"command": "echo hello"}, "hello", "success")
+        # Intervening write — would bypass with Layer 1 enabled
+        ledger.set_turn(2)
+        ledger.record("write_file", {"path": "foo.txt"}, "ok", "success")
+        ledger.set_turn(3)
+
+        result = gate._consistency_check("bash", {"command": "echo hello"}, ledger)
+        # Layer 1 disabled, but only 1 match → under threshold → allowed anyway
+        assert result.approved is True
+        assert "under-threshold" in result.reason  # NOT "state-changed"
+
+    def test_change_aware_false_blocks_at_threshold(self):
+        """change_aware=False + enough duplicates → blocked without Layer 1 bypass."""
+        gate = ActionGate(_make_settings(action_gating_change_aware=False))
+        ledger = _ledger()
+        # Use same turn so all actions are within window
+        ledger.set_turn(1)
+        for _ in range(5):
+            ledger.record("bash", {"command": "echo hello"}, "hello", "success")
+            # Intervening write each time — would bypass with Layer 1
+            ledger.record("write_file", {"path": "foo.txt"}, "ok", "success")
+
+        result = gate._consistency_check("bash", {"command": "echo hello"}, ledger)
+        # Layer 1 disabled → writes don't help. 5 matches, threshold 3/5 → blocked
+        assert result.approved is False
+
+    def test_custom_thresholds_honored(self):
+        """Custom repeat/hard thresholds override defaults."""
+        gate = ActionGate(_make_settings(
+            action_gating_repeat_threshold=1,
+            action_gating_hard_block_threshold=2,
+        ))
+        ledger = _ledger()
+        ledger.set_turn(1)
+        ledger.record("learn_fact", {"subject": "test"}, "ok", "success")
+        ledger.set_turn(2)
+
+        # 1st match → at repeat_threshold=1 → warning
+        result = gate._consistency_check("learn_fact", {"subject": "test"}, ledger)
+        assert result.approved is True
+        assert "at-threshold-warning" in result.reason
+
+        # Record 2nd
+        ledger.record("learn_fact", {"subject": "test"}, "ok", "success")
+        ledger.set_turn(3)
+
+        # 2nd match → at hard_block=2 → blocked
+        result = gate._consistency_check("learn_fact", {"subject": "test"}, ledger)
+        assert result.approved is False
+        assert "Doom-loop" in result.reason
+
+    def test_failed_prior_calls_dont_count(self):
+        """Failed actions are not counted toward the threshold."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        for _ in range(5):
+            ledger.record("bash", {"command": "echo hello"}, "error", "error")
+
+        result = gate._consistency_check("bash", {"command": "echo hello"}, ledger)
+        assert result.approved is True
+        assert result.reason == "no-duplicates"
+
+    def test_different_tools_dont_interfere(self):
+        """3x write_file + 3x bash should not cross-contaminate counts."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        for _ in range(3):
+            ledger.record("write_file", {"path": "a.py"}, "ok", "success")
+            ledger.record("bash", {"command": "echo hello"}, "hello", "success")
+
+        # Each tool only has 3 matches — bash: echo is not iterative → threshold 3 → warning
+        result_bash = gate._consistency_check("bash", {"command": "echo hello"}, ledger)
+        assert result_bash.approved is True
+        assert "at-threshold-warning" in result_bash.reason
+
+        # write_file is iterative → threshold 6 → under threshold
+        result_write = gate._consistency_check("write_file", {"path": "a.py"}, ledger)
+        assert result_write.approved is True
+        assert "under-threshold" in result_write.reason
+
+    def test_test_fix_test_cycle_allowed(self):
+        """pytest → edit → pytest → edit → pytest → all allowed by Layer 1."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        for i in range(5):
+            ledger.set_turn(i * 2 + 1)
+            ledger.record("bash", {"command": "pytest tests/test_foo.py"}, "FAIL", "success")
+            ledger.set_turn(i * 2 + 2)
+            ledger.record("write_file", {"path": "foo.py"}, "ok", "success")
+        ledger.set_turn(11)
+
+        result = gate._consistency_check("bash", {"command": "pytest tests/test_foo.py"}, ledger)
+        assert result.approved is True
+        assert result.reason == "state-changed-since-last-run"
+
+    def test_mixed_files_tracked_independently(self):
+        """3x write_file(a.py) + 3x write_file(b.py) tracked independently."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        ledger.set_turn(1)
+        for _ in range(3):
+            ledger.record("write_file", {"path": "a.py"}, "ok", "success")
+            ledger.record("write_file", {"path": "b.py"}, "ok", "success")
+
+        # Each path has 3 matches, but write_file is iterative → threshold 6
+        result_a = gate._consistency_check("write_file", {"path": "a.py"}, ledger)
+        assert result_a.approved is True
+
+        result_b = gate._consistency_check("write_file", {"path": "b.py"}, ledger)
+        assert result_b.approved is True
+
+    def test_no_duplicates_returns_approved(self):
+        """No matching prior calls → approved with 'no-duplicates' reason."""
+        gate = ActionGate(_make_settings())
+        ledger = _ledger()
+        result = gate._consistency_check("bash", {"command": "echo hello"}, ledger)
+        assert result.approved is True
+        assert result.reason == "no-duplicates"
