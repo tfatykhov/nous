@@ -297,25 +297,66 @@ New procedure created → search related facts/decisions → link procedure→fa
 
 #### 2a: Decision Creation Reverse Linking
 
-Add a `DecisionGraphLinker` handler on the `decision_recorded` event (emitted by Brain):
+Add a `DecisionGraphLinker` handler on the `decision_recorded` event (emitted by Brain).
+
+> **Source code note:** `Brain._record()` currently emits `decision_recorded` with only
+> `{"decision_id": str, "category": str}`. The event payload does **not** include
+> `description` or `tags`. The handler must therefore fetch the full decision record
+> by ID before performing similarity searches.
+
+**Option A (recommended):** Fetch decision inside the handler — zero changes to Brain:
 
 ```python
 class DecisionGraphLinker:
     """Reverse-link: when a decision is created, find related orphan facts and episodes."""
     
-    def __init__(self, graph_linker, settings, bus):
+    def __init__(self, brain, graph_linker, settings, bus):
+        self._brain = brain        # Brain instance — for fetching full decision
         self._linker = graph_linker
         self._settings = settings
         bus.on("decision_recorded", self.handle)
     
     async def handle(self, event: Event):
         decision_id = event.data.get("decision_id")
-        description = event.data.get("description")
+        
+        # Fetch full decision record (description, tags, embedding)
+        decision = await self._brain.get(decision_id)
+        if not decision:
+            return
+        
+        description = decision.description
+        tags = decision.tags or []
         
         # 1. Find facts that relate to this decision
         # 2. Find episodes that discussed this topic
-        # 3. Create edges
+        # 3. Create edges using description for similarity search
 ```
+
+**Option B (cleaner long-term):** Extend the event payload in `Brain._record()`:
+
+```python
+# In brain.py _record(), change the emit from:
+await self._emit_event(
+    session,
+    "decision_recorded",
+    {"decision_id": str(decision.id), "category": input.category},
+)
+
+# To:
+await self._emit_event(
+    session,
+    "decision_recorded",
+    {
+        "decision_id": str(decision.id),
+        "category": input.category,
+        "description": input.description,
+        "tags": input.tags,
+    },
+)
+```
+
+**Recommendation:** Implement Option A first (no Brain changes needed), then migrate to
+Option B when other handlers also need richer event data.
 
 **Key change:** This ensures that when a decision is recorded _after_ related facts already exist, the edges still get created.
 
@@ -340,30 +381,73 @@ if self._graph_linker and episode.structured_summary:
 
 #### 2c: Procedure Creation Linking
 
-Add a `ProcedureGraphLinker` handler on the `procedure_learned` event:
+> **Source code note:** `ProcedureManager.store()` currently does **not** emit any event.
+> The only procedure events today are `procedure_activated` (from `activate()`) and
+> `procedure_outcome` (from `record_outcome()`). A new `procedure_stored` event must
+> be added before this handler can work.
+
+**Step 1 — Add `procedure_stored` event to `ProcedureManager._store()`:**
+
+```python
+# In procedures.py _store(), after session.flush():
+procedure = Procedure(...)
+session.add(procedure)
+await session.flush()
+
+# ADD THIS:
+await self._emit_event(
+    session,
+    "procedure_stored",
+    {
+        "procedure_id": str(procedure.id),
+        "name": input.name,
+        "domain": input.domain,
+        "description": input.description,
+        "tags": input.tags or [],
+    },
+)
+
+return self._to_detail(procedure)
+```
+
+**Step 2 — Add `ProcedureGraphLinker` handler:**
 
 ```python
 class ProcedureGraphLinker:
     """Link new procedures to related facts and decisions."""
     
+    def __init__(self, procedure_manager, graph_linker, settings, bus):
+        self._procedures = procedure_manager
+        self._linker = graph_linker
+        self._settings = settings
+        bus.on("procedure_stored", self.handle)
+    
     async def handle(self, event: Event):
         proc_id = event.data.get("procedure_id")
-        content = event.data.get("content")  # procedure body/triggers
+        description = event.data.get("description", "")
+        domain = event.data.get("domain", "")
+        
+        # Use description + domain for similarity search
+        # (embedding already stored by _store(), can also fetch it)
         
         # 1. Find facts related to this procedure's domain
         # 2. Find decisions that motivated this procedure
         # 3. Create informed_by and caused_by edges
 ```
 
+> **Note:** Unlike the decision handler (2a), we control the full event payload here
+> since we're adding the event from scratch. Include all fields the linker needs
+> directly in the event to avoid a round-trip fetch.
+
 ### Event Requirements
 
-Verify these events carry enough data:
+Verified against source code (2026-04-11):
 
-| Event | Required Data | Currently Emitted? |
-|-------|--------------|-------------------|
-| `decision_recorded` | decision_id, description, tags | Yes (Brain.record()) |
-| `procedure_learned` | procedure_id, content, triggers | Need to verify |
-| `session_ended` | episode_id, transcript | Yes (already used) |
+| Event | Required Data | Status | Action Needed |
+|-------|--------------|--------|---------------|
+| `decision_recorded` | decision_id, description, tags | ⚠️ **Partial** — only emits `decision_id` + `category` | Handler fetches full record by ID (Option A), or extend payload (Option B) |
+| `procedure_stored` | procedure_id, name, domain, description, tags | ❌ **Does not exist** — `store()` emits no event | Add `procedure_stored` emit to `ProcedureManager._store()` |
+| `session_ended` | episode_id, transcript | ✅ Exists and sufficient | None |
 
 ### Estimated LOC: ~250
 
