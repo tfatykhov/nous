@@ -831,6 +831,93 @@ class TestDAGCancelCascade:
         assert cleanup.status == "cancelled"  # cancel_cascade -> cancelled
         assert dep_node.status == "blocked"   # dependency -> blocked
 
+    @pytest.mark.asyncio
+    async def test_cancel_cascade_blocks_transitive_descendants(self, store, orchestrator, subtask_mgr):
+        """A -(cancel_cascade)-> B -(dependency)-> C: A fails, B cancelled, C blocked."""
+        request = DAGCreateRequest(
+            name="transitive-cascade",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask, instructions="B"),
+                DAGNodeSpec(name="c", type=DAGNodeType.subtask, instructions="C"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="a", to_node="b", edge_type="cancel_cascade"),
+                DAGEdgeSpec(from_node="b", to_node="c", edge_type="dependency"),
+            ],
+        )
+
+        # Unique subtask IDs per create call
+        subtask_mgr.create.side_effect = lambda **kw: SimpleNamespace(
+            id=uuid.uuid4(), status="pending"
+        )
+
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+
+        # A and B are both wave-0 (cancel_cascade doesn't affect waves).
+        # Fail A's subtask, B is still running.
+        fetched = await store.get_dag(dag.id)
+        node_a = next(n for n in fetched.nodes if n.name == "a")
+
+        async def selective_get(sid):
+            if sid == node_a.subtask_id:
+                return SimpleNamespace(id=sid, status="failed", result=None, error="fail")
+            return SimpleNamespace(id=sid, status="running", result=None, error=None)
+
+        subtask_mgr.get = AsyncMock(side_effect=selective_get)
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        b = next(n for n in fetched.nodes if n.name == "b")
+        c = next(n for n in fetched.nodes if n.name == "c")
+
+        assert b.status == "cancelled"  # direct cancel_cascade target
+        assert c.status == "blocked"    # dependency descendant of cancelled node
+
+    @pytest.mark.asyncio
+    async def test_retry_recovers_cancel_cascade_descendants(self, store, orchestrator, subtask_mgr):
+        """retry_node resets cancelled descendants from cancel_cascade, not just blocked."""
+        request = DAGCreateRequest(
+            name="retry-cascade",
+            nodes=[
+                DAGNodeSpec(name="a", type=DAGNodeType.subtask, instructions="A"),
+                DAGNodeSpec(name="b", type=DAGNodeType.subtask, instructions="B"),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="a", to_node="b", edge_type="cancel_cascade"),
+            ],
+        )
+
+        # Unique subtask IDs per create call
+        subtask_mgr.create.side_effect = lambda **kw: SimpleNamespace(
+            id=uuid.uuid4(), status="pending"
+        )
+
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+
+        fetched = await store.get_dag(dag.id)
+        node_a = next(n for n in fetched.nodes if n.name == "a")
+
+        async def selective_get(sid):
+            if sid == node_a.subtask_id:
+                return SimpleNamespace(id=sid, status="failed", result=None, error="fail")
+            return SimpleNamespace(id=sid, status="running", result=None, error=None)
+
+        subtask_mgr.get = AsyncMock(side_effect=selective_get)
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        assert next(n for n in fetched.nodes if n.name == "b").status == "cancelled"
+
+        # Retry A — B should be requeued from cancelled to pending
+        await orchestrator.retry_node(dag.id, "a")
+
+        fetched = await store.get_dag(dag.id)
+        assert next(n for n in fetched.nodes if n.name == "b").status == "pending"
+
 
 class TestDAGEdgeCases:
     """Test edge cases and coverage gaps."""

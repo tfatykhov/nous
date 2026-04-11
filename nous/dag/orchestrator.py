@@ -172,7 +172,7 @@ class DAGOrchestrator:
         node_by_id = {str(n.id): n for n in dag.nodes}
         for nid in reachable:
             n = node_by_id[nid]
-            if n.status != "blocked":
+            if n.status not in ("blocked", "cancelled"):
                 continue
             # Only unblock if no other failed predecessor exists
             other_failed_preds = dep_map[nid] & still_failed
@@ -492,37 +492,31 @@ class DAGOrchestrator:
         if not failed_ids:
             return
 
+        # Find nodes to cancel (cancel_cascade edges — direct only)
+        to_cancel: set[str] = set()
+        for node_id, predecessors in cancel_map.items():
+            node = node_by_id[node_id]
+            if node.status in _TERMINAL:
+                continue
+            if predecessors & failed_ids:
+                to_cancel.add(node_id)
+
         # Transitively find nodes to block (dependency edges)
+        # Treat both failed and cancel_cascade-cancelled nodes as "poison"
+        poison = failed_ids | to_cancel
         to_block: set[str] = set()
         changed = True
         while changed:
             changed = False
             for node_id, predecessors in dep_map.items():
                 node = node_by_id[node_id]
-                if node.status in _TERMINAL or node_id in to_block:
+                if node.status in _TERMINAL or node_id in to_block or node_id in to_cancel:
                     continue
-                if predecessors & (failed_ids | to_block):
+                if predecessors & (poison | to_block):
                     to_block.add(node_id)
                     changed = True
 
-        # Find nodes to cancel (cancel_cascade edges — direct only)
-        to_cancel: set[str] = set()
-        for node_id, predecessors in cancel_map.items():
-            node = node_by_id[node_id]
-            if node.status in _TERMINAL or node_id in to_block:
-                continue
-            if predecessors & failed_ids:
-                to_cancel.add(node_id)
-
-        # Apply blocked status
-        for node_id in to_block:
-            node = node_by_id[node_id]
-            await self._store.update_node(
-                node.id, status="blocked", error="Predecessor failed"
-            )
-            node.status = "blocked"
-
-        # Apply cancelled status
+        # Apply cancelled status (cancel_cascade targets)
         for node_id in to_cancel:
             node = node_by_id[node_id]
             await self._cancel_node(node)
@@ -530,6 +524,14 @@ class DAGOrchestrator:
                 node.id, status="cancelled", error="Cancelled by predecessor failure"
             )
             node.status = "cancelled"
+
+        # Apply blocked status (dependency descendants)
+        for node_id in to_block:
+            node = node_by_id[node_id]
+            await self._store.update_node(
+                node.id, status="blocked", error="Predecessor failed"
+            )
+            node.status = "blocked"
 
     def _find_ready_nodes(self, dag: ExecutionDAG) -> list[DAGNode]:
         """Find pending nodes whose all dependency/context_flow predecessors are completed."""
