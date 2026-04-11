@@ -1489,6 +1489,20 @@ def create_app(
             logger.error("Dashboard DAG error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F040: Graph density dashboard ---
+
+    async def dashboard_density(request: Request) -> JSONResponse:
+        """GET /dashboard/density - Graph density metrics for dashboard."""
+        try:
+            from nous.api.dashboard_queries import get_density_data
+
+            async with database.session() as session:
+                data = await get_density_data(session, settings.agent_id)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard density error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -2385,6 +2399,8 @@ def create_app(
         Route("/dashboard/cache", dashboard_cache),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
+        # F040: Graph density dashboard
+        Route("/dashboard/density", dashboard_density),
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),

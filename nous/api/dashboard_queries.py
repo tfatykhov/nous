@@ -1646,3 +1646,131 @@ async def get_dag_dashboard_data(session: AsyncSession, agent_id: str) -> dict[s
             "avg_completion_seconds": round(avg_seconds, 1),
         },
     }
+
+
+# ── F040: Graph density dashboard ─────────────────────────────────────────
+
+
+async def get_density_data(session: AsyncSession, agent_id: str) -> dict:
+    """F040: Return graph density metrics for the density dashboard tab."""
+    now = datetime.now(timezone.utc)
+    seven_days_ago = now - timedelta(days=7)
+
+    # Per-type orphan and total counts
+    type_configs = [
+        ("fact", "heart.facts", "fact", "active = true"),
+        ("decision", "brain.decisions", "decision", "1=1"),
+        ("episode", "heart.episodes", "episode", "1=1"),
+        ("procedure", "heart.procedures", "procedure", "active = true"),
+    ]
+
+    total_nodes = 0
+    total_orphans = 0
+    density_by_type: dict[str, dict[str, Any]] = {}
+
+    for type_name, table, edge_type, filter_clause in type_configs:
+        # Total count for this type
+        result = await session.execute(
+            text(f"""
+                SELECT COUNT(*) AS cnt
+                FROM {table}
+                WHERE agent_id = :agent_id AND {filter_clause}
+            """),
+            {"agent_id": agent_id},
+        )
+        type_total = result.scalar() or 0
+
+        # Orphan count: nodes with no edges referencing them
+        result = await session.execute(
+            text(f"""
+                SELECT COUNT(*) AS cnt
+                FROM {table} t
+                WHERE t.agent_id = :agent_id AND {filter_clause}
+                  AND NOT EXISTS (
+                      SELECT 1 FROM brain.graph_edges e
+                      WHERE e.agent_id = :agent_id
+                        AND (
+                            (e.source_id = t.id AND e.source_type = :edge_type)
+                            OR (e.target_id = t.id AND e.target_type = :edge_type)
+                        )
+                  )
+            """),
+            {"agent_id": agent_id, "edge_type": edge_type},
+        )
+        type_orphans = result.scalar() or 0
+
+        total_nodes += type_total
+        total_orphans += type_orphans
+        density_by_type[type_name] = {
+            "total": type_total,
+            "orphan": type_orphans,
+            "orphan_rate": round(type_orphans / type_total, 4) if type_total > 0 else 0.0,
+        }
+
+    # Total edges
+    result = await session.execute(
+        text("SELECT COUNT(*) FROM brain.graph_edges WHERE agent_id = :agent_id"),
+        {"agent_id": agent_id},
+    )
+    total_edges = result.scalar() or 0
+
+    # Edge distribution by relation type
+    result = await session.execute(
+        text("""
+            SELECT relation, COUNT(*) AS cnt
+            FROM brain.graph_edges
+            WHERE agent_id = :agent_id
+            GROUP BY relation
+            ORDER BY cnt DESC
+        """),
+        {"agent_id": agent_id},
+    )
+    edge_distribution = {row.relation: row.cnt for row in result}
+
+    # Connected nodes (unique nodes that appear in at least one edge)
+    result = await session.execute(
+        text("""
+            SELECT COUNT(DISTINCT node_id) AS cnt FROM (
+                SELECT source_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                UNION
+                SELECT target_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+            ) sub
+        """),
+        {"agent_id": agent_id},
+    )
+    connected_nodes = result.scalar() or 0
+
+    # Average degree
+    avg_degree = round(total_edges / connected_nodes, 2) if connected_nodes > 0 else 0.0
+
+    # Backfill progress: auto-linked edges per day over last 7 days
+    result = await session.execute(
+        text("""
+            SELECT DATE(created_at) AS day, COUNT(*) AS cnt
+            FROM brain.graph_edges
+            WHERE agent_id = :agent_id
+              AND auto_linked = true
+              AND created_at >= :since
+            GROUP BY day
+            ORDER BY day
+        """),
+        {"agent_id": agent_id, "since": seven_days_ago},
+    )
+    backfill_progress = [
+        {"date": str(row.day), "edges": row.cnt}
+        for row in result
+    ]
+
+    orphan_rate = round(total_orphans / total_nodes, 4) if total_nodes > 0 else 0.0
+
+    return {
+        "total_nodes": total_nodes,
+        "total_edges": total_edges,
+        "total_orphans": total_orphans,
+        "orphan_rate": orphan_rate,
+        "avg_degree": avg_degree,
+        "connected_nodes": connected_nodes,
+        "density_by_type": density_by_type,
+        "edge_distribution": edge_distribution,
+        "backfill_progress": backfill_progress,
+    }
