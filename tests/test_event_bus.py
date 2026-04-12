@@ -1149,6 +1149,7 @@ class TestSleepHandler:
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
         handler._phase_stale_scan = AsyncMock(return_value=True)
         handler._phase_cluster_consolidation = AsyncMock(return_value=True)
+        handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
         handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
@@ -1162,6 +1163,7 @@ class TestSleepHandler:
         handler._phase_resolve_contradictions.assert_called_once()
         handler._phase_stale_scan.assert_called_once()
         handler._phase_cluster_consolidation.assert_called_once()
+        handler._phase_graph_densification.assert_called_once()
         handler._phase_generalize.assert_called_once()
         handler._phase_evolve_rubric.assert_called_once()
 
@@ -1169,7 +1171,7 @@ class TestSleepHandler:
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
         assert emitted.type == "sleep_completed"
-        assert len(emitted.data["phases_completed"]) == 9
+        assert len(emitted.data["phases_completed"]) == 10
         assert emitted.data["interrupted"] is False
 
     @pytest.mark.asyncio

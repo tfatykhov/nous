@@ -210,6 +210,7 @@ class TestPhasesCompleted:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
         handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
@@ -221,8 +222,9 @@ class TestPhasesCompleted:
         assert "compress" in emitted.data["phases_completed"]
         assert "reflect" in emitted.data["phases_completed"]
         assert "resolve_contradictions" in emitted.data["phases_completed"]
+        assert "graph_densification" in emitted.data["phases_completed"]
         assert "generalize" in emitted.data["phases_completed"]
-        assert len(emitted.data["phases_completed"]) == 6
+        assert len(emitted.data["phases_completed"]) == 7
 
     @pytest.mark.asyncio
     async def test_all_phases_succeed_all_in_phases_completed(self):
@@ -232,13 +234,14 @@ class TestPhasesCompleted:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
         handler._phase_evolve_rubric = AsyncMock(return_value=True)
 
         await handler._run_sleep(_make_event("sleep_started"))
 
         emitted = bus.emit.call_args[0][0]
-        assert len(emitted.data["phases_completed"]) == 7
+        assert len(emitted.data["phases_completed"]) == 8
 
 
 # ===========================================================================
