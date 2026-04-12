@@ -155,6 +155,7 @@ All shipped implementation specs with PR references:
 | F020 | [Tool Output Intelligence](F020-tool-output-intelligence.md) | ✅ Shipped | SmartCompress (ingestion-time statistical compression) + ReversibleCache (Postgres-backed tool result caching) + `cache_retrieve` tool |
 | F031-b | [Consolidation Orient & Resolve](F031-consolidation-orient-resolve.md) | ✅ Shipped | Orient context injection in sleep reflection — checks existing facts before extracting. Contradiction resolution phase with fact supersession |
 | F038 | Memory Quality & Context Loading Fixes | ✅ Shipped | Quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency weighting, user_direct admission bonus, task synthesis, context dedup, bash batching hints |
+| F040 | [Graph Densification](F040-graph-densification.md) | ✅ Shipped | Orphan backfill engine, reverse linking (decision/procedure/episode), per-relation thresholds, edge confidence scoring, cluster discovery, density dashboard |
 
 ### Phase 2 — Quality (next to build)
 

@@ -130,6 +130,15 @@ class ProcedureManager:
         session.add(procedure)
         await session.flush()
 
+        # F040: Emit procedure_stored event for graph linking
+        await self._emit_event(session, "procedure_stored", {
+            "procedure_id": str(procedure.id),
+            "name": input.name,
+            "domain": input.domain or "",
+            "description": input.description or "",
+            "tags": input.tags or [],
+        })
+
         return self._to_detail(procedure)
 
     # ------------------------------------------------------------------

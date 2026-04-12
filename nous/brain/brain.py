@@ -76,6 +76,10 @@ class Brain:
         self.bridge_extractor = BridgeExtractor()
         self.agent_id = settings.agent_id
 
+        # F040: Optional EventBus for decision_recorded emission.
+        # Injected post-construction in main.py (same pattern as Heart._bus).
+        self._bus = None
+
     # --- Lifecycle (P2-11) ---
 
     async def close(self) -> None:
@@ -383,6 +387,16 @@ class Brain:
             "decision_recorded",
             {"decision_id": str(decision.id), "category": input.category},
         )
+
+        # F040: Emit on in-process EventBus for reverse graph linking.
+        # The DB audit event (via _emit_event) does NOT reach the bus.
+        if self._bus is not None:
+            from nous.events import Event as BusEvent
+            await self._bus.emit(BusEvent(
+                type="decision_recorded",
+                agent_id=self.agent_id,
+                data={"decision_id": str(decision.id), "category": input.category},
+            ))
 
         # 8. Auto-link (isolated in nested savepoint + try/except — P1-1)
         # Nested savepoint ensures SQL errors in auto_link don't abort the

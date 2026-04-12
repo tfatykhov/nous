@@ -390,7 +390,24 @@ class Heart:
 
     async def store_procedure(self, input: ProcedureInput, session: AsyncSession | None = None) -> ProcedureDetail:
         """Store a new procedure."""
-        return await self.procedures.store(input, session)
+        result = await self.procedures.store(input, session)
+
+        # F040: Emit on in-process EventBus for procedure graph linking.
+        # The DB audit event (via _emit_event) does NOT reach the bus.
+        if self._bus is not None:
+            await self._bus.emit(Event(
+                type="procedure_stored",
+                agent_id=self.agent_id,
+                data={
+                    "procedure_id": str(result.id),
+                    "name": input.name,
+                    "domain": input.domain or "",
+                    "description": input.description or "",
+                    "tags": input.tags or [],
+                },
+            ))
+
+        return result
 
     async def activate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Mark a procedure as activated."""
