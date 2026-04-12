@@ -5,6 +5,7 @@ MockAgentRunner for /chat endpoints.
 Real Postgres (existing conftest.py fixtures) for DB-backed endpoints.
 """
 
+import asyncio
 import uuid
 
 import pytest
@@ -399,3 +400,93 @@ async def test_health_db_down(mock_runner, brain, heart, cognitive, settings):
         assert data["status"] == "unhealthy"
     else:
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# /chat/stream SSE keepalive (defense against client read timeout during
+# stalls in pre_turn / compaction / any non-streaming phase of stream_chat)
+# ---------------------------------------------------------------------------
+
+
+class _StallingStreamRunner(MockAgentRunner):
+    """Runner whose stream_chat stalls before yielding any events.
+
+    Simulates a slow pre_turn / compaction / cold-cache recall.
+    """
+
+    def __init__(self, stall_seconds: float) -> None:
+        super().__init__()
+        self.stall_seconds = stall_seconds
+
+    async def stream_chat(
+        self,
+        session_id,
+        user_message,
+        platform=None,
+        user_id=None,
+        user_display_name=None,
+    ):
+        from nous.api.runner import StreamEvent
+
+        # Simulate stall — no events emitted for this duration
+        await asyncio.sleep(self.stall_seconds)
+        yield StreamEvent(type="text_delta", text="hello")
+        yield StreamEvent(type="done", stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_keepalive_during_stall(
+    brain, heart, cognitive, db, settings
+):
+    """Server emits SSE comment-line pings while stream_chat is stalled."""
+    from nous.api.rest import create_app
+
+    # Tighten ping interval and stall longer than it so a ping is forced.
+    object.__setattr__(settings, "sse_ping_interval", 1)
+    runner = _StallingStreamRunner(stall_seconds=2.5)
+
+    app = create_app(runner, brain, heart, cognitive, db, settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", timeout=30
+    ) as c:
+        async with c.stream(
+            "POST", "/chat/stream", json={"message": "hi"}
+        ) as resp:
+            assert resp.status_code == 200
+            chunks: list[str] = []
+            async for chunk in resp.aiter_text():
+                chunks.append(chunk)
+            body = "".join(chunks)
+
+    # SSE comment-line keepalive must appear before the data event,
+    # since the runner stalls 2.5s with ping_interval=1.
+    assert ": keepalive" in body, f"no keepalive in response: {body!r}"
+    # Real event still flows through after the stall completes.
+    assert '"type": "text_delta"' in body
+    assert '"text": "hello"' in body
+    # At least 2 keepalives expected (2.5s stall, 1s interval)
+    assert body.count(": keepalive") >= 2
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_no_keepalive_when_events_flow(
+    brain, heart, cognitive, db, settings
+):
+    """When events flow faster than ping_interval, no keepalive comments."""
+    from nous.api.rest import create_app
+
+    object.__setattr__(settings, "sse_ping_interval", 5)
+    runner = _StallingStreamRunner(stall_seconds=0.0)  # no stall
+
+    app = create_app(runner, brain, heart, cognitive, db, settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test", timeout=10
+    ) as c:
+        async with c.stream(
+            "POST", "/chat/stream", json={"message": "hi"}
+        ) as resp:
+            assert resp.status_code == 200
+            body = "".join([c async for c in resp.aiter_text()])
+
+    assert '"type": "text_delta"' in body
+    assert ": keepalive" not in body
