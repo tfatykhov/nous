@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.graph_linker import GraphLinker, common_template_text, edge_confidence
 from nous.config import Settings
+from nous.heart.search import hybrid_search
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -143,48 +144,88 @@ class GraphDensifier:
         self,
         entity_type: str,
         orphan_id: UUID,
+        orphan_content: str,
         session: AsyncSession,
     ) -> int:
-        """Link an orphan to similar nodes of the same type using stored embeddings."""
+        """Link an orphan to similar nodes of the same type using hybrid search.
+
+        Uses RRF-fused vector + keyword search to find candidates, catching
+        relationships that pure vector search misses (shared terms in
+        different embedding neighborhoods).
+        """
         config = _ENTITY_CONFIG[entity_type]
         table, type_name, content_col, extra_where = config
         threshold = _get_threshold(self._settings, entity_type, entity_type)
 
-        sql = text(f"""
-            SELECT t.id, {content_col} AS content,
-                   1 - (t.embedding <=> (SELECT embedding FROM {table} WHERE id = :orphan_id)) AS similarity
-            FROM {table} t
-            WHERE t.agent_id = :agent_id
-              AND {extra_where}
-              AND t.id != :orphan_id
-              AND t.embedding IS NOT NULL
-              AND 1 - (t.embedding <=> (SELECT embedding FROM {table} WHERE id = :orphan_id)) >= :pre_threshold
-            ORDER BY t.embedding <=> (SELECT embedding FROM {table} WHERE id = :orphan_id)
-            LIMIT 5
-        """)
-        result = await session.execute(sql, {
-            "agent_id": self._agent_id,
-            "orphan_id": orphan_id,
-            "pre_threshold": threshold * 0.9,
-        })
-        candidates = result.all()
+        # Fetch the orphan's stored embedding for vector search
+        emb_sql = text(f"SELECT embedding::text FROM {table} WHERE id = :orphan_id")
+        emb_result = await session.execute(emb_sql, {"orphan_id": orphan_id})
+        emb_row = emb_result.first()
 
+        orphan_embedding: list[float] | None = None
+        if emb_row and emb_row.embedding:
+            import json
+            raw = emb_row.embedding
+            orphan_embedding = json.loads(raw) if isinstance(raw, str) else raw
+
+        # Hybrid search: vector + keyword via RRF
+        # brain.decisions has no `active` column — disable active filter for it
+        has_active = entity_type != "decision"
+        candidates = await hybrid_search(
+            session=session,
+            table=table,
+            embedding=orphan_embedding,
+            query_text=orphan_content[:500] if orphan_content else "",
+            agent_id=self._agent_id,
+            extra_where=f"AND t.id != :orphan_id",
+            extra_params={"orphan_id": orphan_id},
+            limit=10,
+            vector_weight=0.6,  # 60% vector, 40% keyword — gives FTS more weight than default
+            active_filter=has_active,
+        )
+
+        if not candidates:
+            return 0
+
+        # For each candidate, verify actual cosine similarity meets threshold
+        # (RRF scores are rank-based, not directly comparable to similarity thresholds)
         edges_created = 0
         relation = _get_relation(entity_type, entity_type)
 
-        for row in candidates:
-            if row.similarity >= threshold:
-                edge = await self._linker.create_edge(
-                    source_id=orphan_id,
-                    target_id=row.id,
-                    source_type=type_name,
-                    target_type=type_name,
-                    relation=relation,
-                    weight=float(row.similarity),
-                    session=session,
-                )
-                if edge:
-                    edges_created += 1
+        for cand_id, rrf_score in candidates:
+            if cand_id == orphan_id:
+                continue
+
+            # Check actual embedding similarity if we have the orphan embedding
+            if orphan_embedding:
+                sim_sql = text(f"""
+                    SELECT 1 - (embedding <=> CAST(:emb AS vector)) AS similarity
+                    FROM {table} WHERE id = :cand_id AND embedding IS NOT NULL
+                """)
+                emb_str = "[" + ",".join(str(float(v)) for v in orphan_embedding) + "]"
+                sim_result = await session.execute(sim_sql, {
+                    "emb": emb_str,
+                    "cand_id": cand_id,
+                })
+                sim_row = sim_result.first()
+                if not sim_row or sim_row.similarity < threshold:
+                    continue
+                weight = float(sim_row.similarity)
+            else:
+                # Keyword-only match — use RRF score as proxy weight
+                weight = min(rrf_score, 1.0)
+
+            edge = await self._linker.create_edge(
+                source_id=orphan_id,
+                target_id=cand_id,
+                source_type=type_name,
+                target_type=type_name,
+                relation=relation,
+                weight=weight,
+                session=session,
+            )
+            if edge:
+                edges_created += 1
 
         return edges_created
 
@@ -196,69 +237,109 @@ class GraphDensifier:
         target_type: str,
         session: AsyncSession,
     ) -> int:
-        """Link an orphan to nodes of a different type using common-template re-embedding."""
-        if not self._embedder:
-            return 0
+        """Link an orphan to nodes of a different type.
 
+        Uses two candidate sources merged via dedup:
+        1. Vector search with common-template re-embedding (existing approach)
+        2. Keyword-only hybrid search (catches term matches embeddings miss)
+        """
         config = _ENTITY_CONFIG[target_type]
         target_table, target_type_name, target_content_col, target_where = config
         threshold = _get_threshold(self._settings, source_type, target_type)
 
-        # Embed source with common template for fair comparison
-        source_template = common_template_text(source_type, orphan_content)
-        try:
-            source_embedding = await self._embedder.embed(source_template)
-        except Exception:
-            logger.warning("Failed to embed %s %s for cross-type backfill", source_type, orphan_id)
+        # Candidate set (deduped by ID)
+        candidate_ids: set[UUID] = set()
+
+        # Source 1: Vector search with common-template re-embedding
+        source_embedding: list[float] | None = None
+        if self._embedder:
+            source_template = common_template_text(source_type, orphan_content)
+            try:
+                source_embedding = await self._embedder.embed(source_template)
+            except Exception:
+                logger.warning("Failed to embed %s %s for cross-type backfill", source_type, orphan_id)
+
+        if source_embedding:
+            embedding_str = "[" + ",".join(str(float(v)) for v in source_embedding) + "]"
+            sql = text(f"""
+                SELECT t.id
+                FROM {target_table} t
+                WHERE t.agent_id = :agent_id
+                  AND {target_where}
+                  AND t.embedding IS NOT NULL
+                  AND 1 - (t.embedding <=> CAST(:embedding AS vector)) >= :pre_threshold
+                ORDER BY t.embedding <=> CAST(:embedding AS vector)
+                LIMIT 5
+            """)
+            result = await session.execute(sql, {
+                "agent_id": self._agent_id,
+                "embedding": embedding_str,
+                "pre_threshold": threshold * 0.9,
+            })
+            for row in result:
+                candidate_ids.add(row.id)
+
+        # Source 2: Keyword search via hybrid_search (keyword-only, no embedding)
+        if orphan_content:
+            has_active = target_type != "decision"
+            keyword_hits = await hybrid_search(
+                session=session,
+                table=target_table,
+                embedding=None,  # keyword-only
+                query_text=orphan_content[:500],
+                agent_id=self._agent_id,
+                limit=5,
+                active_filter=has_active,
+            )
+            for cand_id, _ in keyword_hits:
+                candidate_ids.add(cand_id)
+
+        if not candidate_ids:
             return 0
 
-        embedding_str = "[" + ",".join(str(float(v)) for v in source_embedding) + "]"
-
-        sql = text(f"""
-            SELECT t.id, {target_content_col} AS content,
-                   1 - (t.embedding <=> CAST(:embedding AS vector)) AS similarity
+        # Fetch content for all candidates in one query
+        placeholders = ", ".join(f":id_{i}" for i in range(len(candidate_ids)))
+        content_sql = text(f"""
+            SELECT t.id, {target_content_col} AS content
             FROM {target_table} t
-            WHERE t.agent_id = :agent_id
-              AND {target_where}
-              AND t.embedding IS NOT NULL
-              AND 1 - (t.embedding <=> CAST(:embedding AS vector)) >= :pre_threshold
-            ORDER BY t.embedding <=> CAST(:embedding AS vector)
-            LIMIT 5
+            WHERE t.id IN ({placeholders})
         """)
-        result = await session.execute(sql, {
-            "agent_id": self._agent_id,
-            "embedding": embedding_str,
-            "pre_threshold": threshold * 0.9,
-        })
-        candidates = result.all()
+        params = {f"id_{i}": cid for i, cid in enumerate(candidate_ids)}
+        result = await session.execute(content_sql, params)
+        candidate_content: dict[UUID, str] = {
+            row.id: row.content for row in result if row.content
+        }
 
         edges_created = 0
         relation = _get_relation(source_type, target_type)
 
-        for row in candidates:
-            if not row.content:
-                continue
+        for cand_id, content in candidate_content.items():
             # Re-embed target with common template for fair similarity
-            target_template = common_template_text(target_type, row.content)
+            if not self._embedder:
+                continue
+            target_template = common_template_text(target_type, content)
             try:
                 target_embedding = await self._embedder.embed(target_template)
             except Exception:
                 continue
 
-            similarity = GraphLinker._cosine_similarity(source_embedding, target_embedding)
+            if source_embedding:
+                similarity = GraphLinker._cosine_similarity(source_embedding, target_embedding)
+            else:
+                # No source embedding — skip this candidate
+                continue
 
             if similarity >= threshold:
-                # Use edge_confidence for final scoring
                 confidence = edge_confidence(
                     similarity=similarity,
-                    shared_tags=0,  # Tags not compared in batch backfill
+                    shared_tags=0,
                     shared_subject=False,
                     temporal_proximity_days=0.0,
                 )
 
                 edge = await self._linker.create_edge(
                     source_id=orphan_id,
-                    target_id=row.id,
+                    target_id=cand_id,
                     source_type=source_type,
                     target_type=target_type_name,
                     relation=relation,
@@ -282,7 +363,7 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("fact", orphan_id, session)
+                total += await self._backfill_same_type("fact", orphan_id, content, session)
                 total += await self._backfill_cross_type("fact", orphan_id, content, "decision", session)
             await session.commit()
 
@@ -301,7 +382,7 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("decision", orphan_id, session)
+                total += await self._backfill_same_type("decision", orphan_id, content, session)
                 total += await self._backfill_cross_type("decision", orphan_id, content, "fact", session)
             await session.commit()
 
@@ -320,7 +401,7 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("episode", orphan_id, session)
+                total += await self._backfill_same_type("episode", orphan_id, content, session)
                 total += await self._backfill_cross_type("episode", orphan_id, content, "fact", session)
             await session.commit()
 
@@ -339,7 +420,7 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("procedure", orphan_id, session)
+                total += await self._backfill_same_type("procedure", orphan_id, content, session)
                 total += await self._backfill_cross_type("procedure", orphan_id, content, "fact", session)
                 total += await self._backfill_cross_type("procedure", orphan_id, content, "decision", session)
             await session.commit()
