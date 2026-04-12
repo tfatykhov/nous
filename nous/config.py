@@ -161,6 +161,12 @@ class Settings(BaseSettings):
     keepalive_interval: int = Field(
         default=10, validation_alias="NOUS_KEEPALIVE_INTERVAL"
     )  # Seconds between keepalive events during tool execution
+    sse_ping_interval: int = Field(
+        default=15, validation_alias="NOUS_SSE_PING_INTERVAL"
+    )  # Seconds between SSE comment-line pings on /chat/stream — keeps
+    # the socket alive during stalls in pre_turn, compaction, or any
+    # other non-streaming phase of stream_chat. Comment lines (`:`) are
+    # ignored by spec-compliant SSE clients but reset their read timer.
 
     # SmartCompress (F020 Phase 1)
     smart_compress_enabled: bool = Field(

@@ -714,10 +714,21 @@ class NousTelegramBot:
         typing_task = asyncio.create_task(_typing_loop())
 
         try:
+            # Override read timeout to None for the streaming call only.
+            # The server emits SSE comment-line keepalives every
+            # NOUS_SSE_PING_INTERVAL seconds (default 15s) so the socket
+            # stays warm even during long pre_turn / compaction / tool
+            # phases. The shared client's 300s read timeout would otherwise
+            # cap turn duration arbitrarily. connect/write/pool timeouts
+            # are still enforced to catch real network failures fast.
+            stream_timeout = httpx.Timeout(
+                connect=10, read=None, write=10, pool=10
+            )
             async with self._http.stream(
                 "POST",
                 f"{self.nous_url}/chat/stream",
                 json=payload,
+                timeout=stream_timeout,
             ) as response:
                 if response.status_code != 200:
                     error_body = await response.aread()

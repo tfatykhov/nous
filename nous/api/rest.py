@@ -35,6 +35,8 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -144,8 +146,38 @@ def create_app(
                 session_id, message, platform=platform,
                 user_id=user_id, user_display_name=user_display_name,
             )
+            aiter = stream.__aiter__()
+            ping_interval = settings.sse_ping_interval
+            pending: asyncio.Task | None = None
             try:
-                async for event in stream:
+                while True:
+                    if pending is None:
+                        pending = asyncio.create_task(aiter.__anext__())
+
+                    # Race the next event against the ping interval. We use
+                    # asyncio.wait (not wait_for) so that on timeout the task
+                    # is NOT cancelled — it stays pending and we resume waiting
+                    # on the next iteration. This keeps bytes flowing to the
+                    # client during stalls in pre_turn, compaction, or any
+                    # other non-streaming phase of stream_chat.
+                    done, _ = await asyncio.wait(
+                        {pending}, timeout=ping_interval
+                    )
+                    if not done:
+                        # No event in window — emit SSE comment-line ping.
+                        # Comment lines (starting with `:`) are ignored by
+                        # spec-compliant SSE clients but reset their socket
+                        # read timer. See WHATWG EventSource spec.
+                        yield ": keepalive\n\n"
+                        continue
+
+                    try:
+                        event = pending.result()
+                    except StopAsyncIteration:
+                        pending = None
+                        break
+                    pending = None
+
                     event_data: dict[str, Any] = {
                         "type": event.type,
                         "text": event.text,
@@ -161,6 +193,13 @@ def create_app(
                 error_data = json.dumps({"type": "error", "text": str(e)})
                 yield f"data: {error_data}\n\n"
             finally:
+                # Cancel any in-flight __anext__ task before closing the
+                # generator to avoid "Task was destroyed but it is pending"
+                # warnings on client disconnect.
+                if pending is not None and not pending.done():
+                    pending.cancel()
+                    with contextlib.suppress(BaseException):
+                        await pending
                 # Ensure stream_chat generator is closed on client disconnect
                 # so its finally block (post_turn cleanup) runs deterministically.
                 await stream.aclose()

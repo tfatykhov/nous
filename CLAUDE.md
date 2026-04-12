@@ -303,6 +303,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RRF_K` | `60` | RRF smoothing constant for hybrid search rank fusion |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
+| `NOUS_SSE_PING_INTERVAL` | `15` | Seconds between SSE comment-line pings on `/chat/stream`. Keeps the socket warm during stalls in pre_turn, compaction, or any non-streaming phase. Comment lines are ignored by SSE clients but reset their read timer. |
 | `NOUS_GRAPH_RECALL_ENABLED` | `true` | Enable graph expansion in recall_deep |
 | `NOUS_GRAPH_RECALL_MAX_EXPAND` | `5` | Max seed results to expand |
 | `NOUS_GRAPH_RECALL_DECAY` | `0.7` | Score decay per graph hop |
