@@ -109,6 +109,7 @@ async def hybrid_search(
     extra_params: dict | None = None,
     limit: int = 10,
     vector_weight: float | None = None,
+    active_filter: bool = True,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
 
@@ -138,6 +139,9 @@ async def hybrid_search(
         limit: Maximum number of results to return.
         vector_weight: Weight for vector score (keyword weight = 1 - vector_weight).
             None = resolve from runtime config / settings / default.
+        active_filter: Whether to include ``AND t.active = true`` in the WHERE
+            clause.  Set to ``False`` for tables without an ``active`` column
+            (e.g. ``brain.decisions``).  Default ``True``.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
@@ -155,7 +159,8 @@ async def hybrid_search(
     if extra_params:
         params.update(extra_params)
 
-    filter_clauses = f"AND t.agent_id = :agent_id AND t.active = true {extra_where}"
+    active_clause = "AND t.active = true" if active_filter else ""
+    filter_clauses = f"AND t.agent_id = :agent_id {active_clause} {extra_where}"
 
     vector_results: list[tuple[UUID, float]] = []
     keyword_results: list[tuple[UUID, float]] = []
