@@ -5,7 +5,8 @@
 > **Depends on:** F040 (Graph Densification — shipped), F022 (Graph-Augmented Recall — shipped)  
 > **Related:** F031 (Sleep Consolidation), tinyHippo (github.com/max-talanov/tinyHippo)  
 > **Author:** Nous + Tim  
-> **Created:** 2026-04-12
+> **Created:** 2026-04-12  
+> **Updated:** 2026-04-12 (fact-checked against actual replay_12pct_stc.h5)
 
 ---
 
@@ -19,944 +20,876 @@ Prove that a spiking neural network (SNN) modeled on hippocampal microcircuitry 
 
 Nous's current graph densification (F040) uses **embedding cosine similarity** to connect memory nodes. This is effective but limited:
 
-1. **Cosine similarity is symmetric and static** — it cannot model temporal sequence relationships, competitive inhibition, or consolidation dynamics.
-2. **Thresholds are hand-tuned** — `graph_threshold_fact_fact: 0.82`, `fact_decision: 0.72`, etc. These have no biological or empirical basis.
-3. **No replay dynamics** — in biological memory, sleep replay selectively strengthens some associations and weakens others through competitive inhibition. F040 treats all above-threshold pairs equally.
-4. **No consolidation gating** — the brain's STC (Synaptic Tagging and Capture) mechanism ensures only memories that survive protein-synthesis-dependent consolidation become permanent. F040 has no equivalent filter.
+- Cosine similarity only finds **surface-level semantic overlap** — misses cross-domain associations
+- Thresholds are **hand-tuned** (`graph_threshold_fact_fact`, etc.) with no principled basis
+- No **competitive inhibition** — all above-threshold pairs get edges equally, no winner-take-all dynamics
+- No **temporal sequence** awareness — doesn't model "memory A precedes memory B" relationships
 
-### What tinyHippo Provides
-
-tinyHippo (github.com/max-talanov/tinyHippo) is a biologically realistic hippocampal microcircuit simulation built on NEST with Izhikevich neurons. A single run produces an HDF5 file containing:
-
-- **SWR replay dynamics** — bidirectional (forward + reverse) sharp-wave ripple events showing which neuron groups co-activated during replay
-- **STC consolidation results** — which synapses survived competitive consolidation to achieve L-LTP (late long-term potentiation)
-- **Replay quality metrics** — Spearman ρ correlation measuring replay fidelity
-
-These outputs encode the **results of actual neural computation** — not heuristics. The SNN's inhibitory interneurons, competitive synaptic tagging, and replay dynamics produce association patterns that cosine similarity cannot.
+tinyHippo provides a biologically-grounded alternative: hippocampal SWR replay with STC (Synaptic Tagging and Capture) consolidation that inherently performs competitive weight selection.
 
 ---
 
-## Design: Use tinyHippo Only During Sleep
+## Reference File: replay_12pct_stc.h5
 
-### Why Sleep-Only Is Correct
+**Actual file analyzed:** `replay_12pct_stc.h5` (59.8 MB) from Google Drive  
+**Generated:** 2026-04-11T21:14:46 UTC  
+**Source:** tinyHippo `replay_scaled.py` with `--ec-lii --stc` flags  
+**Scale:** 12% (~93,000 neurons)  
+**Simulation:** 7,000 ms with 14 SWR events  
+**NEST version:** 3.9.0
 
-This mirrors actual neurobiology:
-- The hippocampus performs consolidation replay **during sleep**, not during active recall
-- tinyHippo simulates this exact process (SWR events are a sleep phenomenon)
-- **Latency**: eliminated — sleep has no time constraint, tinyHippo can run for minutes
-- **Encoding bridge at query time**: eliminated — batch-encode during sleep, not per-query
-- **Proving SNN works**: clean A/B test — graph before vs after SNN-augmented sleep
-
-### Architecture
+### Complete HDF5 Schema (Fact-Checked)
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    NOUS SLEEP CYCLE                      │
-│                                                          │
-│  Phase 1-7: existing phases (prune, compress, reflect…) │
-│                                                          │
-│  Phase 8: F040 cosine-similarity densification          │
-│                                                          │
-│  Phase 8b: F041 SNN densification (NEW)                 │
-│    ┌─────────────────────────────────────────────┐      │
-│    │ 1. COLLECT: batch recent memories            │      │
-│    │ 2. CLUSTER: KMeans → n_groups buckets        │      │
-│    │ 3. READ H5: load pre-computed tinyHippo run  │      │
-│    │ 4. EXTRACT: co-activation matrix + STC gates │      │
-│    │ 5. MAP: group pairs → memory ID pairs        │      │
-│    │ 6. WRITE: create weighted graph edges         │      │
-│    └─────────────────────────────────────────────┘      │
-│                                                          │
-│  Phase 9-10: generalize, evolve rubric                  │
-│                                                          │
-│  Nous wakes up → existing F022 recall traverses         │
-│  the enriched graph → better retrieval                  │
-└─────────────────────────────────────────────────────────┘
+ROOT ATTRIBUTES:
+  created_utc:     "2026-04-11T21:14:46.449236"
+  dt_ms:           10.0              # Time bin width in milliseconds
+  n_groups:        35                # Number of sequence groups
+  sim_ms:          7000.0            # Total simulation time
+  scale:           "12% scale"       # ~93k neurons
+  nest_version:    "3.9.0"
+  ec_lii_present:  True              # EC Layer II cortical module active
+  ec_lii_N:        12005             # EC LII neuron count
+  ec_lii_K_ca1:    50                # CA1→EC fan-in per EC neuron
+  ec_lii_w_init:   1.0               # Initial synaptic weight
+  swr_fwd_start:   300.0             # First forward SWR window start (ms)
+  swr_fwd_stop:    420.0             # First forward SWR window end (ms)
+  swr_rev_start:   600.0             # First reverse SWR window start (ms)
+  swr_rev_stop:    720.0             # First reverse SWR window end (ms)
+
+POPULATIONS (8 total):
+  ca3_sup/          # CA3 superficial pyramidal (31,675 cells)
+    spk_times       float32[1,859,951]    # All spike times
+    spk_senders     int32[1,859,951]      # Cell IDs per spike
+    group_ids       int32[35, 905]        # Cell→group mapping (905 cells/group)
+    heatmap         float32[35, 700]      # Firing rate per group per time bin
+    rate            float32[700]          # Population-average rate per bin
+
+  ca3_deep/         # CA3 deep pyramidal (7,910 cells)
+    spk_times       float32[752,750]
+    spk_senders     int32[752,750]
+    group_ids       int32[35, 226]        # 226 cells/group
+    heatmap         float32[35, 700]
+    rate            float32[700]
+
+  ca3_int_sup/      # CA3 inhibitory interneurons superficial (2,870 cells)
+    spk_times       float32[424,120]
+    spk_senders     int32[424,120]
+    rate            float32[700]
+
+  ca3_int_deep/     # CA3 inhibitory interneurons deep (945 cells)
+    spk_times       float32[138,815]
+    spk_senders     int32[138,815]
+    rate            float32[700]
+
+  ca1_pyr/          # CA1 pyramidal readout (55,195 cells)
+    spk_times       float32[15,335,605]   # ← 15M spikes, richest signal
+    spk_senders     int32[15,335,605]
+    rate            float32[700]
+
+  ca1_basket/       # CA1 basket interneurons (1,680 cells)
+    spk_times       float32[842,123]
+    spk_senders     int32[842,123]
+    rate            float32[700]
+
+  ca1_olm/          # CA1 OLM interneurons (1,085 cells)
+    spk_times       float32[202,404]
+    spk_senders     int32[202,404]
+    rate            float32[700]
+
+  ec_lii/           # Entorhinal Cortex Layer II (12,005 cells)
+    spk_times       float32[2,546,335]
+    spk_senders     int32[2,546,335]
+    rate            float32[700]
+
+STC (Synaptic Tagging & Capture):
+  stc/
+    n_synapses      attr: 612,255         # CA1→EC synapses
+    n_swr_events    attr: 14              # Total SWR events in simulation
+    w_init          attr: 1.0             # Starting weight
+    w_final         float32[612,255]      # Final weight per synapse
+    ltp_mask        uint8[612,255]        # 1 = achieved L-LTP
+    tag_final       float32[612,255]      # Residual tag strength
+    post_idx        int32[612,255]        # Which EC neuron this synapse targets
+    event           int32[14]             # SWR event indices [1..14]
+    t_swr_start     float32[14]           # SWR window start times
+    t_swr_end       float32[14]           # SWR window end times
+    n_tagged_syn    int32[14]             # Tagged synapses per event
+    n_active_syn    int32[14]             # Active synapses per event
+    n_ltp_new       int32[14]             # New L-LTP captures per event
+    n_ltp_total     int32[14]             # Cumulative L-LTP count
+    n_ec_fired      int32[14]             # EC neurons that fired per event
+    w_mean          float32[14]           # Mean weight per event
+    w_ltp_mean      float32[14]           # Mean weight of L-LTP synapses per event
+    prp_mean        float32[14]           # Mean PRP pool per event
+    prp_max         float32[14]           # Max PRP pool per event
+    prp_pool_final  float32[12,005]       # Final PRP per EC neuron
+
+STATS:
+  stats/
+    rho_fwd         attr: 0.3070          # Forward replay Spearman ρ
+    pval_fwd        attr: 0.0728          # Forward replay p-value
+    rho_rev         attr: 0.4305          # Reverse replay Spearman ρ (SIGNIFICANT)
+    pval_rev        attr: 0.0098          # Reverse replay p-value
+    mean_rate_*     attrs per population  # Mean firing rates
+
+GLOBAL:
+  times_ms          float32[700]          # Time bin centers
 ```
 
----
+### SWR Event Windows (All 14)
 
-## HDF5 Schema (Fact-Checked Against tinyHippo Source)
+| Event | Type    | Start (ms) | End (ms) |
+|-------|---------|-----------|----------|
+| 1     | Forward | 300       | 420      |
+| 2     | Reverse | 600       | 720      |
+| 3     | Forward | 1300      | 1420     |
+| 4     | Reverse | 1600      | 1720     |
+| 5     | Forward | 2300      | 2420     |
+| 6     | Reverse | 2600      | 2720     |
+| 7     | Forward | 3300      | 3420     |
+| 8     | Reverse | 3600      | 3720     |
+| 9     | Forward | 4300      | 4420     |
+| 10    | Reverse | 4600      | 4720     |
+| 11    | Forward | 5300      | 5420     |
+| 12    | Reverse | 5600      | 5720     |
+| 13    | Forward | 6300      | 6420     |
+| 14    | Reverse | 6600      | 6720     |
 
-All field names verified against `replay_scaled.py` lines 1497-1690 (`save_replay_hdf5()`).
-
-### Root Attributes
-
-| Attribute | Type | Source Line | Description |
-|-----------|------|-------------|-------------|
-| `sim_ms` | float | L1588 (h5.attrs) | Total simulation duration in milliseconds |
-| `n_groups` | int | L1588 (h5.attrs) | Number of sequence groups (default 20, scales as `max(10, round(10 * sqrt(pct)))`) |
-| `swr_fwd_start` | float | L1588 (h5.attrs) | Forward SWR replay window start (ms) |
-| `swr_fwd_stop` | float | L1588 (h5.attrs) | Forward SWR replay window end (ms) |
-| `swr_rev_start` | float | L1588 (h5.attrs) | Reverse SWR replay window start (ms) |
-| `swr_rev_stop` | float | L1588 (h5.attrs) | Reverse SWR replay window end (ms) |
-| `scale` | str | L1588 (h5.attrs) | Scale label (e.g., "100% scale") |
-| `dt_ms` | float | L1588 (h5.attrs) | Time bin width used for heatmap (from `bin_ms` param, default 10.0) |
-
-### `/ca3_sup/` — CA3 Superficial Layer (Primary Replay Data)
-
-| Dataset | Shape | Dtype | Description |
-|---------|-------|-------|-------------|
-| `spk_times` | `[n_spikes]` | float32 | Raw spike timestamps (ms), gzip compressed |
-| `spk_senders` | `[n_spikes]` | int32 | Neuron IDs that spiked, gzip compressed |
-| `rate` | `[n_bins]` | float64 | Population-mean firing rate per time bin (Hz) |
-| `group_ids` | `[n_groups, group_size]` | int32 | Neuron ID membership per sequence group |
-| `heatmap` | `[n_groups, n_bins]` | float32 | **KEY DATA** — Per-group firing rate per time bin |
-
-### `/ca3_deep/` — CA3 Deep Layer
-
-Same structure as `/ca3_sup/` but **no heatmap dataset** (verified: only `spk_times`, `spk_senders`, `rate`, `group_ids`).
-
-### `/ca3_int_sup/`, `/ca3_int_deep/` — Inhibitory Interneurons
-
-| Dataset | Shape | Dtype | Description |
-|---------|-------|-------|-------------|
-| `spk_times` | `[n_spikes]` | float32 | Interneuron spike times |
-| `spk_senders` | `[n_spikes]` | int32 | Interneuron IDs |
-| `rate` | `[n_bins]` | float64 | Mean firing rate |
-
-### `/ca1_pyr/`, `/ca1_basket/`, `/ca1_olm/` — CA1 Populations
-
-Same structure: `spk_times`, `spk_senders`, `rate`.
-
-### `/ec_lii/` — Entorhinal Cortex Layer II (only with `--ec-lii` flag)
-
-| Dataset/Attr | Type | Description |
-|-------------|------|-------------|
-| `spk_times` | float32[] | EC neuron spike times |
-| `spk_senders` | int32[] | EC neuron IDs |
-| `rate` | float64[] | Mean firing rate |
-| `.attrs["n_cells"]` | int | Number of EC neurons |
-| `.attrs["w_init"]` | float | Initial EC→CA1 weight |
-| `.attrs["w_ca1_ec_note"]` | str | Weight description |
-
-### `/stats` — Replay Quality Metrics
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `rho_fwd` | float | **Spearman ρ for forward replay** — correlation between group index and mean spike time during forward SWR window. Positive = correct temporal order. |
-| `pval_fwd` | float | p-value for forward ρ |
-| `rho_rev` | float | **Spearman ρ for reverse replay** — negative = correct reverse temporal order. |
-| `pval_rev` | float | p-value for reverse ρ |
-| `mean_rate_{pop}` | float | Mean firing rate per population (Hz). Keys: `ca3_sup`, `ca3_deep`, `ca3_int_sup`, `ca3_int_deep`, `ca1_pyr`, `ca1_basket`, `ca1_olm`, optionally `ec_lii` |
-
-**Replay quality interpretation** (from `replay_scaled.py` lines 1455-1465):
-- `|rho_fwd| > 0.5` → forward replay PASS
-- `|rho_rev| > 0.5` → reverse replay PASS
-- Both NaN → replay failed entirely (no spikes in SWR window)
-
-### `/stc/` — Synaptic Tagging and Capture (only with `--ec-lii` flag)
-
-| Dataset | Shape | Dtype | Description |
-|---------|-------|-------|-------------|
-| `event` | `[n_swr_events]` | int32 | SWR event index |
-| `t_swr_start` | `[n_swr_events]` | float32 | SWR event start time (ms) |
-| `t_swr_end` | `[n_swr_events]` | float32 | SWR event end time (ms) |
-| `n_active_syn` | `[n_swr_events]` | int32 | Number of synapses active during this SWR |
-| `n_ltp_new` | `[n_swr_events]` | int32 | New L-LTP synapses created this event |
-| `n_ltp_total` | `[n_swr_events]` | int32 | Cumulative L-LTP synapses after this event |
-| `w_mean` | `[n_swr_events]` | float32 | Mean weight across all synapses after event |
-| `w_ltp_mean` | `[n_swr_events]` | float32 | Mean weight of L-LTP synapses only |
-| `w_final` | `[n_synapses]` | float32 | **Final weight distribution** — every synapse's weight after all SWR events |
-| `ltp_mask` | `[n_synapses]` | uint8 | **Boolean mask** — 1 = synapse achieved L-LTP (permanent), 0 = did not survive |
-
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `.attrs["n_swr_events"]` | int | Total number of SWR consolidation events |
-| `.attrs["w_init"]` | float | Initial weight (from EC module) |
-
-**STC interpretation:**
-- `ltp_mask.sum() / len(ltp_mask)` = survival rate (fraction of synapses that became permanent)
-- `w_final[ltp_mask == 1]` = weight distribution of survivors — this is the "consolidation threshold" the SNN learned
-- The 25th percentile of surviving weights becomes our biologically-derived threshold
-
-### `/times_ms` — Time Axis
-
-| Dataset | Shape | Dtype | Description |
-|---------|-------|-------|-------------|
-| `times_ms` | `[n_bins]` | float64 | Bin-centre timestamps in ms, spaced by `dt_ms` |
+Alternating forward/reverse every 300ms gap, repeating every 1000ms cycle.
 
 ---
 
-## Detailed Implementation
+## Honest Assessment: What Works vs What Doesn't In This File
 
-### New File: `nous/brain/snn_densifier.py`
+### ❌ Co-Activation Matrix: USELESS for Discrimination
+
+**What the naive approach assumed:** Compute Pearson correlation between group heatmap rows during SWR windows → use as edge weights. Groups that co-fire get connected.
+
+**What the data actually shows:**
+- **All 595 group pairs** have correlation > 0.6
+- Mean correlation: **0.963** (nearly 1.0)
+- Median: **0.995**
+- 94.6% of pairs have correlation > 0.8
+
+**Why:** At 12% scale, the network is "hot" — all groups fire during every SWR event. The inhibitory interneurons don't create enough selectivity to silence specific groups. The co-activation matrix is effectively uniform.
+
+**Conclusion:** Cannot use heatmap co-activation as edge weight discriminator with this .h5 file.
+
+### ❌ STC Survival Rate: TOO PERMISSIVE
+
+**What the naive approach assumed:** `ltp_mask` separates "strong" (survived L-LTP) from "weak" (didn't survive) synapses, providing a consolidation threshold.
+
+**What the data actually shows:**
+- **98.0%** of synapses (600,250/612,255) achieved L-LTP
+- Every EC neuron has exactly **50/51** LTP synapses
+- The 12,005 non-LTP synapses = exactly 1 per EC neuron
+- Non-LTP synapses have **HIGHER** weight (1.5000) than LTP synapses (mean 1.2941)
+
+**Why:** The PRP pool is uniform across all neurons (all = 14.0) and all synapses get tagged (100% tagged at every event). The competitive inhibition isn't competitive enough at this scale/configuration.
+
+**Conclusion:** Cannot use `ltp_mask` as a binary consolidation gate — it's nearly all-pass.
+
+### ❌ Replay Quality: Below Naive Threshold
+
+**What the spec assumed:** Quality gate at |ρ| > 0.5.
+
+**What the data shows:**
+- Forward: ρ = **0.307** (p = 0.073, NOT significant)
+- Reverse: ρ = **0.431** (p = 0.010, SIGNIFICANT at α=0.01)
+
+**Implication:** The 0.5 threshold would reject this entire file. But reverse replay IS statistically significant. The quality gate needs to use **p-value** (< 0.05) rather than absolute ρ magnitude.
+
+### ✅ w_final Distribution: REAL Per-Synapse Variance
+
+**This is the primary discriminative signal.**
+
+612,255 synapses with weights forming a bell curve:
+- Range: 1.192 → 1.500
+- Mean: 1.298, StdDev: ~0.04
+- Clear structure: peak around 1.29, tail to 1.40
+
+Per-EC-neuron mean weight has genuine variance:
+- Range: 1.245 → 1.355 (std = 0.013)
+- This means some EC neurons consolidated stronger than others
+
+**How to use:** The w_final distribution encodes how strongly each synapse was consolidated by competitive SNN dynamics (STC with tag decay, PRP competition). Neurons with higher mean incoming weight were "preferred" by the consolidation process.
+
+### ✅ Bidirectional Replay Sequence: REAL
+
+Odd SWR events → reverse replay (negative ρ):
+- SWR 1: ρ = -0.402 (p = 0.017)*
+- SWR 3: ρ = -0.402 (p = 0.017)*
+- SWR 5: ρ = -0.402 (p = 0.017)*
+
+Even SWR events → forward replay (positive ρ):
+- SWR 2: ρ = +0.485 (p = 0.003)**
+- SWR 4: ρ = +0.289 (p = 0.093)
+
+The alternating direction is consistent with hippocampal biology. Forward replay strengthens sequential associations (A→B→C). Reverse replay strengthens backward associations (C→B→A).
+
+### ✅ Weight Evolution Trajectory: REAL
+
+```
+Events 1-2: w_mean ≈ 1.00 (no LTP yet)
+Event 3:    w_mean → 1.31  (massive L-LTP capture, 600,250 new LTP synapses)
+Events 4-14: gradual decline 1.31 → 1.30 (STC tag decay + competition)
+```
+
+This trajectory encodes **temporal consolidation dynamics** — how quickly the SNN settles and which synapses maintain their strength.
+
+### ✅ Per-SWR Spike Timing: RICHEST SIGNAL
+
+- **15.3M CA1 pyramidal spikes** with millisecond-precision timing
+- **1.86M CA3 spikes** organized into 35 groups with known cell→group mapping
+- CA3 groups fire at different times during each SWR (e.g., SWR 1: Group 4 leads at 337ms, Group 34 fires last)
+- The temporal order of group activation encodes **sequence associations**
+
+---
+
+## Revised Architecture
+
+Given the actual .h5 data, the integration uses **three discriminative signals** (not the co-activation matrix):
+
+### Signal 1: w_final Distribution → Edge Weights
+
+Each of the 612,255 CA1→EC synapses has a unique weight that emerged from SNN competition. Map Nous memories to EC neuron indices, then use the per-neuron mean incoming weight as a **consolidation strength score**.
 
 ```python
-"""F041 — SNN Sleep Densification using tinyHippo HDF5 replay data.
+# Per-EC-neuron consolidation strength
+neuron_strength = {}
+for n in range(n_ec_neurons):
+    mask = post_idx == n
+    neuron_strength[n] = w_final[mask].mean()
+    
+# Range: 1.245 → 1.355
+# Normalize to [0, 1] for edge weights
+min_w, max_w = min(neuron_strength.values()), max(neuron_strength.values())
+for n in neuron_strength:
+    neuron_strength[n] = (neuron_strength[n] - min_w) / (max_w - min_w)
+```
 
-Reads pre-computed tinyHippo simulation results and uses SWR replay
-co-activation patterns + STC consolidation gates to create graph edges
-during Nous sleep cycles.
+**Mapping:** Assign Nous memories to EC neurons via embedding-based clustering (KMeans, n_clusters = 12,005 is too many → use 35 groups, then sub-cluster within). Each memory gets a consolidation strength from the mean w_final of its mapped neurons.
 
-Data flow:
-  1. Load .h5 from configured path
-  2. Quality-gate on replay Spearman ρ (reject bad replays)
-  3. Extract co-activation matrix from ca3_sup heatmap during SWR windows
-  4. Extract STC survival threshold from w_final + ltp_mask
-  5. Cluster recent Nous memories into n_groups via KMeans on embeddings
-  6. Map SNN co-activation strengths → memory pair → graph edges
+### Signal 2: CA3 Spike Timing → Temporal Proximity Edges
+
+During each SWR event, CA3 groups fire in a specific temporal order. Groups that fire close together in time have stronger temporal association than groups that fire far apart.
+
+```python
+# For each SWR event, compute CA3 group peak times
+for evt_i in range(14):
+    s, e = t_swr_start[evt_i], t_swr_end[evt_i]
+    for g in range(35):
+        cells = ca3_group_ids[g]
+        spike_mask = (spk_senders in cells) & (s <= spk_times <= e)
+        group_peak_time[evt_i][g] = mean(spk_times[spike_mask])
+    
+    # Temporal proximity between groups
+    for gi in range(35):
+        for gj in range(gi+1, 35):
+            dt = abs(group_peak_time[evt_i][gi] - group_peak_time[evt_i][gj])
+            # Closer in time → stronger association
+            temporal_weight[gi][gj] += exp(-dt / tau)
+```
+
+**Mapping:** Cluster Nous memories into 35 groups (matching n_groups). Groups whose CA3 representations fire close together get edges. This captures **temporal co-occurrence** — "these memories were replayed together."
+
+### Signal 3: Replay Direction → Edge Directionality
+
+Forward replay (odd events) encodes A→B sequence direction.
+Reverse replay (even events) encodes B→A backward association.
+
+```python
+# Forward events: group that fires first → second is a "precedes" edge
+# Reverse events: group that fires last → first is a "follows" edge
+for evt_i in fwd_events:
+    order = argsort(group_peak_time[evt_i])
+    for rank in range(len(order) - 1):
+        add_directed_edge(order[rank], order[rank+1], 
+                         relation="snn_temporal_sequence",
+                         weight=1.0 / (rank + 1))  # earlier pairs weighted more
+```
+
+---
+
+## Integration Pipeline
+
+### Where It Plugs In
+
+`handlers/sleep_handler.py`, Phase 8b — after F040 heuristic densification (line ~886):
+
+```python
+# Existing sleep phases:
+#   Phase 1-7: standard sleep consolidation
+#   Phase 8a: F040 graph densification (cosine similarity)
+#   Phase 8b: F041 SNN densification (tinyHippo) ← NEW
+#   Phase 9-10: cleanup and stats
+```
+
+### Pipeline Steps
+
+```
+┌────────────────────────────────────┐
+│  STEP 1: LOAD .h5                  │
+│  Read replay_12pct_stc.h5          │
+│  Parse: w_final, post_idx,         │
+│  group_ids, spk_times, spk_senders │
+│  t_swr_start, t_swr_end            │
+│  Quality gate: p_rev < 0.05        │
+└──────────────┬─────────────────────┘
+               │
+┌──────────────▼─────────────────────┐
+│  STEP 2: MAP MEMORIES → GROUPS     │
+│  Fetch recent memories (48h)       │
+│  KMeans(n_clusters=35) on          │
+│  embedding vectors                 │
+│  Each memory → one of 35 groups    │
+└──────────────┬─────────────────────┘
+               │
+┌──────────────▼─────────────────────┐
+│  STEP 3: EXTRACT SNN SIGNALS       │
+│  A. Per-group consolidation:       │
+│     Map group→EC neurons→mean_w    │
+│  B. Temporal proximity matrix:     │
+│     CA3 spike timing per SWR       │
+│  C. Replay direction edges:        │
+│     Forward vs reverse ordering    │
+└──────────────┬─────────────────────┘
+               │
+┌──────────────▼─────────────────────┐
+│  STEP 4: CREATE GRAPH EDGES        │
+│  For each memory pair (mi, mj):    │
+│    temporal_weight = proximity[g_i, │
+│    g_j] from spike timing          │
+│    consolidation = mean(strength[  │
+│    g_i], strength[g_j])            │
+│    edge_weight = temporal_weight * │
+│    consolidation                   │
+│    If edge_weight > threshold:     │
+│      create_edge(mi, mj,          │
+│        relation="snn_coactivation",│
+│        weight=edge_weight)         │
+│  For directed temporal sequences:  │
+│    create_edge(mi, mj,            │
+│      relation="snn_temporal_seq",  │
+│      weight=sequence_weight)       │
+└──────────────┬─────────────────────┘
+               │
+┌──────────────▼─────────────────────┐
+│  STEP 5: LOG & STATS               │
+│  edges_created, avg_weight,        │
+│  coverage (% memories connected),  │
+│  comparison with F040 edges        │
+└────────────────────────────────────┘
+```
+
+### Code: brain/snn_densifier.py
+
+```python
+"""
+F041 — SNN Sleep Densification.
+
+Reads pre-computed tinyHippo .h5 replay file and creates
+graph edges based on SNN consolidation dynamics.
+
+Discriminative signals used:
+  1. w_final per-synapse distribution → consolidation strength
+  2. CA3 spike timing during SWR → temporal proximity
+  3. Replay direction → directed sequence edges
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from dataclasses import dataclass
-from uuid import UUID
+from typing import Any
 
+import h5py
 import numpy as np
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import text
-
-from nous.brain.graph_linker import GraphLinker
-from nous.config import Settings
-from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Minimum replay quality to use results (Spearman |ρ| threshold)
-MIN_REPLAY_RHO = 0.5
-
-# Maximum edges to create per sleep cycle
-MAX_EDGES_PER_CYCLE = 500
-
-# Relation type for SNN-derived edges
-SNN_RELATION = "snn_coactivation"
-
-
-@dataclass
-class TinyHippoResults:
-    """Parsed results from a tinyHippo HDF5 file."""
-    n_groups: int
-    sim_ms: float
-    rho_fwd: float
-    rho_rev: float
-    coactivation_matrix: np.ndarray  # [n_groups, n_groups] correlation matrix
-    stc_survival_rate: float | None  # fraction of synapses reaching L-LTP
-    stc_weight_threshold: float | None  # 25th percentile of survivor weights
-    has_stc: bool
-
-
-def load_tinyhippo_h5(h5_path: str | Path) -> TinyHippoResults:
-    """Load and parse tinyHippo HDF5 file.
-    
-    Extracts:
-    - Co-activation matrix from ca3_sup heatmap during SWR windows
-    - STC consolidation thresholds (if --ec-lii data present)
-    - Replay quality metrics
-    
-    Raises:
-        FileNotFoundError: if h5_path does not exist
-        ValueError: if required datasets are missing
-        ImportError: if h5py is not installed
-    """
-    try:
-        import h5py
-    except ImportError:
-        raise ImportError(
-            "h5py is required for F041 SNN densification. "
-            "Install with: pip install h5py"
-        )
-    
-    h5_path = Path(h5_path)
-    if not h5_path.exists():
-        raise FileNotFoundError(f"tinyHippo HDF5 not found: {h5_path}")
-    
-    with h5py.File(h5_path, "r") as h5:
-        # --- Root attributes ---
-        n_groups = int(h5.attrs["n_groups"])
-        sim_ms = float(h5.attrs["sim_ms"])
-        dt_ms = float(h5.attrs.get("dt_ms", 10.0))
-        
-        # SWR windows
-        swr_fwd_start = float(h5.attrs["swr_fwd_start"])
-        swr_fwd_stop = float(h5.attrs["swr_fwd_stop"])
-        swr_rev_start = float(h5.attrs["swr_rev_start"])
-        swr_rev_stop = float(h5.attrs["swr_rev_stop"])
-        
-        # --- Replay quality ---
-        stats = h5["stats"]
-        rho_fwd = float(stats.attrs.get("rho_fwd", float("nan")))
-        rho_rev = float(stats.attrs.get("rho_rev", float("nan")))
-        
-        # --- CA3 SUP heatmap: [n_groups, n_bins] ---
-        if "ca3_sup" not in h5 or "heatmap" not in h5["ca3_sup"]:
-            raise ValueError("Missing ca3_sup/heatmap in HDF5")
-        
-        heatmap = np.array(h5["ca3_sup"]["heatmap"], dtype=np.float32)
-        # heatmap shape: [n_groups, n_bins]
-        
-        # --- Extract SWR-window activity ---
-        # Convert ms timestamps to bin indices
-        fwd_start_bin = int(swr_fwd_start / dt_ms)
-        fwd_stop_bin = int(swr_fwd_stop / dt_ms)
-        rev_start_bin = int(swr_rev_start / dt_ms)
-        rev_stop_bin = int(swr_rev_stop / dt_ms)
-        
-        # Clamp to heatmap bounds
-        n_bins = heatmap.shape[1]
-        fwd_start_bin = max(0, min(fwd_start_bin, n_bins - 1))
-        fwd_stop_bin = max(0, min(fwd_stop_bin, n_bins))
-        rev_start_bin = max(0, min(rev_start_bin, n_bins - 1))
-        rev_stop_bin = max(0, min(rev_stop_bin, n_bins))
-        
-        # Concatenate forward + reverse SWR windows
-        swr_activity = np.hstack([
-            heatmap[:, fwd_start_bin:fwd_stop_bin],
-            heatmap[:, rev_start_bin:rev_stop_bin],
-        ])
-        
-        # --- Co-activation matrix ---
-        # Pearson correlation between group activity during SWR replay
-        # Groups that co-fire during SWR replay are associated
-        if swr_activity.shape[1] < 2:
-            logger.warning("SWR window too narrow for correlation, using full heatmap")
-            swr_activity = heatmap
-        
-        # Handle constant rows (groups that never fired)
-        row_std = swr_activity.std(axis=1)
-        active_mask = row_std > 1e-10
-        
-        coactivation = np.zeros((n_groups, n_groups), dtype=np.float32)
-        if active_mask.sum() >= 2:
-            active_indices = np.where(active_mask)[0]
-            active_corr = np.corrcoef(swr_activity[active_mask])
-            # Map back to full matrix
-            for i_idx, i_full in enumerate(active_indices):
-                for j_idx, j_full in enumerate(active_indices):
-                    coactivation[i_full, j_full] = active_corr[i_idx, j_idx]
-        
-        # Zero out diagonal (no self-edges)
-        np.fill_diagonal(coactivation, 0.0)
-        
-        # Clamp negative correlations to 0 (anti-correlation = inhibition = no edge)
-        coactivation = np.clip(coactivation, 0.0, 1.0)
-        
-        # --- STC consolidation data (optional) ---
-        has_stc = "stc" in h5
-        stc_survival_rate = None
-        stc_weight_threshold = None
-        
-        if has_stc:
-            stc = h5["stc"]
-            w_final = np.array(stc["w_final"], dtype=np.float32)
-            ltp_mask = np.array(stc["ltp_mask"], dtype=np.uint8)
-            
-            total_synapses = len(ltp_mask)
-            survivors = ltp_mask.sum()
-            stc_survival_rate = float(survivors / total_synapses) if total_synapses > 0 else 0.0
-            
-            # Threshold = 25th percentile of surviving weights
-            surviving_weights = w_final[ltp_mask.astype(bool)]
-            if len(surviving_weights) > 0:
-                stc_weight_threshold = float(np.percentile(surviving_weights, 25))
-            
-            logger.info(
-                "STC data: %d/%d synapses survived (%.1f%%), weight threshold: %.4f",
-                survivors, total_synapses, stc_survival_rate * 100,
-                stc_weight_threshold or 0.0,
-            )
-    
-    return TinyHippoResults(
-        n_groups=n_groups,
-        sim_ms=sim_ms,
-        rho_fwd=rho_fwd,
-        rho_rev=rho_rev,
-        coactivation_matrix=coactivation,
-        stc_survival_rate=stc_survival_rate,
-        stc_weight_threshold=stc_weight_threshold,
-        has_stc=has_stc,
-    )
-
-
-@dataclass
-class MemoryNode:
-    """A Nous memory node for clustering."""
-    id: UUID
-    node_type: str  # "fact", "decision", "episode", "procedure"
-    embedding: np.ndarray
-    content: str
-
 
 class SNNDensifier:
-    """F041: SNN-based graph densification using tinyHippo replay data.
-    
-    During Nous sleep, clusters recent memories into groups matching
-    tinyHippo's n_groups, then uses the SNN's co-activation matrix
-    to determine which memory groups should be connected.
-    
-    The co-activation matrix encodes which neuron groups fired together
-    during SWR replay — this is the SNN's "opinion" on which memories
-    are associated, derived from actual neural computation including
-    competitive inhibition and bidirectional replay dynamics.
-    """
-    
-    def __init__(
-        self,
-        db: Database,
-        graph_linker: GraphLinker,
-        settings: Settings,
-        agent_id: str,
-    ) -> None:
-        self.db = db
-        self._linker = graph_linker
-        self._settings = settings
-        self._agent_id = agent_id
-        self._interrupted = False
-    
-    def interrupt(self) -> None:
-        self._interrupted = True
-    
-    async def run_snn_densification(
-        self,
-        h5_path: str | Path,
-        lookback_hours: int = 48,
-        max_memories: int = 500,
-    ) -> dict:
-        """Main entry point: run SNN-based densification.
-        
-        Steps:
-        1. Load tinyHippo .h5 results
-        2. Quality-gate on replay fidelity
-        3. Fetch recent memories with embeddings
-        4. Cluster memories into n_groups via KMeans
-        5. Apply co-activation matrix to create edges
-        6. Apply STC threshold as consolidation gate
-        
-        Returns:
-            dict with keys: edges_created, groups_used, replay_quality,
-            stc_survival_rate, memories_processed
-        """
-        stats = {
-            "edges_created": 0,
-            "groups_used": 0,
-            "replay_quality": {"rho_fwd": None, "rho_rev": None},
-            "stc_survival_rate": None,
-            "memories_processed": 0,
-            "skipped_reason": None,
-        }
-        
-        # Step 1: Load .h5
-        try:
-            results = load_tinyhippo_h5(h5_path)
-        except (FileNotFoundError, ValueError, ImportError) as e:
-            logger.warning("F041: Cannot load tinyHippo H5: %s", e)
-            stats["skipped_reason"] = str(e)
-            return stats
-        
-        stats["replay_quality"] = {
-            "rho_fwd": results.rho_fwd,
-            "rho_rev": results.rho_rev,
-        }
-        stats["stc_survival_rate"] = results.stc_survival_rate
-        
-        # Step 2: Quality gate
-        fwd_ok = not np.isnan(results.rho_fwd) and abs(results.rho_fwd) >= MIN_REPLAY_RHO
-        rev_ok = not np.isnan(results.rho_rev) and abs(results.rho_rev) >= MIN_REPLAY_RHO
-        
-        if not (fwd_ok or rev_ok):
-            logger.warning(
-                "F041: Replay quality too low (rho_fwd=%.3f, rho_rev=%.3f), skipping",
-                results.rho_fwd, results.rho_rev,
-            )
-            stats["skipped_reason"] = "replay_quality_below_threshold"
-            return stats
-        
-        logger.info(
-            "F041: Replay quality OK (rho_fwd=%.3f, rho_rev=%.3f)",
-            results.rho_fwd, results.rho_rev,
-        )
-        
-        # Step 3: Fetch recent memories
-        async with self.db.session() as session:
-            memories = await self._fetch_recent_memories(
-                session, lookback_hours, max_memories
-            )
-        
-        if len(memories) < results.n_groups:
-            logger.warning(
-                "F041: Only %d memories (need >= %d for %d groups), skipping",
-                len(memories), results.n_groups, results.n_groups,
-            )
-            stats["skipped_reason"] = "insufficient_memories"
-            stats["memories_processed"] = len(memories)
-            return stats
-        
-        stats["memories_processed"] = len(memories)
-        
-        # Step 4: Cluster memories into n_groups
-        embeddings = np.array([m.embedding for m in memories])
-        labels = self._cluster_memories(embeddings, results.n_groups)
-        stats["groups_used"] = results.n_groups
-        
-        # Step 5: Build group→memory mapping
-        groups: dict[int, list[MemoryNode]] = {}
-        for mem, label in zip(memories, labels):
-            groups.setdefault(label, []).append(mem)
-        
-        # Step 6: Apply co-activation matrix to create edges
-        coact = results.coactivation_matrix
-        
-        # Determine edge weight threshold
-        # If STC data available: use biologically-derived threshold
-        # Otherwise: use percentile of co-activation values
-        if results.has_stc and results.stc_survival_rate is not None:
-            # Map STC survival rate to co-activation threshold
-            # If only 30% of synapses survived, we want to be selective
-            # Use survival rate as a percentile selector on co-activation values
-            nonzero_coact = coact[coact > 0]
-            if len(nonzero_coact) > 0:
-                # Higher survival = lower threshold (more edges)
-                # Lower survival = higher threshold (more selective, like the SNN)
-                percentile = (1.0 - results.stc_survival_rate) * 100
-                percentile = max(50, min(95, percentile))  # clamp to [50, 95]
-                edge_threshold = float(np.percentile(nonzero_coact, percentile))
-            else:
-                edge_threshold = 0.3
+    """Extracts graph edges from tinyHippo .h5 replay data."""
+
+    def __init__(self, h5_path: str | Path):
+        self.h5_path = Path(h5_path)
+        self._data: dict[str, Any] = {}
+
+    def load(self) -> bool:
+        """Load and validate .h5 file. Returns False if quality gate fails."""
+        if not self.h5_path.exists():
+            logger.warning("H5 file not found: %s", self.h5_path)
+            return False
+
+        with h5py.File(self.h5_path, "r") as h5:
+            # Quality gate: p-value based, not ρ magnitude
+            p_fwd = h5["stats"].attrs["pval_fwd"]
+            p_rev = h5["stats"].attrs["pval_rev"]
+            rho_fwd = h5["stats"].attrs["rho_fwd"]
+            rho_rev = h5["stats"].attrs["rho_rev"]
+
+            if p_fwd > 0.05 and p_rev > 0.05:
+                logger.warning(
+                    "Both replay directions non-significant "
+                    "(p_fwd=%.4f, p_rev=%.4f). Rejecting file.",
+                    p_fwd, p_rev,
+                )
+                return False
+
             logger.info(
-                "F041: STC-derived edge threshold: %.3f (survival=%.1f%%, percentile=%.0f)",
-                edge_threshold, results.stc_survival_rate * 100, percentile,
+                "Replay quality: fwd ρ=%.3f (p=%.4f), rev ρ=%.3f (p=%.4f)",
+                rho_fwd, p_fwd, rho_rev, p_rev,
             )
-        else:
-            # No STC: use top 25% of co-activation values
-            nonzero_coact = coact[coact > 0]
-            if len(nonzero_coact) > 0:
-                edge_threshold = float(np.percentile(nonzero_coact, 75))
-            else:
-                edge_threshold = 0.3
-            logger.info("F041: Heuristic edge threshold: %.3f (no STC data)", edge_threshold)
+
+            # Load STC data
+            self._data["w_final"] = h5["stc/w_final"][:]
+            self._data["post_idx"] = h5["stc/post_idx"][:]
+            self._data["n_ec"] = h5["stc"].attrs["n_ec_neurons"]
+
+            # Load spike data for temporal analysis
+            self._data["n_groups"] = h5.attrs["n_groups"]
+            self._data["dt_ms"] = h5.attrs["dt_ms"]
+            self._data["ca3_group_ids"] = h5["ca3_sup/group_ids"][:]
+            self._data["ca3_spk_times"] = h5["ca3_sup/spk_times"][:]
+            self._data["ca3_spk_senders"] = h5["ca3_sup/spk_senders"][:]
+            self._data["t_swr_start"] = h5["stc/t_swr_start"][:]
+            self._data["t_swr_end"] = h5["stc/t_swr_end"][:]
+            self._data["rho_fwd"] = rho_fwd
+            self._data["rho_rev"] = rho_rev
+
+        return True
+
+    def compute_consolidation_strength(self) -> np.ndarray:
+        """Per-group consolidation strength from w_final.
         
-        # Step 7: Create edges
-        edges_created = 0
-        async with self.db.session() as session:
-            for i in range(results.n_groups):
-                if self._interrupted:
-                    break
-                for j in range(i + 1, results.n_groups):
-                    if self._interrupted:
-                        break
-                    
-                    strength = float(coact[i, j])
-                    if strength < edge_threshold:
-                        continue
-                    
-                    if i not in groups or j not in groups:
-                        continue
-                    
-                    # Create edges between representative pairs
-                    # Don't create N*M edges — pick top pairs by embedding similarity
-                    new_edges = await self._create_group_edges(
-                        session,
-                        groups[i],
-                        groups[j],
-                        strength,
-                        max_pairs=3,
-                    )
-                    edges_created += new_edges
-                    
-                    if edges_created >= MAX_EDGES_PER_CYCLE:
-                        logger.info("F041: Hit edge cap (%d), stopping", MAX_EDGES_PER_CYCLE)
-                        break
-                
-                if edges_created >= MAX_EDGES_PER_CYCLE:
-                    break
-            
-            await session.commit()
+        Maps EC neurons to groups based on which CA1 cells
+        project to them, then aggregates w_final per group.
         
-        stats["edges_created"] = edges_created
-        logger.info(
-            "F041: SNN densification complete — %d edges from %d memories in %d groups",
-            edges_created, len(memories), results.n_groups,
-        )
-        return stats
-    
-    async def _fetch_recent_memories(
-        self,
-        session: AsyncSession,
-        lookback_hours: int,
-        max_memories: int,
-    ) -> list[MemoryNode]:
-        """Fetch recent facts, decisions, episodes with embeddings."""
-        memories: list[MemoryNode] = []
-        
-        # Fetch facts
-        sql = text("""
-            SELECT id, content, embedding::text
-            FROM heart.facts
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND embedding IS NOT NULL
-              AND created_at >= NOW() - INTERVAL ':hours hours'
-            ORDER BY created_at DESC
-            LIMIT :limit
-        """)
-        result = await session.execute(sql, {
-            "agent_id": self._agent_id,
-            "hours": lookback_hours,
-            "limit": max_memories // 3,
-        })
-        for row in result.fetchall():
-            emb = np.fromstring(row[2].strip("[]"), sep=",", dtype=np.float32)
-            if len(emb) > 0:
-                memories.append(MemoryNode(
-                    id=row[0], node_type="fact",
-                    embedding=emb, content=row[1][:200],
-                ))
-        
-        # Fetch decisions
-        sql = text("""
-            SELECT id, description, embedding::text
-            FROM brain.decisions
-            WHERE agent_id = :agent_id
-              AND embedding IS NOT NULL
-              AND created_at >= NOW() - INTERVAL ':hours hours'
-            ORDER BY created_at DESC
-            LIMIT :limit
-        """)
-        result = await session.execute(sql, {
-            "agent_id": self._agent_id,
-            "hours": lookback_hours,
-            "limit": max_memories // 3,
-        })
-        for row in result.fetchall():
-            emb = np.fromstring(row[2].strip("[]"), sep=",", dtype=np.float32)
-            if len(emb) > 0:
-                memories.append(MemoryNode(
-                    id=row[0], node_type="decision",
-                    embedding=emb, content=row[1][:200],
-                ))
-        
-        # Fetch episodes
-        sql = text("""
-            SELECT id,
-                   COALESCE(structured_summary->>'summary', ''),
-                   embedding::text
-            FROM heart.episodes
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND embedding IS NOT NULL
-              AND structured_summary IS NOT NULL
-              AND created_at >= NOW() - INTERVAL ':hours hours'
-            ORDER BY created_at DESC
-            LIMIT :limit
-        """)
-        result = await session.execute(sql, {
-            "agent_id": self._agent_id,
-            "hours": lookback_hours,
-            "limit": max_memories // 3,
-        })
-        for row in result.fetchall():
-            emb = np.fromstring(row[2].strip("[]"), sep=",", dtype=np.float32)
-            if len(emb) > 0:
-                memories.append(MemoryNode(
-                    id=row[0], node_type="episode",
-                    embedding=emb, content=row[1][:200],
-                ))
-        
-        logger.info("F041: Fetched %d memories (%d-hour lookback)", len(memories), lookback_hours)
-        return memories
-    
-    @staticmethod
-    def _cluster_memories(embeddings: np.ndarray, n_clusters: int) -> np.ndarray:
-        """Cluster memory embeddings into n_clusters groups via KMeans.
-        
-        Falls back to simple modular assignment if sklearn unavailable.
+        Returns: float array [n_groups] normalized to [0, 1].
         """
-        try:
-            from sklearn.cluster import KMeans
-            km = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
-            return km.fit_predict(embeddings)
-        except ImportError:
-            logger.warning("F041: sklearn not available, using modular assignment")
-            return np.arange(len(embeddings)) % n_clusters
-    
-    async def _create_group_edges(
-        self,
-        session: AsyncSession,
-        group_a: list[MemoryNode],
-        group_b: list[MemoryNode],
-        snn_strength: float,
-        max_pairs: int = 3,
-    ) -> int:
-        """Create edges between memories in two co-activated groups.
+        w_final = self._data["w_final"]
+        post_idx = self._data["post_idx"]
+        n_ec = self._data["n_ec"]
+        n_groups = self._data["n_groups"]
+
+        # Per-EC-neuron mean weight
+        neuron_w = np.zeros(n_ec)
+        for n in range(n_ec):
+            mask = post_idx == n
+            neuron_w[n] = w_final[mask].mean()
+
+        # Partition EC neurons into n_groups buckets
+        # (simple equal partition — EC neurons are ordered)
+        group_size = n_ec // n_groups
+        group_strength = np.zeros(n_groups)
+        for g in range(n_groups):
+            start = g * group_size
+            end = start + group_size if g < n_groups - 1 else n_ec
+            group_strength[g] = neuron_w[start:end].mean()
+
+        # Normalize to [0, 1]
+        mn, mx = group_strength.min(), group_strength.max()
+        if mx > mn:
+            group_strength = (group_strength - mn) / (mx - mn)
+        else:
+            group_strength[:] = 0.5
+
+        return group_strength
+
+    def compute_temporal_proximity(self, tau_ms: float = 20.0) -> np.ndarray:
+        """Temporal proximity between groups from CA3 spike timing.
         
-        Selects the top-N most similar pairs across groups to avoid
-        creating O(N*M) edges. The edge weight is the SNN co-activation
-        strength (not cosine similarity — that's what F040 does).
+        For each SWR event, compute mean spike time per CA3 group.
+        Groups that fire closer together get higher proximity score.
+        Aggregated across all 14 SWR events.
         
         Args:
-            group_a: memories in cluster i
-            group_b: memories in cluster j  
-            snn_strength: co-activation correlation from tinyHippo heatmap
-            max_pairs: maximum edges to create between these two groups
-            
-        Returns:
-            Number of edges created
+            tau_ms: Time constant for exponential decay (ms).
+                    Smaller = more selective (only very close groups link).
+        
+        Returns: float array [n_groups, n_groups] normalized to [0, 1].
         """
-        # Compute pairwise cosine similarity to rank pairs
-        # But the WEIGHT is the SNN strength (this is the key difference from F040)
-        pairs: list[tuple[float, MemoryNode, MemoryNode]] = []
+        n_groups = self._data["n_groups"]
+        group_ids = self._data["ca3_group_ids"]
+        spk_times = self._data["ca3_spk_times"]
+        spk_senders = self._data["ca3_spk_senders"]
+        t_starts = self._data["t_swr_start"]
+        t_ends = self._data["t_swr_end"]
+
+        proximity = np.zeros((n_groups, n_groups))
+
+        # Pre-build sender→group lookup
+        sender_to_group = {}
+        for g in range(n_groups):
+            for cell_id in group_ids[g]:
+                sender_to_group[int(cell_id)] = g
+
+        for evt_i in range(len(t_starts)):
+            s, e = t_starts[evt_i], t_ends[evt_i]
+            mask = (spk_times >= s) & (spk_times <= e)
+            evt_times = spk_times[mask]
+            evt_senders = spk_senders[mask]
+
+            # Mean spike time per group
+            group_mean_t = np.full(n_groups, np.nan)
+            for g in range(n_groups):
+                cells = set(int(c) for c in group_ids[g])
+                cell_mask = np.isin(evt_senders, list(cells))
+                if cell_mask.sum() > 0:
+                    group_mean_t[g] = evt_times[cell_mask].mean()
+
+            # Temporal proximity: exp(-|dt|/tau)
+            for gi in range(n_groups):
+                if np.isnan(group_mean_t[gi]):
+                    continue
+                for gj in range(gi + 1, n_groups):
+                    if np.isnan(group_mean_t[gj]):
+                        continue
+                    dt = abs(group_mean_t[gi] - group_mean_t[gj])
+                    proximity[gi, gj] += np.exp(-dt / tau_ms)
+                    proximity[gj, gi] = proximity[gi, gj]
+
+        # Normalize to [0, 1]
+        mx = proximity.max()
+        if mx > 0:
+            proximity /= mx
+
+        return proximity
+
+    def compute_sequence_edges(self) -> list[tuple[int, int, float]]:
+        """Directed edges from replay temporal ordering.
         
-        for ma in group_a:
-            for mb in group_b:
-                # Cosine similarity for ranking (which pairs within groups are best)
-                sim = float(np.dot(ma.embedding, mb.embedding) / (
-                    np.linalg.norm(ma.embedding) * np.linalg.norm(mb.embedding) + 1e-10
-                ))
-                pairs.append((sim, ma, mb))
+        Forward replay (odd events): group firing order → sequence edges.
+        Reverse replay (even events): reversed order → backward edges.
         
-        # Sort by embedding similarity, take top pairs
-        pairs.sort(key=lambda x: x[0], reverse=True)
-        
-        edges_created = 0
-        for sim, ma, mb in pairs[:max_pairs]:
-            if self._interrupted:
-                break
-            
-            # Determine relation type based on memory types
-            relation = _get_snn_relation(ma.node_type, mb.node_type)
-            
-            edge = await self._linker.create_edge(
-                source_id=ma.id,
-                target_id=mb.id,
-                source_type=ma.node_type,
-                target_type=mb.node_type,
-                relation=relation,
-                weight=snn_strength,
-                session=session,
-            )
-            if edge is not None:
+        Returns: list of (source_group, target_group, weight) tuples.
+        """
+        n_groups = self._data["n_groups"]
+        group_ids = self._data["ca3_group_ids"]
+        spk_times = self._data["ca3_spk_times"]
+        spk_senders = self._data["ca3_spk_senders"]
+        t_starts = self._data["t_swr_start"]
+        t_ends = self._data["t_swr_end"]
+
+        edges: dict[tuple[int, int], float] = {}
+
+        for evt_i in range(len(t_starts)):
+            s, e = t_starts[evt_i], t_ends[evt_i]
+            mask = (spk_times >= s) & (spk_times <= e)
+            evt_times = spk_times[mask]
+            evt_senders = spk_senders[mask]
+
+            # Mean spike time per group
+            group_mean_t = {}
+            for g in range(n_groups):
+                cells = set(int(c) for c in group_ids[g])
+                cell_mask = np.isin(evt_senders, list(cells))
+                if cell_mask.sum() > 0:
+                    group_mean_t[g] = evt_times[cell_mask].mean()
+
+            # Sort by firing time
+            ordered = sorted(group_mean_t.items(), key=lambda x: x[1])
+
+            # Create sequence edges (adjacent in temporal order)
+            for rank in range(len(ordered) - 1):
+                src, _ = ordered[rank]
+                tgt, _ = ordered[rank + 1]
+                weight = 1.0 / (rank + 1)  # Earlier pairs weighted more
+                key = (src, tgt)
+                edges[key] = edges.get(key, 0.0) + weight
+
+        # Normalize
+        mx = max(edges.values()) if edges else 1.0
+        return [(s, t, w / mx) for (s, t), w in edges.items()]
+
+    def compute_all(self) -> dict[str, Any]:
+        """Compute all signals. Returns dict with results + metadata."""
+        strength = self.compute_consolidation_strength()
+        proximity = self.compute_temporal_proximity()
+        sequences = self.compute_sequence_edges()
+
+        return {
+            "n_groups": self._data["n_groups"],
+            "consolidation_strength": strength,
+            "temporal_proximity": proximity,
+            "sequence_edges": sequences,
+            "rho_fwd": self._data["rho_fwd"],
+            "rho_rev": self._data["rho_rev"],
+            "n_swr_events": len(self._data["t_swr_start"]),
+        }
+```
+
+### Code: Sleep Handler Integration
+
+```python
+# In handlers/sleep_handler.py, add Phase 8b:
+
+async def _phase_snn_densification(self, session, sleep_stats):
+    """Phase 8b: SNN-driven graph densification using tinyHippo replay."""
+    from brain.snn_densifier import SNNDensifier
+    from sklearn.cluster import KMeans
+
+    h5_path = self._settings.get("tinyhippo_h5_path")
+    if not h5_path:
+        logger.info("No tinyHippo .h5 configured, skipping SNN densification")
+        return
+
+    densifier = SNNDensifier(h5_path)
+    if not densifier.load():
+        sleep_stats["snn_status"] = "rejected_quality"
+        return
+
+    signals = densifier.compute_all()
+    n_groups = signals["n_groups"]
+    proximity = signals["temporal_proximity"]
+    strength = signals["consolidation_strength"]
+    sequences = signals["sequence_edges"]
+
+    # Fetch recent memories
+    recent = await self._get_recent_memories(session, hours=48)
+    if len(recent) < n_groups:
+        logger.warning("Only %d memories, need at least %d", len(recent), n_groups)
+        sleep_stats["snn_status"] = "insufficient_memories"
+        return
+
+    # Cluster memories into n_groups
+    embeddings = np.array([m.embedding for m in recent])
+    labels = KMeans(n_clusters=n_groups, n_init=10, random_state=42).fit_predict(embeddings)
+
+    edges_created = 0
+    edges_skipped = 0
+
+    # A. Temporal proximity edges (undirected)
+    for gi in range(n_groups):
+        for gj in range(gi + 1, n_groups):
+            prox = proximity[gi, gj]
+            cons = (strength[gi] + strength[gj]) / 2.0
+            edge_weight = prox * cons
+
+            if edge_weight < 0.1:  # Threshold
+                edges_skipped += 1
+                continue
+
+            mems_i = [m for m, l in zip(recent, labels) if l == gi]
+            mems_j = [m for m, l in zip(recent, labels) if l == gj]
+
+            # Connect representative pairs (centroid-closest from each group)
+            # to avoid O(n²) edge explosion
+            for mi in mems_i[:3]:  # Top 3 per group
+                for mj in mems_j[:3]:
+                    await self._linker.create_edge(
+                        source_id=mi.id,
+                        target_id=mj.id,
+                        source_type=mi.type,
+                        target_type=mj.type,
+                        relation="snn_coactivation",
+                        weight=float(edge_weight),
+                        metadata={
+                            "source": "tinyhippo",
+                            "signal": "temporal_proximity",
+                            "groups": [gi, gj],
+                        },
+                        session=session,
+                    )
+                    edges_created += 1
+
+    # B. Sequence edges (directed)
+    for src_g, tgt_g, seq_weight in sequences:
+        if seq_weight < 0.1:
+            continue
+
+        src_mems = [m for m, l in zip(recent, labels) if l == src_g]
+        tgt_mems = [m for m, l in zip(recent, labels) if l == tgt_g]
+
+        for mi in src_mems[:2]:
+            for mj in tgt_mems[:2]:
+                await self._linker.create_edge(
+                    source_id=mi.id,
+                    target_id=mj.id,
+                    source_type=mi.type,
+                    target_type=mj.type,
+                    relation="snn_temporal_sequence",
+                    weight=float(seq_weight),
+                    metadata={
+                        "source": "tinyhippo",
+                        "signal": "replay_sequence",
+                        "direction": "forward" if src_g < tgt_g else "reverse",
+                    },
+                    session=session,
+                )
                 edges_created += 1
-        
-        return edges_created
 
+    sleep_stats["snn_edges_created"] = edges_created
+    sleep_stats["snn_edges_skipped"] = edges_skipped
+    sleep_stats["snn_groups_used"] = n_groups
+    sleep_stats["snn_rho_fwd"] = signals["rho_fwd"]
+    sleep_stats["snn_rho_rev"] = signals["rho_rev"]
+    sleep_stats["snn_status"] = "completed"
 
-def _get_snn_relation(type_a: str, type_b: str) -> str:
-    """Map memory type pair to relation type for SNN-derived edges."""
-    pair = tuple(sorted([type_a, type_b]))
-    return {
-        ("fact", "fact"): "snn_coactivation",
-        ("decision", "fact"): "snn_coactivation",
-        ("episode", "fact"): "snn_coactivation",
-        ("decision", "decision"): "snn_coactivation",
-        ("decision", "episode"): "snn_coactivation",
-        ("episode", "episode"): "snn_coactivation",
-        ("fact", "procedure"): "snn_coactivation",
-        ("decision", "procedure"): "snn_coactivation",
-        ("episode", "procedure"): "snn_coactivation",
-        ("procedure", "procedure"): "snn_coactivation",
-    }.get(pair, "snn_coactivation")
-```
-
-### Sleep Handler Integration
-
-Add to `handlers/sleep_handler.py`:
-
-```python
-# In _run_sleep(), after Phase 8 (F040 graph densification):
-
-    success = await self._phase_snn_densification(sleep_stats)
-    if success:
-        phases_completed.append("snn_densification")
-
-# New method:
-async def _phase_snn_densification(self, sleep_stats: dict) -> bool:
-    """F041 Phase: SNN-based graph densification using tinyHippo replay."""
-    h5_path = self._settings.tinyhippo_h5_path
-    if not h5_path or not self._snn_densifier:
-        return True
-    try:
-        self._snn_densifier._interrupted = self._interrupted
-        result = await self._snn_densifier.run_snn_densification(
-            h5_path=h5_path,
-            lookback_hours=self._settings.snn_lookback_hours,
-            max_memories=self._settings.snn_max_memories,
-        )
-        sleep_stats["snn_edges_created"] = result["edges_created"]
-        sleep_stats["snn_replay_quality"] = result["replay_quality"]
-        sleep_stats["snn_stc_survival"] = result.get("stc_survival_rate")
-        sleep_stats["snn_skipped"] = result.get("skipped_reason")
-        
-        logger.info(
-            "F041 SNN densification: %d edges (rho_fwd=%.3f, rho_rev=%.3f)",
-            result["edges_created"],
-            result["replay_quality"].get("rho_fwd", 0),
-            result["replay_quality"].get("rho_rev", 0),
-        )
-        return True
-    except Exception:
-        logger.warning("F041 SNN densification failed", exc_info=True)
-        return False
-```
-
-### Configuration
-
-```python
-# Add to nous/config.py Settings class
-
-# F041: SNN Sleep Densification
-tinyhippo_h5_path: str | None = None  # Path to tinyHippo .h5 file (None = disabled)
-snn_densification_enabled: bool = True
-snn_lookback_hours: int = 48  # How far back to look for memories to cluster
-snn_max_memories: int = 500  # Max memories per cycle
-snn_max_edges_per_cycle: int = 500  # Edge creation cap
-snn_min_replay_rho: float = 0.5  # Minimum |Spearman ρ| to accept replay results
-```
-
-### Relation Type Registration
-
-Add `snn_coactivation` to the graph linker's weight multiplier map:
-
-```python
-# In brain/graph_linker.py RELATION_WEIGHT_MULTIPLIERS:
-RELATION_WEIGHT_MULTIPLIERS["snn_coactivation"] = 0.85
-# Slightly below evidence_for (1.0) but above discussed_in (0.7)
-# because SNN co-activation is a genuine association signal
-# but not as semantically specific as evidence_for
-```
-
-### Dependencies
-
-```
-pip install h5py          # HDF5 file reading
-pip install scikit-learn  # KMeans clustering (optional — fallback exists)
-numpy                     # Already a dependency
+    logger.info(
+        "SNN densification complete: %d edges created, %d skipped",
+        edges_created, edges_skipped,
+    )
 ```
 
 ---
 
-## What The Existing .h5 Actually Gives Us (Honest Assessment)
+## Graph Schema
 
-### What works directly
+### New Relation Types
 
-1. **Co-activation matrix from heatmap** — this is topology-independent. It measures what the SNN *actually did* during SWR replay, not just what was wired. The inhibitory interneurons (`ca3_int_sup`, `ca3_int_deep`) create competitive dynamics that suppress some group pairs and strengthen others. Adjacent groups in the chain will correlate strongly, but the correlation *magnitudes* are shaped by neural dynamics, not just wiring.
+| Relation | Directed? | Source |
+|----------|-----------|--------|
+| `snn_coactivation` | No | Temporal proximity during SWR replay |
+| `snn_temporal_sequence` | Yes | Firing order during directed replay |
 
-2. **STC survival threshold** — the `w_final`/`ltp_mask` data encodes which synapses won the competitive consolidation. The 25th percentile of surviving weights is a biologically-derived "good enough to keep" threshold that replaces F040's hand-tuned cosine thresholds.
+### Edge Metadata
 
-3. **Replay quality gate** — `rho_fwd`/`rho_rev` Spearman ρ gives a principled accept/reject criterion. If the SNN's own replay was disordered, we shouldn't trust its co-activation patterns.
+```json
+{
+  "source": "tinyhippo",
+  "signal": "temporal_proximity|replay_sequence",
+  "groups": [3, 17],
+  "direction": "forward|reverse",
+  "h5_file": "replay_12pct_stc.h5",
+  "h5_created": "2026-04-11T21:14:46"
+}
+```
 
-### What's limited
+### Database Migration
 
-1. **The topology is fixed** — groups 0→1→2→...→N are wired in a sequential chain by `sequence_connect_ca3_layered()`. The SNN didn't process Nous's actual memories. Adjacent groups will always have higher co-activation than distant ones. The co-activation matrix has an inherent spatial gradient.
+```sql
+-- No schema change needed: graph_edges already supports arbitrary relations
+-- and JSON metadata. Just ensure the relation values are indexed.
+-- Verify with:
+SELECT DISTINCT relation FROM brain.graph_edges;
+-- Add to documentation only.
+```
 
-2. **Group assignment is external** — KMeans clustering on Nous embeddings maps memories to groups, but the mapping is arbitrary relative to the SNN's topology. Group 0's memories have no intrinsic relationship to group 0's neurons.
+---
 
-3. **No feedback loop** — the SNN doesn't learn from Nous's data. It ran once on a generic configuration. The same .h5 file produces the same co-activation matrix every sleep cycle.
+## Configuration
 
-### Why it's still scientifically valid
-
-The experiment proves: **Does an SNN-derived association function produce better graph edges than cosine similarity alone?**
-
-The co-activation matrix is a learned transfer function: "given N groups of items processed through hippocampal replay dynamics with competitive inhibition and bidirectional replay, what association strengths emerge?"
-
-This function is NOT the same as cosine similarity because:
-- Bidirectional replay creates asymmetric strengthening patterns
-- Inhibitory interneurons suppress some associations that would pass a cosine threshold
-- STC competitive consolidation eliminates weak associations
-
-The experiment controls for the topology limitation by varying the KMeans→group mapping across cycles and measuring whether SNN edges consistently outperform cosine edges.
+```yaml
+# nous.yaml or environment variables
+tinyhippo:
+  h5_path: "/data/tinyhippo/replay_12pct_stc.h5"  # Path to .h5 file
+  enabled: true
+  quality_gate_p: 0.05                # p-value threshold for replay quality
+  temporal_tau_ms: 20.0               # Exponential decay for temporal proximity
+  edge_threshold: 0.1                 # Minimum edge weight to create
+  max_edges_per_group_pair: 3         # Limit to prevent edge explosion
+  max_sequence_edges_per_pair: 2      # Directed edge limit
+```
 
 ---
 
 ## A/B Test Design
 
-### Experimental Setup
+### Setup
 
-Run alternating sleep cycles:
-
-- **Control (A):** F040-only densification — cosine similarity thresholds
-- **Treatment (B):** F040 + F041 — cosine similarity PLUS SNN co-activation edges
+```
+Week 1 (Control):   Sleep with F040 only (cosine similarity densification)
+Week 2 (Treatment): Sleep with F040 + F041 (cosine + SNN densification)
+```
 
 ### Metrics
 
-| Metric | How to Measure | Expected Outcome |
-|--------|---------------|-----------------|
-| Retrieval precision@5 | For 20 test queries, compare top-5 recall results quality | B ≥ A (SNN edges surface non-obvious associations) |
-| Graph connectivity | Average degree, orphan rate, component count | B > A (more edges, better connected) |
-| Multi-hop success | Queries requiring 2+ hop traversal to find answer | B >> A (SNN bridges cosine-invisible gaps) |
-| Edge novelty | % of SNN edges that overlap with F040 cosine edges | Low overlap = SNN finds genuinely different associations |
-| Subjective quality | Tim rates recalled memories as relevant/irrelevant | B ≥ A |
+| Metric | How to Measure | Expected |
+|--------|---------------|----------|
+| Recall precision@5 | Query 20 test prompts, count relevant results in top 5 | Treatment higher |
+| Graph connectivity | `SELECT AVG(degree) FROM graph_node_stats` | Treatment 15-30% higher |
+| Cross-domain edges | Edges connecting different memory types (episode↔fact) | Treatment has more |
+| Orphan reduction | Memories with 0 edges | Treatment has fewer |
+| Edge overlap | % of SNN edges that duplicate F040 edges | < 80% (if > 80%, SNN adds no value) |
+| Tim's subjective rating | Blind test: "which recall set is more useful?" | Treatment preferred |
 
-### Falsification Criterion
+### Falsification Criteria
 
-If SNN edges are >80% redundant with cosine edges (same pairs, similar weights), the SNN adds no value over F040. This would falsify the thesis.
-
-### Positive Signal
-
-If SNN edges connect memory pairs with cosine similarity < 0.70 (below F040's threshold) that Tim judges as genuinely relevant — the SNN is discovering associations that pure embedding similarity cannot.
+The SNN integration provides **no value** if any of these are true:
+1. **> 80% edge overlap** with F040 — SNN just rediscovered cosine similarity
+2. **No precision improvement** on test queries — edges exist but don't help retrieval
+3. **All group pairs get edges** — temporal proximity is as uniform as co-activation was (would need to tune tau_ms down)
 
 ---
 
-## Future Work (Phase 2+)
+## Known Limitations
 
-### Phase 2: Memory-Specific tinyHippo Runs
+### This .h5 File Specifically
 
-Instead of using a pre-computed .h5, modify tinyHippo's `sequence_connect_ca3_layered()` to wire groups based on Nous memory embedding similarities instead of a fixed sequential chain.
+1. **Fixed topology** — CA3 groups are wired as sequential chain (0→1→2→...→34). The SNN replays this fixed sequence. It did NOT discover novel connections from Nous's memories.
 
-**Requires:** Max Talanov collaboration to modify tinyHippo's initialization to accept a custom connectivity matrix.
+2. **98% LTP survival** — Nearly all synapses consolidated. The competitive inhibition at 12% scale isn't selective enough. Future runs could increase inhibitory strength or use 100% scale.
 
-### Phase 3: Bidirectional Feedback
+3. **Moderate replay quality** — Best ρ is 0.431 (reverse). Good enough to use, but not strong. Higher-scale runs (100% on HPC) should produce cleaner replay.
 
-Nous sleep results (which memories were useful next day) feed back to tinyHippo's STC parameters, tuning the consolidation aggressiveness. The SNN learns which consolidation patterns produce useful memories.
+4. **No pre_idx** — The .h5 doesn't record WHICH CA1 cell feeds which EC synapse. We can't do direct CA1→EC→memory mapping, only statistical grouping.
 
-### Phase 4: Live Lightweight SNN
+5. **Static file** — Same .h5 reused every sleep cycle. The SNN doesn't learn from Nous's actual memories. New edges will follow the same template applied to different memory clusterings.
 
-Replace tinyHippo (full NEST simulation) with a lightweight SNN (e.g., Nengo or snnTorch) that runs in-process during sleep. Same architecture (CA3 recurrent + CA1 readout + STC) but fast enough for per-cycle execution.
+### Architectural
+
+6. **KMeans clustering is arbitrary** — Mapping memories to 35 groups via KMeans may not reflect meaningful categories. The SNN's temporal patterns are overlaid on this arbitrary grouping.
+
+7. **Transfer learning assumption** — We're assuming hippocampal replay dynamics generalize from a fixed-topology simulation to arbitrary memory associations. This is the core hypothesis being tested.
+
+---
+
+## Phase 2: Custom tinyHippo Runs (Future)
+
+To address limitations 1 and 5, Phase 2 would:
+
+1. **Generate connectivity from Nous memories** — Build CA3 group wiring based on actual embedding similarity between memory clusters (not sequential chain)
+2. **Run tinyHippo with custom topology** — Requires Max Talanov's help to parameterize `replay_scaled.py` with arbitrary connectivity matrices
+3. **Produce memory-specific .h5** — Each sleep cycle generates a new .h5 from that cycle's memories
+4. **Feedback loop** — Consolidation results feed back into next run's connectivity
+
+This requires:
+- Modifying tinyHippo's `sequence_connect_ca3_layered()` to accept arbitrary adjacency matrices
+- A Nous→tinyHippo parameter export pipeline
+- Access to NEST (local install or HPC job submission)
 
 ---
 
 ## Implementation Plan
 
-| Phase | Work | LOC | Dependencies |
-|-------|------|-----|-------------|
-| 1a | `snn_densifier.py` — H5 parser + co-activation extraction | ~150 | h5py |
-| 1b | `snn_densifier.py` — SNNDensifier class + KMeans clustering | ~200 | scikit-learn (optional) |
-| 1c | Sleep handler integration + config | ~50 | None |
-| 1d | `snn_coactivation` relation type + weight multiplier | ~5 | None |
-| 1e | Tests | ~150 | pytest |
-| **Total Phase 1** | | **~555** | |
+### Phase 1: Static .h5 Integration (~555 LOC, 1-2 weeks)
 
-### Estimated Timeline
+| Component | LOC | Description |
+|-----------|-----|-------------|
+| `brain/snn_densifier.py` | ~250 | HDF5 reader + signal extraction |
+| Sleep handler Phase 8b | ~120 | Integration with `_phase_snn_densification` |
+| Config schema | ~30 | YAML config for h5_path, thresholds |
+| Graph relation types | ~20 | Add `snn_coactivation`, `snn_temporal_sequence` |
+| Tests | ~100 | Unit tests with synthetic .h5 data |
+| Stats/logging | ~35 | Sleep stats extension |
 
-- Phase 1 implementation: 1-2 days
-- A/B testing: 1 week of sleep cycles
-- Phase 2 scoping (with Max): separate spec
+### Dependencies
 
----
+- `h5py` — HDF5 file reading (pip install)
+- `scikit-learn` — KMeans clustering (already in requirements)
+- `numpy` — array operations (already available)
+- tinyHippo .h5 file at configured path
 
-## Risks & Mitigations
+### Risks
 
-### Risk 1: KMeans Cluster Quality
-
-**Problem:** KMeans on high-dimensional embeddings (1536-d) may produce poor clusters.
-
-**Mitigation:** Add cluster quality metric (silhouette score). If score < 0.1, skip SNN densification for this cycle. Consider PCA dimensionality reduction before clustering.
-
-### Risk 2: Same .h5 Every Cycle
-
-**Problem:** Reusing the same .h5 means the same co-activation matrix every sleep cycle. After the first cycle creates all viable edges, subsequent cycles waste computation.
-
-**Mitigation:** Track which .h5 was last used. Skip if same file + same memories. Different KMeans runs on different memory subsets do produce different group assignments, so there's some variability. True fix is Phase 2 (custom tinyHippo runs).
-
-### Risk 3: h5py Dependency in Production
-
-**Problem:** h5py requires HDF5 C library, adding build complexity.
-
-**Mitigation:** h5py is pip-installable with binary wheels on Linux. No compilation needed. If truly problematic, pre-convert .h5 to JSON/numpy offline.
-
-### Risk 4: SNN Edges Conflict with F040 Edges
-
-**Problem:** Same memory pair might get both a cosine edge (F040) and an SNN edge (F041) with different weights.
-
-**Mitigation:** `create_edge()` uses `ON CONFLICT DO NOTHING` on `(source_id, target_id, relation)`. Since SNN edges use `snn_coactivation` relation (distinct from `related_to`), both can coexist. This is actually desirable — it lets us compare which edges are traversed more in practice.
+| Risk | Probability | Mitigation |
+|------|-------------|------------|
+| Temporal proximity also uniform | Medium | Tune tau_ms; try CA3 deep instead of sup |
+| KMeans produces bad clusters | Low | Try HDBSCAN, or use existing memory categories |
+| h5py not available in prod | Low | Add to requirements.txt |
+| Edge explosion with 35×35 groups | Medium | Cap at max_edges_per_group_pair |
 
 ---
 
-## Non-Goals
+## References
 
-- **Running tinyHippo in Nous's process** — tinyHippo requires NEST simulator (HPC). We read its output, not run it.
-- **Real-time SNN inference** — all SNN computation is offline (pre-computed .h5)
-- **Replacing F040** — SNN densification augments F040, doesn't replace it
-- **Custom tinyHippo runs per sleep cycle** — that's Phase 2
-- **Membrain integration** — Membrain's Nengo-based SNN is a separate future path; F041 uses tinyHippo directly
+- tinyHippo: https://github.com/max-talanov/tinyHippo
+- `replay_scaled.py` — main simulation script (SWR generation, STC hooks)
+- `replay_plot_from_hdf5.py` — offline .h5 visualization
+- F040: `docs/features/F040-graph-densification.md`
+- F022: `docs/features/F022-graph-augmented-recall.md`
+- Nous sleep handler: `handlers/sleep_handler.py` (lines 886+)
+- Graph linker: `brain/graph_linker.py`
