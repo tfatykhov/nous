@@ -162,6 +162,7 @@ nous/
 | F038 | Memory Quality & Context Loading Fixes (quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency, user_direct bonus, task synthesis, context dedup, bash hints) | #258 |
 | F038 | Unified DAG Orchestration (DAGStore, DAGOrchestrator, DAG tools, dashboard tab) | #289 |
 | F040 | Graph Densification (orphan backfill, reverse linking, per-relation thresholds, density dashboard, cluster discovery) | — |
+| F042 | Cross-Encoder Reranking (sigmoid-normalized, async, head-truncation, feature-flagged, optional sentence-transformers dep) | — |
 
 ## How to Work
 
@@ -326,6 +327,10 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_PROCEDURE_SCORE_FLOOR` | `0.40` | Minimum score for procedures when embeddings enabled (F038) |
 | `NOUS_MMR_ENABLED` | `false` | Enable MMR diversity re-ranking in recall_deep |
 | `NOUS_MMR_DIVERSITY_WEIGHT` | `0.7` | MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity) |
+| `NOUS_CROSS_ENCODER_ENABLED` | `false` | Enable F042 cross-encoder reranking in recall_deep (requires sentence-transformers) |
+| `NOUS_CROSS_ENCODER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model name for F042 reranking |
+| `NOUS_CROSS_ENCODER_MAX_CANDIDATES` | `30` | Max candidates to rerank (head-truncation, tail untouched) |
+| `NOUS_CROSS_ENCODER_TEXT_LIMIT` | `512` | Max chars per doc fed to cross-encoder |
 | `NOUS_CRITIC_SKILL_INJECTION` | `disabled` | Critic skill injection mode: enabled, disabled, log_only |
 | `NOUS_CRITIC_SKILL_SLOTS` | `2` | Reserved procedure slots for Critic-recommended skills |
 | `NOUS_EMBEDDING_SKILL_SLOTS` | `3` | Procedure slots for embedding similarity search |

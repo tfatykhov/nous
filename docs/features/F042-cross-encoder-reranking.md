@@ -1,6 +1,6 @@
 # F042: Cross-Encoder Reranking Stage
 
-**Status:** Draft  
+**Status:** Shipped  
 **Proposed by:** Tim + Nous  
 **Date:** 2026-04-13  
 **Research basis:** [Advanced RAG Retrieval: Cross-Encoders & Reranking](https://towardsdatascience.com/advanced-rag-retrieval-cross-encoders-reranking/) — practical guide on two-stage retrieval with cross-encoder reranking, fine-tuning, and knowledge distillation  

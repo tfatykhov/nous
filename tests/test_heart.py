@@ -465,3 +465,69 @@ async def test_fact_minimum_content_whitespace(heart, session):
     )
     assert isinstance(result, FactRejected)
     assert "too short" in result.explanation.lower()
+
+
+# ---------------------------------------------------------------------------
+# F042: Cross-Encoder Reranking integration
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_recall_with_cross_encoder_mocked(heart, session, monkeypatch, caplog):
+    """F042: recall_deep uses cross-encoder reranker when enabled.
+
+    Seeds a handful of facts, enables cross_encoder via RuntimeConfig override,
+    monkeypatches the reranker module to install a deterministic fake model,
+    calls heart.recall, and asserts the rerank log fires and returned scores
+    are in the sigmoid range (0, 1].
+    """
+    import logging
+
+    from nous.heart import reranker as reranker_mod
+    from nous.runtime_config import RuntimeConfig
+
+    # Seed a few facts with distinct content
+    await heart.learn(
+        _fact_input(content="The rocket launch was successful at cape canaveral"),
+        session=session,
+    )
+    await heart.learn(
+        _fact_input(content="Cats are popular household pets worldwide"),
+        session=session,
+    )
+    await heart.learn(
+        _fact_input(content="Rockets use liquid hydrogen fuel for propulsion"),
+        session=session,
+    )
+
+    # Install fake model: high logit for any pair whose doc contains 'rocket'
+    class FakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        def predict(self, pairs):
+            self.calls += 1
+            return [5.0 if "rocket" in d.lower() else -5.0 for (_, d) in pairs]
+
+    fake = FakeModel()
+    monkeypatch.setattr(reranker_mod, "CROSS_ENCODER_AVAILABLE", True)
+    monkeypatch.setattr(reranker_mod, "_load_cross_encoder", lambda model_name: fake)
+
+    # Enable cross-encoder via RuntimeConfig override
+    RuntimeConfig.get().set_cross_encoder_enabled(True)
+    try:
+        with caplog.at_level(logging.INFO, logger="nous.heart.heart"):
+            results = await heart.recall("rocket", session=session)
+
+        # Fake model was invoked at least once
+        assert fake.calls >= 1
+
+        # All returned scores are in sigmoid range (0, 1]
+        for r in results:
+            assert 0.0 < r.score <= 1.0, f"score out of sigmoid range: {r.score}"
+
+        # Reorder log line fires (F042 cross-encoder info log in heart.py)
+        ce_logs = [rec for rec in caplog.records if "Cross-encoder" in rec.getMessage()]
+        assert len(ce_logs) >= 1
+    finally:
+        RuntimeConfig.get().clear_cross_encoder_enabled()
