@@ -132,6 +132,13 @@ async def ce_rerank_backfill_candidates(
     ):
         return list(candidate_rows)
 
+    # F045: content-length guard. Facts that are literally just a URL or
+    # short boilerplate string (<min_chars after strip) are dropped BEFORE
+    # CE inference. Empirically, URL-only facts co-score highly on shared
+    # token shape with no semantic signal — the 2026-04-14 A/B experiment
+    # found this to be the dominant failure mode for the CE pipeline.
+    min_chars = int(getattr(settings, "ce_backfill_min_content_chars", 80))
+
     # Wrap only rows with non-empty content. Rows missing from content_map
     # (e.g. NULL/whitespace-only content filtered by fetch_candidate_content)
     # are dropped entirely. This is a no-op for cross-type callers whose
@@ -142,6 +149,8 @@ async def ce_rerank_backfill_candidates(
         content = content_map.get(cand_id, "")
         if not content:
             continue
+        if len(content.strip()) < min_chars:
+            continue  # F045: drop URL-only / boilerplate facts
         wrapped.append(
             RerankCandidate(id=cand_id, content=content, score=float(rrf))
         )

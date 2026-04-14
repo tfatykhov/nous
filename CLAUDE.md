@@ -164,6 +164,7 @@ nous/
 | F040 | Graph Densification (orphan backfill, reverse linking, per-relation thresholds, density dashboard, cluster discovery) | — |
 | F042 | Cross-Encoder Reranking (sigmoid-normalized, async, head-truncation, feature-flagged, optional sentence-transformers dep) | #312 |
 | F043 | Cross-Encoder Reranking in Sleep-Cycle Graph Backfill (precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, _ce_stats telemetry) | #314 |
+| F045 | CE-Aware Cosine Thresholds + Content-Length Guard (relaxed per-relation thresholds when CE backfill is upstream, 80-char min to drop URL-only facts, empirically validated at 80% LLM-judged precision) | — |
 
 ## How to Work
 
@@ -335,6 +336,15 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CE_BACKFILL_ENABLED` | `false` | Enable F043 cross-encoder reranking in F040 sleep-cycle graph backfill (requires sentence-transformers, reuses F042 model) |
 | `NOUS_CE_BACKFILL_TOP_K` | `10` | Max candidates per orphan reranked by cross-encoder before cosine verification |
 | `NOUS_CE_BACKFILL_MIN_SCORE` | `0.30` | Sigmoid-normalized CE score floor — candidates below this are dropped before the cosine gate |
+| `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT` | `0.65` | F045: CE-mode fact↔fact cosine threshold (only applies when CE backfill enabled). Empirically validated at 80% precision on 2026-04-14 A/B. |
+| `NOUS_CE_BACKFILL_THRESHOLD_FACT_DECISION` | `0.55` | F045: CE-mode fact→decision threshold |
+| `NOUS_CE_BACKFILL_THRESHOLD_FACT_EPISODE` | `0.55` | F045: CE-mode fact→episode threshold |
+| `NOUS_CE_BACKFILL_THRESHOLD_DECISION_DECISION` | `0.60` | F045: CE-mode decision↔decision threshold |
+| `NOUS_CE_BACKFILL_THRESHOLD_EPISODE_EPISODE` | `0.58` | F045: CE-mode episode↔episode threshold |
+| `NOUS_CE_BACKFILL_THRESHOLD_PROCEDURE_ANY` | `0.55` | F045: CE-mode procedure→* threshold |
+| `NOUS_CE_BACKFILL_MIN_CONTENT_CHARS` | `80` | F045: drop candidates whose content (after strip) is shorter than this before CE inference. Filters URL-only / boilerplate facts. |
+
+**F045 migration note:** When `NOUS_CE_BACKFILL_ENABLED=true`, the `NOUS_GRAPH_THRESHOLD_*` env overrides below are **ignored** — `_get_threshold()` routes to the `NOUS_CE_BACKFILL_THRESHOLD_*` set instead. Operators upgrading from an F043-only deployment that had `NOUS_GRAPH_THRESHOLD_FACT_FACT` overridden must re-set the equivalent `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT` to keep their override effective. Only `fact_fact=0.65` is empirically validated; the other five CE-mode defaults are histogram estimates — tune per deployment.
 | `NOUS_CRITIC_SKILL_INJECTION` | `disabled` | Critic skill injection mode: enabled, disabled, log_only |
 | `NOUS_CRITIC_SKILL_SLOTS` | `2` | Reserved procedure slots for Critic-recommended skills |
 | `NOUS_EMBEDDING_SKILL_SLOTS` | `3` | Procedure slots for embedding similarity search |
