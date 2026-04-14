@@ -163,7 +163,7 @@ nous/
 | F038 | Unified DAG Orchestration (DAGStore, DAGOrchestrator, DAG tools, dashboard tab) | #289 |
 | F040 | Graph Densification (orphan backfill, reverse linking, per-relation thresholds, density dashboard, cluster discovery) | — |
 | F042 | Cross-Encoder Reranking (sigmoid-normalized, async, head-truncation, feature-flagged, optional sentence-transformers dep) | #312 |
-| F043 | Cross-Encoder Reranking in Sleep-Cycle Graph Backfill (precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, _ce_stats telemetry) | — |
+| F043 | Cross-Encoder Reranking in Sleep-Cycle Graph Backfill (precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, _ce_stats telemetry) | #314 |
 
 ## How to Work
 
