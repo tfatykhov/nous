@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,21 +31,40 @@ def handler(settings, bus):
 
 
 @pytest.mark.asyncio
-async def test_graph_densification_phase_runs(handler):
-    """Graph densification phase runs backfill and cluster discovery when densifier is wired."""
+async def test_graph_densification_phase_runs(handler, caplog):
+    """Graph densification phase runs backfill and cluster discovery when densifier is wired.
+
+    F043 regression guard: the orphan_edges_created total MUST equal the sum of
+    per-type edge counts and MUST NOT include the _ce_stats counters (which would
+    double-count). With facts=3, decisions=2, ce survived=5 + pruned=3, the
+    correct total is 5 — NOT 13.
+    """
     densifier = MagicMock()
-    densifier.run_backfill_cycle = AsyncMock(return_value={"facts": 3, "decisions": 2, "episodes": 0, "procedures": 0})
+    densifier.run_backfill_cycle = AsyncMock(return_value={
+        "facts": 3,
+        "decisions": 2,
+        "episodes": 0,
+        "procedures": 0,
+        "_ce_stats": {"survived": 5, "pruned": 3},
+    })
     densifier.discover_clusters = AsyncMock(return_value=3)
     handler._graph_densifier = densifier
 
     sleep_stats = {}
-    result = await handler._phase_graph_densification(sleep_stats)
+    with caplog.at_level(logging.INFO, logger="nous.handlers.sleep_handler"):
+        result = await handler._phase_graph_densification(sleep_stats)
 
     assert result is True
     densifier.run_backfill_cycle.assert_awaited_once()
     densifier.discover_clusters.assert_awaited_once_with(max_bridges=20)
-    assert sleep_stats["orphan_edges_created"] == 5  # sum(3+2+0+0)
+    # Regression guard: 5 (3+2+0+0), NOT 13 (which would mean _ce_stats leaked in).
+    assert sleep_stats["orphan_edges_created"] == 5
     assert sleep_stats["bridge_edges_created"] == 3
+    # F043: CE counters surfaced into sleep_stats.
+    assert sleep_stats["ce_backfill_survived"] == 5
+    assert sleep_stats["ce_backfill_pruned"] == 3
+    # F043: log line carries the CE survived/pruned summary.
+    assert "CE survived=5 pruned=3" in caplog.text
 
 
 @pytest.mark.asyncio

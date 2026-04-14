@@ -301,3 +301,153 @@ async def test_run_backfill_cycle_returns_all_types(db, settings, mock_embedding
     assert "decisions" in results
     assert "episodes" in results
     assert "procedures" in results
+
+
+# ---------------------------------------------------------------------------
+# F043: CE rerank integration with backfill (require Postgres)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_ce(monkeypatch, fake):
+    """Force CE availability and install fake loader on both reranker + adapter modules."""
+    import nous.heart.reranker as reranker_mod
+    from nous.brain import backfill_rerank as br
+
+    monkeypatch.setattr(reranker_mod, "CROSS_ENCODER_AVAILABLE", True)
+    monkeypatch.setattr(br, "CROSS_ENCODER_AVAILABLE", True)
+    monkeypatch.setattr(reranker_mod, "_load_cross_encoder", lambda name: fake)
+
+
+class _FakeCE:
+    """Fake CrossEncoder; predict returns a precomputed list of raw logits."""
+
+    def __init__(self, scores):
+        self._scores = scores
+        self.calls = 0
+
+    def predict(self, pairs):
+        self.calls += 1
+        # Return scores aligned with however many pairs we got.
+        n = len(list(pairs))
+        if n <= len(self._scores):
+            return self._scores[:n]
+        # Pad with very high logits so extras pass.
+        return list(self._scores) + [10.0] * (n - len(self._scores))
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_backfill_same_type_with_ce_rerank(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint, monkeypatch
+):
+    """CE rerank prunes low-score candidates; only above-floor survivors get edges."""
+    agent_id = f"test-ce-rerank-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={
+        "graph_threshold_fact_fact": 0.01,
+        "graph_threshold_fact_decision": 0.01,
+        "ce_backfill_enabled": True,
+        "ce_backfill_top_k": 10,
+        "ce_backfill_min_score": 0.5,
+    })
+    # 2 high logits (sigmoid >> 0.5), 2 low logits (sigmoid < 0.5).
+    fake = _FakeCE(scores=[5.0, 5.0, -5.0, -5.0])
+    _install_fake_ce(monkeypatch, fake)
+
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        base_emb = await mock_embeddings.embed("Python is great for data science")
+        await _insert_fact(session, agent_id, "Python orphan seed", base_emb)
+        for i in range(4):
+            near = await mock_embeddings.embed_near(
+                "Python is great for data science", noise=0.005
+            )
+            await _insert_fact(session, agent_id, f"candidate {i}", near)
+        await session.commit()
+
+    ce_stats = {"survived": 0, "pruned": 0}
+    # max_count=1: process exactly one orphan so ce_stats reflects a single CE call.
+    # With max_count>1, every near-duplicate becomes its own orphan and ce_stats
+    # accumulates across all of them (5 orphans × 2 survivors = 10, not 2).
+    edges = await densifier.backfill_orphan_facts(max_count=1, ce_stats=ce_stats)
+    # 2 survivors above floor, 2 pruned below floor.
+    assert ce_stats["survived"] == 2
+    assert ce_stats["pruned"] == 2
+    # At most as many edges as survivors (cosine gate may drop further).
+    assert edges <= 2
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_backfill_ce_disabled_matches_baseline(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint
+):
+    """ce_backfill_enabled=False → ce_stats stays zero AND edges still get created."""
+    agent_id = f"test-ce-disabled-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={
+        "graph_threshold_fact_fact": 0.01,
+        "graph_threshold_fact_decision": 0.01,
+        "ce_backfill_enabled": False,
+    })
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        base_emb = await mock_embeddings.embed("Identical fact text")
+        await _insert_fact(session, agent_id, "Identical fact text", base_emb)
+        near = await mock_embeddings.embed_near("Identical fact text", noise=0.005)
+        await _insert_fact(session, agent_id, "Identical fact text v2", near)
+        await session.commit()
+
+    ce_stats = {"survived": 0, "pruned": 0}
+    edges = await densifier.backfill_orphan_facts(max_count=10, ce_stats=ce_stats)
+    # CE disabled → counters never incremented.
+    assert ce_stats == {"survived": 0, "pruned": 0}
+    # Baseline behavior: low threshold + near-identical embeddings → at least one edge.
+    assert edges >= 1
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_returns_ce_stats(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint
+):
+    """run_backfill_cycle includes a `_ce_stats` dict with int survived/pruned."""
+    agent_id = f"test-ce-stats-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    result = await densifier.run_backfill_cycle()
+    assert "_ce_stats" in result
+    assert isinstance(result["_ce_stats"], dict)
+    assert isinstance(result["_ce_stats"].get("survived"), int)
+    assert isinstance(result["_ce_stats"].get("pruned"), int)
+    # Per-type counts remain ints.
+    for k in ("facts", "decisions", "episodes", "procedures"):
+        assert isinstance(result[k], int)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_sum_values_unchanged(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint
+):
+    """Regression guard for P1: summing edge counts must EXCLUDE _ce_stats."""
+    agent_id = f"test-ce-sum-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    result = await densifier.run_backfill_cycle()
+
+    # Mimic the sleep_handler aggregation rule.
+    edge_sum = sum(v for k, v in result.items() if not k.startswith("_"))
+    expected = (
+        result["facts"]
+        + result["decisions"]
+        + result["episodes"]
+        + result["procedures"]
+    )
+    assert edge_sum == expected
+    # And the dict still carries the underscored key.
+    assert "_ce_stats" in result

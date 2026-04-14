@@ -890,8 +890,12 @@ class SleepHandler:
         try:
             self._graph_densifier._interrupted = self._interrupted
             result = await self._graph_densifier.run_backfill_cycle()
+            # F043: pop CE stats BEFORE sum so they don't inflate edge totals.
+            ce_stats = result.pop("_ce_stats", {"survived": 0, "pruned": 0})
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
+            sleep_stats["ce_backfill_survived"] = ce_stats.get("survived", 0)
+            sleep_stats["ce_backfill_pruned"] = ce_stats.get("pruned", 0)
 
             if not self._interrupted:
                 self._graph_densifier._interrupted = self._interrupted
@@ -899,8 +903,10 @@ class SleepHandler:
                 sleep_stats["bridge_edges_created"] = bridges
 
             logger.info(
-                "F040 graph densification: %d backfill edges, %d bridge edges",
+                "F040 graph densification: %d backfill edges (CE survived=%d pruned=%d), %d bridge edges",
                 total_edges,
+                sleep_stats.get("ce_backfill_survived", 0),
+                sleep_stats.get("ce_backfill_pruned", 0),
                 sleep_stats.get("bridge_edges_created", 0),
             )
             return True

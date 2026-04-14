@@ -297,6 +297,11 @@ class Settings(BaseSettings):
     graph_health_orphan_warn_threshold: float = 0.40
     graph_health_check_enabled: bool = True
 
+    # F043: CE reranking for sleep-cycle graph backfill (reuses F042 reranker)
+    ce_backfill_enabled: bool = False
+    ce_backfill_top_k: int = 10
+    ce_backfill_min_score: float = 0.30
+
     # F012: Procedure Learning (K-Line auto-creation)
     procedure_learning_enabled: bool = True
     procedure_cluster_min_size: int = 3

@@ -163,6 +163,7 @@ nous/
 | F038 | Unified DAG Orchestration (DAGStore, DAGOrchestrator, DAG tools, dashboard tab) | #289 |
 | F040 | Graph Densification (orphan backfill, reverse linking, per-relation thresholds, density dashboard, cluster discovery) | — |
 | F042 | Cross-Encoder Reranking (sigmoid-normalized, async, head-truncation, feature-flagged, optional sentence-transformers dep) | #312 |
+| F043 | Cross-Encoder Reranking in Sleep-Cycle Graph Backfill (precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, _ce_stats telemetry) | — |
 
 ## How to Work
 
@@ -331,6 +332,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CROSS_ENCODER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model name for F042 reranking |
 | `NOUS_CROSS_ENCODER_MAX_CANDIDATES` | `30` | Max candidates to rerank (head-truncation, tail untouched) |
 | `NOUS_CROSS_ENCODER_TEXT_LIMIT` | `512` | Max chars per doc fed to cross-encoder |
+| `NOUS_CE_BACKFILL_ENABLED` | `false` | Enable F043 cross-encoder reranking in F040 sleep-cycle graph backfill (requires sentence-transformers, reuses F042 model) |
+| `NOUS_CE_BACKFILL_TOP_K` | `10` | Max candidates per orphan reranked by cross-encoder before cosine verification |
+| `NOUS_CE_BACKFILL_MIN_SCORE` | `0.30` | Sigmoid-normalized CE score floor — candidates below this are dropped before the cosine gate |
 | `NOUS_CRITIC_SKILL_INJECTION` | `disabled` | Critic skill injection mode: enabled, disabled, log_only |
 | `NOUS_CRITIC_SKILL_SLOTS` | `2` | Reserved procedure slots for Critic-recommended skills |
 | `NOUS_EMBEDDING_SKILL_SLOTS` | `3` | Procedure slots for embedding similarity search |
