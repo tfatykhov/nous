@@ -70,6 +70,16 @@ services:
       - NOUS_STALENESS_HALF_LIFE_DAYS=${NOUS_STALENESS_HALF_LIFE_DAYS:-14}
       - NOUS_TOOL_TIMEOUT=${NOUS_TOOL_TIMEOUT:-120}
       - NOUS_KEEPALIVE_INTERVAL=${NOUS_KEEPALIVE_INTERVAL:-10}
+      # F042: Cross-encoder reranking
+      - NOUS_CROSS_ENCODER_ENABLED=${NOUS_CROSS_ENCODER_ENABLED:-false}
+      - NOUS_CROSS_ENCODER_MODEL=${NOUS_CROSS_ENCODER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+      - NOUS_CROSS_ENCODER_MAX_CANDIDATES=${NOUS_CROSS_ENCODER_MAX_CANDIDATES:-30}
+      - NOUS_CROSS_ENCODER_TEXT_LIMIT=${NOUS_CROSS_ENCODER_TEXT_LIMIT:-512}
+      # HuggingFace cache dir — pinned so the volume mount below matches
+      - HF_HOME=/root/.cache/huggingface
+    volumes:
+      # F042: persist downloaded cross-encoder models across container restarts
+      - huggingface_cache:/root/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,6 +89,8 @@ services:
     build: .
     container_name: nous-telegram
     command: python -m nous.telegram_bot
+    healthcheck:
+      disable: true
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       NOUS_API_URL: http://nous:8000
@@ -109,3 +121,4 @@ services:
 
 volumes:
   pgdata:
+  huggingface_cache:
