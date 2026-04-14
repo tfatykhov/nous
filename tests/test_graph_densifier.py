@@ -367,7 +367,10 @@ async def test_backfill_same_type_with_ce_rerank(
         await session.commit()
 
     ce_stats = {"survived": 0, "pruned": 0}
-    edges = await densifier.backfill_orphan_facts(max_count=10, ce_stats=ce_stats)
+    # max_count=1: process exactly one orphan so ce_stats reflects a single CE call.
+    # With max_count>1, every near-duplicate becomes its own orphan and ce_stats
+    # accumulates across all of them (5 orphans × 2 survivors = 10, not 2).
+    edges = await densifier.backfill_orphan_facts(max_count=1, ce_stats=ce_stats)
     # 2 survivors above floor, 2 pruned below floor.
     assert ce_stats["survived"] == 2
     assert ce_stats["pruned"] == 2
