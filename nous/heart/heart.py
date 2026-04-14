@@ -47,6 +47,8 @@ from nous.heart.schedules import ScheduleManager
 from nous.heart.subtasks import SubtaskManager
 from nous.heart.working_memory import WorkingMemoryManager
 from nous.heart.search import batch_fetch_embeddings, mmr_rerank
+from nous.heart.reranker import CROSS_ENCODER_AVAILABLE, cross_encoder_rerank
+from nous.runtime_config import RuntimeConfig
 from nous.events import Event, EventBus
 from nous.storage.database import Database
 from nous.storage.models import ConversationState
@@ -816,6 +818,39 @@ class Heart:
                 recall_result = self._to_recall_result(memory_type, item, original_score)
                 if recall_result is not None:
                     merged.append(recall_result)
+
+        # F042: Cross-encoder reranking (between RRF merge and MMR).
+        # Sort by hybrid score globally first so the head slice for CE is
+        # selected by relevance, not by per-type append order (which would
+        # otherwise let later memory types be excluded from reranking even
+        # when their scores are higher than earlier types').
+        ce_enabled = RuntimeConfig.get().get_cross_encoder_enabled(self.settings)
+        if ce_enabled and len(merged) > 1 and CROSS_ENCODER_AVAILABLE:
+            merged.sort(key=lambda r: r.score, reverse=True)
+            try:
+                pre_ce_head = [
+                    r.id for r in merged[: self.settings.cross_encoder_max_candidates]
+                ]
+                merged = await cross_encoder_rerank(
+                    query=query,
+                    candidates=merged,
+                    text_fn=lambda r: r.summary or "",
+                    model_name=self.settings.cross_encoder_model,
+                    max_candidates=self.settings.cross_encoder_max_candidates,
+                    text_limit=self.settings.cross_encoder_text_limit,
+                )
+                post_ce_head = [
+                    r.id for r in merged[: self.settings.cross_encoder_max_candidates]
+                ]
+                ce_reordered = pre_ce_head != post_ce_head
+                logger.info(
+                    "Cross-encoder: reranked %d candidates (head=%d), reordered=%s",
+                    len(merged), len(pre_ce_head), ce_reordered,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Cross-encoder rerank failed, keeping RRF order: %s", exc
+                )
 
         # F030: MMR diversity re-ranking
         if (

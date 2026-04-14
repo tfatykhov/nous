@@ -354,6 +354,12 @@ class Settings(BaseSettings):
         description="MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity)",
     )
 
+    # F042: Cross-encoder reranking
+    cross_encoder_enabled: bool = False
+    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    cross_encoder_max_candidates: int = 30
+    cross_encoder_text_limit: int = 512
+
     # F024: Critic Agent
     critic_enabled: bool = True
     critic_mode: Literal["shadow", "advised", "parallel"] = "shadow"

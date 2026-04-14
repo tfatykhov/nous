@@ -156,6 +156,7 @@ All shipped implementation specs with PR references:
 | F031-b | [Consolidation Orient & Resolve](F031-consolidation-orient-resolve.md) | ✅ Shipped | Orient context injection in sleep reflection — checks existing facts before extracting. Contradiction resolution phase with fact supersession |
 | F038 | Memory Quality & Context Loading Fixes | ✅ Shipped | Quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency weighting, user_direct admission bonus, task synthesis, context dedup, bash batching hints |
 | F040 | [Graph Densification](F040-graph-densification.md) | ✅ Shipped | Orphan backfill engine, reverse linking (decision/procedure/episode), per-relation thresholds, edge confidence scoring, cluster discovery, density dashboard |
+| F042 | [Cross-Encoder Reranking](F042-cross-encoder-reranking.md) | ✅ Shipped | Cross-encoder reranking stage in recall_deep — sigmoid-normalized scores, async executor, head-truncation, feature-flagged, optional sentence-transformers dep |
 
 ### Phase 2 — Quality (next to build)
 

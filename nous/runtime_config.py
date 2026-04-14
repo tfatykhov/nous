@@ -12,6 +12,7 @@ the /admin API.  Resolution order for each knob:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Keys used in nous_system.config table
 _KEY_VECTOR_WEIGHT = "vector_weight"
 _KEY_RRF_K = "rrf_k"
+_KEY_CROSS_ENCODER_ENABLED = "cross_encoder_enabled"
 
 
 class RuntimeConfig:
@@ -92,6 +94,30 @@ class RuntimeConfig:
         """Remove runtime override, falling back to settings."""
         self._overrides.pop(_KEY_RRF_K, None)
 
+    # -- Cross-encoder enabled (F042) -----------------------------------------
+
+    def get_cross_encoder_enabled(self, settings: Any) -> bool:
+        """Resolve cross_encoder_enabled: runtime override > env/settings > default."""
+        if _KEY_CROSS_ENCODER_ENABLED in self._overrides:
+            return bool(self._overrides[_KEY_CROSS_ENCODER_ENABLED])
+        return bool(settings.cross_encoder_enabled)
+
+    def get_cross_encoder_enabled_source(self, settings: Any) -> str:
+        """Return the source of the current effective cross_encoder_enabled."""
+        if _KEY_CROSS_ENCODER_ENABLED in self._overrides:
+            return "runtime_override"
+        if "cross_encoder_enabled" in settings.model_fields_set:
+            return "env_var"
+        return "default"
+
+    def set_cross_encoder_enabled(self, value: bool) -> None:
+        """Set runtime override (call persist_to_db separately)."""
+        self._overrides[_KEY_CROSS_ENCODER_ENABLED] = bool(value)
+
+    def clear_cross_encoder_enabled(self) -> None:
+        """Remove runtime override, falling back to settings."""
+        self._overrides.pop(_KEY_CROSS_ENCODER_ENABLED, None)
+
     # -- DB persistence -------------------------------------------------------
 
     async def load_from_db(self, session: AsyncSession) -> None:
@@ -112,6 +138,18 @@ class RuntimeConfig:
                     if k > 0:
                         self._overrides[key] = k
                         logger.info("Loaded runtime override: %s = %s", key, k)
+                if key == _KEY_CROSS_ENCODER_ENABLED and value is not None:
+                    # asyncpg deserializes jsonb automatically; value is a
+                    # Python bool here, not a string.
+                    if isinstance(value, bool):
+                        self._overrides[key] = value
+                        logger.info("Loaded runtime override: %s = %s", key, value)
+                    else:
+                        logger.warning(
+                            "Ignoring non-bool value for %s: %r (expected bool)",
+                            key,
+                            value,
+                        )
         except Exception:
             logger.debug("nous_system.config table not available yet (normal on first run)")
 
@@ -123,6 +161,6 @@ class RuntimeConfig:
                 VALUES (:key, CAST(:value AS jsonb))
                 ON CONFLICT (key) DO UPDATE SET value = CAST(:value AS jsonb)
             """),
-            {"key": key, "value": str(value)},
+            {"key": key, "value": json.dumps(value)},
         )
         await session.commit()
