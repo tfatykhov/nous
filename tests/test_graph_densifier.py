@@ -451,3 +451,128 @@ async def test_run_backfill_cycle_sum_values_unchanged(
     assert edge_sum == expected
     # And the dict still carries the underscored key.
     assert "_ce_stats" in result
+
+
+# ---------------------------------------------------------------------------
+# F045: CE-aware threshold dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_get_threshold_ce_mode(settings):
+    """When ce_backfill_enabled=True, _get_threshold returns the relaxed CE-mode values."""
+    from nous.brain.graph_densifier import _get_threshold
+
+    s = settings.model_copy(update={"ce_backfill_enabled": True})
+
+    cases = [
+        (("fact", "fact"), s.ce_backfill_threshold_fact_fact),
+        (("fact", "decision"), s.ce_backfill_threshold_fact_decision),
+        (("decision", "fact"), s.ce_backfill_threshold_fact_decision),  # order-agnostic
+        (("fact", "episode"), s.ce_backfill_threshold_fact_episode),
+        (("decision", "decision"), s.ce_backfill_threshold_decision_decision),
+        (("episode", "episode"), s.ce_backfill_threshold_episode_episode),
+        (("fact", "procedure"), s.ce_backfill_threshold_procedure_any),
+        (("procedure", "procedure"), s.ce_backfill_threshold_procedure_any),
+    ]
+    for (a, b), expected in cases:
+        got = _get_threshold(s, a, b)
+        assert got == expected, (
+            f"CE-mode threshold for ({a},{b}) should be {expected}, got {got}"
+        )
+
+
+def test_get_threshold_strict_mode(settings):
+    """When ce_backfill_enabled=False, _get_threshold returns the existing strict values.
+
+    Regression guard: the F045 split must not change any pre-existing strict threshold.
+    """
+    from nous.brain.graph_densifier import _get_threshold
+
+    s = settings.model_copy(update={"ce_backfill_enabled": False})
+
+    cases = [
+        (("fact", "fact"), s.graph_threshold_fact_fact),
+        (("fact", "decision"), s.graph_threshold_fact_decision),
+        (("decision", "fact"), s.graph_threshold_fact_decision),  # order-agnostic
+        (("fact", "episode"), s.graph_threshold_fact_episode),
+        (("decision", "decision"), s.graph_threshold_decision_decision),
+        (("episode", "episode"), s.graph_threshold_episode_episode),
+        (("fact", "procedure"), s.graph_threshold_procedure_any),
+        (("procedure", "procedure"), s.graph_threshold_procedure_any),
+    ]
+    for (a, b), expected in cases:
+        got = _get_threshold(s, a, b)
+        assert got == expected, (
+            f"strict threshold for ({a},{b}) should be {expected}, got {got}"
+        )
+
+
+def test_get_threshold_default_flag_off(settings):
+    """Out-of-box settings have ce_backfill_enabled=False → strict thresholds."""
+    from nous.brain.graph_densifier import _get_threshold
+
+    # Untouched settings — default must route to strict mode.
+    assert _get_threshold(settings, "fact", "fact") == settings.graph_threshold_fact_fact
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_backfill_uses_ce_mode_threshold_end_to_end(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint, monkeypatch
+):
+    """F045 P2-3: end-to-end proof that CE-mode dispatch reaches _backfill_same_type.
+
+    We set the strict fact-fact threshold to 0.99 (impossible) and the CE-mode
+    fact-fact threshold to 0.01 (always passes). With ``ce_backfill_enabled=True``,
+    ``_get_threshold`` must route to the CE-mode value — which is the ONLY way
+    edges can form. If a future refactor ever bypasses the helper and reads the
+    strict setting directly, this test produces 0 edges and fails loudly.
+    """
+    agent_id = f"test-f045-dispatch-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={
+        # Strict defaults turned WAY up — unreachable if dispatch is broken.
+        "graph_threshold_fact_fact": 0.99,
+        "graph_threshold_fact_decision": 0.99,
+        # CE-mode defaults turned WAY down — always passes.
+        "ce_backfill_threshold_fact_fact": 0.01,
+        "ce_backfill_threshold_fact_decision": 0.01,
+        "ce_backfill_enabled": True,
+        "ce_backfill_top_k": 10,
+        "ce_backfill_min_score": 0.1,
+        # Disable content guard so short test-fact content flows through.
+        "ce_backfill_min_content_chars": 0,
+    })
+
+    # Fake CE returns high raw logits for all candidates → sigmoid ≈ 0.99.
+    fake = _FakeCE(scores=[5.0, 5.0, 5.0, 5.0])
+    _install_fake_ce(monkeypatch, fake)
+
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        base_emb = await mock_embeddings.embed("F045 wiring seed")
+        await _insert_fact(session, agent_id, "F045 wiring seed fact text", base_emb)
+        for i in range(2):
+            near = await mock_embeddings.embed_near("F045 wiring seed", noise=0.005)
+            await _insert_fact(
+                session, agent_id, f"F045 wiring candidate {i}", near,
+            )
+        await session.commit()
+
+    ce_stats = {"survived": 0, "pruned": 0}
+    edges = await densifier.backfill_orphan_facts(max_count=1, ce_stats=ce_stats)
+
+    # CE survived (sigmoid(5.0) > 0.1 floor) and dispatched to the 0.01 CE-mode
+    # gate, so at least one edge should have formed. If dispatch were broken,
+    # the strict 0.99 floor would have blocked everything.
+    assert ce_stats["survived"] >= 1, (
+        f"F045: CE should have kept >=1 candidate (fake scores 5.0, "
+        f"sigmoid~0.99, min_score=0.1) — got ce_stats={ce_stats}"
+    )
+    assert edges >= 1, (
+        f"F045: CE-mode threshold dispatch is broken. With "
+        f"ce_backfill_enabled=True, strict fact_fact=0.99 is unreachable and "
+        f"CE-mode fact_fact=0.01 should always pass. Got {edges} edges, "
+        f"ce_stats={ce_stats}."
+    )

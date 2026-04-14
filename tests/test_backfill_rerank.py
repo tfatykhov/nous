@@ -46,6 +46,10 @@ def make_settings(**overrides):
         ce_backfill_enabled=True,
         ce_backfill_top_k=10,
         ce_backfill_min_score=0.30,
+        # F045: permissive default so legacy tests using short fake content
+        # (e.g. "alpha", "beta") aren't dropped by the content-length guard.
+        # F045-specific tests override this to exercise the guard.
+        ce_backfill_min_content_chars=0,
         cross_encoder_model="fake-model",
         cross_encoder_text_limit=512,
     )
@@ -454,3 +458,149 @@ async def test_fetch_candidate_content_drops_whitespace():
         candidate_ids=[id_keep, id_ws, id_none],
     )
     assert out == {id_keep: "hello"}
+
+
+# ---------------------------------------------------------------------------
+# 15. F045 content-length guard — drops short content
+# ---------------------------------------------------------------------------
+
+
+async def test_content_guard_drops_short(install_fake):
+    """Candidates with content shorter than ce_backfill_min_content_chars are dropped."""
+    fake = FakeModel(score_fn=lambda pairs: [5.0] * len(pairs))
+    install_fake(fake)
+
+    short_id = _uuid(1)
+    long_id = _uuid(2)
+    settings = make_settings(ce_backfill_min_content_chars=80)
+
+    rows = [(short_id, 0.5), (long_id, 0.5)]
+    content_map = {
+        short_id: "too short — 30 char placeholder",  # ~30 chars, below 80
+        long_id: "A" * 200,  # well above the floor
+    }
+
+    out = await br.ce_rerank_backfill_candidates(
+        query_text="test query",
+        candidate_rows=rows,
+        content_map=content_map,
+        settings=settings,
+    )
+
+    # Only the long candidate survives the guard.
+    assert len(out) == 1
+    assert out[0][0] == long_id
+
+
+# ---------------------------------------------------------------------------
+# 16. F045 content-length guard — whitespace stripped before counting
+# ---------------------------------------------------------------------------
+
+
+async def test_content_guard_respects_whitespace(install_fake):
+    """Whitespace-padded short content is still dropped (len measured after strip)."""
+    fake = FakeModel(score_fn=lambda pairs: [5.0] * len(pairs))
+    install_fake(fake)
+
+    padded_id = _uuid(1)
+    real_id = _uuid(2)
+    settings = make_settings(ce_backfill_min_content_chars=80)
+
+    rows = [(padded_id, 0.5), (real_id, 0.5)]
+    content_map = {
+        padded_id: "   short   " + " " * 200,  # strips to 'short' (5 chars)
+        real_id: "A" * 150,
+    }
+
+    out = await br.ce_rerank_backfill_candidates(
+        query_text="test query",
+        candidate_rows=rows,
+        content_map=content_map,
+        settings=settings,
+    )
+
+    assert len(out) == 1
+    assert out[0][0] == real_id
+
+
+# ---------------------------------------------------------------------------
+# 17. F045 content-length guard — configurable floor
+# ---------------------------------------------------------------------------
+
+
+async def test_content_guard_configurable(install_fake):
+    """Raising ce_backfill_min_content_chars drops medium-length content."""
+    fake = FakeModel(score_fn=lambda pairs: [5.0] * len(pairs))
+    install_fake(fake)
+
+    med_id = _uuid(1)
+    long_id = _uuid(2)
+    settings = make_settings(ce_backfill_min_content_chars=250)
+
+    rows = [(med_id, 0.5), (long_id, 0.5)]
+    content_map = {
+        med_id: "M" * 150,  # passes default 80 but not raised 250
+        long_id: "L" * 300,
+    }
+
+    out = await br.ce_rerank_backfill_candidates(
+        query_text="test query",
+        candidate_rows=rows,
+        content_map=content_map,
+        settings=settings,
+    )
+
+    assert len(out) == 1
+    assert out[0][0] == long_id
+
+
+# ---------------------------------------------------------------------------
+# 18. F045 content-length guard — runs BEFORE cross_encoder_rerank (P2-1)
+# ---------------------------------------------------------------------------
+
+
+async def test_content_guard_runs_before_ce(install_fake):
+    """The guard must filter candidates *before* CE inference, not after.
+
+    This is the P2-1 fix from the F045 plan review: ensures the guard is a
+    pre-filter, not a post-filter. We seed 3 candidates (1 short + 2 long)
+    so the F042 reranker does not trip its ``len<=1`` short-circuit, then
+    inspect ``fake.pairs_seen`` to prove the short candidate never reached
+    the model.
+    """
+    fake = FakeModel(score_fn=lambda pairs: [5.0] * len(pairs))
+    install_fake(fake)
+
+    short_id = _uuid(1)
+    long_id_a = _uuid(2)
+    long_id_b = _uuid(3)
+    short_content = "URL-ONLY-FACT-40-chars-barely-barely-hi"  # <80 chars
+    long_content_a = "A" * 200 + " alpha prose fact"
+    long_content_b = "B" * 200 + " bravo prose fact"
+
+    settings = make_settings(ce_backfill_min_content_chars=80)
+
+    out = await br.ce_rerank_backfill_candidates(
+        query_text="test query",
+        candidate_rows=[(short_id, 0.5), (long_id_a, 0.5), (long_id_b, 0.5)],
+        content_map={
+            short_id: short_content,
+            long_id_a: long_content_a,
+            long_id_b: long_content_b,
+        },
+        settings=settings,
+    )
+
+    # Short candidate is not in the output set.
+    out_ids = {cid for cid, _ in out}
+    assert short_id not in out_ids
+    assert long_id_a in out_ids and long_id_b in out_ids
+
+    # F042 reranker was invoked (len>1 so no short-circuit).
+    assert fake.call_count == 1
+    pair_docs = [doc for _, doc in fake.pairs_seen]
+    # Short candidate's content must NEVER have reached the model.
+    assert short_content not in pair_docs
+    # Both long candidates were scored.
+    assert long_content_a in pair_docs
+    assert long_content_b in pair_docs

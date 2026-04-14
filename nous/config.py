@@ -302,6 +302,23 @@ class Settings(BaseSettings):
     ce_backfill_top_k: int = 10
     ce_backfill_min_score: float = 0.30
 
+    # F045: CE-aware relaxed thresholds. Only apply when ce_backfill_enabled=True;
+    # when CE is off, _get_threshold() falls back to the strict graph_threshold_*
+    # defaults above. fact_fact=0.65 empirically validated at 80% LLM-judged
+    # precision in the 2026-04-14 A/B experiment on a 1693-fact corpus.
+    ce_backfill_threshold_fact_fact: float = 0.65
+    ce_backfill_threshold_fact_decision: float = 0.55
+    ce_backfill_threshold_fact_episode: float = 0.55
+    ce_backfill_threshold_decision_decision: float = 0.60
+    ce_backfill_threshold_episode_episode: float = 0.58
+    ce_backfill_threshold_procedure_any: float = 0.55
+
+    # F045: content-length guard for CE backfill. Candidates whose content is
+    # shorter than this (after strip) are dropped before CE inference — filters
+    # URL-only / boilerplate facts that would otherwise co-score highly on
+    # shared token shape with no semantic signal.
+    ce_backfill_min_content_chars: int = 80
+
     # F012: Procedure Learning (K-Line auto-creation)
     procedure_learning_enabled: bool = True
     procedure_cluster_min_size: int = 3

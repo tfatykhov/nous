@@ -43,8 +43,8 @@ _RELATION_MAP: dict[tuple[str, str], str] = {
 }
 
 
-def _get_threshold(settings: Settings, source_type: str, target_type: str) -> float:
-    """Get the similarity threshold for a given type pair."""
+def _get_strict_threshold(settings: Settings, source_type: str, target_type: str) -> float:
+    """Strict per-relation cosine thresholds — used when CE backfill is disabled."""
     key = tuple(sorted([source_type, target_type]))
     thresholds = {
         ("fact", "fact"): settings.graph_threshold_fact_fact,
@@ -56,6 +56,35 @@ def _get_threshold(settings: Settings, source_type: str, target_type: str) -> fl
     if "procedure" in key:
         return settings.graph_threshold_procedure_any
     return thresholds.get(key, 0.75)
+
+
+def _get_ce_mode_threshold(settings: Settings, source_type: str, target_type: str) -> float:
+    """Relaxed thresholds for when F043 CE backfill is upstream and has already
+    pruned candidates. Defaults calibrated from the 2026-04-14 A/B experiment
+    where fact-fact=0.65 achieved 80% LLM-judged precision.
+    """
+    key = tuple(sorted([source_type, target_type]))
+    thresholds = {
+        ("fact", "fact"): settings.ce_backfill_threshold_fact_fact,
+        ("decision", "fact"): settings.ce_backfill_threshold_fact_decision,
+        ("episode", "fact"): settings.ce_backfill_threshold_fact_episode,
+        ("decision", "decision"): settings.ce_backfill_threshold_decision_decision,
+        ("episode", "episode"): settings.ce_backfill_threshold_episode_episode,
+    }
+    if "procedure" in key:
+        return settings.ce_backfill_threshold_procedure_any
+    return thresholds.get(key, 0.60)
+
+
+def _get_threshold(settings: Settings, source_type: str, target_type: str) -> float:
+    """Resolve per-relation cosine threshold.
+
+    Routes to CE-mode (relaxed) thresholds when ``ce_backfill_enabled`` is set,
+    otherwise returns the strict defaults. F045.
+    """
+    if getattr(settings, "ce_backfill_enabled", False):
+        return _get_ce_mode_threshold(settings, source_type, target_type)
+    return _get_strict_threshold(settings, source_type, target_type)
 
 
 def _get_relation(source_type: str, target_type: str) -> str:
