@@ -348,6 +348,10 @@ async def test_backfill_same_type_with_ce_rerank(
         "ce_backfill_enabled": True,
         "ce_backfill_top_k": 10,
         "ce_backfill_min_score": 0.5,
+        # F045: fixture uses short synthetic content ("candidate 0"...) that
+        # would be dropped by the default 80-char guard. Disable it here so
+        # the F043 test semantics are preserved.
+        "ce_backfill_min_content_chars": 0,
     })
     # 2 high logits (sigmoid >> 0.5), 2 low logits (sigmoid < 0.5).
     fake = _FakeCE(scores=[5.0, 5.0, -5.0, -5.0])
