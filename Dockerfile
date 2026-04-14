@@ -32,7 +32,10 @@ RUN mkdir -p /tmp/nous-workspace
 # Copy source BEFORE pip install (F5: non-editable install)
 COPY pyproject.toml .
 COPY nous/ nous/
-RUN pip install --no-cache-dir ".[runtime,agent]"
+# F042: [rerank] pulls sentence-transformers + torch (~2GB). The model
+# itself (~90MB) is downloaded on first use into $HF_HOME and persisted
+# via the huggingface_cache volume defined in docker-compose.yml.
+RUN pip install --no-cache-dir ".[runtime,agent,rerank]"
 
 COPY sql/ sql/
 COPY static/ static/
