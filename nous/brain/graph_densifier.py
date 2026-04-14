@@ -15,6 +15,11 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.brain._entity_config import _ENTITY_CONFIG
+from nous.brain.backfill_rerank import (
+    ce_rerank_backfill_candidates,
+    fetch_candidate_content,
+)
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.graph_linker import GraphLinker, common_template_text, edge_confidence
 from nous.config import Settings
@@ -22,20 +27,6 @@ from nous.heart.search import hybrid_search
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
-
-# Entity configuration: (table, type_name, content_column, extra_where)
-# content_column uses `t.` alias for the main table.
-_ENTITY_CONFIG: dict[str, tuple[str, str, str, str]] = {
-    "fact": ("heart.facts", "fact", "t.content", "t.active = true"),
-    "decision": ("brain.decisions", "decision", "t.description", "1=1"),
-    "episode": (
-        "heart.episodes",
-        "episode",
-        "t.structured_summary->>'summary'",
-        "t.active = true AND t.structured_summary IS NOT NULL",
-    ),
-    "procedure": ("heart.procedures", "procedure", "t.description", "t.active = true"),
-}
 
 # Relation types for different type pairs
 _RELATION_MAP: dict[tuple[str, str], str] = {
@@ -146,6 +137,7 @@ class GraphDensifier:
         orphan_id: UUID,
         orphan_content: str,
         session: AsyncSession,
+        ce_stats: dict[str, int] | None = None,
     ) -> int:
         """Link an orphan to similar nodes of the same type using hybrid search.
 
@@ -186,6 +178,29 @@ class GraphDensifier:
 
         if not candidates:
             return 0
+
+        # F043: CE rerank before cosine verification (precision pre-filter).
+        if self._settings.ce_backfill_enabled:
+            content_map = await fetch_candidate_content(
+                session,
+                self._agent_id,
+                entity_type,
+                [c[0] for c in candidates],
+            )
+            before = len(candidates)
+            candidates = await ce_rerank_backfill_candidates(
+                query_text=orphan_content,
+                candidate_rows=candidates,
+                content_map=content_map,
+                settings=self._settings,
+                log_context=f"{entity_type}-same:{orphan_id}",
+            )
+            after = len(candidates)
+            if ce_stats is not None:
+                ce_stats["survived"] += after
+                ce_stats["pruned"] += max(before - after, 0)
+            if not candidates:
+                return 0
 
         # For each candidate, verify actual cosine similarity meets threshold
         # (RRF scores are rank-based, not directly comparable to similarity thresholds)
@@ -236,6 +251,7 @@ class GraphDensifier:
         orphan_content: str,
         target_type: str,
         session: AsyncSession,
+        ce_stats: dict[str, int] | None = None,
     ) -> int:
         """Link an orphan to nodes of a different type.
 
@@ -310,6 +326,29 @@ class GraphDensifier:
             row.id: row.content for row in result if row.content
         }
 
+        # F043: CE rerank cross-type survivors before the re-embed loop.
+        if self._settings.ce_backfill_enabled and candidate_content:
+            sorted_ids = sorted(candidate_content.keys())  # deterministic tie-break
+            synthetic_rows = [(cid, 0.0) for cid in sorted_ids]
+            before = len(synthetic_rows)
+            ranked = await ce_rerank_backfill_candidates(
+                query_text=orphan_content,
+                candidate_rows=synthetic_rows,
+                content_map=candidate_content,
+                settings=self._settings,
+                log_context=f"{source_type}->{target_type}:{orphan_id}",
+            )
+            surviving = {cid for cid, _ in ranked}
+            candidate_content = {
+                cid: txt
+                for cid, txt in candidate_content.items()
+                if cid in surviving
+            }
+            after = len(candidate_content)
+            if ce_stats is not None:
+                ce_stats["survived"] += after
+                ce_stats["pruned"] += max(before - after, 0)
+
         edges_created = 0
         relation = _get_relation(source_type, target_type)
 
@@ -351,7 +390,11 @@ class GraphDensifier:
 
         return edges_created
 
-    async def backfill_orphan_facts(self, max_count: int | None = None) -> int:
+    async def backfill_orphan_facts(
+        self,
+        max_count: int | None = None,
+        ce_stats: dict[str, int] | None = None,
+    ) -> int:
         """Find orphan facts and connect them to similar facts and decisions."""
         if not self._settings.graph_backfill_enabled:
             return 0
@@ -363,14 +406,22 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("fact", orphan_id, content, session)
-                total += await self._backfill_cross_type("fact", orphan_id, content, "decision", session)
+                total += await self._backfill_same_type(
+                    "fact", orphan_id, content, session, ce_stats=ce_stats
+                )
+                total += await self._backfill_cross_type(
+                    "fact", orphan_id, content, "decision", session, ce_stats=ce_stats
+                )
             await session.commit()
 
         logger.info("F040: backfill_orphan_facts created %d edges from %d orphans", total, len(orphans))
         return total
 
-    async def backfill_orphan_decisions(self, max_count: int | None = None) -> int:
+    async def backfill_orphan_decisions(
+        self,
+        max_count: int | None = None,
+        ce_stats: dict[str, int] | None = None,
+    ) -> int:
         """Find orphan decisions and connect them to similar decisions and facts."""
         if not self._settings.graph_backfill_enabled:
             return 0
@@ -382,14 +433,22 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("decision", orphan_id, content, session)
-                total += await self._backfill_cross_type("decision", orphan_id, content, "fact", session)
+                total += await self._backfill_same_type(
+                    "decision", orphan_id, content, session, ce_stats=ce_stats
+                )
+                total += await self._backfill_cross_type(
+                    "decision", orphan_id, content, "fact", session, ce_stats=ce_stats
+                )
             await session.commit()
 
         logger.info("F040: backfill_orphan_decisions created %d edges from %d orphans", total, len(orphans))
         return total
 
-    async def backfill_orphan_episodes(self, max_count: int | None = None) -> int:
+    async def backfill_orphan_episodes(
+        self,
+        max_count: int | None = None,
+        ce_stats: dict[str, int] | None = None,
+    ) -> int:
         """Find orphan episodes and connect them to similar episodes and facts."""
         if not self._settings.graph_backfill_enabled:
             return 0
@@ -401,14 +460,22 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("episode", orphan_id, content, session)
-                total += await self._backfill_cross_type("episode", orphan_id, content, "fact", session)
+                total += await self._backfill_same_type(
+                    "episode", orphan_id, content, session, ce_stats=ce_stats
+                )
+                total += await self._backfill_cross_type(
+                    "episode", orphan_id, content, "fact", session, ce_stats=ce_stats
+                )
             await session.commit()
 
         logger.info("F040: backfill_orphan_episodes created %d edges from %d orphans", total, len(orphans))
         return total
 
-    async def backfill_orphan_procedures(self, max_count: int | None = None) -> int:
+    async def backfill_orphan_procedures(
+        self,
+        max_count: int | None = None,
+        ce_stats: dict[str, int] | None = None,
+    ) -> int:
         """Find orphan procedures and connect them to similar nodes."""
         if not self._settings.graph_backfill_enabled:
             return 0
@@ -420,39 +487,67 @@ class GraphDensifier:
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
-                total += await self._backfill_same_type("procedure", orphan_id, content, session)
-                total += await self._backfill_cross_type("procedure", orphan_id, content, "fact", session)
-                total += await self._backfill_cross_type("procedure", orphan_id, content, "decision", session)
+                total += await self._backfill_same_type(
+                    "procedure", orphan_id, content, session, ce_stats=ce_stats
+                )
+                total += await self._backfill_cross_type(
+                    "procedure", orphan_id, content, "fact", session, ce_stats=ce_stats
+                )
+                total += await self._backfill_cross_type(
+                    "procedure", orphan_id, content, "decision", session, ce_stats=ce_stats
+                )
             await session.commit()
 
         logger.info("F040: backfill_orphan_procedures created %d edges from %d orphans", total, len(orphans))
         return total
 
-    async def run_backfill_cycle(self) -> dict[str, int]:
+    async def run_backfill_cycle(self) -> dict:
         """Orchestrate a full backfill cycle across all entity types.
 
-        Returns a dict mapping entity type to number of edges created.
+        Returns a dict mapping entity type to number of edges created plus
+        a ``_ce_stats`` key carrying F043 reranker survival counters. The
+        leading underscore on ``_ce_stats`` signals "not a per-type edge
+        count — do not sum me" to downstream consumers that aggregate
+        ``result.values()``.
         """
         self._interrupted = False
-        results: dict[str, int] = {}
+        ce_stats: dict[str, int] = {"survived": 0, "pruned": 0}
+        results: dict = {}
 
-        results["facts"] = await self.backfill_orphan_facts()
-        if self._interrupted:
+        def _log_and_return(aborted: bool) -> dict:
+            # Filter `_`-prefixed keys from the edge-total sum so CE counters
+            # never inflate the per-type totals (F043 P1 regression guard).
+            edge_total = sum(v for k, v in results.items() if not k.startswith("_"))
+            results["_ce_stats"] = ce_stats
+            per_type = {k: v for k, v in results.items() if not k.startswith("_")}
+            if aborted:
+                logger.info(
+                    "F040: backfill cycle aborted (interrupt) — %d edges so far "
+                    "(per_type=%s ce=%s)",
+                    edge_total, per_type, ce_stats,
+                )
+            else:
+                logger.info(
+                    "F040: backfill cycle complete — %d total edges "
+                    "(per_type=%s ce=%s)",
+                    edge_total, per_type, ce_stats,
+                )
             return results
 
-        results["decisions"] = await self.backfill_orphan_decisions()
+        results["facts"] = await self.backfill_orphan_facts(ce_stats=ce_stats)
         if self._interrupted:
-            return results
+            return _log_and_return(aborted=True)
 
-        results["episodes"] = await self.backfill_orphan_episodes()
+        results["decisions"] = await self.backfill_orphan_decisions(ce_stats=ce_stats)
         if self._interrupted:
-            return results
+            return _log_and_return(aborted=True)
 
-        results["procedures"] = await self.backfill_orphan_procedures()
+        results["episodes"] = await self.backfill_orphan_episodes(ce_stats=ce_stats)
+        if self._interrupted:
+            return _log_and_return(aborted=True)
 
-        total = sum(results.values())
-        logger.info("F040: backfill cycle complete — %d total edges created (%s)", total, results)
-        return results
+        results["procedures"] = await self.backfill_orphan_procedures(ce_stats=ce_stats)
+        return _log_and_return(aborted=False)
 
     async def discover_clusters(self, max_bridges: int = 20) -> int:
         """Discover disconnected graph components and create bridge edges.

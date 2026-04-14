@@ -157,6 +157,7 @@ All shipped implementation specs with PR references:
 | F038 | Memory Quality & Context Loading Fixes | ✅ Shipped | Quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency weighting, user_direct admission bonus, task synthesis, context dedup, bash batching hints |
 | F040 | [Graph Densification](F040-graph-densification.md) | ✅ Shipped | Orphan backfill engine, reverse linking (decision/procedure/episode), per-relation thresholds, edge confidence scoring, cluster discovery, density dashboard |
 | F042 | [Cross-Encoder Reranking](F042-cross-encoder-reranking.md) | ✅ Shipped | Cross-encoder reranking stage in recall_deep — sigmoid-normalized scores, async executor, head-truncation, feature-flagged, optional sentence-transformers dep |
+| F043 | [CE Rerank Sleep Backfill](F043-ce-rerank-sleep-backfill.md) | ✅ Shipped | Cross-encoder reranking applied to F040 graph backfill during sleep — precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, `_ce_stats` telemetry |
 
 ### Phase 2 — Quality (next to build)
 
