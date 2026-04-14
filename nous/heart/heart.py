@@ -819,9 +819,14 @@ class Heart:
                 if recall_result is not None:
                     merged.append(recall_result)
 
-        # F042: Cross-encoder reranking (between RRF merge and MMR)
+        # F042: Cross-encoder reranking (between RRF merge and MMR).
+        # Sort by hybrid score globally first so the head slice for CE is
+        # selected by relevance, not by per-type append order (which would
+        # otherwise let later memory types be excluded from reranking even
+        # when their scores are higher than earlier types').
         ce_enabled = RuntimeConfig.get().get_cross_encoder_enabled(self.settings)
         if ce_enabled and len(merged) > 1 and CROSS_ENCODER_AVAILABLE:
+            merged.sort(key=lambda r: r.score, reverse=True)
             try:
                 pre_ce_head = [
                     r.id for r in merged[: self.settings.cross_encoder_max_candidates]
