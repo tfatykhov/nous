@@ -73,3 +73,25 @@ class TestAntiHallucinationPrompt:
         )
         labels = [sec.label for sec in result.sections]
         assert "Context Safety" in labels
+
+    @pytest.mark.asyncio
+    async def test_prompt_forbids_fabricated_identifiers(self):
+        """Extended anti-hallucination clause: never fabricate IDs/UUIDs/paths.
+
+        Prevents the failure mode where the LLM invents a plausible-looking UUID
+        for get_procedure / get_fact / etc. when the ID was not present in context.
+        """
+        s = Settings(anti_hallucination_prompt=True)
+        engine = _make_engine(s)
+
+        result = await engine.build(
+            agent_id="test",
+            session_id="test-session",
+            input_text="test",
+            frame=_make_frame(),
+        )
+        prompt = result.system_prompt
+        assert "fabricate" in prompt.lower()
+        assert "identifiers" in prompt.lower() or "UUIDs" in prompt
+        # Both original and extended clauses must coexist
+        assert "re-read that file" in prompt or "re-fetch" in prompt

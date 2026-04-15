@@ -54,6 +54,9 @@ include = ["nous*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
+markers = [
+    "integration: requires live PostgreSQL (run with --integration)",
+]
 
 [tool.ruff]
 target-version = "py312"
