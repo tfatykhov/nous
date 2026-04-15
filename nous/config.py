@@ -234,8 +234,14 @@ class Settings(BaseSettings):
     subtask_enabled: bool = True
     subtask_workers: int = 2
     subtask_poll_interval: float = 2.0
-    subtask_default_timeout: int = 120
-    subtask_max_timeout: int = 600
+    subtask_default_timeout: int = Field(
+        default=120,
+        validation_alias="NOUS_SUBTASK_DEFAULT_TIMEOUT",
+    )
+    subtask_max_timeout: int = Field(
+        default=900,
+        validation_alias="NOUS_SUBTASK_MAX_TIMEOUT",
+    )
     subtask_max_concurrent: int = 3
     schedule_enabled: bool = True
     schedule_check_interval: int = 60
