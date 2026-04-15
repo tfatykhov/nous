@@ -209,7 +209,13 @@ class ContextEngine:
                 'Instead, say "I\'d need to re-read that file" or "Let me fetch '
                 'that again" and call the tool again. Results marked with '
                 '"re-fetchable" can be retrieved by calling the same tool '
-                "with the same arguments."
+                "with the same arguments.\n\n"
+                "Never fabricate identifiers, UUIDs, file paths, URLs, or exact "
+                "strings that were not present in a prior tool result or in this "
+                "system prompt. If you need one and don't have it, call a search "
+                "or list tool first to obtain it. A tool error from a real ID "
+                "is always better than a plausible-looking guess — guessed IDs "
+                "waste turns and can trigger wrong actions."
             )
             sections.append(
                 ContextSection(

@@ -272,6 +272,68 @@ class TestRecallDeep:
         text = result["content"][0]["text"]
         assert "No results found" in text
 
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_recall_deep_surfaces_fact_id(self, tools):
+        """Heart fact results include an 'id: <uuid>' so get_procedure/get_fact callers
+        can reference them without fabricating UUIDs (anti-hallucination contract).
+
+        Integration-only: requires live PostgreSQL for pgvector <=> operator.
+        """
+        import re
+
+        await tools["learn_fact"](
+            content="Id surfacing test fact about quantum widgets",
+            category="technical",
+            subject="id-surface",
+        )
+
+        result = await tools["recall_deep"](
+            query="quantum widgets",
+            memory_types=["fact"],
+        )
+
+        text = result["content"][0]["text"]
+        assert "Heart Memory" in text
+        assert "id: " in text, "recall_deep must surface entity IDs for get_procedure/detail callers"
+        # Verify the id is a real UUID format, not a placeholder
+        uuid_match = re.search(
+            r"id: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            text,
+        )
+        assert uuid_match is not None, f"Expected UUID in output, got: {text}"
+
+    @pytest.mark.integration
+    @pytest.mark.asyncio
+    async def test_recall_deep_surfaces_decision_id(self, tools):
+        """Brain decision results include an 'id: <uuid>' so follow-up tools
+        can reference the decision without fabricating UUIDs.
+
+        Integration-only: requires live PostgreSQL for pgvector <=> operator.
+        """
+        import re
+
+        await tools["record_decision"](
+            description="Id surfacing decision about deployment topology",
+            confidence=0.8,
+            category="architecture",
+            stakes="medium",
+            tags=["id-surface"],
+        )
+
+        result = await tools["recall_deep"](
+            query="deployment topology",
+            memory_types=["decision"],
+        )
+
+        text = result["content"][0]["text"]
+        assert "Brain Decisions" in text
+        uuid_match = re.search(
+            r"id: ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+            text,
+        )
+        assert uuid_match is not None, f"Expected decision UUID in output, got: {text}"
+
 
 # ---------------------------------------------------------------------------
 # create_censor tests

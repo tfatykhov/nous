@@ -355,7 +355,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         results_text.append("=== Heart Memory ===")
                         for i, result in enumerate(heart_results, 1):
                             results_text.append(
-                                f"{i}. [{result.type}] {result.summary} (score: {result.score:.3f})"
+                                f"{i}. [{result.type}] {result.summary} "
+                                f"(id: {result.id}, score: {result.score:.3f})"
                             )
                     else:
                         results_text.append("=== Heart Memory ===\nNo results found.")
@@ -384,7 +385,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     for i, n in enumerate(heart_graph_decisions, 1):
                         decayed = n.edge_weight * settings.graph_recall_decay
                         results_text.append(
-                            f"{i}. [via {n.edge_relation}] {n.description} (score: {decayed:.3f})"
+                            f"{i}. [via {n.edge_relation}] {n.description} "
+                            f"(id: {n.id}, score: {decayed:.3f})"
                         )
 
             # Search Brain decisions
@@ -461,16 +463,17 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 if decision_results or graph_expanded:
                     results_text.append("\n=== Brain Decisions ===")
                     for i, dec in enumerate(decision_results, 1):
-                        score_str = f" (score: {dec.score:.3f})" if dec.score else ""
+                        score_str = f", score: {dec.score:.3f}" if dec.score else ""
                         results_text.append(
                             f"{i}. {dec.description} | {dec.category} | {dec.stakes} | "
-                            f"confidence: {dec.confidence:.2f}{score_str}"
+                            f"confidence: {dec.confidence:.2f} "
+                            f"(id: {dec.id}{score_str})"
                         )
                     for j, n in enumerate(graph_expanded, len(decision_results) + 1):
                         decayed_score = n.edge_weight * settings.graph_recall_decay
                         results_text.append(
                             f"{j}. [via graph: {n.edge_relation}] {n.description} "
-                            f"(score: {decayed_score:.3f})"
+                            f"(id: {n.id}, score: {decayed_score:.3f})"
                         )
                 else:
                     results_text.append("\n=== Brain Decisions ===\nNo results found.")
