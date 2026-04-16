@@ -132,6 +132,26 @@ Capped at ~400 tokens; projects beyond the cap are summarized as a count ("+4 mo
 
 ---
 
+## Sleep Cycle Integration
+
+F047 attaches to existing `SleepHandler` phases — **no new phase is introduced**. Phases 1–3 of F047 ship without any sleep changes; sleep hooks land in Phase 2 (SessionCloser) and Phase 3 (consolidation voting).
+
+**Phase map (sleep cycle → F047 hook):**
+
+- **Phase 1 `review_decisions`** — also scan `project_events` for `status=active` projects with no events in N days. Emit a *dormant project* signal; SessionCloser decides whether to transition to `paused`. ~20 LOC, no new LLM call.
+- **Phase 4 `reflect`** — primary hook. `SessionCloser` runs inside reflection: for each active project touched in the window, generate a one-paragraph *where we left off* summary and append as a `project_event` with `type=session_close`. This summary is what `ContextInjector` surfaces next turn as the resume anchor. Reuses reflect's existing `background_model` call with a project-scoped prompt — no new LLM budget.
+- **Phase 4.5 `resolve_contradictions` (F031)** — project scope becomes a filter. Intra-project contradictions are higher priority; cross-project ones are often legitimate context differences. Reduces false-positive supersessions.
+- **Phase 7 `cluster_consolidation`** — clusters get a `project_id` vote. If ≥3 members share a project, the derived procedure/fact inherits it. Uses existing cluster data, no new computation.
+- **Phase 8 `graph_densification` (F041)** — no structural change. SNN stays project-agnostic; `GoalSignal` layers on top at retrieval time, giving project-tagged nodes preferential spreading activation.
+
+**New sleep-side component:**
+
+- **`SessionCloser`** — ~80 LOC helper invoked from `_phase_reflect` after the orient step. Idempotent per (project, sleep_tick). Writes directly to `project_events`. No side effects outside the table.
+
+**Ordering constraint:** SessionCloser must run *before* `cluster_consolidation` so project_id votes see fresh session_close events.
+
+---
+
 ## Non-Goals (v1)
 
 - No Gantt-style task decomposition. Projects are flat; sub-structure lives in specs/episodes.
