@@ -132,6 +132,14 @@ def _rewrite_sql_for_sqlite(sql_text: str) -> str:
         sql_text,
         flags=re.IGNORECASE
     )
+    # Rewrite PG interval arithmetic: X.started_at + X.timeout_seconds * interval '1 second'
+    # SQLite equivalent: datetime(X.started_at, '+' || CAST(X.timeout_seconds AS TEXT) || ' seconds')
+    sql_text = re.sub(
+        r"(?:\w+\.)?subtasks\.started_at\s*\+\s*(?:\w+\.)?subtasks\.timeout_seconds\s*\*\s*interval\s*'1 second'",
+        "datetime(subtasks.started_at, '+' || CAST(subtasks.timeout_seconds AS TEXT) || ' seconds')",
+        sql_text,
+        flags=re.IGNORECASE
+    )
     return sql_text
 
 
