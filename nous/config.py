@@ -456,6 +456,11 @@ class Settings(BaseSettings):
     # F038: DAG Orchestration
     dag_enabled: bool = True
 
+    # F047: Goal / Project Registry
+    project_registry_enabled: bool = True
+    project_context_limit: int = 5  # Max active projects injected into context
+    project_context_max_tokens: int = 400  # Token budget for Active Projects section
+
     # F039: Correction Learning Pipeline
     correction_extraction_enabled: bool = True
 

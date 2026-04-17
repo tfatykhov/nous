@@ -2007,3 +2007,208 @@ async def _resolve_dag(store: "Any", dag_id_str: str) -> "Any | None":
         raise ValueError(f"Prefix '{dag_id_str}' is ambiguous, matches: {ids}")
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# F047: Project Registry tools
+# ---------------------------------------------------------------------------
+
+_PROJECT_REGISTER_SCHEMA = {
+    "description": "Register a new project/workstream. Use this when starting work on a new initiative that should be tracked across sessions.",
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "description": "Short slug identifier (e.g. 'F047-project-registry', 'voice-output')",
+        },
+        "title": {
+            "type": "string",
+            "description": "Human-readable title",
+        },
+        "description": {
+            "type": "string",
+            "description": "1-3 sentences describing the goal/intent of this project",
+        },
+        "priority": {
+            "type": "number",
+            "description": "Priority from 0.0 to 1.0 (default 0.5). Higher = more prominent in context.",
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Keywords for filtering and matching",
+        },
+    },
+    "required": ["name", "title"],
+}
+
+_PROJECT_UPDATE_SCHEMA = {
+    "description": "Update an existing project's status, priority, description, or tags.",
+    "type": "object",
+    "properties": {
+        "name_or_id": {
+            "type": "string",
+            "description": "Project name or UUID",
+        },
+        "status": {
+            "type": "string",
+            "enum": ["active", "paused", "completed", "abandoned"],
+            "description": "New status",
+        },
+        "priority": {
+            "type": "number",
+            "description": "New priority (0.0-1.0)",
+        },
+        "description": {
+            "type": "string",
+            "description": "Updated description",
+        },
+        "title": {
+            "type": "string",
+            "description": "Updated title",
+        },
+        "tags": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Updated tags",
+        },
+    },
+    "required": ["name_or_id"],
+}
+
+_PROJECT_NOTE_SCHEMA = {
+    "description": "Add a note or event to a project's log. Use for milestones, blockers, status updates, or general notes.",
+    "type": "object",
+    "properties": {
+        "name_or_id": {
+            "type": "string",
+            "description": "Project name or UUID",
+        },
+        "summary": {
+            "type": "string",
+            "description": "1-2 line summary of the event or note",
+        },
+        "event_type": {
+            "type": "string",
+            "enum": ["note", "milestone", "blocker", "session"],
+            "description": "Type of event (default: note)",
+        },
+    },
+    "required": ["name_or_id", "summary"],
+}
+
+_PROJECT_LIST_SCHEMA = {
+    "description": "List registered projects, optionally filtered by status.",
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["active", "paused", "completed", "abandoned"],
+            "description": "Filter by status (default: active). Pass null/omit for all.",
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Max results (default: 10)",
+        },
+    },
+    "required": [],
+}
+
+
+def register_project_tools(
+    dispatcher: ToolDispatcher,
+    registry: "Any",
+) -> None:
+    """F047: Register project registry tools."""
+    from nous.projects.schemas import (
+        ProjectInput,
+        ProjectNoteInput,
+        ProjectUpdateInput,
+    )
+
+    async def project_register(**kwargs: Any) -> dict:
+        try:
+            inp = ProjectInput(
+                name=kwargs["name"],
+                title=kwargs["title"],
+                description=kwargs.get("description", ""),
+                priority=kwargs.get("priority", 0.5),
+                tags=kwargs.get("tags", []),
+            )
+            detail = await registry.register(inp)
+            events_text = ""
+            if detail.recent_events:
+                events_text = f"\nEvents: {detail.recent_events[0].summary}"
+            text = (
+                f"Registered project '{detail.name}' ({str(detail.id)[:8]})\n"
+                f"  Title: {detail.title}\n"
+                f"  Status: {detail.status}, Priority: {detail.priority:.1f}\n"
+                f"  Tags: {', '.join(detail.tags) if detail.tags else 'none'}"
+                f"{events_text}"
+            )
+            return {"content": [{"type": "text", "text": text}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error registering project: {e}"}]}
+
+    async def project_update(**kwargs: Any) -> dict:
+        try:
+            name_or_id = kwargs["name_or_id"]
+            inp = ProjectUpdateInput(
+                status=kwargs.get("status"),
+                priority=kwargs.get("priority"),
+                description=kwargs.get("description"),
+                title=kwargs.get("title"),
+                tags=kwargs.get("tags"),
+            )
+            detail = await registry.update(name_or_id, inp)
+            text = (
+                f"Updated project '{detail.name}' ({str(detail.id)[:8]})\n"
+                f"  Status: {detail.status}, Priority: {detail.priority:.1f}\n"
+                f"  Title: {detail.title}"
+            )
+            return {"content": [{"type": "text", "text": text}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error updating project: {e}"}]}
+
+    async def project_note(**kwargs: Any) -> dict:
+        try:
+            name_or_id = kwargs["name_or_id"]
+            inp = ProjectNoteInput(
+                summary=kwargs["summary"],
+                event_type=kwargs.get("event_type", "note"),
+            )
+            event_detail = await registry.add_note(name_or_id, inp)
+            text = (
+                f"Added {event_detail.event_type} to project: {event_detail.summary}\n"
+                f"  Event ID: {str(event_detail.id)[:8]}"
+            )
+            return {"content": [{"type": "text", "text": text}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error adding note: {e}"}]}
+
+    async def project_list(**kwargs: Any) -> dict:
+        try:
+            status = kwargs.get("status", "active")
+            limit = kwargs.get("limit", 10)
+            projects = await registry.list_projects(status=status, limit=limit)
+            if not projects:
+                return {"content": [{"type": "text", "text": f"No projects with status '{status}'."}]}
+
+            lines = [f"Projects ({len(projects)}, status={status or 'all'}):"]
+            for p in projects:
+                touched = p.last_touched_at.strftime("%Y-%m-%d %H:%M") if p.last_touched_at else "never"
+                line = f"  {p.name} | {p.status} | priority {p.priority:.1f} | touched {touched}"
+                if p.title:
+                    line += f" | {p.title}"
+                lines.append(line)
+                if p.recent_events:
+                    latest = p.recent_events[0]
+                    lines.append(f"    Last: [{latest.event_type}] {latest.summary}")
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except Exception as e:
+            return {"content": [{"type": "text", "text": f"Error listing projects: {e}"}]}
+
+    dispatcher.register("project_register", project_register, _PROJECT_REGISTER_SCHEMA)
+    dispatcher.register("project_update", project_update, _PROJECT_UPDATE_SCHEMA)
+    dispatcher.register("project_note", project_note, _PROJECT_NOTE_SCHEMA)
+    dispatcher.register("project_list", project_list, _PROJECT_LIST_SCHEMA)

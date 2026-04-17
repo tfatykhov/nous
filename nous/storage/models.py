@@ -615,6 +615,78 @@ class WorkingMemory(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+# ---------------------------------------------------------------------------
+# F047: Goal / Project Registry
+# ---------------------------------------------------------------------------
+
+
+class Project(Base):
+    """Persistent project/workstream registry entry."""
+
+    __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "name", name="uq_projects_agent_name"),
+        CheckConstraint(
+            "status IN ('active', 'paused', 'completed', 'abandoned')",
+            name="ck_projects_status",
+        ),
+        CheckConstraint(
+            "priority >= 0.0 AND priority <= 1.0",
+            name="ck_projects_priority",
+        ),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="active")
+    priority: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.5")
+    tags = mapped_column(ARRAY(Text), nullable=True, server_default="{}")
+    source_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("brain.decisions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_touched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    embedding = mapped_column(Vector(1536), nullable=True)
+
+    events: Mapped[list["ProjectEvent"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan", order_by="ProjectEvent.created_at.desc()"
+    )
+
+
+class ProjectEvent(Base):
+    """Append-only event log entry for a project."""
+
+    __tablename__ = "project_events"
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('created', 'session', 'milestone', 'blocker', 'status_change', 'note')",
+            name="ck_project_events_type",
+        ),
+        {"schema": "heart"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("heart.projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    episode_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("heart.episodes.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    project: Mapped["Project"] = relationship(back_populates="events")
+
+
 class ConversationState(Base):
     __tablename__ = "conversation_state"
     __table_args__ = (
