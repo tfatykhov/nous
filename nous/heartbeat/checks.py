@@ -173,6 +173,18 @@ _OBSERVATION_PATTERNS = [
     "showed that",
     "need both a",  # "need both X and Y" is descriptive, not a task
     "tasks need both",
+    # Contact info / identity facts (not actionable tasks)
+    "email address is",       # person/contact facts about email
+    "linkedin.com/in/",       # LinkedIn profile URL facts
+    "two email addresses",    # dual-email identity facts
+    "profile url is",         # social profile URL facts
+    # Broader resolved/encoded patterns
+    "resolved —",             # facts starting with RESOLVED —
+    "encoded as censors",     # architecture facts about censor encoding
+    "failure modes encoded",  # resolved architecture findings
+    "are stale and should no",  # stale-fact cleanup notes
+    "is a false positive",    # explicit false-positive labeling
+    "recurring false alarm",  # recurring false alarm documentation
 ]
 
 PENDING_PROTOTYPES = [
@@ -255,6 +267,12 @@ class SelfInitiatedCheck(BaseCheck):
                     if fid in seen_fact_ids:
                         continue
                     seen_fact_ids.add(fid)
+
+                    # Skip person/identity category facts — never actionable
+                    fact_category = getattr(fact, "category", None) or ""
+                    fact_tags = getattr(fact, "tags", None) or []
+                    if fact_category == "person" or "resolved" in fact_tags or "identity" in fact_tags:
+                        continue
 
                     # Check recency using fact score as proxy (hybrid search)
                     # and content relevance via _looks_like_pending
