@@ -290,25 +290,44 @@ class DAGOrchestrator:
         if check is None:
             # Check was unregistered — for DAG-managed checks this means
             # self-disable completed (DynamicCheckLoader unregisters on disable).
-            # Treat as successful completion, not failure.
-            await self._store.update_node(
-                node.id,
-                status="completed",
-                result="Check completed (self-disabled)",
-                completed_at=datetime.now(UTC),
-            )
-            node.status = "completed"
+            if node.completion_check and node.completion_check.strip():
+                # Heartbeat check finished — now poll the shell completion_check
+                now = datetime.now(UTC)
+                await self._store.update_node(
+                    node.id,
+                    status="awaiting_check",
+                    awaiting_check_at=now,
+                )
+                node.status = "awaiting_check"
+            else:
+                await self._store.update_node(
+                    node.id,
+                    status="completed",
+                    result="Check completed (self-disabled)",
+                    completed_at=datetime.now(UTC),
+                )
+                node.status = "completed"
             return
 
         # Use check.active to detect disabled checks (review fix)
         if not check.active:
-            await self._store.update_node(
-                node.id,
-                status="completed",
-                result="Check completed (disabled itself)",
-                completed_at=datetime.now(UTC),
-            )
-            node.status = "completed"
+            if node.completion_check and node.completion_check.strip():
+                # Heartbeat check disabled itself — now poll the shell completion_check
+                now = datetime.now(UTC)
+                await self._store.update_node(
+                    node.id,
+                    status="awaiting_check",
+                    awaiting_check_at=now,
+                )
+                node.status = "awaiting_check"
+            else:
+                await self._store.update_node(
+                    node.id,
+                    status="completed",
+                    result="Check completed (disabled itself)",
+                    completed_at=datetime.now(UTC),
+                )
+                node.status = "completed"
 
     async def _poll_awaiting_checks(self, dag: ExecutionDAG) -> None:
         """Poll completion_check commands for nodes in awaiting_check status."""
