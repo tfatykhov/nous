@@ -1020,3 +1020,123 @@ class TestDAGEdgeCases:
         await orchestrator.start_dag(dag.id)
         with pytest.raises(ValueError, match="expected pending"):
             await orchestrator.start_dag(dag.id)
+
+
+class TestCheckNodeCompletionCheck:
+    """Test that check-type nodes honour completion_check after heartbeat finishes."""
+
+    def _check_node_request(self, completion_check: str = "test -f /tmp/done.flag") -> DAGCreateRequest:
+        return DAGCreateRequest(
+            name="check-node-cc-test",
+            nodes=[
+                DAGNodeSpec(
+                    name="monitor",
+                    type=DAGNodeType.check,
+                    instructions="Monitor something",
+                    completion_check=completion_check,
+                ),
+                DAGNodeSpec(
+                    name="use-result",
+                    type=DAGNodeType.subtask,
+                    instructions="Use the result",
+                ),
+            ],
+            edges=[
+                DAGEdgeSpec(from_node="monitor", to_node="use-result", edge_type="dependency"),
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_node_unregistered_no_completion_check_completes(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """check-type node with no completion_check: unregistered → completed directly."""
+        request = DAGCreateRequest(
+            name="check-no-cc",
+            nodes=[DAGNodeSpec(name="monitor", type=DAGNodeType.check, instructions="Monitor")],
+            edges=[],
+        )
+        dag = await store.create(request)
+        await orchestrator.start_dag(dag.id)
+        # Simulate check launched (running)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(monitor.id, status="running", check_name="dag-test-monitor")
+        # Registry returns None → check unregistered
+        dynamic_loader._registry.get_check.return_value = None
+        await orchestrator.tick()
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "completed"
+
+    @pytest.mark.asyncio
+    async def test_check_node_unregistered_with_completion_check_transitions_to_awaiting(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """check-type node: when heartbeat check unregisters and completion_check defined
+        → should transition to awaiting_check (not immediately completed)."""
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(monitor.id, status="running", check_name="dag-test-monitor")
+        # Registry returns None → heartbeat check unregistered (finished)
+        dynamic_loader._registry.get_check.return_value = None
+        # Prevent shell command from actually running
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+        await orchestrator.tick()
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        # BUG FIX: must be awaiting_check, not completed
+        assert monitor2.status == "awaiting_check", (
+            f"Expected awaiting_check, got {monitor2.status}. "
+            "completion_check was ignored — check-type node skipped directly to completed."
+        )
+        assert monitor2.awaiting_check_at is not None
+
+    @pytest.mark.asyncio
+    async def test_check_node_disabled_with_completion_check_transitions_to_awaiting(
+        self, store, orchestrator, dynamic_loader
+    ):
+        """check-type node: when heartbeat check disables itself and completion_check defined
+        → should transition to awaiting_check."""
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(monitor.id, status="running", check_name="dag-test-monitor")
+        # Registry returns an inactive check → check disabled itself
+        inactive_check = MagicMock()
+        inactive_check.active = False
+        dynamic_loader._registry.get_check.return_value = inactive_check
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+        await orchestrator.tick()
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        assert monitor2.status == "awaiting_check", (
+            f"Expected awaiting_check, got {monitor2.status}."
+        )
+        assert monitor2.awaiting_check_at is not None
+
+    @pytest.mark.asyncio
+    async def test_check_node_completion_check_passes_unblocks_dependent(
+        self, store, orchestrator, subtask_mgr, dynamic_loader
+    ):
+        """Full flow: heartbeat check unregisters → awaiting_check → shell passes → dependent launches."""
+        dag = await store.create(self._check_node_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        monitor = next(n for n in fetched.nodes if n.name == "monitor")
+        await store.update_node(monitor.id, status="running", check_name="dag-test-monitor")
+        # Tick 1: heartbeat unregisters → awaiting_check
+        dynamic_loader._registry.get_check.return_value = None
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("pending"))
+        await orchestrator.tick()
+        # Tick 2: completion_check passes → completed → dependent launches
+        orchestrator._run_completion_check = AsyncMock(return_value=CheckResult("success"))
+        await orchestrator.tick()
+        fetched2 = await store.get_dag(dag.id)
+        monitor2 = next(n for n in fetched2.nodes if n.name == "monitor")
+        use_result = next(n for n in fetched2.nodes if n.name == "use-result")
+        assert monitor2.status == "completed"
+        assert use_result.status == "running"
