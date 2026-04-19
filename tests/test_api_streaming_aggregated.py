@@ -484,3 +484,80 @@ async def test_sdk_aggregator_matches_call_for_same_message():
     assert resp_call.content == resp_stream.content
     assert resp_call.stop_reason == resp_stream.stop_reason
     assert resp_call.usage == resp_stream.usage
+
+
+# ---------------------------------------------------------------------------
+# F048 regression: SdkAnthropicClient._message_to_content must strip SDK
+# helper-only fields (parsed_output etc.) so they don't round-trip back to
+# the API as "Extra inputs are not permitted" 400s.
+# ---------------------------------------------------------------------------
+
+
+def test_sdk_message_to_content_strips_parsed_output_from_text():
+    """messages.stream() helper sets `parsed_output` on text blocks; the
+    server rejects it on the NEXT request. _message_to_content must
+    whitelist fields, not model_dump everything."""
+    block = SimpleNamespace(type="text", text="hello world", citations=None)
+    # The SDK helper attaches this; Anthropic server rejects it.
+    block.parsed_output = {"should": "be-stripped"}
+
+    msg = SimpleNamespace(content=[block])
+    result = SdkAnthropicClient._message_to_content(msg)
+
+    assert result == [{"type": "text", "text": "hello world"}]
+    assert "parsed_output" not in result[0]
+
+
+def test_sdk_message_to_content_strips_parsed_output_from_tool_use():
+    block = SimpleNamespace(type="tool_use", id="toolu_abc", name="recall", input={"q": 1})
+    block.parsed_output = "helper-only"
+
+    msg = SimpleNamespace(content=[block])
+    result = SdkAnthropicClient._message_to_content(msg)
+
+    assert result == [{"type": "tool_use", "id": "toolu_abc", "name": "recall", "input": {"q": 1}}]
+    assert "parsed_output" not in result[0]
+
+
+def test_sdk_message_to_content_strips_parsed_output_from_thinking():
+    block = SimpleNamespace(type="thinking", thinking="Let me think.", signature="sig-1")
+    block.parsed_output = "helper-only"
+
+    msg = SimpleNamespace(content=[block])
+    result = SdkAnthropicClient._message_to_content(msg)
+
+    assert result == [{"type": "thinking", "thinking": "Let me think.", "signature": "sig-1"}]
+    assert "parsed_output" not in result[0]
+
+
+def test_sdk_message_to_content_strips_parsed_output_from_unknown_block():
+    """Unknown block types fall back to model_dump — that path must also
+    strip parsed_output defensively."""
+    raw = MagicMock()
+    raw.type = "future_new_block_type"
+    raw.model_dump.return_value = {
+        "type": "future_new_block_type",
+        "payload": "x",
+        "parsed_output": "strip-me",
+    }
+
+    msg = SimpleNamespace(content=[raw])
+    result = SdkAnthropicClient._message_to_content(msg)
+
+    assert result[0]["type"] == "future_new_block_type"
+    assert result[0]["payload"] == "x"
+    assert "parsed_output" not in result[0]
+
+
+def test_sdk_message_to_content_preserves_citations_on_text():
+    """If the block has citations, they must survive the whitelist (they
+    are valid Anthropic API content)."""
+    citation = SimpleNamespace(type="char_location", cited_text="q")
+    citation.model_dump = lambda: {"type": "char_location", "cited_text": "q"}
+
+    block = SimpleNamespace(type="text", text="answer", citations=[citation])
+    msg = SimpleNamespace(content=[block])
+    result = SdkAnthropicClient._message_to_content(msg)
+
+    assert result[0]["text"] == "answer"
+    assert result[0]["citations"] == [{"type": "char_location", "cited_text": "q"}]
