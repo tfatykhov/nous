@@ -159,6 +159,7 @@ All shipped implementation specs with PR references:
 | F042 | [Cross-Encoder Reranking](F042-cross-encoder-reranking.md) | ✅ Shipped | Cross-encoder reranking stage in recall_deep — sigmoid-normalized scores, async executor, head-truncation, feature-flagged, optional sentence-transformers dep |
 | F043 | [CE Rerank Sleep Backfill](F043-ce-rerank-sleep-backfill.md) | ✅ Shipped | Cross-encoder reranking applied to F040 graph backfill during sleep — precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, `_ce_stats` telemetry |
 | F045 | [CE-Aware Thresholds](F045-ce-aware-thresholds.md) | ✅ Shipped | Relaxed per-relation cosine thresholds + 80-char content guard for CE backfill. `fact_fact=0.65` empirically validated at 80% LLM-judged precision on 2026-04-14 A/B. Routes to CE-mode thresholds only when `ce_backfill_enabled=True`. |
+| F046 | [DAG Node Timeout Config](F046-dag-node-timeout-config.md) | ✅ Shipped | Env-var-driven DAG node timeouts: `NOUS_DAG_NODE_DEFAULT_TIMEOUT=600`, `NOUS_DAG_NODE_MAX_TIMEOUT=7200`. `DAGNodeSpec.timeout_seconds` becomes `int \| None`; Settings injected into `DAGStore` + `DAGOrchestrator`; defensive clamp at all 3 orchestrator read sites. Unblocks long-running DAG nodes (Claude Code, deep-research) previously capped at 600 s. Closes #327. |
 
 ### Phase 2 — Quality (next to build)
 

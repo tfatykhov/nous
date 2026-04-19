@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 
+from nous.config import Settings
 from nous.dag.schemas import DAGCreateRequest
 from nous.storage.database import Database
 from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG
@@ -21,9 +22,10 @@ MAX_ACTIVE_DAGS = 5
 class DAGStore:
     """CRUD operations for DAG orchestration."""
 
-    def __init__(self, database: Database, agent_id: str) -> None:
+    def __init__(self, database: Database, agent_id: str, settings: Settings) -> None:
         self._db = database
         self._agent_id = agent_id
+        self._settings = settings
 
     async def create(self, request: DAGCreateRequest) -> ExecutionDAG:
         """Create a DAG with nodes and edges from a validated request.
@@ -64,6 +66,10 @@ class DAGStore:
             node_map: dict[str, DAGNode] = {}
             for spec in request.nodes:
                 wave = waves.get(spec.name, 0)
+                resolved_timeout = min(
+                    spec.timeout_seconds if spec.timeout_seconds is not None else self._settings.dag_node_default_timeout,
+                    self._settings.dag_node_max_timeout,
+                )
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,
@@ -75,7 +81,7 @@ class DAGStore:
                     tools=spec.tools,
                     frame_type=spec.frame_type,
                     model=spec.model,
-                    timeout_seconds=spec.timeout_seconds,
+                    timeout_seconds=resolved_timeout,
                     completion_condition=spec.completion_condition,
                     completion_check=spec.completion_check,
                     completion_check_interval=spec.completion_check_interval,

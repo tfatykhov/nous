@@ -7,6 +7,7 @@ import uuid
 import pytest
 import pytest_asyncio
 
+from nous.config import Settings
 from nous.dag.schemas import (
     DAGCreateRequest,
     DAGEdgeSpec,
@@ -19,7 +20,25 @@ from nous.dag.store import DAGStore, MAX_ACTIVE_DAGS
 async def store(db):
     """DAGStore instance with unique agent_id per test."""
     agent_id = f"test-dag-store-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id)
+    return DAGStore(db, agent_id, Settings())
+
+
+# F046: hermetic Settings for timeout resolution tests — explicit values
+# so the tests don't care about ambient NOUS_DAG_NODE_* env.
+_TEST_DAG_SETTINGS = Settings(
+    dag_node_default_timeout=600,
+    dag_node_max_timeout=7200,
+)
+
+
+@pytest.fixture
+def dag_settings():
+    return _TEST_DAG_SETTINGS
+
+
+@pytest_asyncio.fixture
+async def agent_id():
+    return f"test-dag-store-{uuid.uuid4().hex[:8]}"
 
 
 def _simple_request(name: str = "test-dag") -> DAGCreateRequest:
@@ -197,8 +216,8 @@ class TestDAGStoreIsolation:
     @pytest.mark.asyncio
     async def test_update_node_cross_agent_rejected(self, db):
         """update_node cannot modify nodes belonging to another agent's DAG."""
-        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}")
-        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}")
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings())
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings())
 
         dag = await store_a.create(_simple_request("isolation-test"))
         node_id = dag.nodes[0].id
@@ -214,10 +233,58 @@ class TestDAGStoreIsolation:
     @pytest.mark.asyncio
     async def test_get_dag_cross_agent_rejected(self, db):
         """get_dag returns None for another agent's DAG."""
-        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}")
-        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}")
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings())
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings())
 
         dag = await store_a.create(_simple_request("cross-agent-test"))
 
         fetched = await store_b.get_dag(dag.id)
         assert fetched is None
+
+
+class TestDAGStoreTimeoutResolution:
+    """F046: Store resolves None→default and clamps to max at insert."""
+
+    @pytest.mark.asyncio
+    async def test_create_resolves_none_to_default(self, db, agent_id, dag_settings):
+        store = DAGStore(db, agent_id, dag_settings)
+        req = DAGCreateRequest(
+            name="resolve-none",
+            nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions="x")],
+        )
+        dag = await store.create(req)
+        assert dag.nodes[0].timeout_seconds == dag_settings.dag_node_default_timeout
+
+    @pytest.mark.asyncio
+    async def test_create_clamps_to_max(self, db, agent_id, dag_settings):
+        store = DAGStore(db, agent_id, dag_settings)
+        req = DAGCreateRequest(
+            name="clamp-max",
+            nodes=[
+                DAGNodeSpec(
+                    name="n",
+                    type=DAGNodeType.subtask,
+                    instructions="x",
+                    timeout_seconds=999999,
+                )
+            ],
+        )
+        dag = await store.create(req)
+        assert dag.nodes[0].timeout_seconds == dag_settings.dag_node_max_timeout
+
+    @pytest.mark.asyncio
+    async def test_create_preserves_explicit_value(self, db, agent_id, dag_settings):
+        store = DAGStore(db, agent_id, dag_settings)
+        req = DAGCreateRequest(
+            name="preserve-explicit",
+            nodes=[
+                DAGNodeSpec(
+                    name="n",
+                    type=DAGNodeType.subtask,
+                    instructions="x",
+                    timeout_seconds=300,
+                )
+            ],
+        )
+        dag = await store.create(req)
+        assert dag.nodes[0].timeout_seconds == 300

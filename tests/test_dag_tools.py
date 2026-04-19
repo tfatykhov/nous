@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
+from nous.config import Settings
 from nous.dag.orchestrator import DAGOrchestrator
 from nous.dag.schemas import (
     DAGCreateRequest,
@@ -23,7 +24,7 @@ from nous.api.tools import ToolDispatcher, register_dag_tools
 async def dag_store(db):
     """DAGStore instance with unique agent_id."""
     agent_id = f"test-dag-tools-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id=agent_id)
+    return DAGStore(db, agent_id=agent_id, settings=Settings())
 
 
 @pytest_asyncio.fixture
@@ -33,6 +34,7 @@ async def dag_orchestrator(dag_store):
         store=dag_store,
         subtask_mgr=AsyncMock(),
         dynamic_loader=AsyncMock(),
+        settings=Settings(),
     )
 
 

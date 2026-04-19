@@ -237,6 +237,18 @@ class Settings(BaseSettings):
     subtask_default_timeout: int = 120
     subtask_max_timeout: int = 900
     subtask_max_concurrent: int = 3
+
+    # F046: DAG node timeouts
+    dag_node_default_timeout: int = Field(
+        600,
+        ge=1,
+        description="Default timeout (seconds) for DAG nodes when node spec omits timeout_seconds",
+    )
+    dag_node_max_timeout: int = Field(
+        7200,
+        ge=1,
+        description="Hard ceiling (seconds) for DAG node timeout_seconds",
+    )
     schedule_enabled: bool = True
     schedule_check_interval: int = 60
     telegram_bot_token: str | None = None
@@ -510,6 +522,15 @@ class Settings(BaseSettings):
                     f"thinking_budget ({self.thinking_budget}) must be < "
                     f"max_tokens ({self.max_tokens}). Increase max_tokens."
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dag_timeouts(self) -> "Settings":
+        if self.dag_node_default_timeout > self.dag_node_max_timeout:
+            raise ValueError(
+                f"dag_node_default_timeout ({self.dag_node_default_timeout}) must be <= "
+                f"dag_node_max_timeout ({self.dag_node_max_timeout})"
+            )
         return self
 
     @property

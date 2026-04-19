@@ -1830,7 +1830,7 @@ def register_dag_tools(
                     tools=n.get("tools"),
                     frame_type=n.get("frame_type"),
                     model=n.get("model"),
-                    timeout_seconds=n.get("timeout_seconds", 120),
+                    timeout_seconds=n.get("timeout_seconds"),
                     completion_condition=n.get("completion_condition"),
                     completion_check=n.get("completion_check"),
                     completion_check_interval=n.get("completion_check_interval"),
@@ -1950,7 +1950,7 @@ def register_dag_tools(
         "properties": {
             "name": {"type": "string", "description": "DAG name"},
             "description": {"type": "string"},
-            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer"}, "completion_condition": {"type": "string"}, "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."}, "completion_check_interval": {"type": "integer", "description": "Seconds between completion check polls (default: every tick)"}, "max_check_attempts": {"type": "integer", "description": "Max poll attempts before node fails"}}, "required": ["name", "type", "instructions"]}},
+            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT)"}, "completion_condition": {"type": "string"}, "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."}, "completion_check_interval": {"type": "integer", "description": "Seconds between completion check polls (default: every tick)"}, "max_check_attempts": {"type": "integer", "description": "Max poll attempts before node fails"}}, "required": ["name", "type", "instructions"]}},
             "edges": {"type": "array", "items": {"type": "object", "properties": {"from_node": {"type": "string"}, "to_node": {"type": "string"}, "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow"]}}, "required": ["from_node", "to_node"]}},
             "source": {"type": "string"},
             "token_budget": {"type": "integer"},
