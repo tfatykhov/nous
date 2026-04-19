@@ -72,7 +72,14 @@ class DAGNodeSpec(BaseModel):
     tools: list[str] | None = Field(None, description="Allowed tools for this node")
     frame_type: str | None = Field(None, description="Cognitive frame type")
     model: str | None = Field(None, description="LLM model override")
-    timeout_seconds: int = Field(120, ge=1, le=600, description="Execution timeout")
+    timeout_seconds: int | None = Field(
+        None,
+        ge=1,
+        description=(
+            "Execution timeout (seconds). None means 'use NOUS_DAG_NODE_DEFAULT_TIMEOUT'. "
+            "Values above NOUS_DAG_NODE_MAX_TIMEOUT are clamped at insert."
+        ),
+    )
     completion_condition: str | None = Field(None, description="Optional completion condition")
     completion_check: str | None = Field(
         None,

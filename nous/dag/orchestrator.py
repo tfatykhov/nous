@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
+from nous.config import Settings
 from nous.dag.store import DAGStore
 from nous.storage.models import DAGNode, ExecutionDAG
 
@@ -51,11 +52,14 @@ class DAGOrchestrator:
         subtask_mgr: SubtaskManager | None = None,
         dynamic_loader: DynamicCheckLoader | None = None,
         bus: EventBus | None = None,
+        *,
+        settings: Settings,
     ) -> None:
         self._store = store
         self._subtask_mgr = subtask_mgr
         self._dynamic_loader = dynamic_loader
         self._bus = bus
+        self._settings = settings
         self._lock = asyncio.Lock()
 
     async def tick(self) -> int:
@@ -359,11 +363,12 @@ class DAGOrchestrator:
                 if ref_time.tzinfo is None:
                     ref_time = ref_time.replace(tzinfo=UTC)
                 elapsed_total = (datetime.now(UTC) - ref_time).total_seconds()
-                if elapsed_total > node.timeout_seconds:
+                effective_timeout = self._effective_timeout(node)
+                if elapsed_total > effective_timeout:
                     await self._store.update_node(
                         node.id,
                         status="failed",
-                        error=f"Completion check timed out after {node.timeout_seconds}s ({node.check_attempts} attempts)",
+                        error=f"Completion check timed out after {effective_timeout}s ({node.check_attempts} attempts)",
                         completed_at=datetime.now(UTC),
                     )
                     node.status = "failed"
@@ -475,6 +480,14 @@ class DAGOrchestrator:
         except Exception as e:
             logger.error("Completion check error for node %s: %s", node.name, e)
             return CheckResult("pending", str(e))
+
+    def _effective_timeout(self, node: DAGNode) -> int:
+        """Clamp node.timeout_seconds to settings.dag_node_max_timeout.
+
+        Defensive re-clamp: store already clamps at insert, but historical rows
+        or direct DB writes may carry values above the current ceiling.
+        """
+        return min(node.timeout_seconds, self._settings.dag_node_max_timeout)
 
     async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
         """Read result from status file convention, fall back to node's existing result."""
@@ -621,7 +634,7 @@ class DAGOrchestrator:
                 task=augmented,
                 frame_type=node.frame_type,
                 model=node.model,
-                timeout=node.timeout_seconds,
+                timeout=self._effective_timeout(node),
                 metadata={"dag_id": str(dag.id), "node_name": node.name},
             )
             await self._store.update_node(
@@ -665,7 +678,7 @@ class DAGOrchestrator:
                 prompt=augmented,
                 tools=node.tools,
                 interval_seconds=300,
-                timeout_seconds=node.timeout_seconds,
+                timeout_seconds=self._effective_timeout(node),
             )
             await self._store.update_node(
                 node.id,

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 
+from nous.config import Settings
 from nous.dag.orchestrator import CheckResult, DAGOrchestrator
 from nous.dag.schemas import (
     DAGCreateRequest,
@@ -23,7 +24,7 @@ from nous.dag.store import DAGStore
 async def store(db):
     """DAGStore instance with unique agent_id per test."""
     agent_id = f"test-dag-orch-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id)
+    return DAGStore(db, agent_id, Settings())
 
 
 @pytest.fixture
@@ -52,6 +53,7 @@ def orchestrator(store, subtask_mgr, dynamic_loader):
         store=store,
         subtask_mgr=subtask_mgr,
         dynamic_loader=dynamic_loader,
+        settings=Settings(),
     )
 
 

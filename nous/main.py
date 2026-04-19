@@ -575,12 +575,13 @@ async def create_components(settings: Settings) -> dict:
             from nous.dag.store import DAGStore
             from nous.dag.orchestrator import DAGOrchestrator
 
-            dag_store = DAGStore(database, agent_id=settings.agent_id)
+            dag_store = DAGStore(database, agent_id=settings.agent_id, settings=settings)
             dag_orchestrator = DAGOrchestrator(
                 store=dag_store,
                 subtask_mgr=heart.subtasks,
                 dynamic_loader=dynamic_loader,
                 bus=bus,
+                settings=settings,
             )
 
             if heartbeat_runner is not None:

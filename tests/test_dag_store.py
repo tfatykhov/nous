@@ -7,6 +7,7 @@ import uuid
 import pytest
 import pytest_asyncio
 
+from nous.config import Settings
 from nous.dag.schemas import (
     DAGCreateRequest,
     DAGEdgeSpec,
@@ -19,7 +20,7 @@ from nous.dag.store import DAGStore, MAX_ACTIVE_DAGS
 async def store(db):
     """DAGStore instance with unique agent_id per test."""
     agent_id = f"test-dag-store-{uuid.uuid4().hex[:8]}"
-    return DAGStore(db, agent_id)
+    return DAGStore(db, agent_id, Settings())
 
 
 def _simple_request(name: str = "test-dag") -> DAGCreateRequest:
@@ -197,8 +198,8 @@ class TestDAGStoreIsolation:
     @pytest.mark.asyncio
     async def test_update_node_cross_agent_rejected(self, db):
         """update_node cannot modify nodes belonging to another agent's DAG."""
-        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}")
-        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}")
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings())
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings())
 
         dag = await store_a.create(_simple_request("isolation-test"))
         node_id = dag.nodes[0].id
@@ -214,8 +215,8 @@ class TestDAGStoreIsolation:
     @pytest.mark.asyncio
     async def test_get_dag_cross_agent_rejected(self, db):
         """get_dag returns None for another agent's DAG."""
-        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}")
-        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}")
+        store_a = DAGStore(db, f"agent-a-{uuid.uuid4().hex[:8]}", Settings())
+        store_b = DAGStore(db, f"agent-b-{uuid.uuid4().hex[:8]}", Settings())
 
         dag = await store_a.create(_simple_request("cross-agent-test"))
 

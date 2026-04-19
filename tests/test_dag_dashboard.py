@@ -7,6 +7,7 @@ import uuid
 import pytest
 import pytest_asyncio
 
+from nous.config import Settings
 from nous.dag.schemas import (
     DAGCreateRequest,
     DAGEdgeSpec,
@@ -31,7 +32,7 @@ async def test_get_dag_dashboard_data_empty(db):
 @pytest.mark.asyncio
 async def test_get_dag_dashboard_data_with_dag(db):
     agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
-    store = DAGStore(db, agent_id=agent_id)
+    store = DAGStore(db, agent_id=agent_id, settings=Settings())
     req = DAGCreateRequest(
         name="dashboard-test",
         nodes=[
@@ -59,7 +60,7 @@ async def test_get_dag_dashboard_data_with_dag(db):
 async def test_get_dag_dashboard_recent_dags(db):
     """Completed DAGs appear in recent_dags, not active_dags."""
     agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
-    store = DAGStore(db, agent_id=agent_id)
+    store = DAGStore(db, agent_id=agent_id, settings=Settings())
     req = DAGCreateRequest(
         name="completed-dag",
         nodes=[
@@ -86,7 +87,7 @@ async def test_get_dag_dashboard_recent_dags(db):
 async def test_get_dag_dashboard_stats_success_rate(db):
     """Success rate is computed from completed vs total finished."""
     agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
-    store = DAGStore(db, agent_id=agent_id)
+    store = DAGStore(db, agent_id=agent_id, settings=Settings())
 
     # Create and complete 2 DAGs, fail 1
     for i, status in enumerate(["completed", "completed", "failed"]):
@@ -115,7 +116,7 @@ async def test_get_dag_dashboard_stats_success_rate(db):
 async def test_get_dag_dashboard_node_and_edge_fields(db):
     """Active DAG nodes and edges have correct field structure."""
     agent_id = f"test-dag-dash-{uuid.uuid4().hex[:8]}"
-    store = DAGStore(db, agent_id=agent_id)
+    store = DAGStore(db, agent_id=agent_id, settings=Settings())
     req = DAGCreateRequest(
         name="field-test",
         nodes=[
