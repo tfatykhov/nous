@@ -1,6 +1,6 @@
 # F046: Configurable DAG Node Timeouts
 
-**Status:** Proposed
+**Status:** Shipped
 **Proposed by:** Tim
 **Date:** 2026-04-18
 **Depends on:** F038 (Unified DAG Orchestration — shipped), F038.1 (DAG Completion Check — shipped)
