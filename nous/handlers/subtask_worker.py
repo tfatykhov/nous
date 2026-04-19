@@ -150,6 +150,7 @@ class SubtaskWorkerPool:
                 is_subtask=True,
                 max_tool_calls=self._settings.subtask_tool_call_limit,
                 model_override=subtask.model or self._settings.background_model,
+                is_background=True,
             )
 
             await self._heart.subtasks.complete(subtask.id, response_text)

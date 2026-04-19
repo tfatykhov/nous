@@ -202,6 +202,7 @@ class AgentRunner:
         max_tool_calls: int | None = None,
         model_override: str | None = None,
         tool_filter: list[str] | None = None,  # F034.5: restrict available tools
+        is_background: bool = False,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -246,7 +247,7 @@ class AgentRunner:
             conversation.messages.append(Message(role="assistant", content=response_text))
             turn_result = TurnResult(response_text=response_text)
             await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
-            return response_text, usage
+            return response_text, turn_context, usage
 
         # F026: Get/create execution ledger and set turn
         ledger = self._get_or_create_ledger(session_id)
@@ -338,6 +339,7 @@ class AgentRunner:
                 user_message=user_message,
                 ledger=ledger,
                 tool_filter=tool_filter,
+                is_background=is_background,
             )
             conversation.messages.append(Message(role="assistant", content=response_text))
         except Exception as e:
@@ -620,12 +622,15 @@ class AgentRunner:
         tools: list[dict[str, Any]] | None = None,
         skip_thinking: bool = False,
         model_override: str | None = None,
+        is_background: bool = False,
     ) -> ApiResponse:
         """Call Anthropic Messages API via configured backend.
 
         Delegates to self._api.call() which handles retries and error mapping.
         Returns parsed ApiResponse with content blocks and stop_reason.
         F036: system_prompt may be str or dict[str, str] (tier split).
+        F048: when is_background=True and feature flag enabled, routes through
+        call_streaming_aggregated() to avoid idle-connection drops on long runs.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
@@ -634,6 +639,13 @@ class AgentRunner:
             system_prompt, messages, tools,
             skip_thinking=skip_thinking, model_override=model_override,
         )
+        if is_background:
+            if self._settings.api_background_streaming_enabled:
+                return await self._api.call_streaming_aggregated(payload)
+            logger.warning(
+                "F048: is_background=True but NOUS_API_BACKGROUND_STREAMING_ENABLED=false; "
+                "falling back to non-streaming call() — idle-connection drops may recur"
+            )
         return await self._api.call(payload)
 
     async def _call_api_stream(
@@ -1110,6 +1122,7 @@ class AgentRunner:
         user_message: str = "",
         ledger: ExecutionLedger | None = None,
         tool_filter: list[str] | None = None,  # F034.5: restrict to named tools
+        is_background: bool = False,
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1157,6 +1170,7 @@ class AgentRunner:
                 messages=messages,
                 tools=tools if tools else None,
                 model_override=model_override,
+                is_background=is_background,
             )
 
             # F035.4: Update context log with response metadata
@@ -1303,6 +1317,7 @@ class AgentRunner:
                     messages=messages,
                     tools=None,
                     model_override=model_override,
+                    is_background=is_background,
                 )
                 if final.usage:
                     total_usage["input_tokens"] += final.usage.get("input_tokens", 0)
@@ -1335,6 +1350,7 @@ class AgentRunner:
                 messages=messages,
                 tools=None,
                 model_override=model_override,
+                is_background=is_background,
             )
             if final_response.usage:
                 total_usage["input_tokens"] += final_response.usage.get("input_tokens", 0)

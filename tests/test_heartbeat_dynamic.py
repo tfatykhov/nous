@@ -1572,3 +1572,78 @@ class TestRunnerCallback:
         mock_create_task.assert_called_once()
         call_kwargs = mock_create_task.call_args
         assert "trigger_cb_check" in call_kwargs[1]["name"]
+
+
+# ---------------------------------------------------------------------------
+# F048: DynamicCheck.run uses background streaming path
+# ---------------------------------------------------------------------------
+
+
+class TestF048DynamicCheckBackgroundStreaming:
+    """F048: DynamicCheck._run_check forwards is_background=True to runner."""
+
+    @pytest.mark.asyncio
+    async def test_dynamic_check_run_uses_background_streaming(self):
+        """F048: see nous/heartbeat/dynamic.py:130 — run_turn is called with
+        is_background=True so the cognitive triage lives under the streaming
+        path instead of the blocking call()."""
+        runner = AsyncMock()
+        runner.run_turn = AsyncMock(return_value=(
+            '{"has_findings": false, "findings": []}',
+            MagicMock(),
+            {"input_tokens": 70, "output_tokens": 20},
+        ))
+        runner.end_conversation = AsyncMock()
+
+        check = _make_dynamic_check(
+            name="bg_check", tools=["web_search"], runner=runner,
+        )
+        await check.run()
+
+        runner.run_turn.assert_awaited_once()
+        call_kwargs = runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_background") is True
+
+    @pytest.mark.asyncio
+    async def test_execute_callback_uses_background_streaming(self):
+        """F048: regression test for the 5th call site — HeartbeatRunner
+        ._execute_callback at nous/heartbeat/runner.py:580 must pass
+        is_background=True to the triage runner. Without this, on_complete
+        callbacks silently revert to non-streaming path and can hit idle-
+        connection drops on long callback tasks."""
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        settings.heartbeat_model = None
+        settings.background_model = "claude-sonnet-4-6"
+        registry = CheckRegistry()
+        mock_runner = AsyncMock()
+        runner = HeartbeatRunner(
+            settings=settings, registry=registry, runner=mock_runner,
+            brain=AsyncMock(), heart=MagicMock(), bus=None,
+            http_client=AsyncMock(),
+        )
+
+        triage_runner = AsyncMock()
+        triage_runner.run_turn = AsyncMock(return_value=(
+            "callback done", MagicMock(),
+            {"input_tokens": 150, "output_tokens": 50},
+        ))
+        triage_runner.end_conversation = AsyncMock()
+        runner._get_triage_runner = MagicMock(return_value=triage_runner)
+
+        check = DynamicCheck(
+            check_id="cb-f048", name="cb_bg",
+            prompt="Check Z", tools=["web_search"],
+            on_complete_prompt="Do callback work",
+            on_complete_tools=["web_search"],
+        )
+
+        await runner._execute_callback(check)
+
+        triage_runner.run_turn.assert_awaited()
+        call_kwargs = triage_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_background") is True, (
+            "on_complete callback must forward is_background=True "
+            "(regression check for the 5th F048 call site)"
+        )
