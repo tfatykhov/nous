@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from pydantic import ValidationError
 
 from nous.dag.schemas import (
     DAGCreateRequest,
@@ -352,3 +353,31 @@ class TestDAGCreateRequest:
         )
         waves = req.compute_waves()
         assert all(w == 0 for w in waves.values())
+
+
+# ---------------------------------------------------------------------------
+# F046: DAGNodeSpec timeout field validation (Pydantic-level)
+# ---------------------------------------------------------------------------
+
+
+class TestDAGNodeSpecTimeout:
+    """F046: Pydantic spec-level timeout validation.
+
+    Separate from TestDAGNodeModel (which tests the ORM default of 120).
+    Spec default is now None (meaning 'use NOUS_DAG_NODE_DEFAULT_TIMEOUT');
+    store layer resolves None and clamps to the configured max at insert.
+    """
+
+    def test_timeout_accepts_values_above_legacy_ceiling(self):
+        node = DAGNodeSpec(name="x", type=DAGNodeType.subtask, timeout_seconds=3600)
+        assert node.timeout_seconds == 3600
+
+    def test_timeout_default_is_none(self):
+        node = DAGNodeSpec(name="x", type=DAGNodeType.subtask)
+        assert node.timeout_seconds is None
+
+    def test_timeout_rejects_non_positive(self):
+        with pytest.raises(ValidationError):
+            DAGNodeSpec(name="x", type=DAGNodeType.subtask, timeout_seconds=0)
+        with pytest.raises(ValidationError):
+            DAGNodeSpec(name="x", type=DAGNodeType.subtask, timeout_seconds=-1)

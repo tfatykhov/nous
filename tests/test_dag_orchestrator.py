@@ -19,6 +19,7 @@ from nous.dag.schemas import (
     DAGNodeType,
 )
 from nous.dag.store import DAGStore
+from nous.storage.models import DAGNode, ExecutionDAG
 
 @pytest_asyncio.fixture
 async def store(db):
@@ -1142,3 +1143,40 @@ class TestCheckNodeCompletionCheck:
         use_result = next(n for n in fetched2.nodes if n.name == "use-result")
         assert monitor2.status == "completed"
         assert use_result.status == "running"
+
+
+class TestDAGOrchestratorTimeoutClamp:
+    """F046: Defensive re-clamp of node.timeout_seconds at launch time.
+
+    Store already clamps at insert, but historical rows or direct DB writes
+    may carry values above the current ceiling — the orchestrator's
+    _effective_timeout() helper clamps at each read site.
+    """
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_clamps_node_timeout_to_max(
+        self, orchestrator, subtask_mgr
+    ):
+        settings = orchestrator._settings
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=uuid.uuid4(),
+            name="n",
+            node_type="subtask",
+            status="ready",
+            timeout_seconds=99999,  # above ceiling
+            wave=0,
+            instructions="x",
+        )
+        dag = ExecutionDAG(
+            id=uuid.uuid4(),
+            agent_id="test",
+            name="t",
+            status="running",
+            nodes=[node],
+            edges=[],
+        )
+        await orchestrator._launch_subtask_node(node, dag)
+        subtask_mgr.create.assert_called_once()
+        _, kwargs = subtask_mgr.create.call_args
+        assert kwargs["timeout"] == settings.dag_node_max_timeout

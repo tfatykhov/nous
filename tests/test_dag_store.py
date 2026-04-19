@@ -23,6 +23,26 @@ async def store(db):
     return DAGStore(db, agent_id, Settings())
 
 
+# F046: hermetic Settings for timeout resolution tests — explicit values
+# so the tests don't care about ambient NOUS_DAG_NODE_* env. Passing by the
+# fields' validation_alias (the env-var names) because the current Settings
+# declaration uses validation_alias, which shadows the field name.
+_TEST_DAG_SETTINGS = Settings(
+    NOUS_DAG_NODE_DEFAULT_TIMEOUT=600,
+    NOUS_DAG_NODE_MAX_TIMEOUT=7200,
+)
+
+
+@pytest.fixture
+def dag_settings():
+    return _TEST_DAG_SETTINGS
+
+
+@pytest_asyncio.fixture
+async def agent_id():
+    return f"test-dag-store-{uuid.uuid4().hex[:8]}"
+
+
 def _simple_request(name: str = "test-dag") -> DAGCreateRequest:
     """Create a simple single-node DAG request."""
     return DAGCreateRequest(
@@ -222,3 +242,51 @@ class TestDAGStoreIsolation:
 
         fetched = await store_b.get_dag(dag.id)
         assert fetched is None
+
+
+class TestDAGStoreTimeoutResolution:
+    """F046: Store resolves None→default and clamps to max at insert."""
+
+    @pytest.mark.asyncio
+    async def test_create_resolves_none_to_default(self, db, agent_id, dag_settings):
+        store = DAGStore(db, agent_id, dag_settings)
+        req = DAGCreateRequest(
+            name="resolve-none",
+            nodes=[DAGNodeSpec(name="n", type=DAGNodeType.subtask, instructions="x")],
+        )
+        dag = await store.create(req)
+        assert dag.nodes[0].timeout_seconds == dag_settings.dag_node_default_timeout
+
+    @pytest.mark.asyncio
+    async def test_create_clamps_to_max(self, db, agent_id, dag_settings):
+        store = DAGStore(db, agent_id, dag_settings)
+        req = DAGCreateRequest(
+            name="clamp-max",
+            nodes=[
+                DAGNodeSpec(
+                    name="n",
+                    type=DAGNodeType.subtask,
+                    instructions="x",
+                    timeout_seconds=999999,
+                )
+            ],
+        )
+        dag = await store.create(req)
+        assert dag.nodes[0].timeout_seconds == dag_settings.dag_node_max_timeout
+
+    @pytest.mark.asyncio
+    async def test_create_preserves_explicit_value(self, db, agent_id, dag_settings):
+        store = DAGStore(db, agent_id, dag_settings)
+        req = DAGCreateRequest(
+            name="preserve-explicit",
+            nodes=[
+                DAGNodeSpec(
+                    name="n",
+                    type=DAGNodeType.subtask,
+                    instructions="x",
+                    timeout_seconds=300,
+                )
+            ],
+        )
+        dag = await store.create(req)
+        assert dag.nodes[0].timeout_seconds == 300
