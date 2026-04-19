@@ -264,3 +264,164 @@ class TestClassifierErrorHandling:
         assert result["total"] == 2
         assert result["classified"] == 1
         assert result["errors"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Summary / observability (INFO log tier breakdown + budget-exhausted WARNING)
+# ---------------------------------------------------------------------------
+
+
+class TestBackfillSummary:
+    @pytest.mark.asyncio
+    async def test_summary_includes_tier_counts(self, monkeypatch):
+        """run_once return value has per-tier counts and LLM budget usage."""
+        class LockSession:
+            async def __aenter__(self_inner):
+                m = MagicMock()
+                res = MagicMock(); res.scalar = MagicMock(return_value=True)
+                m.execute = AsyncMock(return_value=res)
+                return m
+            async def __aexit__(self_inner, *a): return False
+
+        class UpdateSession:
+            async def __aenter__(self_inner):
+                m = MagicMock(); m.execute = AsyncMock(); m.commit = AsyncMock()
+                return m
+            async def __aexit__(self_inner, *a): return False
+
+        db = MagicMock()
+        db.session = MagicMock(side_effect=[
+            LockSession(),
+            UpdateSession(), UpdateSession(), UpdateSession(),
+        ])
+
+        classifier = MagicMock()
+        classifier._budget_check = None
+        tiers = iter(["llm", "heuristic_action", "default"])
+
+        async def classify(content, cat, tags):
+            return (True, 0.7, next(tiers))
+
+        classifier.classify = AsyncMock(side_effect=classify)
+        h = ActionabilityBackfillHandler(db, classifier, "agent-x", token_budget=10_000)
+
+        batches = iter([
+            [(uuid4(), "a", None, []), (uuid4(), "b", None, []), (uuid4(), "c", None, [])],
+            [],
+        ])
+
+        async def fake_fetch():
+            return next(batches)
+
+        monkeypatch.setattr(h, "_fetch_batch", fake_fetch)
+        summary = await h.run_once()
+
+        assert summary["total"] == 3
+        assert summary["classified"] == 3
+        assert summary["errors"] == 0
+        assert summary["tiers"] == {"llm": 1, "heuristic_action": 1, "default": 1}
+        assert summary["llm_calls_used"] == 1
+        assert summary["llm_budget"] == 40
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_emits_warning(self, monkeypatch, caplog):
+        """When LLM budget hits cap AND defaults happened, operator sees a
+        WARNING pointing at NOUS_ACTIONABILITY_BACKFILL_TOKEN_BUDGET."""
+        import logging as _logging
+
+        class LockSession:
+            async def __aenter__(self_inner):
+                m = MagicMock()
+                res = MagicMock(); res.scalar = MagicMock(return_value=True)
+                m.execute = AsyncMock(return_value=res)
+                return m
+            async def __aexit__(self_inner, *a): return False
+
+        class UpdateSession:
+            async def __aenter__(self_inner):
+                m = MagicMock(); m.execute = AsyncMock(); m.commit = AsyncMock()
+                return m
+            async def __aexit__(self_inner, *a): return False
+
+        db = MagicMock()
+        # token_budget=250 → _max_llm_calls=1. Two facts: 1st LLM (budget
+        # consumed), 2nd defaulted.
+        db.session = MagicMock(side_effect=[LockSession(), UpdateSession(), UpdateSession()])
+        classifier = MagicMock()
+        classifier._budget_check = None
+        tiers = iter(["llm", "default"])
+
+        async def classify(content, cat, tags):
+            return (False, 0.5, next(tiers))
+
+        classifier.classify = AsyncMock(side_effect=classify)
+        h = ActionabilityBackfillHandler(db, classifier, "agent-x", token_budget=250)
+
+        batches = iter([
+            [(uuid4(), "a", None, []), (uuid4(), "b", None, [])],
+            [],
+        ])
+
+        async def fake_fetch():
+            return next(batches)
+
+        monkeypatch.setattr(h, "_fetch_batch", fake_fetch)
+
+        with caplog.at_level(_logging.WARNING, logger="nous.handlers.actionability_backfill"):
+            summary = await h.run_once()
+
+        assert summary["llm_calls_used"] == 1
+        assert summary["llm_budget"] == 1
+        assert summary["tiers"].get("default", 0) == 1
+
+        warns = [r for r in caplog.records if r.levelno == _logging.WARNING]
+        assert any(
+            "budget exhausted" in r.getMessage()
+            and "NOUS_ACTIONABILITY_BACKFILL_TOKEN_BUDGET" in r.getMessage()
+            for r in warns
+        ), f"expected budget-exhausted WARNING; got: {[r.getMessage() for r in warns]}"
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_without_defaults_no_warning(self, monkeypatch, caplog):
+        """If budget is fully used but every fact was LLM-classified (no
+        defaults), no warning — there was nothing missed."""
+        import logging as _logging
+
+        class LockSession:
+            async def __aenter__(self_inner):
+                m = MagicMock()
+                res = MagicMock(); res.scalar = MagicMock(return_value=True)
+                m.execute = AsyncMock(return_value=res)
+                return m
+            async def __aexit__(self_inner, *a): return False
+
+        class UpdateSession:
+            async def __aenter__(self_inner):
+                m = MagicMock(); m.execute = AsyncMock(); m.commit = AsyncMock()
+                return m
+            async def __aexit__(self_inner, *a): return False
+
+        db = MagicMock()
+        db.session = MagicMock(side_effect=[LockSession(), UpdateSession()])
+        classifier = MagicMock()
+        classifier._budget_check = None
+
+        async def classify(content, cat, tags):
+            return (True, 0.9, "llm")
+
+        classifier.classify = AsyncMock(side_effect=classify)
+        h = ActionabilityBackfillHandler(db, classifier, "agent-x", token_budget=250)
+
+        batches = iter([[(uuid4(), "a", None, [])], []])
+
+        async def fake_fetch():
+            return next(batches)
+
+        monkeypatch.setattr(h, "_fetch_batch", fake_fetch)
+        with caplog.at_level(_logging.WARNING, logger="nous.handlers.actionability_backfill"):
+            await h.run_once()
+
+        assert not any(
+            "budget exhausted" in r.getMessage()
+            for r in caplog.records if r.levelno == _logging.WARNING
+        )
