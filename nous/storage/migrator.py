@@ -27,6 +27,24 @@ CREATE TABLE IF NOT EXISTS nous_system.schema_migrations (
 """
 
 
+def _split_sql_statements(sql: str) -> list[str]:
+    """Split a migration file into individual SQL statements.
+
+    Strips `-- ...` line comments BEFORE splitting on `;` so a semicolon
+    inside a comment does not break the splitter (see bug: migration 034
+    had "-- legacy rows; backfill..." that was mis-split into "backfill..."
+    and executed as SQL).
+
+    Block comments `/* ... */` are NOT handled — our migrations don't use
+    them. Dollar-quoted strings `$$...$$` would also need care; current
+    migrations don't use those either.
+    """
+    stripped = "\n".join(
+        ln for ln in sql.splitlines() if not ln.lstrip().startswith("--")
+    )
+    return [stmt.strip() for stmt in stripped.split(";") if stmt.strip()]
+
+
 async def run_migrations(engine: AsyncEngine) -> list[str]:
     """Apply pending SQL migrations and return list of newly applied names."""
     if not _MIGRATIONS_DIR.is_dir():
@@ -60,16 +78,8 @@ async def run_migrations(engine: AsyncEngine) -> list[str]:
 
             logger.info("Applying migration %s ...", path.name)
             # asyncpg doesn't support multiple statements in one execute(),
-            # so split on semicolons and run each statement individually.
-            for raw_stmt in sql.split(";"):
-                # Strip SQL comments (-- ...) before checking if empty
-                lines = [
-                    ln for ln in raw_stmt.splitlines()
-                    if ln.strip() and not ln.strip().startswith("--")
-                ]
-                stmt = "\n".join(lines).strip()
-                if not stmt:
-                    continue
+            # so split and run each statement individually.
+            for stmt in _split_sql_statements(sql):
                 await conn.execute(text(stmt))
             await conn.execute(
                 text(
