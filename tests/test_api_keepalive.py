@@ -274,3 +274,80 @@ async def test_sdk_client_no_socket_options_when_disabled(monkeypatch):
         assert transport._pool._http2 is True
     finally:
         await http_client.aclose()
+
+
+# ---------------------------------------------------------------------------
+# F048 codex P1: env-proxy preservation
+# ---------------------------------------------------------------------------
+
+
+async def test_httpx_client_preserves_https_env_proxy(monkeypatch):
+    """F048 codex P1: setting HTTPS_PROXY must result in an https:// mount
+    on the httpx client, even though transport= is set for socket_options."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy.example:3128")
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+    monkeypatch.delenv("http_proxy", raising=False)
+    monkeypatch.delenv("all_proxy", raising=False)
+
+    client = HttpxAnthropicClient(_make_settings())
+    await client.start()
+    try:
+        # httpx stores mounts as {URLPattern: AsyncBaseTransport}; URLPattern
+        # exposes .scheme for the scheme filter.
+        schemes = [pat.scheme for pat in client._http._mounts.keys()]
+        assert "https" in schemes, (
+            f"expected an https:// mount from HTTPS_PROXY; got schemes={schemes}"
+        )
+    finally:
+        await client.close()
+
+
+async def test_httpx_client_no_proxy_mount_when_env_unset(monkeypatch):
+    """F048: when no env proxies are set, no F048-added mounts are created."""
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+                "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.delenv(key, raising=False)
+
+    client = HttpxAnthropicClient(_make_settings())
+    await client.start()
+    try:
+        schemes = [pat.scheme for pat in client._http._mounts.keys()]
+        assert "http" not in schemes and "https" not in schemes and "all" not in schemes, (
+            f"expected no scheme mounts when env unset; got schemes={schemes}"
+        )
+    finally:
+        await client.close()
+
+
+async def test_sdk_client_preserves_http_env_proxy(monkeypatch):
+    """F048 codex P1: HTTP_PROXY must produce an http:// mount on the SDK
+    backend's inner httpx.AsyncClient."""
+    import anthropic as _anthropic_mod
+
+    monkeypatch.setattr(_anthropic_mod, "AsyncAnthropic", _SpyAsyncAnthropic)
+    monkeypatch.setenv("HTTP_PROXY", "http://corp-proxy.example:3128")
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("ALL_PROXY", raising=False)
+
+    client = SdkAnthropicClient(_make_settings())
+    await client.start()
+    try:
+        http_client = _SpyAsyncAnthropic.last_kwargs["http_client"]
+        schemes = [pat.scheme for pat in http_client._mounts.keys()]
+        assert "http" in schemes, (
+            f"expected an http:// mount from HTTP_PROXY; got schemes={schemes}"
+        )
+    finally:
+        await http_client.aclose()
+
+
+def test_build_transport_with_env_proxies_returns_empty_mounts_when_trust_env_false(monkeypatch):
+    """F048: trust_env=False short-circuits env iteration regardless of env state."""
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+    limits = httpx.Limits(max_connections=5, max_keepalive_connections=2)
+
+    _transport, mounts = ac_mod._build_transport_with_env_proxies(
+        http2=True, limits=limits, socket_options=None, trust_env=False,
+    )
+    assert mounts == {}

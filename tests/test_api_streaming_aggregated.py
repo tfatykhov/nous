@@ -231,6 +231,67 @@ async def test_httpx_aggregator_accepts_message_stop_as_terminal(monkeypatch):
     assert resp.stop_reason == "end_turn"
 
 
+async def test_httpx_aggregator_preserves_thinking_blocks(monkeypatch):
+    """F048 codex P2: when extended thinking is enabled, the aggregator must
+    reconstruct thinking blocks (thinking_start / thinking_delta /
+    signature_delta) into the same shape call() returns. Otherwise background
+    turns silently lose thinking content and the tool loop cannot capture
+    turn_result.thinking_blocks for downstream deliberation tracing."""
+    client = HttpxAnthropicClient(_settings())
+    client._http = MagicMock()
+
+    events = [
+        StreamEvent(type="message_start", usage={"input_tokens": 40}),
+        # thinking block at index 0
+        StreamEvent(type="thinking_start", block_index=0),
+        StreamEvent(type="thinking_delta", text="Let me think. ", block_index=0),
+        StreamEvent(type="thinking_delta", text="The answer is 42.", block_index=0),
+        StreamEvent(type="signature_delta", text="sig-abc123", block_index=0),
+        StreamEvent(type="block_stop", block_index=0),
+        # text block at index 1
+        StreamEvent(type="text_block_start", block_index=1),
+        StreamEvent(type="text_delta", text="42"),
+        StreamEvent(type="block_stop", block_index=1),
+        StreamEvent(type="done", stop_reason="end_turn", usage={"output_tokens": 20}),
+    ]
+    monkeypatch.setattr(client, "stream", _canned_stream(events))
+
+    resp = await client.call_streaming_aggregated({"model": "x", "messages": []})
+
+    assert len(resp.content) == 2
+    thinking = resp.content[0]
+    assert thinking["type"] == "thinking"
+    assert thinking["thinking"] == "Let me think. The answer is 42."
+    assert thinking["signature"] == "sig-abc123"
+    assert resp.content[1]["type"] == "text"
+    assert resp.content[1]["text"] == "42"
+
+
+async def test_httpx_aggregator_preserves_redacted_thinking_blocks(monkeypatch):
+    """F048 codex P2: redacted_thinking events (single complete events with
+    encrypted data) must land in content as {'type': 'redacted_thinking',
+    'data': ...}."""
+    client = HttpxAnthropicClient(_settings())
+    client._http = MagicMock()
+
+    events = [
+        StreamEvent(type="message_start", usage={"input_tokens": 10}),
+        StreamEvent(type="redacted_thinking", text="encrypted-payload", block_index=0),
+        StreamEvent(type="block_stop", block_index=0),
+        StreamEvent(type="text_block_start", block_index=1),
+        StreamEvent(type="text_delta", text="ok"),
+        StreamEvent(type="block_stop", block_index=1),
+        StreamEvent(type="done", stop_reason="end_turn", usage={"output_tokens": 5}),
+    ]
+    monkeypatch.setattr(client, "stream", _canned_stream(events))
+
+    resp = await client.call_streaming_aggregated({"model": "x", "messages": []})
+
+    assert len(resp.content) == 2
+    assert resp.content[0] == {"type": "redacted_thinking", "data": "encrypted-payload"}
+    assert resp.content[1]["type"] == "text"
+
+
 async def test_httpx_aggregator_logs_warning_on_malformed_tool_input_json(monkeypatch, caplog):
     """F048 P1: when joined tool_input fragments fail json.loads, aggregator
     must log a WARNING (not swallow silently) and fall back to input={}."""

@@ -119,6 +119,66 @@ def _build_socket_options(settings: Settings) -> list[tuple[int, int, int]] | No
     return opts
 
 
+def _build_transport_with_env_proxies(
+    *,
+    http2: bool,
+    limits: httpx.Limits,
+    socket_options: list[tuple[int, int, int]] | None,
+    trust_env: bool = True,
+) -> tuple[httpx.AsyncHTTPTransport, dict[str, httpx.AsyncHTTPTransport]]:
+    """Build an AsyncHTTPTransport with keep-alive options plus env-proxy mounts.
+
+    F048 codex P1: When a caller passes ``transport=`` to ``httpx.AsyncClient``,
+    httpx's auto-loading of ``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY``
+    environment variables is silently disabled
+    (``allow_env_proxies = trust_env and transport is None``). We need the
+    custom transport so we can set ``socket_options`` for TCP keep-alive, so
+    we replicate httpx's env-proxy logic manually by returning a ``mounts``
+    dict that the caller passes alongside ``transport=``.
+
+    Returns ``(default_transport, mounts)``. ``mounts`` is empty when no
+    proxies are set or ``trust_env=False``.
+    """
+    transport_kwargs: dict[str, Any] = {
+        "http2": http2,
+        "limits": limits,
+    }
+    if socket_options is not None:
+        transport_kwargs["socket_options"] = socket_options
+
+    default_transport = httpx.AsyncHTTPTransport(**transport_kwargs)
+
+    mounts: dict[str, httpx.AsyncHTTPTransport] = {}
+    if not trust_env:
+        return default_transport, mounts
+
+    import os
+
+    # Match httpx's auto-load matrix: HTTPS_PROXY binds https://, HTTP_PROXY
+    # binds http://, ALL_PROXY binds all:// (lowest precedence).
+    for env_keys, scheme in (
+        (("HTTPS_PROXY", "https_proxy"), "https://"),
+        (("HTTP_PROXY", "http_proxy"), "http://"),
+        (("ALL_PROXY", "all_proxy"), "all://"),
+    ):
+        proxy_url = next(
+            (os.environ[k] for k in env_keys if os.environ.get(k)),
+            None,
+        )
+        if not proxy_url:
+            continue
+        mounts[scheme] = httpx.AsyncHTTPTransport(
+            **transport_kwargs, proxy=proxy_url,
+        )
+
+    if mounts:
+        logger.info(
+            "F048: honouring env proxies for Anthropic transport: %s",
+            sorted(mounts.keys()),
+        )
+    return default_transport, mounts
+
+
 # ---------------------------------------------------------------------------
 # Httpx helpers (extracted from runner.py)
 # ---------------------------------------------------------------------------
@@ -349,11 +409,12 @@ class HttpxAnthropicClient:
         # F048: TCP keep-alive on the transport. When transport= is set on
         # httpx.AsyncClient, http2= and limits= kwargs on AsyncClient itself
         # are silently ignored — they must live on the transport instead.
+        # The helper also returns mounts= to preserve HTTP_PROXY/HTTPS_PROXY
+        # env-proxy routing, which httpx otherwise disables when a custom
+        # transport is passed (codex P1 on PR #337).
         sock_opts = _build_socket_options(settings)
-        transport = httpx.AsyncHTTPTransport(
-            http2=True,
-            limits=limits,
-            socket_options=sock_opts,
+        transport, mounts = _build_transport_with_env_proxies(
+            http2=True, limits=limits, socket_options=sock_opts,
         )
 
         self._http = httpx.AsyncClient(
@@ -361,13 +422,15 @@ class HttpxAnthropicClient:
             headers=headers,
             timeout=timeout,
             transport=transport,
+            mounts=mounts,
         )
 
         auth_type = "OAT/subscription" if is_oat else ("Bearer token" if auth_token else "API key")
         logger.info(
-            "httpx client initialized (auth: %s, http2: true, keepalive: %s)",
+            "httpx client initialized (auth: %s, http2: true, keepalive: %s, env_proxies: %s)",
             auth_type,
             bool(sock_opts),
+            bool(mounts),
         )
 
     async def close(self) -> None:
@@ -564,6 +627,8 @@ class HttpxAnthropicClient:
         blocks: dict[int, dict[str, Any]] = {}
         tool_input_fragments: dict[int, list[str]] = {}
         text_parts: dict[int, list[str]] = {}
+        thinking_parts: dict[int, list[str]] = {}
+        signature_parts: dict[int, list[str]] = {}
         last_text_block_index: int | None = None
         stop_reason: str | None = None
         usage: dict[str, int] = {}
@@ -586,12 +651,33 @@ class HttpxAnthropicClient:
                     "input": {},
                 }
                 tool_input_fragments[event.block_index] = []
+            elif event.type == "thinking_start":
+                # F048 codex P2: preserve extended-thinking blocks so callers
+                # that enable thinking_mode get the same content shape as
+                # non-streaming call() returns.
+                blocks[event.block_index] = {
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "",
+                }
+                thinking_parts[event.block_index] = []
+                signature_parts[event.block_index] = []
+            elif event.type == "redacted_thinking":
+                # Redacted thinking blocks arrive as a single complete event.
+                blocks[event.block_index] = {
+                    "type": "redacted_thinking",
+                    "data": event.text,
+                }
             elif event.type == "text_delta":
                 # _parse_sse_event drops block_index on text_delta; fragments
                 # belong to the most recently opened text block (mirrors the
                 # stream_chat reconstruction logic in runner.py).
                 if last_text_block_index is not None:
                     text_parts.setdefault(last_text_block_index, []).append(event.text)
+            elif event.type == "thinking_delta":
+                thinking_parts.setdefault(event.block_index, []).append(event.text)
+            elif event.type == "signature_delta":
+                signature_parts.setdefault(event.block_index, []).append(event.text)
             elif event.type == "tool_input_delta":
                 tool_input_fragments.setdefault(event.block_index, []).append(event.text)
             elif event.type == "block_stop":
@@ -613,11 +699,17 @@ class HttpxAnthropicClient:
                             joined[:200],
                         )
                         blocks[event.block_index]["input"] = {}
-                # Finalize text block content on close
-                if event.block_index in text_parts and event.block_index in blocks:
-                    if blocks[event.block_index].get("type") == "text":
-                        blocks[event.block_index]["text"] = "".join(
-                            text_parts[event.block_index]
+                # Finalize text / thinking block content on close
+                block = blocks.get(event.block_index)
+                if block is not None:
+                    if block.get("type") == "text" and event.block_index in text_parts:
+                        block["text"] = "".join(text_parts[event.block_index])
+                    elif block.get("type") == "thinking":
+                        block["thinking"] = "".join(
+                            thinking_parts.get(event.block_index, [])
+                        )
+                        block["signature"] = "".join(
+                            signature_parts.get(event.block_index, [])
                         )
             elif event.type == "done":
                 stop_reason = event.stop_reason or stop_reason
@@ -647,10 +739,15 @@ class HttpxAnthropicClient:
                 "(no 'message_delta' or 'message_stop'); response truncated"
             )
 
-        # Flush any text blocks that never saw a block_stop (defensive)
+        # Flush any text / thinking blocks that never saw a block_stop (defensive)
         for idx, parts in text_parts.items():
             if idx in blocks and blocks[idx].get("type") == "text" and not blocks[idx].get("text"):
                 blocks[idx]["text"] = "".join(parts)
+        for idx, parts in thinking_parts.items():
+            block = blocks.get(idx)
+            if block is not None and block.get("type") == "thinking" and not block.get("thinking"):
+                block["thinking"] = "".join(parts)
+                block["signature"] = "".join(signature_parts.get(idx, []))
 
         ordered_content = [blocks[i] for i in sorted(blocks)]
         return ApiResponse(
@@ -736,9 +833,10 @@ class SdkAnthropicClient:
 
         # Pass a custom httpx client with HTTP/2 enabled plus F048 TCP keep-alive.
         # http2= and limits= live on the transport; passing them on AsyncClient
-        # alongside transport= would be silently ignored.
+        # alongside transport= would be silently ignored. Also pass mounts= to
+        # preserve HTTP_PROXY/HTTPS_PROXY env-proxy routing (codex P1 on PR #337).
         sock_opts = _build_socket_options(settings)
-        sdk_transport = httpx.AsyncHTTPTransport(
+        sdk_transport, sdk_mounts = _build_transport_with_env_proxies(
             http2=True,
             limits=httpx.Limits(
                 max_connections=5,
@@ -746,15 +844,18 @@ class SdkAnthropicClient:
             ),
             socket_options=sock_opts,
         )
-        kwargs["http_client"] = httpx.AsyncClient(transport=sdk_transport)
+        kwargs["http_client"] = httpx.AsyncClient(
+            transport=sdk_transport, mounts=sdk_mounts,
+        )
 
         self._client = AsyncAnthropic(**kwargs)
 
         auth_type = "OAT/subscription" if is_oat else ("Bearer token" if auth_token else "API key")
         logger.info(
-            "Anthropic SDK client initialized (auth: %s, http2: true, keepalive: %s)",
+            "Anthropic SDK client initialized (auth: %s, http2: true, keepalive: %s, env_proxies: %s)",
             auth_type,
             bool(sock_opts),
+            bool(sdk_mounts),
         )
 
     async def close(self) -> None:
