@@ -118,6 +118,7 @@ class ActionabilityBackfillHandler:
         total = 0
         classified = 0
         errors = 0
+        tier_counts: dict[str, int] = {}
         start = time.monotonic()
 
         while True:
@@ -132,6 +133,7 @@ class ActionabilityBackfillHandler:
                     )
                     if tier == "llm":
                         self._llm_calls_used += 1
+                    tier_counts[tier] = tier_counts.get(tier, 0) + 1
                     await self._update_actionable(fact_id, actionable, conf)
                     classified += 1
                 except asyncio.CancelledError:
@@ -155,8 +157,21 @@ class ActionabilityBackfillHandler:
             "classified": classified,
             "errors": errors,
             "elapsed_s": round(elapsed, 2),
+            "tiers": tier_counts,
+            "llm_calls_used": self._llm_calls_used,
+            "llm_budget": self._max_llm_calls,
         }
         logger.info("F047 backfill complete: %s", summary)
+        if self._llm_calls_used >= self._max_llm_calls and tier_counts.get("default", 0) > 0:
+            logger.warning(
+                "F047 backfill: LLM budget exhausted (%d/%d calls) — %d fact(s) "
+                "fell through to the default path. Raise "
+                "NOUS_ACTIONABILITY_BACKFILL_TOKEN_BUDGET to cover them on the "
+                "next run.",
+                self._llm_calls_used,
+                self._max_llm_calls,
+                tier_counts.get("default", 0),
+            )
         return summary
 
     async def _fetch_batch(self) -> list[tuple[UUID, str, str | None, list[str]]]:

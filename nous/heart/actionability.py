@@ -236,8 +236,12 @@ class ActionabilityClassifier:
             )
             return (self._default_when_unknown, 0.3, "default")
 
-        return (
-            bool(result["actionable"]),
-            float(result.get("confidence", 0.5)),
-            "llm",
+        actionable = bool(result["actionable"])
+        confidence = float(result.get("confidence", 0.5))
+        logger.info(
+            "F047: LLM classified actionable=%s confidence=%.2f for %r",
+            actionable,
+            confidence,
+            content[:80],
         )
+        return (actionable, confidence, "llm")

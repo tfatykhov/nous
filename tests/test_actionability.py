@@ -201,6 +201,39 @@ class TestLLMTier:
         assert tier == "default"
 
     @pytest.mark.asyncio
+    async def test_llm_success_emits_info_log(self, monkeypatch, caplog):
+        """Successful LLM classifications must log at INFO so operators have
+        symmetric visibility with the default-path log, not silent success."""
+        import logging as _logging
+
+        async def fake_call(**kwargs):
+            return {"actionable": True, "confidence": 0.82, "reason": "explicit ask"}
+
+        monkeypatch.setattr(
+            "nous.handlers.call_background_llm_structured",
+            fake_call,
+        )
+
+        fake_llm = MagicMock()
+        c = ActionabilityClassifier(llm=fake_llm)
+
+        with caplog.at_level(_logging.INFO, logger="nous.heart.actionability"):
+            actionable, conf, tier = await c.classify("TODO is resolved")
+
+        assert tier == "llm" and actionable is True and conf == 0.82
+        success_logs = [
+            r for r in caplog.records
+            if r.levelno == _logging.INFO and "LLM classified" in r.getMessage()
+        ]
+        assert success_logs, (
+            "expected an INFO log on successful LLM classification; "
+            f"got records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        msg = success_logs[0].getMessage()
+        assert "actionable=True" in msg
+        assert "0.82" in msg
+
+    @pytest.mark.asyncio
     async def test_no_llm_no_heuristic_returns_default(self):
         c = ActionabilityClassifier(llm=None, default_when_unknown=False)
         # "banana" matches nothing
