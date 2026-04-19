@@ -282,6 +282,101 @@ class TestSelfInitiatedPromiseTracking:
 
 
 # ===========================================================================
+# TestObservationPatternSuppression — coverage for the 10 patterns added in
+# PR #323 (identity/contact facts, resolved/encoded notes, false-positive
+# meta-docs). Guards against accidental pattern removal.
+# ===========================================================================
+
+
+class TestObservationPatternSuppression:
+    """Regression guard for PR #323 identity/resolved _OBSERVATION_PATTERNS."""
+
+    @pytest.mark.parametrize("content", [
+        # Contact info / identity facts
+        "Tim's email address is tim@example.com",
+        "Profile: linkedin.com/in/tfatykhov",
+        "He has two email addresses for different accounts",
+        "His profile url is example.com/tim",
+        # Resolved / encoded patterns
+        "Resolved — admission guardrails now block stale facts",
+        "Task completion signals encoded as censors",
+        "Long-running failure modes encoded in the heart module",
+        "These facts are stale and should no longer surface",
+        "That flag is a false positive from last week",
+        "Recurring false alarm from Tuesday's heartbeat run",
+    ])
+    def test_pattern_triggers_is_observation(self, content: str):
+        """Each PR #323 pattern makes _is_observation return True."""
+        assert SelfInitiatedCheck._is_observation(content)
+
+
+# ===========================================================================
+# TestTagCasingSkip — tag membership must be case-insensitive.
+# Fact schema does not enforce tag casing; comparison must lowercase.
+# ===========================================================================
+
+
+class TestTagCasingSkip:
+    """Embedding-search tag skip ignores case for 'resolved' and 'identity'."""
+
+    @staticmethod
+    def _make_fact(tags: list[str], category: str | None = None) -> MagicMock:
+        f = MagicMock()
+        f.id = "fact-tag"
+        # Actionable-looking content so only the tag skip can suppress it.
+        f.content = "TODO: need to follow up on this pending action"
+        f.score = 0.9
+        f.category = category
+        f.tags = tags
+        return f
+
+    @staticmethod
+    def _wire_heart(heart: MagicMock, fact: MagicMock) -> None:
+        heart.facts.search = AsyncMock(return_value=[fact])
+        heart.search_episodes = AsyncMock(return_value=[])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tag_variant", ["resolved", "Resolved", "RESOLVED"])
+    async def test_resolved_tag_skipped_case_insensitively(self, tag_variant: str):
+        heart, brain = MagicMock(), MagicMock()
+        self._wire_heart(heart, self._make_fact(tags=[tag_variant]))
+        embeddings = MagicMock()
+        embeddings.embed_batch = AsyncMock(return_value=[[0.1] * 10] * 5)
+
+        check = SelfInitiatedCheck(heart, brain, _mock_settings(), embeddings=embeddings)
+        result = await check.run()
+
+        assert [f for f in result.findings if f.raw_data.get("detection") == "embedding"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tag_variant", ["identity", "Identity", "IDENTITY"])
+    async def test_identity_tag_skipped_case_insensitively(self, tag_variant: str):
+        heart, brain = MagicMock(), MagicMock()
+        self._wire_heart(heart, self._make_fact(tags=[tag_variant]))
+        embeddings = MagicMock()
+        embeddings.embed_batch = AsyncMock(return_value=[[0.1] * 10] * 5)
+
+        check = SelfInitiatedCheck(heart, brain, _mock_settings(), embeddings=embeddings)
+        result = await check.run()
+
+        assert [f for f in result.findings if f.raw_data.get("detection") == "embedding"] == []
+
+    @pytest.mark.asyncio
+    async def test_person_category_still_skipped(self):
+        """Regression guard: category='person' skip survives the tag-casing refactor."""
+        heart, brain = MagicMock(), MagicMock()
+        self._wire_heart(heart, self._make_fact(tags=[], category="person"))
+        embeddings = MagicMock()
+        embeddings.embed_batch = AsyncMock(return_value=[[0.1] * 10] * 5)
+
+        check = SelfInitiatedCheck(heart, brain, _mock_settings(), embeddings=embeddings)
+        result = await check.run()
+
+        assert [f for f in result.findings if f.raw_data.get("detection") == "embedding"] == []
+
+
+# ===========================================================================
 # TestEmailLLMClassification — 4 tests
 # ===========================================================================
 
