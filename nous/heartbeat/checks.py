@@ -268,10 +268,11 @@ class SelfInitiatedCheck(BaseCheck):
                         continue
                     seen_fact_ids.add(fid)
 
-                    # Skip person/identity category facts — never actionable
+                    # Skip person/identity category facts — never actionable.
+                    # Lowercase tags for comparison; schema doesn't enforce casing.
                     fact_category = getattr(fact, "category", None) or ""
-                    fact_tags = getattr(fact, "tags", None) or []
-                    if fact_category == "person" or "resolved" in fact_tags or "identity" in fact_tags:
+                    fact_tags_lower = {t.lower() for t in (getattr(fact, "tags", None) or [])}
+                    if fact_category == "person" or fact_tags_lower & {"resolved", "identity"}:
                         continue
 
                     # Check recency using fact score as proxy (hybrid search)
