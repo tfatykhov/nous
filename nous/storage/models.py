@@ -407,6 +407,10 @@ class Fact(Base):
     # F021.1: Per-dimension scores for dashboard analytics
     admission_scores = mapped_column(JSONB, nullable=True, default=None)
 
+    # F047: Actionability classification (learn-time verdict)
+    actionable: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    actionable_confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])
     source_decision: Mapped["Decision | None"] = relationship(foreign_keys=[source_decision_id])

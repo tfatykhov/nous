@@ -128,6 +128,9 @@ class FactDetail(BaseModel):
     tags: list[str]
     created_at: datetime
     contradiction_warning: ContradictionWarning | None = None
+    # F047: Actionability classification
+    actionable: bool | None = None
+    actionable_confidence: float | None = None
 
 
 class FactRejected(BaseModel):
@@ -152,6 +155,11 @@ class FactSummary(BaseModel):
     active: bool
     score: float | None = None
     superseded_by: UUID | None = None
+    # F047: Propagated from ORM so downstream consumers (heartbeat, etc.)
+    # can act on the persisted actionability verdict without a second DB hit.
+    actionable: bool | None = None
+    actionable_confidence: float | None = None
+    tags: list[str] = []
 
 
 # --- Procedures ---

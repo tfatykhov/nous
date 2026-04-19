@@ -476,6 +476,14 @@ class Settings(BaseSettings):
     rubric_max_versions_per_week: int = 1
     rubric_outcome_model: str = "claude-haiku-4-5-20251001"
 
+    # F047: Actionability classification
+    actionability_enabled: bool = True
+    actionability_llm_enabled: bool = True
+    actionability_model: str = "claude-haiku-4-5-20251001"
+    actionability_default: bool = False  # Fail-closed on uncertain facts
+    actionability_backfill_on_startup: bool = True
+    actionability_backfill_token_budget: int = 10_000  # rough Haiku daily cap
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

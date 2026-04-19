@@ -166,6 +166,7 @@ nous/
 | F043 | Cross-Encoder Reranking in Sleep-Cycle Graph Backfill (precision pre-filter before cosine gate, reuses F042 reranker, feature-flagged, _ce_stats telemetry) | #314 |
 | F045 | CE-Aware Cosine Thresholds + Content-Length Guard (relaxed per-relation thresholds when CE backfill is upstream, 80-char min to drop URL-only facts, empirically validated at 80% LLM-judged precision) | #315 |
 | F046 | [DAG Node Timeout Configuration](docs/features/F046-dag-node-timeout-config.md) (env-var-driven DAG node timeouts — `NOUS_DAG_NODE_DEFAULT_TIMEOUT`=600s, `NOUS_DAG_NODE_MAX_TIMEOUT`=7200s; Settings DI on DAGStore+DAGOrchestrator; schema `timeout_seconds` → `int \| None`; defensive clamp at 3 read sites; unblocks long-running Claude Code / deep-research DAG nodes) | — |
+| F047 | [Actionability Classification](docs/features/F047-actionability-classification.md) (learn-time classifier persists `actionable: bool` on `heart.facts`, replacing the `_OBSERVATION_PATTERNS` arms-race at heartbeat read time — 3 tiers: hard filter → positive-wins heuristic → Haiku LLM; backfill handler with PG advisory lock + supervision wrapper; heartbeat now consults persisted verdict with positive-wins fallback for NULL rows, fixing the PR #335 short-circuit bug; supersedes PR #335) | — |
 
 ## How to Work
 
@@ -276,6 +277,12 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SUBTASK_MAX_TIMEOUT` | `600` | Maximum allowed timeout |
 | `NOUS_DAG_NODE_DEFAULT_TIMEOUT` | `600` | Default timeout (s) for DAG nodes when node spec omits `timeout_seconds` (F046) |
 | `NOUS_DAG_NODE_MAX_TIMEOUT` | `7200` | Hard ceiling (s) for DAG node `timeout_seconds` — clamped at insert and at read sites (F046) |
+| `NOUS_ACTIONABILITY_ENABLED` | `true` | Enable F047 actionability classification at fact learn time |
+| `NOUS_ACTIONABILITY_LLM_ENABLED` | `true` | Use Haiku LLM for ambiguous actionability cases (tier 2) |
+| `NOUS_ACTIONABILITY_MODEL` | `claude-haiku-4-5-20251001` | LLM model for F047 actionability tier-2 classification |
+| `NOUS_ACTIONABILITY_DEFAULT` | `false` | Fallback verdict when classifier can't decide (false = fail-closed, don't page user) |
+| `NOUS_ACTIONABILITY_BACKFILL_ON_STARTUP` | `true` | Run F047 backfill automatically on startup for NULL rows |
+| `NOUS_ACTIONABILITY_BACKFILL_TOKEN_BUDGET` | `10000` | Rough Haiku daily token cap for backfill |
 | `NOUS_SUBTASK_MAX_CONCURRENT` | `3` | Max concurrent subtasks |
 | `NOUS_SCHEDULE_ENABLED` | `true` | Enable task scheduler |
 | `NOUS_SCHEDULE_CHECK_INTERVAL` | `60` | Seconds between schedule checks |
