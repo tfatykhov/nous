@@ -24,12 +24,10 @@ async def store(db):
 
 
 # F046: hermetic Settings for timeout resolution tests — explicit values
-# so the tests don't care about ambient NOUS_DAG_NODE_* env. Passing by the
-# fields' validation_alias (the env-var names) because the current Settings
-# declaration uses validation_alias, which shadows the field name.
+# so the tests don't care about ambient NOUS_DAG_NODE_* env.
 _TEST_DAG_SETTINGS = Settings(
-    NOUS_DAG_NODE_DEFAULT_TIMEOUT=600,
-    NOUS_DAG_NODE_MAX_TIMEOUT=7200,
+    dag_node_default_timeout=600,
+    dag_node_max_timeout=7200,
 )
 
 

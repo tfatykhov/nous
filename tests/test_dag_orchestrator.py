@@ -1180,3 +1180,75 @@ class TestDAGOrchestratorTimeoutClamp:
         subtask_mgr.create.assert_called_once()
         _, kwargs = subtask_mgr.create.call_args
         assert kwargs["timeout"] == settings.dag_node_max_timeout
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_clamps_check_node_timeout_to_max(
+        self, orchestrator, dynamic_loader
+    ):
+        """_launch_check_node clamps node.timeout_seconds at dynamic_loader.create_check."""
+        settings = orchestrator._settings
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=uuid.uuid4(),
+            name="chk",
+            node_type="check",
+            status="ready",
+            timeout_seconds=99999,  # above ceiling
+            wave=0,
+            instructions="x",
+        )
+        dag = ExecutionDAG(
+            id=uuid.uuid4(),
+            agent_id="test",
+            name="t",
+            status="running",
+            nodes=[node],
+            edges=[],
+        )
+        await orchestrator._launch_check_node(node, dag)
+        dynamic_loader.create_check.assert_called_once()
+        _, kwargs = dynamic_loader.create_check.call_args
+        assert kwargs["timeout_seconds"] == settings.dag_node_max_timeout
+
+    @pytest.mark.asyncio
+    async def test_orchestrator_clamps_awaiting_check_timeout_to_max(
+        self, orchestrator, store
+    ):
+        """_poll_awaiting_checks uses clamped timeout when deciding whether to fail out.
+
+        A node with timeout_seconds=99999 (above ceiling 7200) whose completion-check
+        has been awaiting for 7500s should fail — because the effective timeout is
+        clamped to 7200, not 99999.
+        """
+        settings = orchestrator._settings
+        dag_req = DAGCreateRequest(
+            name="awaiting-clamp-dag",
+            nodes=[
+                DAGNodeSpec(
+                    name="long-check",
+                    type=DAGNodeType.subtask,
+                    instructions="run and check",
+                    completion_check="test -f /tmp/done",
+                    timeout_seconds=7200,  # at ceiling; store accepts
+                ),
+            ],
+        )
+        dag = await store.create(dag_req)
+        node = dag.nodes[0]
+
+        # Simulate out-of-band value ABOVE ceiling that historical rows might carry.
+        await store.update_node(node.id, timeout_seconds=99999)
+        # Put node into awaiting_check with backdated timestamp > clamped ceiling.
+        from datetime import UTC, datetime, timedelta
+        past = datetime.now(UTC) - timedelta(seconds=settings.dag_node_max_timeout + 300)
+        await store.update_node(
+            node.id, status="awaiting_check", awaiting_check_at=past
+        )
+
+        fetched = await store.get_dag(dag.id)
+        await orchestrator._poll_awaiting_checks(fetched)
+
+        final = await store.get_dag(dag.id)
+        timed_out = next(n for n in final.nodes if n.name == "long-check")
+        assert timed_out.status == "failed"
+        assert f"{settings.dag_node_max_timeout}s" in (timed_out.error or "")

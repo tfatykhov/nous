@@ -241,13 +241,11 @@ class Settings(BaseSettings):
     # F046: DAG node timeouts
     dag_node_default_timeout: int = Field(
         600,
-        validation_alias="NOUS_DAG_NODE_DEFAULT_TIMEOUT",
         ge=1,
         description="Default timeout (seconds) for DAG nodes when node spec omits timeout_seconds",
     )
     dag_node_max_timeout: int = Field(
         7200,
-        validation_alias="NOUS_DAG_NODE_MAX_TIMEOUT",
         ge=1,
         description="Hard ceiling (seconds) for DAG node timeout_seconds",
     )
