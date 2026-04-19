@@ -173,6 +173,21 @@ _OBSERVATION_PATTERNS = [
     "showed that",
     "need both a",  # "need both X and Y" is descriptive, not a task
     "tasks need both",
+    # Architectural design constraints / rules (not actionable tasks)
+    "as a fundamental design constraint",  # principle statements about design
+    "the architecture should treat",       # architecture rule statements
+    "not an edge case",                    # design constraint framing
+    "idempotency and side-effect",         # idempotency principle statements
+    "should treat timeouts",               # timeout design rule
+    # Filed / tracked issue facts (already captured, not to-do items)
+    "three-tier fix",                      # filed issue with solution already tracked
+    "renumbered from f0",                  # issue housekeeping/renaming fact
+    "pr #231",                             # specific PR reference in fact
+    "branch feat/f0",                      # feature branch reference in fact
+    # Stale bug-description facts (bug already fixed in code)
+    "never get that command executed",     # DAG completion_check bug (fixed PR #324)
+    "only subtask nodes transition to",    # DAG state machine description
+    "awaiting_check status, which is required",  # DAG awaiting_check bug description
     # Contact info / identity facts (not actionable tasks)
     "email address is",       # person/contact facts about email
     "linkedin.com/in/",       # LinkedIn profile URL facts

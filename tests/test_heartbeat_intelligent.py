@@ -292,21 +292,35 @@ class TestObservationPatternSuppression:
     """Regression guard for PR #323 identity/resolved _OBSERVATION_PATTERNS."""
 
     @pytest.mark.parametrize("content", [
-        # Contact info / identity facts
+        # Contact info / identity facts (PR #323)
         "Tim's email address is tim@example.com",
         "Profile: linkedin.com/in/tfatykhov",
         "He has two email addresses for different accounts",
         "His profile url is example.com/tim",
-        # Resolved / encoded patterns
+        # Resolved / encoded patterns (PR #323)
         "Resolved — admission guardrails now block stale facts",
         "Task completion signals encoded as censors",
         "Long-running failure modes encoded in the heart module",
         "These facts are stale and should no longer surface",
         "That flag is a false positive from last week",
         "Recurring false alarm from Tuesday's heartbeat run",
+        # Architectural design constraint rules (PR #331)
+        "The architecture should treat timeouts as a fundamental design constraint, not an edge case",
+        "As a fundamental design constraint, checkpoints are required every 60s",
+        "Idempotency and side-effect verification are required for reliable pipelines",
+        "Should treat timeouts as expected, not exceptional behaviour",
+        # Filed / tracked issue facts (PR #331)
+        "Three-tier fix: result truncation detection, context budget reservation, critical action declarations",
+        "Renumbered from F032 (which was already used for Execution Ledger Dashboard)",
+        "PR #231 on branch feat/F033-subtask-completion-validation",
+        "Branch feat/F033-subtask-completion-validation now merged",
+        # Stale bug-description facts — bug already fixed in PR #324 (PR #331)
+        "Check-type nodes never get that command executed because only subtask nodes transition",
+        "Only subtask nodes transition to awaiting_check status, which is required by _poll_awaiting_checks",
+        "The awaiting_check status, which is required by the polling loop, was never set for check nodes",
     ])
     def test_pattern_triggers_is_observation(self, content: str):
-        """Each PR #323 pattern makes _is_observation return True."""
+        """Each PR #323/#331 pattern makes _is_observation return True."""
         assert SelfInitiatedCheck._is_observation(content)
 
 
