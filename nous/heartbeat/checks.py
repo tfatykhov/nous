@@ -132,60 +132,10 @@ class HealthCheck(BaseCheck):
 # SelfInitiatedCheck
 # ------------------------------------------------------------------
 
-_OBSERVATION_PATTERNS = [
-    # Generic descriptive/rule patterns
-    "follows a pattern",
-    "in general",
-    "typically",
-    "the process is",
-    "is used for",
-    "is designed to",
-    "pattern of",
-    # Resolved / completed language
-    "are resolved",
-    "is resolved",
-    "has been resolved",
-    "were resolved",
-    "already completed",
-    "no longer pending",
-    "should no longer trigger",
-    "was fixed",
-    "has been done",
-    "marked as done",
-    "both emails rep",  # "Both emails replied" completion note
-    # False-alarm / meta-documentation patterns
-    "false alarm",
-    "false positive",
-    "false-alarm",
-    "stale fact cleanup",
-    "heartbeat repeatedly flags",
-    "purely observational",
-    "not action items",
-    "not an action item",
-    # Confirmed receipt / observation patterns
-    "confirmed receipt",
-    "confirmed that it was",  # narrowed from "confirmed that" to avoid suppressing actionable confirmations
-    "tim confirmed",
-    "indicating interest in",
-    "has requested information about",  # narrowed from "has requested" to avoid suppressing actionable requests
-    # Lesson-learned / rule patterns (not actionable)
-    "lesson learned",
-    "showed that",
-    "need both a",  # "need both X and Y" is descriptive, not a task
-    "tasks need both",
-    # Contact info / identity facts (not actionable tasks)
-    "email address is",       # person/contact facts about email
-    "linkedin.com/in/",       # LinkedIn profile URL facts
-    "two email addresses",    # dual-email identity facts
-    "profile url is",         # social profile URL facts
-    # Broader resolved/encoded patterns
-    "resolved —",             # facts starting with RESOLVED —
-    "encoded as censors",     # architecture facts about censor encoding
-    "failure modes encoded",  # resolved architecture findings
-    "are stale and should no",  # stale-fact cleanup notes
-    "is a false positive",    # explicit false-positive labeling
-    "recurring false alarm",  # recurring false alarm documentation
-]
+# F047: _OBSERVATION_PATTERNS now owned by nous.heart.actionability.
+# Re-exported here for backward-compat with any callers still importing
+# from this module. Authoritative source: nous/heart/actionability.py.
+from nous.heart.actionability import _OBSERVATION_PATTERNS  # noqa: E402, F401
 
 PENDING_PROTOTYPES = [
     "I need to follow up on this",
@@ -275,12 +225,28 @@ class SelfInitiatedCheck(BaseCheck):
                     if fact_category == "person" or fact_tags_lower & {"resolved", "identity"}:
                         continue
 
-                    # Check recency using fact score as proxy (hybrid search)
-                    # and content relevance via _looks_like_pending
+                    # F047: Prefer persisted actionable verdict.
+                    # Fallback path for NULL (unclassified) rows uses
+                    # positive-wins logic (action patterns beat observation
+                    # patterns) — fixing the PR #335 review P1.
                     score = getattr(fact, "score", 0.0) or 0.0
-                    if not self._is_observation(fact.content) and (
-                        score >= threshold or self._looks_like_pending(fact.content)
-                    ):
+                    actionable = getattr(fact, "actionable", None)
+
+                    if actionable == True:  # noqa: E712 — SQLite may return 1/0
+                        is_pending = True
+                    elif actionable == False:  # noqa: E712
+                        is_pending = False
+                    else:
+                        # Legacy fallback — row hasn't been classified yet.
+                        # Positive action wins over observation substring.
+                        if self._looks_like_pending(fact.content):
+                            is_pending = True
+                        elif self._is_observation(fact.content):
+                            is_pending = False
+                        else:
+                            is_pending = score >= threshold
+
+                    if is_pending:
                         findings.append(Finding(
                             source="facts",
                             summary=f"Pending action: {fact.content[:100]}",
@@ -442,7 +408,14 @@ class SelfInitiatedCheck(BaseCheck):
                     fid = str(fact.id)
                     if fid in seen_ids:
                         continue
-                    if self._looks_like_pending(fact.content):
+                    # F047: honour persisted verdict in the keyword fallback
+                    # too — otherwise classifier's actionable=False on rule
+                    # facts would leak through here despite being suppressed
+                    # on the embedding path.
+                    actionable = getattr(fact, "actionable", None)
+                    if actionable == False:  # noqa: E712 — SQLite 0/1
+                        continue
+                    if actionable == True or self._looks_like_pending(fact.content):  # noqa: E712
                         findings.append(Finding(
                             source="facts",
                             summary=f"Pending action: {fact.content[:100]}",

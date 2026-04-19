@@ -329,7 +329,11 @@ async def sqlite_search_all(
             active=f.active if f.active is not None else True,
             score=scores.get(fid, 0),
             tags=tags or [],
-            learned_at=f.learned_at or f.created_at,
+            # F047: propagate actionable verdict so SQLite-based tests see
+            # the same heartbeat behavior as Postgres (embedding + keyword
+            # paths both consult the persisted flag).
+            actionable=getattr(f, "actionable", None),
+            actionable_confidence=getattr(f, "actionable_confidence", None),
         ))
     return results
 

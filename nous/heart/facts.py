@@ -25,6 +25,7 @@ from nous.storage.models import Episode, Event, Fact, GraphEdge
 
 if TYPE_CHECKING:
     from nous.handlers import LLMClient
+    from nous.heart.actionability import ActionabilityClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class FactManager:
         embeddings: EmbeddingProvider | None,
         agent_id: str,
         admission_controller: AdmissionController | None = None,
+        actionability_classifier: "ActionabilityClassifier | None" = None,
     ) -> None:
         self.db = db
         self.embeddings = embeddings
@@ -80,6 +82,8 @@ class FactManager:
         # F027: LLM client for write-time supersession classifier
         self._llm: LLMClient | None = None
         self._llm_model: str = "claude-haiku-4-5-20251001"
+        # F047: Actionability classifier for write-time verdict
+        self._actionability_classifier = actionability_classifier
 
     # ------------------------------------------------------------------
     # Event helper
@@ -357,6 +361,23 @@ class FactManager:
                     explanation=admission_result.explanation,
                 )
 
+        # F047: Classify actionability at learn time.
+        # Failure is non-fatal — fact still saved with actionable=NULL and
+        # the heartbeat falls back to the legacy heuristic path for it.
+        actionable_verdict: bool | None = None
+        actionable_conf: float | None = None
+        if self._actionability_classifier is not None:
+            try:
+                actionable_verdict, actionable_conf, _tier = await self._actionability_classifier.classify(
+                    input.content,
+                    input.category,
+                    list(input.tags or []),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("F047: actionability classify failed for new fact", exc_info=True)
+
         fact = Fact(
             agent_id=self.agent_id,
             content=input.content,
@@ -376,6 +397,8 @@ class FactManager:
                 admission_result.scores if admission_result and not admission_result.bypassed and admission_result.scores
                 else None
             ),
+            actionable=actionable_verdict,
+            actionable_confidence=actionable_conf,
         )
         session.add(fact)
         await session.flush()
@@ -972,6 +995,9 @@ class FactManager:
                 confidence=f.confidence or 1.0,
                 active=f.active if f.active is not None else True,
                 score=1.0,  # Tier 1: always-on, no relevance ranking
+                actionable=f.actionable,
+                actionable_confidence=f.actionable_confidence,
+                tags=list(f.tags or []),
             )
             for f in facts
         ]
@@ -1062,6 +1088,9 @@ class FactManager:
                 active=f.active if f.active is not None else True,
                 score=scores.get(f.id),
                 superseded_by=f.superseded_by,
+                actionable=f.actionable,
+                actionable_confidence=f.actionable_confidence,
+                tags=list(f.tags or []),
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -1155,6 +1184,9 @@ class FactManager:
                 active=f.active if f.active is not None else True,
                 score=scores.get(f.id),
                 superseded_by=f.superseded_by,
+                actionable=f.actionable,
+                actionable_confidence=f.actionable_confidence,
+                tags=list(f.tags or []),
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -1239,8 +1271,8 @@ class FactManager:
         result = await session.execute(q)
         facts = list(result.scalars().all())
 
-        # NOTE: FactSummary has fields: id, content, category, subject, confidence, active, score.
-        # It does NOT have source, tags, or learned_at. Use only existing fields.
+        # F047: FactSummary now carries tags + actionable; keep this site
+        # in sync with _search / _search_all / _list_by_category.
         summaries = [
             FactSummary(
                 id=f.id,
@@ -1249,6 +1281,9 @@ class FactManager:
                 subject=f.subject,
                 confidence=f.confidence or 1.0,
                 active=f.active if f.active is not None else True,
+                actionable=f.actionable,
+                actionable_confidence=f.actionable_confidence,
+                tags=list(f.tags or []),
             )
             for f in facts
         ]
@@ -1363,6 +1398,8 @@ class FactManager:
             active=fact.active if fact.active is not None else True,
             tags=fact.tags or [],
             created_at=fact.created_at,
+            actionable=fact.actionable,
+            actionable_confidence=fact.actionable_confidence,
         )
 
     # ------------------------------------------------------------------

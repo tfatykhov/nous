@@ -152,6 +152,34 @@ async def create_components(settings: Settings) -> dict:
     # F027: Wire supersession classifier LLM client
     heart.facts.set_llm_client(api_client, model=settings.contradiction_model)
 
+    # F047: Wire actionability classifier + schedule backfill for NULL rows
+    if settings.actionability_enabled:
+        from nous.heart.actionability import ActionabilityClassifier
+
+        actionability_classifier = ActionabilityClassifier(
+            llm=api_client if settings.actionability_llm_enabled else None,
+            model=settings.actionability_model,
+            default_when_unknown=settings.actionability_default,
+        )
+        heart.facts._actionability_classifier = actionability_classifier
+
+        if settings.actionability_backfill_on_startup:
+            import asyncio as _asyncio
+            from nous.handlers.actionability_backfill import (
+                ActionabilityBackfillHandler,
+                run_backfill_with_supervision,
+            )
+
+            backfill_handler = ActionabilityBackfillHandler(
+                db=database,
+                classifier=actionability_classifier,
+                agent_id=settings.agent_id,
+                token_budget=settings.actionability_backfill_token_budget,
+            )
+            # Fire-and-forget; wrapper logs and re-raises CancelledError so
+            # exceptions don't vanish into asyncio's void.
+            _asyncio.create_task(run_backfill_with_supervision(backfill_handler))
+
     rubric_evolver = None
 
     # 006: Register handlers on bus (after cognitive exists for monitor)
