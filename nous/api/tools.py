@@ -1191,6 +1191,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                         is_subtask=True,
                         max_tool_calls=settings.subtask_tool_call_limit,
                         model_override=effective_model,
+                        is_background=True,
                     ),
                     timeout=effective_timeout,
                 )

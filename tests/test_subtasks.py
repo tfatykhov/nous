@@ -1292,3 +1292,89 @@ class TestRunTurnErrorPropagation:
 
         assert response_text == "Hello!"
         mock_cognitive.post_turn.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# F048: background streaming integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestF048BackgroundStreaming:
+    """F048: verify subtask paths route through is_background=True into the runner."""
+
+    async def test_subtask_uses_background_streaming_path(self):
+        """F048: SubtaskWorkerPool._execute_subtask passes is_background=True to
+        runner.run_turn (line 153 in nous/handlers/subtask_worker.py)."""
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=("result", MagicMock(), {}))
+
+        mock_heart = MagicMock()
+        mock_heart.subtasks = AsyncMock()
+        mock_heart.subtasks.complete = AsyncMock()
+
+        worker_settings = Settings(
+            subtask_workers=1,
+            subtask_poll_interval=0.1,
+            subtask_default_timeout=600,
+            subtask_max_concurrent=3,
+            telegram_bot_token=None,
+            telegram_chat_id=None,
+        )
+
+        pool = SubtaskWorkerPool(
+            runner=mock_runner,
+            heart=mock_heart,
+            settings=worker_settings,
+        )
+
+        subtask = MagicMock(spec=Subtask)
+        subtask.id = uuid.uuid4()
+        subtask.task = "Background task"
+        subtask.parent_session_id = "parent-99"
+        subtask.timeout_seconds = 600
+        subtask.frame_type = None
+        subtask.model = None
+        subtask.notify = False
+
+        await pool._execute_subtask(subtask)
+
+        mock_runner.run_turn.assert_called_once()
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_background") is True
+
+    async def test_inline_subtask_via_spawn_task_uses_background(self):
+        """F048: spawn_task(await_result=True) in nous/api/tools.py passes
+        is_background=True when invoking runner.run_turn inline (line 1194)."""
+        from nous.api.tools import create_subtask_tools
+
+        mock_runner = AsyncMock()
+        mock_runner.run_turn = AsyncMock(return_value=(
+            "Inline result",
+            MagicMock(),  # turn_context
+            {"input_tokens": 50, "output_tokens": 25},
+        ))
+
+        heart = MagicMock()
+        heart.subtasks = AsyncMock()
+        mock_subtask = MagicMock()
+        mock_subtask.id = uuid.uuid4()
+        heart.subtasks.create = AsyncMock(return_value=mock_subtask)
+        heart.subtasks.complete = AsyncMock()
+
+        tool_settings = Settings(
+            inline_subtask_timeout=60,
+            subtask_max_timeout=3600,
+            subtask_tool_call_limit=20,
+            agent_id="test-inline-agent",
+        )
+        tools = create_subtask_tools(heart, tool_settings, runner=mock_runner)
+
+        await tools["spawn_task"](
+            task="Inline fetch",
+            await_result=True,
+            _session_id="test-parent",
+        )
+
+        mock_runner.run_turn.assert_awaited_once()
+        call_kwargs = mock_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_background") is True

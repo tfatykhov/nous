@@ -1002,3 +1002,50 @@ class TestHeartbeatPublicProperties:
             brain=AsyncMock(), heart=AsyncMock(), bus=None, http_client=None,
         )
         assert runner.tokens_used_today == 0
+
+
+# ---------------------------------------------------------------------------
+# F048: heartbeat cognitive triage uses background streaming path
+# ---------------------------------------------------------------------------
+
+
+class TestF048HeartbeatBackgroundStreaming:
+    """F048: heartbeat runner passes is_background=True to triage_runner.run_turn."""
+
+    @pytest.mark.asyncio
+    async def test_cognitive_triage_uses_background_streaming(self):
+        """F048: _cognitive_triage forwards is_background=True (see
+        nous/heartbeat/runner.py:498)."""
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        settings = _mock_settings()
+        shared_runner = AsyncMock()
+        shared_runner.run_turn = AsyncMock(return_value=(
+            "triage reply",
+            MagicMock(),
+            {"input_tokens": 120, "output_tokens": 60},
+        ))
+        shared_runner.end_conversation = AsyncMock()
+
+        hb = HeartbeatRunner(
+            settings=settings,
+            registry=CheckRegistry(),
+            runner=shared_runner,
+            brain=AsyncMock(),
+            heart=MagicMock(),
+            bus=None,
+            http_client=None,
+        )
+
+        findings = [
+            Finding(
+                source="health", summary="Something to review",
+                urgency="normal", needs_action=True,
+            ),
+        ]
+        result = await hb._cognitive_triage(findings)
+
+        assert result.tokens_used == 180
+        shared_runner.run_turn.assert_awaited_once()
+        call_kwargs = shared_runner.run_turn.call_args.kwargs
+        assert call_kwargs.get("is_background") is True

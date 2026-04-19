@@ -495,6 +495,7 @@ class HeartbeatRunner:
                 skip_episode=True,
                 is_subtask=True,
                 model_override=heartbeat_model,
+                is_background=True,
             )
             result.response = response_text or ""
             result.tokens_used = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
@@ -576,6 +577,7 @@ class HeartbeatRunner:
                     is_subtask=True,
                     tool_filter=tool_filter,
                     model_override=heartbeat_model,
+                    is_background=True,
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens

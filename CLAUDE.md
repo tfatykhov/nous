@@ -167,6 +167,7 @@ nous/
 | F045 | CE-Aware Cosine Thresholds + Content-Length Guard (relaxed per-relation thresholds when CE backfill is upstream, 80-char min to drop URL-only facts, empirically validated at 80% LLM-judged precision) | #315 |
 | F046 | [DAG Node Timeout Configuration](docs/features/F046-dag-node-timeout-config.md) (env-var-driven DAG node timeouts — `NOUS_DAG_NODE_DEFAULT_TIMEOUT`=600s, `NOUS_DAG_NODE_MAX_TIMEOUT`=7200s; Settings DI on DAGStore+DAGOrchestrator; schema `timeout_seconds` → `int \| None`; defensive clamp at 3 read sites; unblocks long-running Claude Code / deep-research DAG nodes) | — |
 | F047 | [Actionability Classification](docs/features/F047-actionability-classification.md) (learn-time classifier persists `actionable: bool` on `heart.facts`, replacing the `_OBSERVATION_PATTERNS` arms-race at heartbeat read time — 3 tiers: hard filter → positive-wins heuristic → Haiku LLM; backfill handler with PG advisory lock + supervision wrapper; heartbeat now consults persisted verdict with positive-wins fallback for NULL rows, fixing the PR #335 short-circuit bug; supersedes PR #335) | — |
+| F048 | [Background Streaming + TCP Keep-Alive](docs/features/F048-background-streaming-keepalive.md) (subtask + heartbeat turns stream under the hood via `call_streaming_aggregated` on both Anthropic clients — keeps TCP socket warm with incremental SSE bytes so long background generations no longer hit idle-connection drops; `AgentRunner.run_turn(is_background=True)` threads through `_tool_loop` to every `_call_api` call; wired at 5 sites: subtask_worker, heartbeat cognitive_triage + on_complete callback, DynamicCheck._run_check, and inline `spawn_task(await_result)`; `httpx.AsyncHTTPTransport` gains `SO_KEEPALIVE` + Linux `TCP_KEEPIDLE` / macOS `TCP_KEEPALIVE` via `_build_socket_options` helper; truncated-stream detection raises rather than silently returning empty content; fixes pre-existing censor-block 2-tuple return bug at runner.py:249; gated by `NOUS_API_BACKGROUND_STREAMING_ENABLED=true` + `NOUS_API_SOCKET_KEEPALIVE_ENABLED=true`) | — |
 
 ## How to Work
 
@@ -273,8 +274,14 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SUBTASK_ENABLED` | `true` | Enable subtask worker pool |
 | `NOUS_SUBTASK_WORKERS` | `2` | Number of async worker tasks |
 | `NOUS_SUBTASK_POLL_INTERVAL` | `2.0` | Seconds between queue polls |
-| `NOUS_SUBTASK_DEFAULT_TIMEOUT` | `120` | Default subtask timeout (seconds) |
-| `NOUS_SUBTASK_MAX_TIMEOUT` | `600` | Maximum allowed timeout |
+| `NOUS_SUBTASK_DEFAULT_TIMEOUT` | `600` | Default subtask timeout (seconds). Bumped from 120 in F048 so the outer `asyncio.wait_for` does not cancel before the new 600 s per-chunk streaming read completes. |
+| `NOUS_SUBTASK_MAX_TIMEOUT` | `3600` | Maximum allowed subtask timeout (seconds). Bumped from 900 in F048 to pair with `NOUS_API_BACKGROUND_TIMEOUT_READ`. |
+| `NOUS_API_BACKGROUND_STREAMING_ENABLED` | `true` | F048 master switch — route `is_background=True` turns (subtask + heartbeat) through `call_streaming_aggregated` instead of `call()`. |
+| `NOUS_API_BACKGROUND_TIMEOUT_READ` | `600` | F048 per-chunk read timeout (seconds) applied only to background streamed requests. |
+| `NOUS_API_SOCKET_KEEPALIVE_ENABLED` | `true` | F048 master switch for TCP keep-alive on the httpx transport (both Anthropic client backends). |
+| `NOUS_API_SOCKET_KEEPALIVE_IDLE` | `30` | F048 seconds of idle before the first TCP keep-alive probe (Linux `TCP_KEEPIDLE` / macOS `TCP_KEEPALIVE`; ignored on Windows). |
+| `NOUS_API_SOCKET_KEEPALIVE_INTERVAL` | `10` | F048 seconds between TCP keep-alive probes (Linux `TCP_KEEPINTVL`; ignored otherwise). |
+| `NOUS_API_SOCKET_KEEPALIVE_COUNT` | `3` | F048 number of failed keep-alive probes before dropping the connection (Linux `TCP_KEEPCNT`; ignored otherwise). |
 | `NOUS_DAG_NODE_DEFAULT_TIMEOUT` | `600` | Default timeout (s) for DAG nodes when node spec omits `timeout_seconds` (F046) |
 | `NOUS_DAG_NODE_MAX_TIMEOUT` | `7200` | Hard ceiling (s) for DAG node `timeout_seconds` — clamped at insert and at read sites (F046) |
 | `NOUS_ACTIONABILITY_ENABLED` | `true` | Enable F047 actionability classification at fact learn time |

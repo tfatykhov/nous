@@ -144,6 +144,17 @@ class Settings(BaseSettings):
     api_base_url: str = "https://api.anthropic.com"
     api_timeout_connect: int = 10  # seconds
     api_timeout_read: int = 120  # seconds
+
+    # F048: Background streaming aggregation (Mechanism B)
+    api_background_streaming_enabled: bool = True
+    api_background_timeout_read: int = 600  # seconds — read timeout for background streaming aggregator
+
+    # F048: TCP keep-alive on httpx transports (Mechanism A)
+    api_socket_keepalive_enabled: bool = True
+    api_socket_keepalive_idle: int = 30  # seconds before first keep-alive probe
+    api_socket_keepalive_interval: int = 10  # seconds between probes
+    api_socket_keepalive_count: int = 3  # failed probes before RST
+
     workspace_dir: str = "/tmp/nous-workspace"
 
     # Web tools
@@ -234,8 +245,8 @@ class Settings(BaseSettings):
     subtask_enabled: bool = True
     subtask_workers: int = 2
     subtask_poll_interval: float = 2.0
-    subtask_default_timeout: int = 120
-    subtask_max_timeout: int = 900
+    subtask_default_timeout: int = 600  # F048: bumped from 120 so outer wait_for doesn't cancel inner streaming
+    subtask_max_timeout: int = 3600  # F048: bumped from 900 to support long-running background streaming
     subtask_max_concurrent: int = 3
 
     # F046: DAG node timeouts

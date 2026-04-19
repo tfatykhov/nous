@@ -127,6 +127,7 @@ class DynamicCheck(BaseCheck):
                 is_subtask=True,
                 tool_filter=self._tools if self._tools else None,
                 model_override=self._model_override,
+                is_background=True,
             )
 
             findings = self._parse_findings(response_text or "")
