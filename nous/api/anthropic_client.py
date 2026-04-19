@@ -1028,11 +1028,60 @@ class SdkAnthropicClient:
 
     @staticmethod
     def _message_to_content(message: Any) -> list[dict[str, Any]]:
-        """Convert SDK Message.content blocks to raw dicts matching API format."""
+        """Convert SDK Message.content blocks to raw dicts matching the API's
+        wire format.
+
+        The SDK's `messages.stream()` helper (used by call_streaming_aggregated)
+        attaches helper-only fields (e.g. `parsed_output`) to some blocks that
+        the server will reject on the next request as
+        "Extra inputs are not permitted". model_dump() emits every field, so
+        we explicitly build each block from the allow-listed set of fields
+        per block type and drop anything else.
+        """
         content: list[dict[str, Any]] = []
         for block in message.content:
-            block_dict = block.model_dump() if hasattr(block, "model_dump") else block.dict()
-            content.append(block_dict)
+            block_type = getattr(block, "type", None)
+
+            if block_type == "text":
+                out: dict[str, Any] = {
+                    "type": "text",
+                    "text": getattr(block, "text", "") or "",
+                }
+                citations = getattr(block, "citations", None)
+                if citations:
+                    out["citations"] = [
+                        c.model_dump() if hasattr(c, "model_dump") else dict(c)
+                        for c in citations
+                    ]
+            elif block_type == "tool_use":
+                out = {
+                    "type": "tool_use",
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}) or {},
+                }
+            elif block_type == "thinking":
+                out = {
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", "") or "",
+                    "signature": getattr(block, "signature", "") or "",
+                }
+            elif block_type == "redacted_thinking":
+                out = {
+                    "type": "redacted_thinking",
+                    "data": getattr(block, "data", "") or "",
+                }
+            else:
+                # Unknown block type — model_dump but strip known helper-only
+                # fields as a defensive fallback.
+                raw = (
+                    block.model_dump() if hasattr(block, "model_dump")
+                    else dict(block)
+                )
+                raw.pop("parsed_output", None)
+                out = raw
+
+            content.append(out)
         return content
 
     @staticmethod
