@@ -1,6 +1,6 @@
 -- F047: Actionability classification at learn time.
 -- Adds two nullable columns and a partial index on heart.facts.
--- NULL = not yet classified (legacy rows; backfill handler will populate).
+-- NULL = not yet classified (legacy rows, backfilled by the handler).
 -- Partial index optimizes the "find actionable facts" query used by heartbeat.
 
 ALTER TABLE heart.facts
