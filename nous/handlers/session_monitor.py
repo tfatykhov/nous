@@ -14,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from nous.config import Settings
 from nous.events import Event, EventBus
+
+if TYPE_CHECKING:
+    from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
 
@@ -42,14 +46,17 @@ class SessionTimeoutMonitor:
         settings: Settings,
         *,
         cognitive: object | None = None,
+        heart: Heart | None = None,
     ):
         self._bus = bus
         self._settings = settings
         self._cognitive = cognitive  # CognitiveLayer reference for end_session
+        self._heart = heart  # F049: required for WM TTL sweep; None disables
         self._last_activity: dict[str, float] = {}  # session_id -> monotonic time
         self._last_agent: dict[str, str] = {}  # session_id -> agent_id
         self._global_last_activity: float = time.monotonic()
         self._sleep_emitted: bool = False
+        self._last_wm_sweep: float = 0.0  # F049: monotonic time of last WM sweep
         self._task: asyncio.Task | None = None
 
         bus.on("turn_completed", self.on_activity)
@@ -171,6 +178,23 @@ class SessionTimeoutMonitor:
             _sleep_event.trace_id = _sleep_event.event_id  # Root event
             await self._bus.emit(_sleep_event)
             self._sleep_emitted = True
+
+        # 3. F049: periodic WM TTL safety-net sweep.
+        if (
+            self._heart is not None
+            and self._settings.working_memory_ttl_hours > 0
+        ):
+            sweep_interval = self._settings.working_memory_sweep_interval_seconds
+            if now - self._last_wm_sweep >= sweep_interval:
+                try:
+                    await self._heart.working_memory.cleanup_stale(
+                        max_age_hours=self._settings.working_memory_ttl_hours,
+                        batch_size=self._settings.working_memory_sweep_batch_size,
+                    )
+                except Exception:
+                    logger.exception("WM TTL sweep raised")
+                finally:
+                    self._last_wm_sweep = time.monotonic()
 
     def get_stats(self) -> dict:
         """F035.1: Return session monitor statistics."""

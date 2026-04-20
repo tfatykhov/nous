@@ -248,6 +248,28 @@ class Settings(BaseSettings):
     subtask_default_timeout: int = 600  # F048: bumped from 120 so outer wait_for doesn't cancel inner streaming
     subtask_max_timeout: int = 3600  # F048: bumped from 900 to support long-running background streaming
     subtask_max_concurrent: int = 3
+    subtask_cleanup_timeout_seconds: int = Field(
+        default=30,
+        validation_alias="NOUS_SUBTASK_CLEANUP_TIMEOUT_SECONDS",
+        description="F049: max seconds to wait for end_conversation in subtask finally before logging ERROR",
+    )
+
+    # F049: WM TTL safety-net sweep
+    working_memory_ttl_hours: int = Field(
+        default=24,
+        validation_alias="NOUS_WORKING_MEMORY_TTL_HOURS",
+        description="F049: delete heart.working_memory rows older than this (0 disables)",
+    )
+    working_memory_sweep_interval_seconds: int = Field(
+        default=3600,
+        validation_alias="NOUS_WORKING_MEMORY_SWEEP_INTERVAL_SECONDS",
+        description="F049: minimum seconds between WM TTL safety-net sweeps",
+    )
+    working_memory_sweep_batch_size: int = Field(
+        default=5000,
+        validation_alias="NOUS_WORKING_MEMORY_SWEEP_BATCH_SIZE",
+        description="F049: rows per DELETE batch during WM sweep",
+    )
 
     # F046: DAG node timeouts
     dag_node_default_timeout: int = Field(
