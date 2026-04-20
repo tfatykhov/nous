@@ -141,32 +141,59 @@ class SubtaskWorkerPool:
         system_prefix = build_subtask_prefix(subtask.task, subtask.frame_type)
 
         try:
-            response_text, _turn_ctx, _usage = await self._runner.run_turn(
-                session_id=session_id,
-                user_message=subtask.task,
-                agent_id=self._settings.agent_id,
-                system_prompt_prefix=system_prefix,
-                skip_episode=True,
-                is_subtask=True,
-                max_tool_calls=self._settings.subtask_tool_call_limit,
-                model_override=subtask.model or self._settings.background_model,
-                is_background=True,
-            )
+            try:
+                response_text, _turn_ctx, _usage = await self._runner.run_turn(
+                    session_id=session_id,
+                    user_message=subtask.task,
+                    agent_id=self._settings.agent_id,
+                    system_prompt_prefix=system_prefix,
+                    skip_episode=True,
+                    is_subtask=True,
+                    max_tool_calls=self._settings.subtask_tool_call_limit,
+                    model_override=subtask.model or self._settings.background_model,
+                    is_background=True,
+                )
 
-            await self._heart.subtasks.complete(subtask.id, response_text)
-            await self._emit_event("subtask_completed", subtask, result=response_text)
-            await self._notify_telegram(subtask, result=response_text)
+                await self._heart.subtasks.complete(subtask.id, response_text)
+                await self._emit_event("subtask_completed", subtask, result=response_text)
+                await self._notify_telegram(subtask, result=response_text)
 
-            logger.info("Subtask %s completed", subtask.id.hex[:8])
+                logger.info("Subtask %s completed", subtask.id.hex[:8])
 
-        except asyncio.CancelledError:
-            raise  # Propagate cancellation
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            logger.exception("Subtask %s failed", subtask.id.hex[:8])
-            await self._heart.subtasks.fail(subtask.id, error_msg)
-            await self._emit_event("subtask_failed", subtask, error=error_msg)
-            await self._notify_telegram(subtask, error=error_msg)
+            except asyncio.CancelledError:
+                raise  # Propagate cancellation
+            except Exception as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                logger.exception("Subtask %s failed", subtask.id.hex[:8])
+                await self._heart.subtasks.fail(subtask.id, error_msg)
+                await self._emit_event("subtask_failed", subtask, error=error_msg)
+                await self._notify_telegram(subtask, error=error_msg)
+        finally:
+            # F049 Mechanism B: guarantee session teardown on every exit path.
+            cleanup_timeout = self._settings.subtask_cleanup_timeout_seconds
+            try:
+                await asyncio.shield(
+                    asyncio.wait_for(
+                        self._runner.end_conversation(
+                            session_id, agent_id=self._settings.agent_id
+                        ),
+                        timeout=cleanup_timeout,
+                    )
+                )
+                logger.debug("Ended subtask session %s", session_id)
+            except TimeoutError:
+                logger.error(
+                    "Subtask cleanup timed out after %ds for session %s — possible runner/brain outage",
+                    cleanup_timeout, session_id,
+                )
+            except asyncio.CancelledError:
+                logger.warning("Subtask cleanup cancelled for %s", session_id)
+                raise
+            except Exception:
+                logger.exception(
+                    "Subtask cleanup failed for session %s — end_conversation raised",
+                    session_id,
+                )
 
     # ------------------------------------------------------------------
     # Event emission

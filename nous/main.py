@@ -315,7 +315,9 @@ async def create_components(settings: Settings) -> dict:
         try:
             from nous.handlers.session_monitor import SessionTimeoutMonitor
 
-            session_monitor = SessionTimeoutMonitor(bus, settings, cognitive=cognitive)
+            session_monitor = SessionTimeoutMonitor(
+                bus, settings, cognitive=cognitive, heart=heart
+            )
         except ImportError:
             logger.debug("SessionTimeoutMonitor not available yet")
 

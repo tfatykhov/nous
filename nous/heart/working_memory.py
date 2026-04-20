@@ -9,10 +9,12 @@ No embeddings needed — working memory is structured, not searched.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -303,6 +305,96 @@ class WorkingMemoryManager:
         if wm is not None:
             await session.delete(wm)
             await session.flush()
+
+    # ------------------------------------------------------------------
+    # cleanup_stale() — F049 Mechanism A: TTL safety-net sweep
+    # ------------------------------------------------------------------
+
+    async def cleanup_stale(
+        self,
+        max_age_hours: int = 24,
+        batch_size: int = 5000,
+    ) -> int:
+        """Delete stale working_memory rows for this agent.
+
+        Safety net for session paths that never called end_conversation
+        (primary cause: subtask sessions prior to F049 Mechanism B).
+
+        Uses a PostgreSQL transaction-scoped advisory lock keyed on the
+        agent_id hash so two replicas cannot race on the same DELETE.
+        Deletes in LIMIT-batched chunks via ``ctid IN (SELECT ... LIMIT N)``
+        so a single invocation cannot hold a long exclusive lock on the
+        table at scale.
+
+        Args:
+            max_age_hours: Age threshold. Rows whose ``updated_at`` is older
+                than ``now() - max_age_hours`` are deleted. ``<= 0`` disables
+                the sweep (returns 0 without issuing any SQL).
+            batch_size: Maximum rows deleted per DELETE batch.
+
+        Returns:
+            Total rows deleted across all batches. ``0`` when TTL disabled
+            or when another replica holds the advisory lock.
+        """
+        if max_age_hours <= 0:
+            return 0
+
+        cutoff = datetime.now(UTC) - timedelta(hours=max_age_hours)
+        # Cross-process-stable 31-bit key for pg_try_advisory_xact_lock.
+        # Python's builtin hash() has a randomized per-process seed, so two
+        # replicas would compute different keys and the lock would not
+        # serialize them. SHA-256 → int → mod keeps the key deterministic.
+        digest = hashlib.sha256(self.agent_id.encode("utf-8")).digest()
+        lock_key = int.from_bytes(digest[:4], "big") % (2**31)
+        total_deleted = 0
+
+        async with self.db.session() as session:
+            acquired = (
+                await session.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:k)").bindparams(k=lock_key)
+                )
+            ).scalar()
+            if not acquired:
+                logger.debug(
+                    "WM sweep skipped — another replica holds the advisory lock for agent %s",
+                    self.agent_id,
+                )
+                return 0
+
+            while True:
+                result = await session.execute(
+                    text(
+                        """
+                        DELETE FROM heart.working_memory
+                        WHERE ctid IN (
+                            SELECT ctid FROM heart.working_memory
+                            WHERE agent_id = :agent_id AND updated_at < :cutoff
+                            LIMIT :batch_size
+                        )
+                        RETURNING session_id
+                        """
+                    ).bindparams(
+                        agent_id=self.agent_id,
+                        cutoff=cutoff,
+                        batch_size=int(batch_size),
+                    )
+                )
+                deleted = result.scalars().all()
+                total_deleted += len(deleted)
+                if len(deleted) < batch_size:
+                    break
+            await session.commit()
+
+        if total_deleted:
+            logger.info(
+                "WM sweep deleted %d rows for agent %s (threshold=%dh)",
+                total_deleted,
+                self.agent_id,
+                max_age_hours,
+            )
+        else:
+            logger.debug("WM sweep: no stale rows for agent %s", self.agent_id)
+        return total_deleted
 
     # ------------------------------------------------------------------
     # Private helpers
