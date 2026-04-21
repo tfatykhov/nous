@@ -1,0 +1,5 @@
+# F051: eval fixtures staging is generated locally by `python -m nous.eval.ingest`
+# and must NOT be shipped in the generic application image. It IS intentionally
+# included by Dockerfile.eval-db via an explicit COPY.
+# All other Dockerfiles must ignore it.
+/nous-eval-fixtures-staging/

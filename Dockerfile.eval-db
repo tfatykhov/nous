@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.6
+#
+# F051: Retrieval Evaluation Harness — baked-fixture Postgres image.
+#
+# Multi-stage build:
+#   1. `ingest` stage boots pgvector/pgvector:pg17, runs init.sql + all migrations
+#      via the standard docker-entrypoint-initdb.d mechanism, then runs
+#      /load.sh to bulk-COPY the eval corpus JSONL files into tables.
+#   2. Final stage copies the cooked /var/lib/postgresql/data directory over to
+#      a fresh pgvector/pgvector:pg17 base so the runtime image is minimal.
+#
+# BOTH stages MUST be pgvector/pgvector:pg17 (NOT postgres:17) — sql/init.sql
+# runs `CREATE EXTENSION vector;` on DB init and the plain postgres:17 image
+# would crash at entrypoint.
+#
+# Expected build context layout (operator populates via `python -m nous.eval.ingest`
+# before calling `docker build`):
+#   nous-eval-fixtures-staging/
+#     facts.jsonl
+#     decisions.jsonl
+#     episodes.jsonl
+#     procedures.jsonl
+#     censors.jsonl
+#     manifest.json   # fixture_version, captured_at, source agent_id, row counts
+#
+# .dockerignore excludes this directory from OTHER image builds.
+
+FROM pgvector/pgvector:pg17 AS ingest
+ARG FIXTURE_VERSION
+ENV POSTGRES_USER=nous \
+    POSTGRES_PASSWORD=nous_eval \
+    POSTGRES_DB=nous_eval \
+    NOUS_EVAL_FIXTURE_VERSION=$FIXTURE_VERSION
+
+# Schema + migrations — executed in lexicographic order by docker-entrypoint.sh.
+# 00_init.sql prefix guarantees it runs before any numeric migration file.
+COPY sql/init.sql /docker-entrypoint-initdb.d/00_init.sql
+COPY sql/migrations/*.sql /docker-entrypoint-initdb.d/
+
+# Staged JSONL fixtures produced by the operator's ingest run.
+COPY nous-eval-fixtures-staging/ /fixtures/
+
+# Loader — runs AFTER initdb has finished (see /load.sh for the wait protocol).
+COPY Dockerfile.eval-db.load.sh /load.sh
+RUN chmod +x /load.sh && /load.sh
+
+# --- Runtime stage ---------------------------------------------------------
+FROM pgvector/pgvector:pg17
+ARG FIXTURE_VERSION
+LABEL org.nous.fixture_version=$FIXTURE_VERSION \
+      org.opencontainers.image.title="nous-eval-db" \
+      org.opencontainers.image.description="F051 retrieval-eval harness baked-fixture Postgres (pgvector/pgvector:pg17)"
+
+ENV POSTGRES_USER=nous \
+    POSTGRES_PASSWORD=nous_eval \
+    POSTGRES_DB=nous_eval
+
+# Copy already-initialised cluster so the runtime container skips initdb.
+COPY --from=ingest /var/lib/postgresql/data /var/lib/postgresql/data
+
+HEALTHCHECK --interval=5s --timeout=3s --retries=20 \
+    CMD pg_isready -U nous -d nous_eval || exit 1
+
+EXPOSE 5432
