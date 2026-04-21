@@ -135,7 +135,7 @@ Additional subtlety: if `owns_embeddings=True` is used per-config, each Heart sp
 
 The plan's decision is correct (separate class, clean env namespace), but the spec needs updating to match, otherwise subagents will diverge based on which doc they read first.
 
-**Proposed fix.** Update spec §Config to say "New env vars in a separate `nous.eval.config.EvalSettings` class (pydantic-settings, env_prefix `NOUS_EVAL_`)" and move the table there.
+**Proposed fix.** Update spec §Config to say "New env vars in a separate `nous_eval.config.EvalSettings` class (pydantic-settings, env_prefix `NOUS_EVAL_`)" and move the table there.
 
 ### P2-7: `nous_system.eval_runs` migration gets applied to both DBs — clarify
 
@@ -170,7 +170,7 @@ Stage 1's `pg_ctl start` won't work unless `/var/lib/postgresql/data` is initial
 1. **Silent-failure enumeration (spec §"Silent-failure surface")** is thorough — 12 concrete paths with explicit behavior. Most features ship without this; F051 is better.
 2. **Row-level `reviewed_by` gate** on AI-hand-labeled qrels is intellectually honest. Informational vs. gate-eligible separation prevents unreviewed labels from polluting merge-decisions.
 3. **Named volumes + Python `tasks.py` runner + `docker buildx --platform linux/amd64`** — Windows-compat thinking is baked in from day 1 rather than discovered during first run.
-4. **Purely additive** — no changes to production retrieval code paths means blast radius is exactly `nous/eval/` + one migration + one docker-compose service block. Revocable via `rm -rf` + `DROP TABLE`.
+4. **Purely additive** — no changes to production retrieval code paths means blast radius is exactly `nous_eval/` + one migration + one docker-compose service block. Revocable via `rm -rf` + `DROP TABLE`.
 5. **Separate private fixtures repo** keeps personal memory data out of the public repo while the 10-query smoke subset remains publicly reproducible.
 6. **Persistent Docker image pattern** (stage-1 ingest → stage-2 consumable) avoids the naive "rebuild Postgres state every run" trap.
 7. **Test coverage map per silent-failure item** in plan §"Silent-failure coverage map" is a genuinely good verification artifact.

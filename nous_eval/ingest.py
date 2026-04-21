@@ -2,7 +2,7 @@
 
 Usage::
 
-    python -m nous.eval.ingest --out nous-eval-fixtures-staging --agent-id nous-eval-corpus
+    python -m nous_eval.ingest --out nous-eval-fixtures-staging --agent-id nous-eval-corpus
 
 What it does (in strict order):
 
@@ -127,7 +127,7 @@ def _require_prod_env() -> str:
 
 def _parse_args(argv: list[str] | None) -> IngestConfig:
     parser = argparse.ArgumentParser(
-        prog="python -m nous.eval.ingest",
+        prog="python -m nous_eval.ingest",
         description="Replay prod corpus into scratch eval DB + dump JSONL.",
     )
     parser.add_argument(
@@ -173,7 +173,7 @@ def _parse_args(argv: list[str] | None) -> IngestConfig:
 def _settings_for_ingest(scratch_db_url: str) -> Any:
     """Build a Settings clone scoped to the scratch DB with all async/bg off.
 
-    Imported lazily so ``from nous.eval.ingest import IngestConfig`` does not
+    Imported lazily so ``from nous_eval.ingest import IngestConfig`` does not
     incur the full Settings load (which reads many env vars).
     """
     from nous.config import Settings  # lazy import

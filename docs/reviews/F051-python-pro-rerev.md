@@ -9,7 +9,7 @@
 
 | ID | Issue | Status |
 |---|---|---|
-| P1-1 | `python -m nous.eval.retrieval` crash | ✅ Fixed — §B.9/§B.10/§B.11 rename `cli.py`→`retrieval.py`, add `rebuild.py` + `ingest_entry.py` |
+| P1-1 | `python -m nous_eval.retrieval` crash | ✅ Fixed — §B.9/§B.10/§B.11 rename `cli.py`→`retrieval.py`, add `rebuild.py` + `ingest_entry.py` |
 | P1-2 | numpy not a dep | ✅ Fixed — §B.7 uses `statistics.mean` + list comps |
 
 ## P2 status

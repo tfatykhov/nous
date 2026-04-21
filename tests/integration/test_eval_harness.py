@@ -110,9 +110,9 @@ async def test_eval_probes_fixture_present() -> None:
 async def test_qrels_loader_reads_smoke_fixture() -> None:
     """Sanity check: the qrels_loader can parse the committed smoke fixture."""
     try:
-        from nous.eval.qrels_loader import load_qrels
+        from nous_eval.qrels_loader import load_qrels
     except ImportError:
-        pytest.skip("nous.eval.qrels_loader not yet available")
+        pytest.skip("nous_eval.qrels_loader not yet available")
     qrels = load_qrels(SMOKE_QRELS)
     assert len(qrels) >= 5
     for q in qrels:
@@ -129,12 +129,12 @@ async def test_end_to_end_smoke_run_when_db_up(tmp_path: Path) -> None:
     _skip_if_eval_db_down()
 
     try:
-        from nous.eval.config import EvalSettings
-        from nous.eval.qrels_loader import load_qrels
-        from nous.eval.report import render_json, render_markdown, write_reports
-        from nous.eval.retrieval_runner import RetrievalConfig, run_matrix
+        from nous_eval.config import EvalSettings
+        from nous_eval.qrels_loader import load_qrels
+        from nous_eval.report import render_json, render_markdown, write_reports
+        from nous_eval.retrieval_runner import RetrievalConfig, run_matrix
     except ImportError:
-        pytest.skip("nous.eval.* not yet available")
+        pytest.skip("nous_eval.* not yet available")
 
     from nous.config import Settings
 

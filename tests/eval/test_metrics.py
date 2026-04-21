@@ -1,4 +1,4 @@
-"""Unit tests for nous.eval.metrics (F051 Phase 1).
+"""Unit tests for nous_eval.metrics (F051 Phase 1).
 
 Golden-vector tests — every metric checked by hand against a tiny qrel set.
 
@@ -17,15 +17,15 @@ import pytest
 pytestmark = pytest.mark.eval
 
 try:
-    from nous.eval.metrics import (
+    from nous_eval.metrics import (
         MetricsResult,
         compute_delta,
         compute_metrics,
     )
-    from nous.eval.retrieval_runner import QrelResult
+    from nous_eval.retrieval_runner import QrelResult
 except ImportError:
     pytest.skip(
-        "nous.eval.metrics / retrieval_runner not yet available",
+        "nous_eval.metrics / retrieval_runner not yet available",
         allow_module_level=True,
     )
 

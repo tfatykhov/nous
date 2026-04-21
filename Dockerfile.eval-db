@@ -13,7 +13,7 @@
 # runs `CREATE EXTENSION vector;` on DB init and the plain postgres:17 image
 # would crash at entrypoint.
 #
-# Expected build context layout (operator populates via `python -m nous.eval.ingest`
+# Expected build context layout (operator populates via `python -m nous_eval.ingest`
 # before calling `docker build`):
 #   nous-eval-fixtures-staging/
 #     facts.jsonl

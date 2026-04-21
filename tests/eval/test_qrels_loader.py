@@ -1,4 +1,4 @@
-"""Unit tests for nous.eval.qrels_loader (F051 Phase 1).
+"""Unit tests for nous_eval.qrels_loader (F051 Phase 1).
 
 Covers:
 - Loading a valid JSONL file -> list[Qrel]
@@ -23,9 +23,9 @@ import pytest
 pytestmark = pytest.mark.eval
 
 try:
-    from nous.eval.qrels_loader import Qrel, QrelSource, load_qrels
+    from nous_eval.qrels_loader import Qrel, QrelSource, load_qrels
 except ImportError:
-    pytest.skip("nous.eval.qrels_loader not yet available", allow_module_level=True)
+    pytest.skip("nous_eval.qrels_loader not yet available", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------

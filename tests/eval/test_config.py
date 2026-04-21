@@ -1,4 +1,4 @@
-"""Unit tests for nous.eval.config (F051 Phase 1).
+"""Unit tests for nous_eval.config (F051 Phase 1).
 
 Covers:
 - Defaults match spec (port 5433, agent_id="nous-eval-corpus", fixture_version)
@@ -19,9 +19,9 @@ import pytest
 pytestmark = pytest.mark.eval
 
 try:
-    from nous.eval.config import EvalSettings
+    from nous_eval.config import EvalSettings
 except ImportError:
-    pytest.skip("nous.eval.config not yet available", allow_module_level=True)
+    pytest.skip("nous_eval.config not yet available", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------

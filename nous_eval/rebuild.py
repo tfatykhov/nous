@@ -1,9 +1,9 @@
-"""``python -m nous.eval.rebuild`` — drop the eval-DB volume and rebuild.
+"""``python -m nous_eval.rebuild`` — drop the eval-DB volume and rebuild.
 
-Thin dispatcher into :func:`nous.eval.tasks._rebuild`. The actual command
+Thin dispatcher into :func:`nous_eval.tasks._rebuild`. The actual command
 logic lives in ``tasks.py`` (owned by the Infra subagent). This module
-exists so operators can do ``python -m nous.eval.rebuild`` without
-remembering the longer ``python -m nous.eval.tasks rebuild`` form.
+exists so operators can do ``python -m nous_eval.rebuild`` without
+remembering the longer ``python -m nous_eval.tasks rebuild`` form.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import sys
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Delegate to ``nous.eval.tasks main`` with the ``rebuild`` subcommand.
+    """Delegate to ``nous_eval.tasks main`` with the ``rebuild`` subcommand.
 
     Imported lazily so this module loads cleanly even before the Infra
     subagent's ``tasks.py`` lands — a missing tasks module produces a
@@ -22,10 +22,10 @@ def main(argv: list[str] | None = None) -> int:
     ``_rebuild`` with a properly-shaped ``argparse.Namespace``.
     """
     try:
-        from nous.eval.tasks import main as tasks_main
+        from nous_eval.tasks import main as tasks_main
     except ImportError as exc:
         print(
-            f"ERROR: nous.eval.tasks not available ({exc}). "
+            f"ERROR: nous_eval.tasks not available ({exc}). "
             f"Infra subagent must land tasks.py before rebuild works.",
             file=sys.stderr,
         )

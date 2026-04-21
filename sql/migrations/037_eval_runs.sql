@@ -1,7 +1,7 @@
 -- Migration 037: F051 retrieval evaluation run history.
 --
--- One row per harness invocation (`python -m nous.eval.retrieval ...`).
--- Populated by `nous/eval/report.py::persist_run_history` when
+-- One row per harness invocation (`python -m nous_eval.retrieval ...`).
+-- Populated by `nous_eval/report.py::persist_run_history` when
 -- NOUS_EVAL_RUN_HISTORY_ENABLED=true (the default). INSERT is wrapped in
 -- `asyncio.wait_for(..., timeout=NOUS_EVAL_RUN_HISTORY_INSERT_TIMEOUT_S)` so
 -- a stalled eval DB cannot block the CLI (P1-7 in plan v2.1).

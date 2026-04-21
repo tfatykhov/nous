@@ -2,7 +2,7 @@
 
 Used by the eval-DB image build pipeline (``Dockerfile.eval-db.load.sh``)
 and by integration tests seeding an ephemeral DB. Reads JSONL files
-produced by :mod:`nous.eval.ingest` and writes rows into the existing
+produced by :mod:`nous_eval.ingest` and writes rows into the existing
 ``heart.facts`` / ``heart.episodes`` / ``heart.procedures`` /
 ``brain.decisions`` tables via SQLAlchemy core inserts.
 

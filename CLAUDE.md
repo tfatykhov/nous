@@ -95,22 +95,6 @@ nous/
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
-│   ├── eval/                   # Retrieval evaluation harness (F051)
-│   │   ├── config.py           # EvalSettings (pydantic-settings, NOUS_EVAL_* prefix)
-│   │   ├── source_registry.py  # sources.yaml loader + per-source toggles
-│   │   ├── corpus_loader.py    # Bulk JSONL → Postgres (ingest + test-DB seed)
-│   │   ├── qrels_loader.py     # Qrel pydantic model + JSONL loader + reviewed_by gate
-│   │   ├── retrieval_runner.py # run_matrix: RuntimeConfig.reset + per-config Heart/Brain
-│   │   ├── metrics.py          # MRR/P@K/R@K/nDCG (pure Python, no numpy)
-│   │   ├── report.py           # Markdown + JSON + decide_gate_f050
-│   │   ├── retrieval.py        # `python -m nous.eval.retrieval` CLI
-│   │   ├── rebuild.py          # `python -m nous.eval.rebuild` (volume purge)
-│   │   ├── ingest_entry.py     # `python -m nous.eval.ingest_entry` dispatcher
-│   │   ├── tasks.py            # Cross-platform task runner (build-image, push, etc.)
-│   │   ├── ingest.py           # Quarterly prod-DB fixture refresh
-│   │   ├── ingest_longmemeval.py # 20-Q stratified LongMemEval_S subset ingestion
-│   │   ├── probe_gen.py        # Auto-generate probes from INDEX.md + git log
-│   │   └── hand_labels_draft.py  # AI-drafted hand-label qrels
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (52 endpoints)
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
@@ -125,6 +109,23 @@ nous/
 │       ├── smart_compress.py   # Smart compression for tool results
 │       ├── tool_cache.py       # Tool result caching
 │       └── models.py           # API request/response models
+├── nous_eval/                  # Retrieval evaluation harness (F051) — dev-only sibling package
+│   │                           #   NOT shipped in prod Dockerfile; `COPY nous/ nous/` skips this.
+│   ├── config.py               # EvalSettings (pydantic-settings, NOUS_EVAL_* prefix)
+│   ├── source_registry.py      # sources.yaml loader + per-source toggles
+│   ├── corpus_loader.py        # Bulk JSONL → Postgres (ingest + test-DB seed)
+│   ├── qrels_loader.py         # Qrel pydantic model + JSONL loader + reviewed_by gate
+│   ├── retrieval_runner.py     # run_matrix: RuntimeConfig.reset + per-config Heart/Brain
+│   ├── metrics.py              # MRR/P@K/R@K/nDCG (pure Python, no numpy)
+│   ├── report.py               # Markdown + JSON + decide_gate_f050
+│   ├── retrieval.py            # `python -m nous_eval.retrieval` CLI
+│   ├── rebuild.py              # `python -m nous_eval.rebuild` (volume purge)
+│   ├── ingest_entry.py         # `python -m nous_eval.ingest_entry` dispatcher
+│   ├── tasks.py                # Cross-platform task runner (build-image, push, etc.)
+│   ├── ingest.py               # Quarterly prod-DB fixture refresh
+│   ├── ingest_longmemeval.py   # 20-Q stratified LongMemEval_S subset ingestion
+│   ├── probe_gen.py            # Auto-generate probes from INDEX.md + git log
+│   └── hand_labels_draft.py    # AI-drafted hand-label qrels
 ├── tests/                      # 1750+ tests across 91 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)
@@ -186,7 +187,7 @@ nous/
 | F047 | [Actionability Classification](docs/features/F047-actionability-classification.md) (learn-time classifier persists `actionable: bool` on `heart.facts`, replacing the `_OBSERVATION_PATTERNS` arms-race at heartbeat read time — 3 tiers: hard filter → positive-wins heuristic → Haiku LLM; backfill handler with PG advisory lock + supervision wrapper; heartbeat now consults persisted verdict with positive-wins fallback for NULL rows, fixing the PR #335 short-circuit bug; supersedes PR #335) | — |
 | F048 | [Background Streaming + TCP Keep-Alive](docs/features/F048-background-streaming-keepalive.md) (subtask + heartbeat turns stream under the hood via `call_streaming_aggregated` on both Anthropic clients — keeps TCP socket warm with incremental SSE bytes so long background generations no longer hit idle-connection drops; `AgentRunner.run_turn(is_background=True)` threads through `_tool_loop` to every `_call_api` call; wired at 5 sites: subtask_worker, heartbeat cognitive_triage + on_complete callback, DynamicCheck._run_check, and inline `spawn_task(await_result)`; `httpx.AsyncHTTPTransport` gains `SO_KEEPALIVE` + Linux `TCP_KEEPIDLE` / macOS `TCP_KEEPALIVE` via `_build_socket_options` helper; truncated-stream detection raises rather than silently returning empty content; fixes pre-existing censor-block 2-tuple return bug at runner.py:249; gated by `NOUS_API_BACKGROUND_STREAMING_ENABLED=true` + `NOUS_API_SOCKET_KEEPALIVE_ENABLED=true`) | — |
 | F049 | [Session & Memory Lifecycle Hygiene](docs/features/F049-session-lifecycle-hygiene.md) (closes #187 + scoped #166 — `_execute_subtask` wraps body in `try/finally` calling `end_conversation` under `asyncio.shield(asyncio.wait_for(..., 30))` with three distinct except branches (TimeoutError/CancelledError/Exception) at ERROR severity; `WorkingMemoryManager.cleanup_stale()` sweeps stale `heart.working_memory` rows via `ctid IN (SELECT … LIMIT N)` batched DELETE under `pg_try_advisory_xact_lock` keyed on a SHA-256 hash of `agent_id` for cross-process-stable replica serialization; session monitor grows `heart: Heart | None` kwarg and invokes the sweep at most once per `NOUS_WORKING_MEMORY_SWEEP_INTERVAL_SECONDS`; 13 new tests, empirically targets 86/87 stale rows observed in 2026-04-20 audit) | — |
-| F051 | [Retrieval Evaluation Harness](docs/features/F051-retrieval-eval-harness.md) (local-first retrieval eval + per-source qrels + paired A/B — new `nous/api/retrieval_pipeline.py::run_recall_pipeline` extracted from `tools.py::recall_deep` to expose structured results alongside unchanged LLM-facing text; new `nous/eval/` module tree (config, source_registry, corpus_loader, qrels_loader, retrieval_runner, metrics, report, CLI entries); persistent `nous-eval-db` Docker image under `docker compose --profile eval` bound to `127.0.0.1:5433`; new `sql/migrations/037_eval_runs.sql` for run history; `_verify_fixture_version` + `_verify_corpus_agent_id` preflight probes; `RuntimeConfig.reset()` between configs; 14-flag disable list for background handlers; `.gitattributes` enforces LF on `.sh`; `F050` gate logic in `decide_gate_f050` requires aggregate MRR +7%, no single-source regression >3%, and majority-positive sources; 69 new tests + byte-identical recall_deep snapshot; 4-agent implementation team with 2-cycle review) | — |
+| F051 | [Retrieval Evaluation Harness](docs/features/F051-retrieval-eval-harness.md) (local-first retrieval eval + per-source qrels + paired A/B — new `nous/api/retrieval_pipeline.py::run_recall_pipeline` extracted from `tools.py::recall_deep` to expose structured results alongside unchanged LLM-facing text; new `nous_eval/` module tree (config, source_registry, corpus_loader, qrels_loader, retrieval_runner, metrics, report, CLI entries); persistent `nous-eval-db` Docker image under `docker compose --profile eval` bound to `127.0.0.1:5433`; new `sql/migrations/037_eval_runs.sql` for run history; `_verify_fixture_version` + `_verify_corpus_agent_id` preflight probes; `RuntimeConfig.reset()` between configs; 14-flag disable list for background handlers; `.gitattributes` enforces LF on `.sh`; `F050` gate logic in `decide_gate_f050` requires aggregate MRR +7%, no single-source regression >3%, and majority-positive sources; 69 new tests + byte-identical recall_deep snapshot; 4-agent implementation team with 2-cycle review) | — |
 
 ## How to Work
 

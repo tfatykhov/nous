@@ -31,13 +31,13 @@ from nous.api.retrieval_pipeline import run_recall_pipeline
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
-from nous.eval.config import EvalSettings
+from nous_eval.config import EvalSettings
 from nous.heart.heart import Heart
 from nous.runtime_config import RuntimeConfig
 from nous.storage.database import Database
 
 if TYPE_CHECKING:
-    from nous.eval.qrels_loader import Qrel
+    from nous_eval.qrels_loader import Qrel
 
 logger = logging.getLogger(__name__)
 

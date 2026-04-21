@@ -14,7 +14,7 @@ The function returns structured ``PipelineResult`` objects + ``PipelineStats``
 so callers can either:
 
 - Format them for display (``nous.api.tools.recall_deep`` -> LLM tool output)
-- Score them against qrels (``nous.eval.retrieval_runner`` -> F051 harness)
+- Score them against qrels (``nous_eval.retrieval_runner`` -> F051 harness)
 
 Byte-identical text output is a hard invariant of the refactor; see
 ``tests/fixtures/recall_deep_text_snapshot.txt`` + the matching snapshot test.

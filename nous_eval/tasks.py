@@ -2,7 +2,7 @@
 
 One-stop CLI dispatcher for the offline fixture pipeline:
 
-    python -m nous.eval.tasks <subcommand> [args...]
+    python -m nous_eval.tasks <subcommand> [args...]
 
 Subcommands (all wrap subprocess calls with ``check=True`` so errors propagate
 as non-zero exit codes, and ``capture_output=True`` so stdout/stderr surface in
@@ -93,7 +93,7 @@ def _build_image(args: argparse.Namespace) -> int:
     if not staging.is_dir():
         print(
             f"[eval.tasks] ERROR: {staging}/ missing. "
-            "Run `python -m nous.eval.tasks ingest` first.",
+            "Run `python -m nous_eval.tasks ingest` first.",
             file=sys.stderr,
         )
         return 2
@@ -210,31 +210,31 @@ def _rebuild(args: argparse.Namespace) -> int:
 
 
 def _ingest(args: argparse.Namespace) -> int:
-    """Delegate to :mod:`nous.eval.ingest` (operator-run).
+    """Delegate to :mod:`nous_eval.ingest` (operator-run).
 
     Kept as a subprocess call rather than an in-process import so the ingest
     pipeline can set its own environment (e.g. ``NOUS_EVENT_BUS_ENABLED=false``)
     without leaking into the tasks.py process.
     """
-    return _run_passthrough([sys.executable, "-m", "nous.eval.ingest", *args.extra])
+    return _run_passthrough([sys.executable, "-m", "nous_eval.ingest", *args.extra])
 
 
 def _probe_gen(args: argparse.Namespace) -> int:
-    """Delegate to :mod:`nous.eval.probe_gen`."""
-    return _run_passthrough([sys.executable, "-m", "nous.eval.probe_gen", *args.extra])
+    """Delegate to :mod:`nous_eval.probe_gen`."""
+    return _run_passthrough([sys.executable, "-m", "nous_eval.probe_gen", *args.extra])
 
 
 def _hand_labels_draft(args: argparse.Namespace) -> int:
-    """Delegate to :mod:`nous.eval.hand_labels_draft`."""
+    """Delegate to :mod:`nous_eval.hand_labels_draft`."""
     return _run_passthrough(
-        [sys.executable, "-m", "nous.eval.hand_labels_draft", *args.extra]
+        [sys.executable, "-m", "nous_eval.hand_labels_draft", *args.extra]
     )
 
 
 def _longmemeval_subset(args: argparse.Namespace) -> int:
-    """Delegate to :mod:`nous.eval.ingest_longmemeval`."""
+    """Delegate to :mod:`nous_eval.ingest_longmemeval`."""
     return _run_passthrough(
-        [sys.executable, "-m", "nous.eval.ingest_longmemeval", *args.extra]
+        [sys.executable, "-m", "nous_eval.ingest_longmemeval", *args.extra]
     )
 
 
@@ -245,7 +245,7 @@ def _longmemeval_subset(args: argparse.Namespace) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m nous.eval.tasks",
+        prog="python -m nous_eval.tasks",
         description="F051 retrieval-eval harness operator task runner",
     )
     sub = parser.add_subparsers(dest="command", required=True)

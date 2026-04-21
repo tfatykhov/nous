@@ -1,4 +1,4 @@
-"""``python -m nous.eval.retrieval`` — main CLI entry for the eval harness.
+"""``python -m nous_eval.retrieval`` — main CLI entry for the eval harness.
 
 Subcommand-free CLI: argparse with ``--configs``, ``--sources``, etc. The
 harness:
@@ -31,22 +31,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nous.config import Settings
-from nous.eval.config import EvalSettings
-from nous.eval.metrics import compute_metrics
-from nous.eval.qrels_loader import QrelSource, load_qrels
-from nous.eval.report import (
+from nous_eval.config import EvalSettings
+from nous_eval.metrics import compute_metrics
+from nous_eval.qrels_loader import QrelSource, load_qrels
+from nous_eval.report import (
     decide_gate_f050,
     render_json,
     render_markdown,
     write_reports,
 )
-from nous.eval.retrieval_runner import RetrievalConfig, run_matrix
-from nous.eval.source_registry import SourceRegistry
+from nous_eval.retrieval_runner import RetrievalConfig, run_matrix
+from nous_eval.source_registry import SourceRegistry
 
 if TYPE_CHECKING:
-    from nous.eval.qrels_loader import Qrel
-    from nous.eval.retrieval_runner import RunResult
-    from nous.eval.source_registry import ResolvedSource
+    from nous_eval.qrels_loader import Qrel
+    from nous_eval.retrieval_runner import RunResult
+    from nous_eval.source_registry import ResolvedSource
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
 def build_parser() -> argparse.ArgumentParser:
     """Construct the argparse parser used by ``main``."""
     parser = argparse.ArgumentParser(
-        prog="python -m nous.eval.retrieval",
+        prog="python -m nous_eval.retrieval",
         description="F051 retrieval evaluation harness.",
     )
     parser.add_argument(
@@ -243,7 +243,7 @@ async def _verify_fixture_version(
     log INFO and continue.
     Version row missing → same treatment.
     Version row present but mismatch → WARN with both tags so operator
-    knows to run `python -m nous.eval.tasks rebuild`.
+    knows to run `python -m nous_eval.tasks rebuild`.
     """
     import asyncpg
 
@@ -288,7 +288,7 @@ async def _verify_fixture_version(
     if actual != expected_version:
         logger.warning(
             "F051: fixture version mismatch — eval DB has '%s' but env expects '%s'. "
-            "Run `python -m nous.eval.tasks rebuild` to sync.",
+            "Run `python -m nous_eval.tasks rebuild` to sync.",
             actual,
             expected_version,
         )

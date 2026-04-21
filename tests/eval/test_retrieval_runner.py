@@ -1,6 +1,6 @@
-"""Unit tests for nous.eval.retrieval_runner (F051 Phase 1).
+"""Unit tests for nous_eval.retrieval_runner (F051 Phase 1).
 
-Strategy: patch ``nous.eval.retrieval_runner.run_recall_pipeline`` (not Heart
+Strategy: patch ``nous_eval.retrieval_runner.run_recall_pipeline`` (not Heart
 directly — the runner calls the pipeline, not Heart). A FakePipeline callable
 stands in for ``run_recall_pipeline`` so tests execute without a DB.
 
@@ -23,8 +23,8 @@ pytestmark = pytest.mark.eval
 
 try:
     from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
-    from nous.eval.qrels_loader import Qrel
-    from nous.eval.retrieval_runner import (
+    from nous_eval.qrels_loader import Qrel
+    from nous_eval.retrieval_runner import (
         QrelResult,
         RetrievalConfig,
         RunResult,
@@ -32,7 +32,7 @@ try:
     )
 except ImportError:
     pytest.skip(
-        "nous.eval.retrieval_runner (+deps) not yet available",
+        "nous_eval.retrieval_runner (+deps) not yet available",
         allow_module_level=True,
     )
 
@@ -123,16 +123,16 @@ async def test_run_matrix_builds_per_config_run_result() -> None:
 
     with (
         patch(
-            "nous.eval.retrieval_runner.run_recall_pipeline",
+            "nous_eval.retrieval_runner.run_recall_pipeline",
             side_effect=_fake_pipeline_hit,
         ),
         patch(
-            "nous.eval.retrieval_runner._build_heart_for_eval"
+            "nous_eval.retrieval_runner._build_heart_for_eval"
         ) as mock_build_heart,
         patch(
-            "nous.eval.retrieval_runner._build_brain_for_eval"
+            "nous_eval.retrieval_runner._build_brain_for_eval"
         ) as mock_build_brain,
-        patch("nous.eval.retrieval_runner.Database") as mock_db_cls,
+        patch("nous_eval.retrieval_runner.Database") as mock_db_cls,
     ):
         # Heart async context manager
         mock_heart = AsyncMock()
@@ -170,16 +170,16 @@ async def test_qrel_exception_captured_not_zero_scored() -> None:
 
     with (
         patch(
-            "nous.eval.retrieval_runner.run_recall_pipeline",
+            "nous_eval.retrieval_runner.run_recall_pipeline",
             side_effect=_fake_pipeline_raises,
         ),
         patch(
-            "nous.eval.retrieval_runner._build_heart_for_eval"
+            "nous_eval.retrieval_runner._build_heart_for_eval"
         ) as mock_build_heart,
         patch(
-            "nous.eval.retrieval_runner._build_brain_for_eval"
+            "nous_eval.retrieval_runner._build_brain_for_eval"
         ) as mock_build_brain,
-        patch("nous.eval.retrieval_runner.Database") as mock_db_cls,
+        patch("nous_eval.retrieval_runner.Database") as mock_db_cls,
     ):
         mock_heart = AsyncMock()
         mock_heart.embeddings = None
@@ -216,18 +216,18 @@ async def test_runtime_config_reset_between_configs() -> None:
 
     with (
         patch(
-            "nous.eval.retrieval_runner.run_recall_pipeline",
+            "nous_eval.retrieval_runner.run_recall_pipeline",
             side_effect=_fake_pipeline_hit,
         ),
         patch(
-            "nous.eval.retrieval_runner._build_heart_for_eval"
+            "nous_eval.retrieval_runner._build_heart_for_eval"
         ) as mock_build_heart,
         patch(
-            "nous.eval.retrieval_runner._build_brain_for_eval"
+            "nous_eval.retrieval_runner._build_brain_for_eval"
         ) as mock_build_brain,
-        patch("nous.eval.retrieval_runner.Database") as mock_db_cls,
+        patch("nous_eval.retrieval_runner.Database") as mock_db_cls,
         patch(
-            "nous.eval.retrieval_runner.RuntimeConfig"
+            "nous_eval.retrieval_runner.RuntimeConfig"
         ) as mock_runtime_config,
     ):
         mock_heart = AsyncMock()
@@ -265,15 +265,15 @@ async def test_score_rank_first_gold_match() -> None:
 
     with (
         patch(
-            "nous.eval.retrieval_runner.run_recall_pipeline", side_effect=_pipeline
+            "nous_eval.retrieval_runner.run_recall_pipeline", side_effect=_pipeline
         ),
         patch(
-            "nous.eval.retrieval_runner._build_heart_for_eval"
+            "nous_eval.retrieval_runner._build_heart_for_eval"
         ) as mock_build_heart,
         patch(
-            "nous.eval.retrieval_runner._build_brain_for_eval"
+            "nous_eval.retrieval_runner._build_brain_for_eval"
         ) as mock_build_brain,
-        patch("nous.eval.retrieval_runner.Database") as mock_db_cls,
+        patch("nous_eval.retrieval_runner.Database") as mock_db_cls,
     ):
         mock_heart = AsyncMock()
         mock_heart.embeddings = None

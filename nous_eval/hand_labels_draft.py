@@ -26,7 +26,7 @@ Output JSONL schema (one row per draft):
     }
 
 Phase 1 ships the drafting code without invoking Sonnet — wired in Phase 2
-when the operator runs ``python -m nous.eval.hand_labels_draft --n 30``.
+when the operator runs ``python -m nous_eval.hand_labels_draft --n 30``.
 """
 
 from __future__ import annotations
@@ -222,7 +222,7 @@ async def run(config: HLDConfig) -> int:
 
 
 def _parse_args(argv: list[str] | None) -> HLDConfig:
-    p = argparse.ArgumentParser(prog="python -m nous.eval.hand_labels_draft")
+    p = argparse.ArgumentParser(prog="python -m nous_eval.hand_labels_draft")
     p.add_argument("--n", type=int, default=DEFAULT_N)
     p.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     p.add_argument("--model", default=DEFAULT_MODEL)

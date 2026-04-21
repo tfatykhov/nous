@@ -32,7 +32,7 @@ If Nous later needs external benchmark numbers for a paper or public comparison,
 
 ## Goals
 
-1. **Reproducible retrieval measurement** — any PR author can run `uv run python -m nous.eval.retrieval` and get MRR / P@K / R@K / nDCG on a fixed corpus + qrels set in under 5 minutes.
+1. **Reproducible retrieval measurement** — any PR author can run `uv run python -m nous_eval.retrieval` and get MRR / P@K / R@K / nDCG on a fixed corpus + qrels set in under 5 minutes.
 2. **Paired A/B between retrieval configs** — `--configs baseline,f050_on,ce_off` produces a side-by-side delta table, gate decisions use paired deltas not absolute numbers.
 3. **Graceful degradation** — missing fixtures, unavailable LongMemEval, unreviewed hand-labels should all still yield *some* usable output with the limitation clearly flagged. Harness must never crash when a source is missing.
 4. **Persistent, local eval DB** — one-time ingestion, then every subsequent run reuses the baked Postgres state. Zero re-ingestion cost on repeat runs.
@@ -48,7 +48,7 @@ If Nous later needs external benchmark numbers for a paper or public comparison,
 - **No mutation of the eval DB at harness run time** — retrieval is read-only on `nous_eval`. Any test that learns facts at runtime belongs in existing pytest, not F051.
 - **No schema changes on the main `nous` DB** beyond a single new `nous_system.eval_runs` table for run history.
 - **No new REST endpoints.** F051 is CLI-only in Phase 1. If dashboard integration is wanted later, that's F051.3.
-- **No changes to production retrieval code paths.** Every edit lives under `nous/eval/`, `sql/migrations/NNN_eval_runs.sql`, `Dockerfile.eval-db`, `docker-compose.yml` (one new service under a profile), and docs.
+- **No changes to production retrieval code paths.** Every edit lives under `nous_eval/`, `sql/migrations/NNN_eval_runs.sql`, `Dockerfile.eval-db`, `docker-compose.yml` (one new service under a profile), and docs.
 
 ## Deferred (with rationale)
 
@@ -82,7 +82,7 @@ This refactor must land BEFORE the eval harness reads from the pipeline. Blast r
 │                     │ import nous.heart, .brain  │
 │                     │                            │
 │  ┌──────────────────┴───────────────────┐        │
-│  │  `uv run python -m nous.eval.retrieval`        │
+│  │  `uv run python -m nous_eval.retrieval`        │
 │  │     - loads RetrievalConfig matrix             │
 │  │     - connects Heart(db=eval_db)               │
 │  │     - loops qrels, calls recall_deep           │
@@ -113,10 +113,10 @@ This refactor must land BEFORE the eval harness reads from the pipeline. Blast r
 └──────────────────────────────────────┘
 ```
 
-### 2. Module layout — `nous/eval/`
+### 2. Module layout — `nous_eval/`
 
 ```
-nous/eval/
+nous_eval/
 ├── __init__.py
 ├── config.py               # EvalSettings (Pydantic) — env vars, defaults
 ├── source_registry.py      # Load sources.yaml, resolve paths, per-source toggles
@@ -136,7 +136,7 @@ nous/eval/
 
 Under 1500 LOC total, ~800 LOC of tests alongside in `tests/eval/`.
 
-### 3. Source registry — `nous/eval/config/sources.yaml`
+### 3. Source registry — `nous_eval/config/sources.yaml`
 
 ```yaml
 # Per-source metadata. Harness reads this at startup to build the fixture matrix.
@@ -234,7 +234,7 @@ Example overrides used in Phase 1:
 | `mmr_off` | `mmr_enabled=False` |
 | `graph_off` | `graph_recall_enabled=False` |
 
-Config matrix lives in `nous/eval/config/configs.yaml`. CLI `--configs a,b,c` selects by name; unknown name errors at startup with a list of available configs.
+Config matrix lives in `nous_eval/config/configs.yaml`. CLI `--configs a,b,c` selects by name; unknown name errors at startup with a list of available configs.
 
 ### 6. Retrieval runner — `retrieval_runner.py`
 
@@ -346,7 +346,7 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=20 \
 EXPOSE 5432
 ```
 
-Built via `uv run python -m nous.eval.tasks build-image --version v2026-Q2` which wraps:
+Built via `uv run python -m nous_eval.tasks build-image --version v2026-Q2` which wraps:
 
 ```bash
 docker buildx build \
@@ -393,7 +393,7 @@ Starts on demand only:
 
 ```bash
 docker compose --profile eval up -d nous-eval-db
-uv run python -m nous.eval.retrieval --configs baseline,f050_on
+uv run python -m nous_eval.retrieval --configs baseline,f050_on
 docker compose --profile eval stop nous-eval-db   # Optional
 ```
 
@@ -425,7 +425,7 @@ COMMENT ON TABLE nous_system.eval_runs IS
 
 Writes are best-effort: if the main `nous` DB is unreachable at run end, the run is logged to stderr as WARN and the report still persists on disk. Never blocks the harness invocation.
 
-### 12. Ingest pipeline — `nous/eval/ingest.py`
+### 12. Ingest pipeline — `nous_eval/ingest.py`
 
 **When:** quarterly, or when adding new fixture sources. Runs against **prod Nous DB** via SSH tunnel (`ssh -L 15432:localhost:5432 vm` beforehand).
 
@@ -438,8 +438,8 @@ Writes are best-effort: if the main `nous` DB is unreachable at run end, the run
 5. **AI-hand draft**: call an inline agent with access to the corpus sample, produce 30 queries across 3 categories (specific-lookup / concept / jargon-drift), emit qrels with `reviewed_by: null`.
 6. **Synthetic Haiku**: optionally, 1-2 queries reverse-generated per fact. Off by default.
 7. **Commit JSONL dump to `nous-eval-fixtures` git repo** at `v<tag>/` directory. Tag the repo.
-8. **Build eval DB image**: `uv run python -m nous.eval.tasks build-image --version v<tag>`.
-9. **Push image to GHCR**: `uv run python -m nous.eval.tasks push-image --version v<tag>`.
+8. **Build eval DB image**: `uv run python -m nous_eval.tasks build-image --version v<tag>`.
+9. **Push image to GHCR**: `uv run python -m nous_eval.tasks push-image --version v<tag>`.
 10. **Bump `NOUS_EVAL_FIXTURE_VERSION` default** in docker-compose.yml, commit to nous repo.
 
 ### 13. Hand-label draft — `hand_labels_draft.py`
@@ -468,7 +468,7 @@ Output committed to `nous-eval-fixtures/v<tag>/qrels_ai_hand_draft.jsonl`. After
 ### 14. Windows-specific considerations
 
 1. **Named volumes only** — no `./data:/var/lib/postgresql/data` bind mount, because Windows path translation via WSL2 backend has Docker permission issues and encoding traps. `nous_eval_db_data` named volume solves both.
-2. **No Makefile** — all build / push / rebuild tasks are `uv run python -m nous.eval.tasks <subcommand>`. Argparse subcommands; cross-platform.
+2. **No Makefile** — all build / push / rebuild tasks are `uv run python -m nous_eval.tasks <subcommand>`. Argparse subcommands; cross-platform.
 3. **Forward slashes in config YAML** — Python's `pathlib.PurePosixPath` normalizes. Absolute Windows paths (`E:\...`) only appear in the CLI `--out reports/...` arg, which is shell-quoted by the user.
 4. **Port 5433 conflict detection** — at startup, harness does `socket.socket().connect_ex(("localhost", 5433))`. If the eval DB container is down (refused connection) → error message tells user to run `docker compose --profile eval up -d nous-eval-db`. If *something else* is squatting 5433 (successful connect to non-Postgres process) → separate error instructs user to stop the conflicting service.
 5. **`docker buildx` uses `--platform linux/amd64` explicitly** so the Windows WSL2 Docker Engine produces images identical to what an amd64 Linux host produces. Prevents surprise arch mismatches.
@@ -557,7 +557,7 @@ Every path below must fail **loudly or gracefully** — never silently:
 10. **Config name not in configs.yaml** → fast-fail at startup with list of valid names.
 11. **Gate threshold met but single-source regression exceeds max** → gate decision = FAIL with explicit "single-source regression: <source> -<pct>%".
 12. **Fixture version mismatch** (image tag vs `meta.json` in fixtures dir) → WARN at startup, run continues, version mismatch noted in report header.
-13. **Named volume stale after image tag bump.** Docker copies image data INTO an empty named volume; a populated `nous_eval_db_data` silently keeps old fixtures even when the image tag bumps. Mitigation: (a) at startup, harness queries `nous_eval_meta.fixture_version` and compares to `NOUS_EVAL_FIXTURE_VERSION`; mismatch raises a HARD error instructing operator to run `python -m nous.eval.tasks rebuild` which purges the volume; (b) rebuild command always runs `docker volume rm -f nous_eval_db_data` before re-up.
+13. **Named volume stale after image tag bump.** Docker copies image data INTO an empty named volume; a populated `nous_eval_db_data` silently keeps old fixtures even when the image tag bumps. Mitigation: (a) at startup, harness queries `nous_eval_meta.fixture_version` and compares to `NOUS_EVAL_FIXTURE_VERSION`; mismatch raises a HARD error instructing operator to run `python -m nous_eval.tasks rebuild` which purges the volume; (b) rebuild command always runs `docker volume rm -f nous_eval_db_data` before re-up.
 14. **Default eval DB password `nous_eval` left unchanged.** Startup emits `UserWarning` if `NOUS_EVAL_DB_PASSWORD == "nous_eval"`. Port 5433 binds `127.0.0.1` only, so risk is contained to local machine, but operator is reminded.
 15. **`agent_id` mismatch between ingested corpus and harness.** Corpus is ingested with `agent_id=nous-eval-corpus`; `EvalSettings.agent_id` defaults to the same; startup queries `SELECT DISTINCT agent_id FROM heart.facts` and warns if the corpus contains a different value.
 16. **RuntimeConfig singleton state bleed between configs.** `RuntimeConfig.reset()` is called (a) at harness startup and (b) between each config in the matrix. If a config flag lives in RuntimeConfig-layer (e.g. `cross_encoder_enabled`, `vector_weight`, `rrf_k`), the per-config Settings override takes effect via the `_overrides`-empty fallback path. Verified by `test_runtime_config_reset_between_configs`.
@@ -597,7 +597,7 @@ Every path below must fail **loudly or gracefully** — never silently:
 
 - **Phase 1 ship gate:**
   - All unit + integration tests green
-  - `uv run python -m nous.eval.retrieval` in smoke mode produces a valid report referencing ≥1 source
+  - `uv run python -m nous_eval.retrieval` in smoke mode produces a valid report referencing ≥1 source
   - Manual docker-compose spin-up with `nous-eval-db:latest` (placeholder image on first PR; replaced in Phase 2) reaches healthcheck within 30s
   - Windows 11 compatibility verified: all CLI tasks run from Git Bash without modification
 - **Phase 2 completion gate:** fixture ingest produces v2026-Q2 JSONL dumps + image + reviewed hand-labels; full-fidelity run produces gate-eligible metrics
@@ -617,7 +617,7 @@ Every path below must fail **loudly or gracefully** — never silently:
 7. **F050 gate tightened to +7% MRR + no single-source regression > 3%.** Protects against N=20 noise flip-flops more than the original +5% spec value.
 8. **`nous_system.eval_runs` on main DB, not eval DB.** Run history must survive eval DB rebuilds. Persist best-effort; never block harness on write failure.
 9. **LongMemEval MIT attribution file committed publicly.** The 10-query smoke subset in the public repo must carry the attribution per MIT license; full 500-Q set stays in private fixtures repo.
-10. **No schema changes on production Nous DB** beyond `eval_runs`. F051 must be fully removable via `DROP TABLE nous_system.eval_runs; rm -rf nous/eval/` with zero other impact.
+10. **No schema changes on production Nous DB** beyond `eval_runs`. F051 must be fully removable via `DROP TABLE nous_system.eval_runs; rm -rf nous_eval/` with zero other impact.
 
 ---
 
@@ -637,7 +637,7 @@ Every path below must fail **loudly or gracefully** — never silently:
 
 | Component | Est. LOC | Est. time |
 |---|---|---|
-| `nous/eval/` module (config + registry + loaders + runner + metrics + report) | ~1200 | 1.5 days |
+| `nous_eval/` module (config + registry + loaders + runner + metrics + report) | ~1200 | 1.5 days |
 | `Dockerfile.eval-db` + `tasks.py` + docker-compose profile | ~200 | 0.5 days |
 | Ingest pipeline (`ingest.py`, `ingest_longmemeval.py`, `probe_gen.py`, `hand_labels_draft.py`) | ~600 | 1 day |
 | Tests (unit + integration + smoke fixtures) | ~800 | 1 day |

@@ -19,7 +19,7 @@ import math
 from dataclasses import dataclass
 from statistics import mean
 
-from nous.eval.retrieval_runner import QrelResult
+from nous_eval.retrieval_runner import QrelResult
 
 
 @dataclass(frozen=True)

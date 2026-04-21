@@ -14,17 +14,17 @@ implementation plan.
 
 from __future__ import annotations
 
-from nous.eval.config import EvalSettings
-from nous.eval.metrics import Delta, MetricsResult, compute_delta, compute_metrics
-from nous.eval.qrels_loader import Qrel, QrelSource, load_qrels
-from nous.eval.report import GateDecision, decide_gate_f050, render_json, render_markdown
-from nous.eval.retrieval_runner import (
+from nous_eval.config import EvalSettings
+from nous_eval.metrics import Delta, MetricsResult, compute_delta, compute_metrics
+from nous_eval.qrels_loader import Qrel, QrelSource, load_qrels
+from nous_eval.report import GateDecision, decide_gate_f050, render_json, render_markdown
+from nous_eval.retrieval_runner import (
     QrelResult,
     RetrievalConfig,
     RunResult,
     run_matrix,
 )
-from nous.eval.source_registry import ResolvedSource, SourceRegistry, SourceSpec
+from nous_eval.source_registry import ResolvedSource, SourceRegistry, SourceSpec
 
 __all__ = [
     "EvalSettings",

@@ -1,4 +1,4 @@
-"""Unit tests for nous.eval.source_registry (F051 Phase 1).
+"""Unit tests for nous_eval.source_registry (F051 Phase 1).
 
 Covers the 6 resolution rules:
 1. fixtures_dir unset -> only requires_fixtures_dir=false sources load; smoke banner
@@ -24,9 +24,9 @@ import pytest
 pytestmark = pytest.mark.eval
 
 try:
-    from nous.eval.source_registry import ResolvedSource, SourceRegistry, SourceSpec
+    from nous_eval.source_registry import ResolvedSource, SourceRegistry, SourceSpec
 except ImportError:
-    pytest.skip("nous.eval.source_registry not yet available", allow_module_level=True)
+    pytest.skip("nous_eval.source_registry not yet available", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------

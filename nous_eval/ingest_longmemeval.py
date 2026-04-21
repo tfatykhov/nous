@@ -192,11 +192,11 @@ async def _replay_sessions_into_scratch(
     """Drive ``fact_extractor`` + ``episode_summarizer`` over each haystack session.
 
     Phase 1 ships the skeleton: we construct Settings for the scratch DB (via
-    :func:`nous.eval.ingest._settings_for_ingest`) and log the intended actions.
+    :func:`nous_eval.ingest._settings_for_ingest`) and log the intended actions.
     Phase 2 wires the actual replay call — blocked on a small refactor of the
     fact_extractor handler so it can run without a live EventBus.
     """
-    from nous.eval.ingest import _settings_for_ingest
+    from nous_eval.ingest import _settings_for_ingest
 
     # Build Settings now so mis-wiring surfaces at code-review time, not Phase 2.
     _ = _settings_for_ingest(scratch_db_url)
@@ -254,7 +254,7 @@ def _write_qrels(picked: list[dict[str, Any]], stats: LMEIngestStats, out_path: 
 
 
 def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
-    p = argparse.ArgumentParser(prog="python -m nous.eval.ingest_longmemeval")
+    p = argparse.ArgumentParser(prog="python -m nous_eval.ingest_longmemeval")
     p.add_argument("--n", type=int, default=DEFAULT_N)
     p.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     p.add_argument("--out-qrels", type=Path, default=Path("tests/fixtures/longmemeval_qrels.jsonl"))

@@ -189,7 +189,7 @@ def write_probes(probes: list[Probe], out_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-    parser = argparse.ArgumentParser(prog="python -m nous.eval.probe_gen")
+    parser = argparse.ArgumentParser(prog="python -m nous_eval.probe_gen")
     parser.add_argument("--index", type=Path, default=INDEX_MD_DEFAULT)
     parser.add_argument("--out", type=Path, default=OUT_DEFAULT)
     parser.add_argument(

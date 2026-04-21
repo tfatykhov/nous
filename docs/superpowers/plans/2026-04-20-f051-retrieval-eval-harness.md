@@ -17,7 +17,7 @@
 6. **[arch]** Known limitation note: `nous/heart/search.py:34-55` currently rebuilds `Settings()` from `os.environ` internally for `vector_weight` + `rrf_k` — so per-config A/B of those two knobs won't propagate through `run_matrix`'s `model_copy`-based override. **Phase 1 config matrix does not touch those knobs** (only `cross_encoder_enabled`, `mmr_enabled`, `graph_recall_enabled`, `query_expansion_enabled`), so this is acceptable. Documented as a known limitation in the report header. Fix is out of scope for F051 — a follow-up would refactor `search.py` to accept Settings as a parameter.
 7. **[arch]** `decide_gate_f050` docstring documents the N=2-sources edge case: `require_majority_positive=True` with 2 gate-eligible sources reduces to "both sources must have positive delta", which is stricter than majority. Documented, not a bug.
 8. **[arch]** `PipelineStats` gets a new field `n_per_type_errors: dict[str, int]` — Heart's per-type try/except at `heart.py:783-799` suppresses sub-search exceptions into warnings; surfacing the count in stats exposes silent-failures in eval reports.
-9. **[python-pro]** Add `tests/eval/test_no_utcnow.py` as a grep-linter — `git ls-files nous/eval/ | xargs grep -l 'utcnow'` must return empty. Prevents regression to deprecated API.
+9. **[python-pro]** Add `tests/eval/test_no_utcnow.py` as a grep-linter — `git ls-files nous_eval/ | xargs grep -l 'utcnow'` must return empty. Prevents regression to deprecated API.
 
 ## Review findings incorporated
 
@@ -39,7 +39,7 @@
 
 8. **[devil P1-4] Dockerfile.eval-db uses `postgres:17` but `sql/init.sql:10` runs `CREATE EXTENSION vector`.** Image build crashes at entrypoint. **Fix:** base image is `pgvector/pgvector:pg17`, matching docker-compose.yml:105.
 
-9. **[devil P1-5] Named volume + baked image = stale fixtures on version bump.** Docker only copies image data INTO an empty named volume. Version bumping `NOUS_EVAL_FIXTURE_VERSION=v2026-Q3` silently keeps v2026-Q2 data. **Fix:** (a) `tasks.py::rebuild` command runs `docker volume rm nous_eval_db_data && docker compose --profile eval up -d nous-eval-db`; (b) on startup, the harness queries `nous_eval_meta.fixture_version` and compares to `NOUS_EVAL_FIXTURE_VERSION`; mismatch → error instructs operator to run `python -m nous.eval.tasks rebuild`.
+9. **[devil P1-5] Named volume + baked image = stale fixtures on version bump.** Docker only copies image data INTO an empty named volume. Version bumping `NOUS_EVAL_FIXTURE_VERSION=v2026-Q3` silently keeps v2026-Q2 data. **Fix:** (a) `tasks.py::rebuild` command runs `docker volume rm nous_eval_db_data && docker compose --profile eval up -d nous-eval-db`; (b) on startup, the harness queries `nous_eval_meta.fixture_version` and compares to `NOUS_EVAL_FIXTURE_VERSION`; mismatch → error instructs operator to run `python -m nous_eval.tasks rebuild`.
 
 10. **[devil P1-6] CRLF on `Dockerfile.eval-db.load.sh` breaks on Windows clone.** Fresh Windows clone without `.gitattributes` converts `*.sh` to CRLF; bash errors with `$'\r': command not found`. **Fix:** add `.gitattributes` declaring `*.sh text eol=lf`.
 
@@ -53,7 +53,7 @@
 
 15. **[devil P1-11] Ingest shares process-wide EventBus.** fact_extractor/episode_summarizer handlers could cascade writes to prod DB via singleton. **Fix:** ingest disables the EventBus entirely via `settings.event_bus_enabled=False` + passes a null EventBus instance to the fact_extractor handler (it will process inline, not via bus).
 
-16. **[python-pro P1-1] `python -m nous.eval.retrieval` crashes — no such module.** Plan defined `cli.py` but invoked `python -m nous.eval.retrieval`. **Fix:** rename `cli.py` → `retrieval.py`; `ingest.py` and `rebuild.py` become top-level modules in `nous/eval/` with `if __name__ == "__main__": raise SystemExit(main())`.
+16. **[python-pro P1-1] `python -m nous_eval.retrieval` crashes — no such module.** Plan defined `cli.py` but invoked `python -m nous_eval.retrieval`. **Fix:** rename `cli.py` → `retrieval.py`; `ingest.py` and `rebuild.py` become top-level modules in `nous_eval/` with `if __name__ == "__main__": raise SystemExit(main())`.
 
 17. **[python-pro P1-2] numpy is not a dep; over-engineering for 500 data points.** **Fix:** use `statistics.mean` + list comprehensions. Subsecond. Drop numpy from plan.
 
@@ -128,7 +128,7 @@ async def run_recall_pipeline(
     This is what the production `recall_deep` tool runs, but returning
     structured results instead of formatted text. Used by:
       - `tools.py::recall_deep` (formats to text for LLM)
-      - `nous/eval/retrieval_runner.py` (scores against qrels)
+      - `nous_eval/retrieval_runner.py` (scores against qrels)
     """
     # Mirror tools.py:320-509 logic but accumulate into PipelineResult objects.
     # No code duplication: tools.py:recall_deep becomes a thin wrapper that
@@ -154,8 +154,8 @@ async def run_recall_pipeline(
 | Agent | agent_id | Files | LOC est. |
 |---|---|---|---|
 | **PREREQ: Refactor** | `nous-eval-impl-refactor` | `nous/api/retrieval_pipeline.py` (new), `nous/api/tools.py` (edit recall_deep) | ~280 net |
-| **Core** | `nous-eval-impl-core` | `nous/eval/{config,source_registry,corpus_loader,qrels_loader,retrieval_runner,metrics,report,retrieval,rebuild,ingest_entry}.py` | ~1200 |
-| **Infra** | `nous-eval-impl-infra` | `Dockerfile.eval-db`, `Dockerfile.eval-db.load.sh`, `docker-compose.yml` (edit), `.gitattributes` (new), `nous/eval/{tasks,ingest,ingest_longmemeval,probe_gen,hand_labels_draft}.py`, `sql/migrations/037_eval_runs.sql`, `nous/config.py` (edit) | ~900 |
+| **Core** | `nous-eval-impl-core` | `nous_eval/{config,source_registry,corpus_loader,qrels_loader,retrieval_runner,metrics,report,retrieval,rebuild,ingest_entry}.py` | ~1200 |
+| **Infra** | `nous-eval-impl-infra` | `Dockerfile.eval-db`, `Dockerfile.eval-db.load.sh`, `docker-compose.yml` (edit), `.gitattributes` (new), `nous_eval/{tasks,ingest,ingest_longmemeval,probe_gen,hand_labels_draft}.py`, `sql/migrations/037_eval_runs.sql`, `nous/config.py` (edit) | ~900 |
 | **Tests** | `nous-eval-impl-tests` | `tests/eval/*.py`, `tests/integration/test_eval_harness.py`, `tests/fixtures/{eval_smoke_corpus,eval_smoke,eval_probes}.jsonl` | ~900 |
 
 **Sequencing:**
@@ -204,10 +204,10 @@ Per §"Pipeline refactor" above.
 
 ### B. Core (`nous-eval-impl-core`)
 
-#### B.1 NEW: `nous/eval/__init__.py` (~25 LOC)
+#### B.1 NEW: `nous_eval/__init__.py` (~25 LOC)
 Public API re-exports.
 
-#### B.2 NEW: `nous/eval/config.py` (~130 LOC)
+#### B.2 NEW: `nous_eval/config.py` (~130 LOC)
 
 ```python
 from pathlib import Path
@@ -275,15 +275,15 @@ class EvalSettings(BaseSettings):
             )
 ```
 
-#### B.3 NEW: `nous/eval/source_registry.py` (~260 LOC)
+#### B.3 NEW: `nous_eval/source_registry.py` (~260 LOC)
 
 Same design as v1 but with explicit resolution logging (`_skip_reason` field on `ResolvedSource` for the report).
 
-#### B.4 NEW: `nous/eval/qrels_loader.py` (~180 LOC)
+#### B.4 NEW: `nous_eval/qrels_loader.py` (~180 LOC)
 
 Same as v1 but `memory_types` Literal includes `"decision"` (now valid because pipeline covers decisions).
 
-#### B.5 NEW: `nous/eval/corpus_loader.py` (~220 LOC)
+#### B.5 NEW: `nous_eval/corpus_loader.py` (~220 LOC)
 
 Bulk-COPY from JSONL → Postgres. Used by the eval DB image build pipeline (inside Dockerfile) AND by the smoke-mode test fixtures. Key functions:
 
@@ -297,7 +297,7 @@ async def load_corpus_from_jsonl(db: Database, jsonl_dir: Path, agent_id: str) -
     """
 ```
 
-#### B.6 NEW: `nous/eval/retrieval_runner.py` (~320 LOC)
+#### B.6 NEW: `nous_eval/retrieval_runner.py` (~320 LOC)
 
 ```python
 from nous.api.retrieval_pipeline import run_recall_pipeline, PipelineResult
@@ -417,7 +417,7 @@ async def _run_one(heart, brain, settings, qrel, idx, top_k) -> QrelResult:
                           n_gold_total=len(qrel.gold_ids), error=f"{type(exc).__name__}: {exc}")
 ```
 
-#### B.7 NEW: `nous/eval/metrics.py` (~200 LOC)
+#### B.7 NEW: `nous_eval/metrics.py` (~200 LOC)
 
 Pure Python via `statistics.mean` + list comps — no numpy.
 
@@ -456,7 +456,7 @@ def compute_delta(baseline: MetricsResult, experimental: MetricsResult, metric: 
     see spec §"Resolved decisions" for the math)."""
 ```
 
-#### B.8 NEW: `nous/eval/report.py` (~280 LOC)
+#### B.8 NEW: `nous_eval/report.py` (~280 LOC)
 
 Same spec §8 layout. `decide_gate_f050`:
 
@@ -505,17 +505,17 @@ def decide_gate_f050(
     return GateDecision(feature="F050", passed=True, ...)
 ```
 
-#### B.9 NEW: `nous/eval/retrieval.py` (~280 LOC)
+#### B.9 NEW: `nous_eval/retrieval.py` (~280 LOC)
 
-Renamed from v1's `cli.py` so `python -m nous.eval.retrieval` resolves. Contains the main eval entrypoint.
+Renamed from v1's `cli.py` so `python -m nous_eval.retrieval` resolves. Contains the main eval entrypoint.
 
-#### B.10 NEW: `nous/eval/rebuild.py` (~40 LOC)
+#### B.10 NEW: `nous_eval/rebuild.py` (~40 LOC)
 
-`python -m nous.eval.rebuild` — drops the named volume + restarts the nous-eval-db service.
+`python -m nous_eval.rebuild` — drops the named volume + restarts the nous-eval-db service.
 
-#### B.11 NEW: `nous/eval/ingest_entry.py` (~20 LOC)
+#### B.11 NEW: `nous_eval/ingest_entry.py` (~20 LOC)
 
-`python -m nous.eval.ingest_entry` — thin dispatcher into `nous/eval/ingest.py::run()`. (`ingest.py` itself is under Infra's ownership.)
+`python -m nous_eval.ingest_entry` — thin dispatcher into `nous_eval/ingest.py::run()`. (`ingest.py` itself is under Infra's ownership.)
 
 ### C. Infra (`nous-eval-impl-infra`)
 
@@ -577,7 +577,7 @@ volumes:
 *.md text
 ```
 
-#### C.5 NEW: `nous/eval/tasks.py` (~260 LOC)
+#### C.5 NEW: `nous_eval/tasks.py` (~260 LOC)
 
 Subcommands: `build-image`, `push-image`, `serve-eval-db`, `stop-eval-db`, `rebuild`, `ingest`, `probe-gen`, `hand-labels-draft`, `longmemeval-subset`. Each wraps a specific subprocess call with `capture_output=True, text=True, check=True`.
 
@@ -593,15 +593,15 @@ def _rebuild(args) -> int:
     return 0
 ```
 
-#### C.6 NEW: `nous/eval/ingest.py` (~240 LOC)
+#### C.6 NEW: `nous_eval/ingest.py` (~240 LOC)
 
 Operator-run. Fails fast if `NOUS_PROD_DB_HOST/PORT/USER/PASSWORD/NAME` unset. Disables EventBus. Writes replayed state to a **scratch** eval DB (ephemeral), then dumps JSONL.
 
-#### C.7 NEW: `nous/eval/ingest_longmemeval.py` (~200 LOC)
+#### C.7 NEW: `nous_eval/ingest_longmemeval.py` (~200 LOC)
 
-#### C.8 NEW: `nous/eval/probe_gen.py` (~130 LOC)
+#### C.8 NEW: `nous_eval/probe_gen.py` (~130 LOC)
 
-#### C.9 NEW: `nous/eval/hand_labels_draft.py` (~180 LOC)
+#### C.9 NEW: `nous_eval/hand_labels_draft.py` (~180 LOC)
 
 #### C.10 NEW: `sql/migrations/037_eval_runs.sql` (~30 LOC)
 
@@ -688,9 +688,9 @@ Add `eval` and `integration` to `[tool.pytest.ini_options].markers` if not alrea
 2. **`uv run pytest tests/ -v`** passes — ALL tests, including pre-existing recall_deep tests (refactor didn't regress).
 3. **`uv run pytest tests/eval/ -v`** passes — new unit suite green.
 4. **`uv run pytest tests/integration/test_eval_harness.py -v`** passes when eval-db container up; skips with clear reason when down.
-5. **`uv run python -m nous.eval.retrieval --smoke`** runs without crashing even when `nous-eval-db` container is NOT up (fixtures dir unset → probes-only smoke).
+5. **`uv run python -m nous_eval.retrieval --smoke`** runs without crashing even when `nous-eval-db` container is NOT up (fixtures dir unset → probes-only smoke).
 6. **`docker compose --profile eval config`** validates.
-7. **`uv run python -m nous.eval.tasks --help`** lists all 9 subcommands.
+7. **`uv run python -m nous_eval.tasks --help`** lists all 9 subcommands.
 8. **`sql/migrations/037_eval_runs.sql`** applies cleanly on fresh `nous` DB.
 9. **CLAUDE.md + INDEX.md updated.** F051 marked Shipped.
 10. **Windows 11 compatibility:** `uv run` commands all succeed from Git Bash; `.sh` files check-in with LF (verified via `git ls-files --eol`).
@@ -728,7 +728,7 @@ Tests agent must include all 18.
 
 ## Documentation updates (orchestrator task, post-impl)
 
-1. CLAUDE.md — add 12 new env vars + `nous/eval/` section in project layout + F051 Shipped row
+1. CLAUDE.md — add 12 new env vars + `nous_eval/` section in project layout + F051 Shipped row
 2. INDEX.md — F051 row Shipped
 3. F051 spec status flip to ✅ Shipped after PR merges
 4. Memory: `project_f051_shipped.md`

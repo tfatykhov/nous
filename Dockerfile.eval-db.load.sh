@@ -68,7 +68,7 @@ load_jsonl_if_present heart.procedures
 load_jsonl_if_present heart.censors
 
 # Stamp the fixture version so the running harness can version-check on startup
-# (see nous/eval/retrieval.py::_verify_fixture_version).
+# (see nous_eval/retrieval.py::_verify_fixture_version).
 psql -U "${PGUSER}" -d "${PGDB}" -v ON_ERROR_STOP=1 <<SQL
 CREATE TABLE IF NOT EXISTS nous_eval_meta (
     key   TEXT PRIMARY KEY,

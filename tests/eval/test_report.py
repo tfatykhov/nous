@@ -1,4 +1,4 @@
-"""Unit tests for nous.eval.report (F051 Phase 1).
+"""Unit tests for nous_eval.report (F051 Phase 1).
 
 Covers the F050 gate decision logic:
 
@@ -25,18 +25,18 @@ import pytest
 pytestmark = pytest.mark.eval
 
 try:
-    from nous.eval.report import (
+    from nous_eval.report import (
         GateDecision,
         decide_gate_f050,
         render_json,
         render_markdown,
         write_reports,
     )
-    from nous.eval.retrieval_runner import QrelResult, RetrievalConfig, RunResult
-    from nous.eval.source_registry import ResolvedSource, SourceSpec
+    from nous_eval.retrieval_runner import QrelResult, RetrievalConfig, RunResult
+    from nous_eval.source_registry import ResolvedSource, SourceSpec
 except ImportError:
     pytest.skip(
-        "nous.eval.report (+deps) not yet available",
+        "nous_eval.report (+deps) not yet available",
         allow_module_level=True,
     )
 

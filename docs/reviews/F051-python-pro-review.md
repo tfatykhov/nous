@@ -13,25 +13,25 @@
 
 ## P1 (must-fix)
 
-### P1-1: `python -m nous.eval.retrieval` will crash — no such module
+### P1-1: `python -m nous_eval.retrieval` will crash — no such module
 
-**File/line:** plan §Acceptance criteria #4, §Files §8, spec §Goals #1 (`uv run python -m nous.eval.retrieval`)
+**File/line:** plan §Acceptance criteria #4, §Files §8, spec §Goals #1 (`uv run python -m nous_eval.retrieval`)
 
-**Problem:** The plan's CLI invocation is `uv run python -m nous.eval.retrieval`. Python's `-m` flag requires one of:
-- `nous/eval/retrieval.py` containing `if __name__ == "__main__":`
-- `nous/eval/retrieval/` package with `__main__.py`
+**Problem:** The plan's CLI invocation is `uv run python -m nous_eval.retrieval`. Python's `-m` flag requires one of:
+- `nous_eval/retrieval.py` containing `if __name__ == "__main__":`
+- `nous_eval/retrieval/` package with `__main__.py`
 
-Neither exists in the plan's file list. The actual entry-point module per §Files §8 is `nous/eval/cli.py`, and §Files §5 defines `nous/eval/retrieval_runner.py` (which is the runner, not a CLI). Running `python -m nous.eval.retrieval` today would raise `No module named nous.eval.retrieval`.
+Neither exists in the plan's file list. The actual entry-point module per §Files §8 is `nous_eval/cli.py`, and §Files §5 defines `nous_eval/retrieval_runner.py` (which is the runner, not a CLI). Running `python -m nous_eval.retrieval` today would raise `No module named nous_eval.retrieval`.
 
-The plan also references `python -m nous.eval.rebuild` and `python -m nous.eval.ingest` (§Files §8 last line) — same issue; these modules don't exist in the file list.
+The plan also references `python -m nous_eval.rebuild` and `python -m nous_eval.ingest` (§Files §8 last line) — same issue; these modules don't exist in the file list.
 
-**Proposed fix (cheapest):** Rename `nous/eval/cli.py` → `nous/eval/retrieval.py`, and make `nous/eval/tasks.py` / `nous/eval/ingest.py` the real modules for their `-m` invocations. Each exposes `main(argv)` + `if __name__ == "__main__": raise SystemExit(main())`. So:
+**Proposed fix (cheapest):** Rename `nous_eval/cli.py` → `nous_eval/retrieval.py`, and make `nous_eval/tasks.py` / `nous_eval/ingest.py` the real modules for their `-m` invocations. Each exposes `main(argv)` + `if __name__ == "__main__": raise SystemExit(main())`. So:
 
 ```
-nous/eval/retrieval.py       # was cli.py — entry for `python -m nous.eval.retrieval`
-nous/eval/retrieval_runner.py  # unchanged — internal matrix runner
-nous/eval/tasks.py             # entry for `python -m nous.eval.tasks`
-nous/eval/ingest.py            # entry for `python -m nous.eval.ingest`
+nous_eval/retrieval.py       # was cli.py — entry for `python -m nous_eval.retrieval`
+nous_eval/retrieval_runner.py  # unchanged — internal matrix runner
+nous_eval/tasks.py             # entry for `python -m nous_eval.tasks`
+nous_eval/ingest.py            # entry for `python -m nous_eval.ingest`
 ```
 
 and every entry module ends with:
@@ -41,7 +41,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-Consider adding a `tests/eval/test_module_entrypoints.py` that does `import nous.eval.retrieval` and `runpy.run_module("nous.eval.retrieval", run_name="__main__")` with `["--help"]` args to catch this class of regression.
+Consider adding a `tests/eval/test_module_entrypoints.py` that does `import nous_eval.retrieval` and `runpy.run_module("nous_eval.retrieval", run_name="__main__")` with `["--help"]` args to catch this class of regression.
 
 ### P1-2: `numpy` is not a dep — drop it, use `statistics`
 

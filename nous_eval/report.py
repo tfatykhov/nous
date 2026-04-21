@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from nous.eval.metrics import (
+from nous_eval.metrics import (
     MetricsResult,
     compute_delta,
     compute_metrics,
@@ -29,8 +29,8 @@ from nous.eval.metrics import (
 )
 
 if TYPE_CHECKING:
-    from nous.eval.retrieval_runner import RunResult
-    from nous.eval.source_registry import ResolvedSource
+    from nous_eval.retrieval_runner import RunResult
+    from nous_eval.source_registry import ResolvedSource
 
 logger = logging.getLogger(__name__)
 
