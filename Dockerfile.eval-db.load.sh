@@ -41,11 +41,21 @@ load_jsonl_if_present() {
         return 0
     fi
     echo "[load.sh] LOAD ${table} <- ${file}"
-    # Each JSONL row becomes one INSERT via a staging-table trick: COPY the raw
-    # lines into a TEMP (col JSONB) then INSERT ... SELECT.
+    # Inline staging-table approach (no PL/pgSQL procedure dependency):
+    #   1. Create TEMP TABLE _stg (j JSONB)
+    #   2. COPY raw JSONL lines from disk into _stg
+    #   3. INSERT INTO target SELECT keys/values from _stg
+    # The target table's columns must be a subset of the JSONL keys; missing
+    # JSONB keys become SQL NULL via `->`'s NULL-on-missing semantics.
+    # Each row in the JSONL must include every NOT NULL column the target
+    # demands — operator's responsibility when generating the dump.
     psql -U "${PGUSER}" -d "${PGDB}" -v ON_ERROR_STOP=1 <<SQL
-\\set fixture_path '${file}'
-CALL nous_eval_load_jsonl(:'fixture_path', '${table}');
+BEGIN;
+CREATE TEMP TABLE _stg (j JSONB) ON COMMIT DROP;
+\\copy _stg (j) FROM '${file}' WITH (FORMAT text);
+INSERT INTO ${table}
+SELECT * FROM jsonb_populate_recordset(NULL::${table}, (SELECT jsonb_agg(j) FROM _stg));
+COMMIT;
 SQL
 }
 

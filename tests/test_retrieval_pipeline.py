@@ -458,5 +458,5 @@ class TestExports:
         assert s.n_heart_results == 0
         assert s.n_brain_results == 0
         assert s.n_graph_expanded == 0
-        assert s.n_per_type_errors == {}
+        assert s.n_stage_errors == {}
         assert s.contradiction_edges == []

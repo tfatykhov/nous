@@ -233,6 +233,145 @@ def main(argv: list[str] | None = None) -> int:
     )
 
 
+async def _verify_fixture_version(
+    eval_settings: EvalSettings, expected_version: str
+) -> None:
+    """Query nous_eval_meta on the eval DB and warn on version mismatch.
+
+    Schema is key/value (matches Dockerfile.eval-db.load.sh + corpus_loader).
+    Missing table → eval DB was bootstrapped without the fixture stamp;
+    log INFO and continue.
+    Version row missing → same treatment.
+    Version row present but mismatch → WARN with both tags so operator
+    knows to run `python -m nous.eval.tasks rebuild`.
+    """
+    import asyncpg
+
+    try:
+        conn = await asyncpg.connect(
+            host=eval_settings.db_host,
+            port=eval_settings.db_port,
+            user=eval_settings.db_user,
+            password=eval_settings.db_password,
+            database=eval_settings.db_name,
+            timeout=5,
+        )
+    except Exception as exc:
+        logger.info(
+            "F051: fixture-version probe could not connect (%s); skipping check",
+            exc,
+        )
+        return
+    try:
+        row = await conn.fetchrow(
+            "SELECT value FROM nous_eval_meta WHERE key = $1",
+            "fixture_version",
+        )
+    except asyncpg.exceptions.UndefinedTableError:
+        logger.info(
+            "F051: nous_eval_meta table not present on eval DB — fixture-version "
+            "probe skipped (DB likely bootstrapped without the load.sh stamp)"
+        )
+        return
+    except Exception as exc:
+        logger.warning("F051: fixture-version probe query failed: %s", exc)
+        return
+    finally:
+        await conn.close()
+
+    if row is None:
+        logger.info(
+            "F051: nous_eval_meta has no 'fixture_version' row — fixture stamp missing"
+        )
+        return
+    actual = row["value"]
+    if actual != expected_version:
+        logger.warning(
+            "F051: fixture version mismatch — eval DB has '%s' but env expects '%s'. "
+            "Run `python -m nous.eval.tasks rebuild` to sync.",
+            actual,
+            expected_version,
+        )
+    else:
+        logger.debug("F051: fixture version OK (%s)", actual)
+
+
+async def _verify_corpus_agent_id(eval_settings: EvalSettings) -> None:
+    """Query the eval DB for the corpus's actual agent_id and warn on mismatch.
+
+    The harness will silently produce MRR=0 across every qrel if the eval DB's
+    corpus uses a different agent_id than EvalSettings.agent_id (Heart's
+    sub-searches filter `WHERE agent_id = self.agent_id`). This probe surfaces
+    that misconfiguration before the matrix run.
+    """
+    import asyncpg
+
+    try:
+        conn = await asyncpg.connect(
+            host=eval_settings.db_host,
+            port=eval_settings.db_port,
+            user=eval_settings.db_user,
+            password=eval_settings.db_password,
+            database=eval_settings.db_name,
+            timeout=5,
+        )
+    except Exception as exc:
+        logger.info(
+            "F051: agent_id probe could not connect (%s); skipping check", exc
+        )
+        return
+    try:
+        # Sample distinct agent_ids across the four memory tables. If any
+        # contain only a single agent_id and it doesn't match settings,
+        # warn loudly. Empty tables produce no signal (the corpus might be
+        # legitimately small).
+        rows = await conn.fetch(
+            """
+            SELECT 'heart.facts' AS tbl, agent_id, COUNT(*) AS n
+              FROM heart.facts GROUP BY agent_id
+            UNION ALL
+            SELECT 'brain.decisions', agent_id, COUNT(*)
+              FROM brain.decisions GROUP BY agent_id
+            UNION ALL
+            SELECT 'heart.episodes', agent_id, COUNT(*)
+              FROM heart.episodes GROUP BY agent_id
+            UNION ALL
+            SELECT 'heart.procedures', agent_id, COUNT(*)
+              FROM heart.procedures GROUP BY agent_id
+            """
+        )
+    except asyncpg.exceptions.UndefinedTableError as exc:
+        logger.info(
+            "F051: agent_id probe found unexpected schema (%s); skipping check",
+            exc,
+        )
+        return
+    except Exception as exc:
+        logger.warning("F051: agent_id probe query failed: %s", exc)
+        return
+    finally:
+        await conn.close()
+
+    expected = eval_settings.agent_id
+    distinct_ids = {r["agent_id"] for r in rows if r["n"] > 0}
+    if not distinct_ids:
+        logger.warning(
+            "F051: corpus tables are EMPTY on the eval DB — every qrel will "
+            "score MRR=0. Re-run ingest or check NOUS_EVAL_FIXTURE_VERSION."
+        )
+        return
+    if expected not in distinct_ids:
+        logger.warning(
+            "F051: agent_id mismatch — EvalSettings.agent_id='%s' but corpus "
+            "uses %s. Every Heart sub-search WILL return zero rows. "
+            "Set NOUS_EVAL_AGENT_ID to one of those values.",
+            expected,
+            sorted(distinct_ids),
+        )
+    else:
+        logger.debug("F051: agent_id OK (%s)", expected)
+
+
 async def _run_async(
     args: argparse.Namespace,
     eval_settings: EvalSettings,
@@ -325,6 +464,10 @@ async def _run_async(
         )
         run_results: list["RunResult"] = []
     else:
+        # Pre-flight integrity probes. Both warn-only — neither blocks the run,
+        # but each produces a clear log line if the eval DB is misconfigured.
+        await _verify_fixture_version(eval_settings, fixture_version)
+        await _verify_corpus_agent_id(eval_settings)
         run_results = await run_matrix(
             configs=configs,
             qrels=all_qrels,

@@ -81,7 +81,14 @@ class PipelineStats:
     n_heart_results: int = 0
     n_brain_results: int = 0
     n_graph_expanded: int = 0
-    n_per_type_errors: dict[str, int] = field(default_factory=dict)
+    # Per-stage error counts surfaced to eval reports. Keys are pipeline
+    # stage names: "heart_recall", "brain_query", "heart_graph_neighbors",
+    # "decision_neighbors", "spreading_activation", "contradiction_query".
+    # Heart's INTERNAL per-sub-search exceptions (heart.py:807-812) are NOT
+    # included here — they are caught and logged at WARN inside Heart.recall
+    # before the pipeline sees results. Surfacing those would require Heart
+    # instrumentation; deferred to a follow-up.
+    n_stage_errors: dict[str, int] = field(default_factory=dict)
     # Raw contradiction edges (source_id, source_type, target_id, target_type).
     # Preserves byte-identical warning emission for the legacy formatter
     # because PipelineResult.contradicts deduplicates and loses source-type
@@ -129,6 +136,10 @@ class _PipelineAccumulator:
     spreading_activation_used: bool = False
     graph_expansion_used: bool = False
     contradiction_checks_ran: bool = False
+
+    # Per-stage error counter — incremented when a try/except around a stage
+    # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
+    stage_errors: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +202,7 @@ async def run_recall_pipeline(
         n_heart_results=len(acc.heart_results),
         n_brain_results=len(acc.decision_results),
         n_graph_expanded=len(acc.graph_expanded),
-        n_per_type_errors={},  # Heart's per-type suppression is internal; exposed via logs
+        n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
     )
     return results, stats
@@ -261,8 +272,11 @@ async def _run_stages(
                             acc.heart_graph_decisions.append(n)
                             seen_graph_ids.add(n.id)
                 except Exception:
-                    # Matches pre-refactor: swallow silently (see tools.py:380-381)
-                    pass
+                    # Matches pre-refactor: swallow silently (see tools.py:380-381).
+                    # Surface count to PipelineStats.n_stage_errors for eval visibility.
+                    acc.stage_errors["heart_graph_neighbors"] = (
+                        acc.stage_errors.get("heart_graph_neighbors", 0) + 1
+                    )
 
     # ------------------------------------------------------------------
     # Stage 3+4: Brain decisions + graph expansion
@@ -296,6 +310,9 @@ async def _run_stages(
                         )
                 except Exception:
                     logger.debug("Density check failed, using 1-hop")
+                    acc.stage_errors["spreading_density_check"] = (
+                        acc.stage_errors.get("spreading_density_check", 0) + 1
+                    )
 
             if use_spreading:
                 try:
@@ -335,6 +352,9 @@ async def _run_stages(
                     logger.debug(
                         "Spreading activation failed, falling back to 1-hop"
                     )
+                    acc.stage_errors["spreading_activation"] = (
+                        acc.stage_errors.get("spreading_activation", 0) + 1
+                    )
                     use_spreading = False
 
             if not use_spreading:
@@ -355,6 +375,9 @@ async def _run_stages(
                     except Exception:
                         logger.debug(
                             "Graph expansion failed for decision %s", dec.id
+                        )
+                        acc.stage_errors["decision_neighbors"] = (
+                            acc.stage_errors.get("decision_neighbors", 0) + 1
                         )
 
             if graph_expanded:
@@ -392,8 +415,11 @@ async def _run_stages(
                             (c.source_id, c.source_type, c.target_id, c.target_type)
                         )
         except Exception:
-            # Matches pre-refactor: non-critical, suppressed (see tools.py:508-509)
-            pass
+            # Matches pre-refactor: non-critical, suppressed (see tools.py:508-509).
+            # Counted so eval reports surface silent contradiction-query failures.
+            acc.stage_errors["contradiction_query"] = (
+                acc.stage_errors.get("contradiction_query", 0) + 1
+            )
 
     return acc
 

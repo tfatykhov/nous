@@ -241,14 +241,18 @@ async def _dump_table_to_jsonl(
     count = 0
     with out_path.open("w", encoding="utf-8") as fh:
         async with pool.acquire() as conn:
-            async for record in conn.cursor(
-                f"SELECT * FROM {schema}.{table}"  # noqa: S608 (table names are constants)
-            ):
-                row = dict(record)
-                if "agent_id" in row:
-                    row["agent_id"] = eval_agent_id
-                fh.write(json.dumps(row, default=_json_fallback) + "\n")
-                count += 1
+            # asyncpg server-side cursors require an open transaction.
+            # Without it `conn.cursor(...)` raises InterfaceError on first
+            # iteration. Read-only outer transaction keeps the dump consistent.
+            async with conn.transaction():
+                async for record in conn.cursor(
+                    f"SELECT * FROM {schema}.{table}"  # noqa: S608 (table names are constants)
+                ):
+                    row = dict(record)
+                    if "agent_id" in row:
+                        row["agent_id"] = eval_agent_id
+                    fh.write(json.dumps(row, default=_json_fallback) + "\n")
+                    count += 1
     logger.info("[eval.ingest] dumped %s rows from %s -> %s", count, qualified_table, out_path)
     return count
 

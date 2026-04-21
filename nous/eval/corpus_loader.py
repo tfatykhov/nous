@@ -136,13 +136,16 @@ async def _ensure_meta_table(db: Database) -> None:
     function exists so ephemeral test DBs (no image) can still be seeded.
     """
     async with db.session() as session:
+        # Schema matches Dockerfile.eval-db.load.sh's key/value layout so
+        # both code paths agree on what nous_eval_meta looks like.
+        # Auxiliary columns (loaded_at, corpus_counts) are stored as JSONB
+        # under the 'corpus_counts' key for harness diagnostics.
         await session.execute(
             text(
                 """
                 CREATE TABLE IF NOT EXISTS nous_eval_meta (
-                    fixture_version TEXT PRIMARY KEY,
-                    loaded_at       TIMESTAMPTZ NOT NULL,
-                    corpus_counts   JSONB NOT NULL
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
                 )
                 """
             )
@@ -254,18 +257,28 @@ def _pgvector_literal(vec: list[float]) -> str:
 
 
 async def _write_meta(session, fixture_version: str, stats: CorpusStats) -> None:
-    """Upsert the ``nous_eval_meta`` row for this fixture version."""
+    """Upsert nous_eval_meta rows for this fixture version.
+
+    Schema is key/value (matches Dockerfile.eval-db.load.sh). Stored keys:
+      - fixture_version (the active tag)
+      - loaded_at        (ISO 8601 timestamp)
+      - corpus_counts    (JSON-encoded CorpusStats payload)
+    """
     now = datetime.now(tz=timezone.utc)
     payload = stats.to_dict()
-    await session.execute(
-        text(
-            """
-            INSERT INTO nous_eval_meta (fixture_version, loaded_at, corpus_counts)
-            VALUES (:v, :ts, CAST(:c AS JSONB))
-            ON CONFLICT (fixture_version) DO UPDATE SET
-                loaded_at = EXCLUDED.loaded_at,
-                corpus_counts = EXCLUDED.corpus_counts
-            """
-        ),
-        {"v": fixture_version, "ts": now, "c": json.dumps(payload)},
-    )
+    rows = [
+        ("fixture_version", fixture_version),
+        ("loaded_at", now.isoformat()),
+        ("corpus_counts", json.dumps(payload)),
+    ]
+    for key, value in rows:
+        await session.execute(
+            text(
+                """
+                INSERT INTO nous_eval_meta (key, value)
+                VALUES (:k, :v)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """
+            ),
+            {"k": key, "v": value},
+        )
