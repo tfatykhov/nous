@@ -32,6 +32,7 @@
 | F031 | Censor Middleware | ✅ Shipped | Censors execute read-only tools, conditional unblock, action payloads, censor update API |
 | F033 | Multi-Tier Search Routing | ✅ Shipped | Tavily primary + Exa research + Brave fallback, query classification router |
 | F025 | [Amnesia Prevention](F025-amnesia-prevention.md) | ✅ Shipped | Staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence |
+| F051 | [Retrieval Eval Harness](F051-retrieval-eval-harness.md) | ✅ Shipped | Local-first retrieval evaluation: pipeline refactor + per-source qrels + paired A/B configs + persistent eval-DB Docker image + F050 gate-decision logic |
 
 ### P0: Identity & Context
 | Feature | Name | Status | Description |

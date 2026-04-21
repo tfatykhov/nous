@@ -1,6 +1,6 @@
 # F051 — Retrieval Evaluation Harness
 
-**Status:** 📝 Draft
+**Status:** ✅ Shipped (2026-04-20)
 **Proposed by:** Tim
 **Date:** 2026-04-20
 **Depends on:** F002 (Heart Module — shipped), F025 (RRF hybrid search — shipped), F004 (Runtime / Docker — shipped)
