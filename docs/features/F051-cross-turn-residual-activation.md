@@ -1,6 +1,6 @@
 # F051: Cross-Turn Residual Activation
 
-**Status:** 📝 Draft (v2 — post multi-agent review)
+**Status:** 📝 Draft (v3 — post Codex PR review)
 **Proposed by:** Tim (human-brain association framing — "train of thought between turns")
 **Date:** 2026-04-21
 **Depends on:** F002 (Heart — shipped), F022 (Graph-Augmented Recall & Spreading Activation — shipped), F025 (RRF hybrid search — shipped), F042 (CE reranking — shipped)
@@ -11,6 +11,9 @@
 
 ## Changelog
 
+- **v3 (2026-04-21):** Folded 2 Codex review findings on PR #343:
+  1. **WorkingMemory item schema** — actual `WorkingMemoryItem` contract (`nous/heart/schemas.py:289`) is `{type, ref_id: UUID, summary, relevance, loaded_at}` — NOT `{id, activation_count, ...}` as v2 wrote. Spec now shows correct base schema; residual adds are two optional JSONB-only fields.
+  2. **Session plumbing for post-fusion boost** — v2 showed boost applied in `Heart._recall` but `Heart.recall()` has no `agent_id`/`session_id` parameters (`nous/heart/heart.py:736`). v3 plumbs `residual_activations: dict[UUID, float] | None = None` through `Heart.recall`/`_recall` so the boost can apply before MMR. The tool layer (where `agent_id`/`session_id` live) computes activations and passes them in.
 - **v2 (2026-04-21):** Folded 5 fixes from multi-agent review:
   1. Reuse existing `ConversationState.turn_count` — drop the proposed `working_memory.turn_counter` migration
   2. Mandate isolated DB session in `record_surfaced` — prevents AsyncSession corruption from fire-and-forget task
@@ -37,7 +40,7 @@ Verified against repo at HEAD `db635d4`:
 - `grep -i "residual|cross.turn|carryover|persistent.activation|priming"` → zero hits in source
 - `nous/brain/spreading_activation.py::spreading_activation_search` (line 56) seeds **only** from the caller's `seed_nodes` argument, which is built from the current query's vector hits at `nous/api/tools.py:420-423`. No prior-turn state enters.
 - `Fact.last_recalled_at` and `Fact.recall_count` exist on the model (`nous/storage/models.py:405-406`), are **written** by `facts.py:152`, and are **only read** by the sleep-handler staleness scan. Never read at query time.
-- `WorkingMemoryManager.loaded_items` tracks `{id, type, relevance, loaded_at, activation_count}` per session but `grep "working_memory|loaded_items" nous/brain/` returns zero hits — working memory is a display buffer, not a retrieval signal.
+- `WorkingMemoryItem` (`nous/heart/schemas.py:289`) has the contract `{type: MemoryType, ref_id: UUID, summary: str, relevance: float, loaded_at: datetime}`. `WorkingMemoryManager` persists these as JSONB in `WorkingMemory.items`. `grep "working_memory|loaded_items" nous/brain/` returns zero hits — working memory is a display/context buffer, not a retrieval signal.
 - `ConversationState.turn_count` (`nous/storage/models.py:634`) already persists per-session turn count and is already incremented by the conversation pipeline. **No new turn counter needed** (v2 correction).
 
 ### Symptom examples
@@ -107,18 +110,23 @@ After RRF fusion (and graph merge) but before MMR, each candidate's score gets `
 
 **Turn counter:** `ConversationState.turn_count` (`heart.conversation_state`, `nous/storage/models.py:634`) is already an `Integer NOT NULL DEFAULT 0`, already incremented per user-facing turn by the conversation pipeline. **Reuse as-is. No migration.**
 
-**Per-item activation state:** `WorkingMemory.items` is already a JSONB list of:
+**Per-item activation state:** `WorkingMemory.items` is a JSONB list. The Pydantic contract `WorkingMemoryItem` (`nous/heart/schemas.py:289`) is:
 ```json
-{"id": "...", "type": "fact|episode|decision|procedure",
- "relevance": 0.0-1.0, "loaded_at": "ISO8601", "activation_count": int}
+{"type": "fact|episode|decision|procedure",
+ "ref_id": "UUID",
+ "summary": "str",
+ "relevance": 0.0-1.0,
+ "loaded_at": "ISO8601"}
 ```
 
-Extend the schema **in-JSON (no migration)** with:
+Extend **in-JSONB, no migration, no schema change to `WorkingMemoryItem`**. Two new optional keys on the JSONB payload only (not on the Pydantic model in v1):
 ```json
 {..., "activation": 0.0-1.0, "last_surfaced_turn": int}
 ```
 
-Readers that don't know these keys ignore them; writers default them to `0.0` and `0` if absent. JSONB is schemaless on the SQL side — purely a Python-side contract.
+`ResidualActivator` reads/writes these extra keys directly against the JSONB via `WorkingMemoryManager`'s raw item access path (see `working_memory.py:427` where `items = [WorkingMemoryItem(**i) for i in raw_items]`). Residual activation reads `raw_items` pre-parse to access the extra fields, leaving the typed model untouched.
+
+**Important (v3 fix #1):** the spec's v2 example used `id` instead of `ref_id`; any implementation following v2 literally would have written payloads that fail `WorkingMemoryItem(**i)` parsing. Do not drop or rename `ref_id`. `activation` and `last_surfaced_turn` are **additive only**.
 
 ### 3. Module — `nous/heart/residual_activation.py` (new, ~150 LOC)
 
@@ -215,24 +223,72 @@ The real call site for `spreading_activation_search` lives in `nous/api/tools.py
                   )
 ```
 
-Post-fusion boost applies after the heart-type merge but before MMR. In `nous/heart/heart.py::_recall` (or wherever MMR runs):
+**Post-fusion boost — plumbed through `Heart.recall` (v3 fix #2).**
+
+`Heart.recall()` currently has no `agent_id`/`session_id` parameters (`nous/heart/heart.py:736`), so the tool layer must pass the already-computed activations in. This keeps the boost inside `_recall` where per-type merging and MMR happen, while leaving session identity out of Heart.
 
 ```diff
-  candidates = merge_heart_and_graph_results(...)
-+ if residual_activations:
-+     candidates = residual.boost_scores(candidates, residual_activations)
-  final = mmr(candidates, lambda_=settings.mmr_lambda)
+# nous/heart/heart.py
+  async def recall(
+      self,
+      query: str,
+      limit: int = 10,
+      types: list[str] | None = None,
+      session: AsyncSession | None = None,
++     residual_activations: dict[UUID, float] | None = None,
+  ) -> list[RecallResult]:
+      if session is None:
+          async with self.db.session() as session:
+-             return await self._recall(query, limit, types, session)
++             return await self._recall(query, limit, types, session, residual_activations)
+-     return await self._recall(query, limit, types, session)
++     return await self._recall(query, limit, types, session, residual_activations)
 
-+ # Fire-and-forget write — residual.record_surfaced opens its OWN session
-+ if settings.residual_activation_enabled:
+  async def _recall(
+      self,
+      query: str,
+      limit: int,
+      types: list[str] | None,
+      session: AsyncSession,
++     residual_activations: dict[UUID, float] | None = None,
+  ) -> list[RecallResult]:
+      ...
+      # after per-type merge, before MMR:
++     if residual_activations and self.residual is not None:
++         merged = self.residual.boost_scores(merged, residual_activations)
+      final = mmr(merged, lambda_=settings.mmr_lambda)
+      return final
+```
+
+And the tool layer (`nous/api/tools.py::recall_deep`) becomes:
+
+```diff
+  # after residual_activations is computed (see earlier diff)
+- results = await heart.recall(query=query, limit=limit, types=search_types)
++ results = await heart.recall(
++     query=query, limit=limit, types=search_types,
++     residual_activations=residual_activations or None,
++ )
+
+  # ...later, after graph expansion and final response assembly:
++ if settings.residual_activation_enabled and residual is not None:
++     surfaced = [
++         (r.id, r.type, r.score or 0.0) for r in results
++     ]
++     # Fire-and-forget; record_surfaced opens its OWN AsyncSession (v2 fix #2)
 +     asyncio.create_task(
 +         residual.record_surfaced(
-+             agent_id, session_id, current_turn,
-+             [(c.id, c.type, c.score) for c in final]
++             brain.agent_id, session_id, current_turn, surfaced
 +         )
 +     )
-  return final
 ```
+
+**Why not apply the boost in `tools.py` instead of plumbing?** Because MMR runs inside `_recall`. Boosting only after MMR would mean the diversity step never sees residual-activated items' promoted scores — defeating the seed injection's purpose for ranking. Applying inside `_recall` before MMR preserves both behaviors.
+
+**Fail-open guarantees:**
+- `residual_activations=None` or `{}` → `_recall` skips the boost branch entirely, returning v1 behavior.
+- `ResidualActivator.compute_activations` exception → caught in `tools.py`, logged, `residual_activations` stays `{}`.
+- `ResidualActivator` not wired into Heart → `self.residual is None` short-circuit makes `_recall` a no-op on this axis.
 
 ### 5. Settings
 
