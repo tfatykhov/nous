@@ -1,0 +1,13 @@
+=== Heart Memory ===
+1. [fact] fact summary one (id: 11111111-1111-1111-1111-111111111111, score: 0.900)
+2. [episode] episode summary two (id: 22222222-2222-2222-2222-222222222222, score: 0.800)
+
+=== Graph-Connected Decisions ===
+1. [via supports] decision via heart graph (id: 33333333-3333-3333-3333-333333333333, score: 0.560)
+
+=== Brain Decisions ===
+1. brain decision one | architecture | medium | confidence: 0.85 (id: 44444444-4444-4444-4444-444444444444, score: 0.750)
+2. brain decision two | tooling | low | confidence: 0.60 (id: 55555555-5555-5555-5555-555555555555)
+3. [via graph: contradicts] decision via brain graph (id: 66666666-6666-6666-6666-666666666666, score: 0.490)
+
+Warning: Contradiction detected between decision(44444444) and decision(55555555)

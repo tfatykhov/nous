@@ -21,8 +21,6 @@ from collections.abc import Callable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
-
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.config import Settings
@@ -131,6 +129,135 @@ class ToolDispatcher:
             self._tool_schema_cache[frame_id] = result
             return copy.deepcopy(result)
         return result
+
+
+# ---------------------------------------------------------------------------
+# recall_deep text formatter (F051 refactor)
+# ---------------------------------------------------------------------------
+
+
+def _format_pipeline_text(
+    results: "list[Any]",  # list[PipelineResult] — string-quoted to avoid import cycle at module top
+    stats: "Any",  # PipelineStats
+    search_types: list[str],
+) -> str:
+    """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
+
+    Byte-identical to the pre-F051 ``recall_deep`` text output for the same
+    query + heart/brain state. Section ordering, headings, score precision,
+    score-truthy elision (``if dec.score`` not ``is not None``), and contradiction
+    warning format are all preserved exactly.
+    """
+    search_all = "all" in search_types
+    results_text: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Heart Memory section
+    # ------------------------------------------------------------------
+    # Heart section is emitted iff Heart sub-search ran (heart_types non-empty).
+    # The pre-refactor closure used a local `heart_types` list; we replicate
+    # that gate by checking whether any heart-eligible type was in search_types
+    # (or 'all' was passed) AND the pipeline produced or attempted Heart results.
+    heart_results = [r for r in results if r.source == "heart"]
+    heart_section_eligible = search_all or any(
+        t in search_types for t in ["episode", "fact", "procedure", "censor"]
+    )
+    # The original closure ALSO requires that heart_types resolves to a non-empty
+    # list — which is always true once heart_section_eligible is True (because the
+    # filter expression yields the same membership). So the gate matches.
+    if heart_section_eligible:
+        if heart_results:
+            results_text.append("=== Heart Memory ===")
+            for i, result in enumerate(heart_results, 1):
+                results_text.append(
+                    f"{i}. [{result.type}] {result.description} "
+                    f"(id: {result.id}, score: {result.score:.3f})"
+                )
+        else:
+            results_text.append("=== Heart Memory ===\nNo results found.")
+
+    # ------------------------------------------------------------------
+    # Graph-Connected Decisions section (F022 Phase 2 cross-type)
+    # ------------------------------------------------------------------
+    # Pre-refactor: heart_graph_decisions are PipelineResult.source == "graph_expanded"
+    # AND derived from Heart seeds. We tag those distinctly: graph-expanded results
+    # produced from Heart seeds appear as `source="graph_expanded"` with type=="decision"
+    # AND no matching brain-side seed (i.e., emitted in stage 2 not stage 4).
+    # Distinguish via a heuristic: stage-2 entries have edge_relation that is NOT
+    # "spreading_activation", and they precede the Brain section in the result
+    # ordering. We rely on the pipeline's stage ordering: stage-2 results come
+    # before any "brain" source result.
+    heart_graph: list = []
+    seen_brain = False
+    for r in results:
+        if r.source == "brain":
+            seen_brain = True
+            continue
+        if r.source == "graph_expanded" and not seen_brain and r.type == "decision":
+            heart_graph.append(r)
+
+    if heart_graph:
+        results_text.append("\n=== Graph-Connected Decisions ===")
+        for i, n in enumerate(heart_graph, 1):
+            results_text.append(
+                f"{i}. [via {n.edge_relation}] {n.description} "
+                f"(id: {n.id}, score: {n.score:.3f})"
+            )
+
+    # ------------------------------------------------------------------
+    # Brain Decisions section
+    # ------------------------------------------------------------------
+    if search_all or "decision" in search_types:
+        decision_results = [r for r in results if r.source == "brain"]
+        # Brain-side graph-expanded entries: source in {graph_expanded,
+        # spreading_activation} AND appear after the brain block.
+        brain_graph: list = []
+        seen_brain = False
+        for r in results:
+            if r.source == "brain":
+                seen_brain = True
+                continue
+            if seen_brain and r.source in ("graph_expanded", "spreading_activation"):
+                brain_graph.append(r)
+
+        if decision_results or brain_graph:
+            results_text.append("\n=== Brain Decisions ===")
+            for i, dec in enumerate(decision_results, 1):
+                # Preserve original truthy-elision behavior: ``raw_score``
+                # is None or 0.0 -> empty string. Don't use ``dec.score``
+                # because it's normalized to 0.0 for None (see _decisions_to_pipeline).
+                raw = dec.metadata.get("raw_score")
+                score_str = f", score: {raw:.3f}" if raw else ""
+                category = dec.metadata.get("category", "")
+                stakes = dec.metadata.get("stakes", "")
+                confidence = dec.metadata.get("confidence", 0.0)
+                results_text.append(
+                    f"{i}. {dec.description} | {category} | {stakes} | "
+                    f"confidence: {confidence:.2f} "
+                    f"(id: {dec.id}{score_str})"
+                )
+            for j, n in enumerate(brain_graph, len(decision_results) + 1):
+                results_text.append(
+                    f"{j}. [via graph: {n.edge_relation}] {n.description} "
+                    f"(id: {n.id}, score: {n.score:.3f})"
+                )
+        else:
+            results_text.append("\n=== Brain Decisions ===\nNo results found.")
+
+    # ------------------------------------------------------------------
+    # Contradiction warnings (F022 Phase 3)
+    # ------------------------------------------------------------------
+    for src_id, src_type, tgt_id, tgt_type in stats.contradiction_edges:
+        results_text.append(
+            f"\nWarning: Contradiction detected between "
+            f"{src_type}({str(src_id)[:8]}) and "
+            f"{tgt_type}({str(tgt_id)[:8]})"
+        )
+
+    if not results_text:
+        results_text.append("No results found.")
+
+    return "\n".join(results_text)
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +451,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
     ) -> dict[str, Any]:
         """Search across all memory types in Heart and Brain.
 
+        Thin wrapper around ``run_recall_pipeline`` (F051 refactor): the
+        pipeline runs the full retrieval stack and returns structured
+        results; this closure formats them into the legacy text shape.
+
         Args:
             query: Search query string
             limit: Maximum results to return
@@ -333,186 +464,20 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         Returns:
             MCP-compliant response with ranked results or error message
         """
+        from nous.api.retrieval_pipeline import run_recall_pipeline
+
         try:
-            # Determine which types to search
             search_types = memory_types or ["all"]
-            search_all = "all" in search_types
-
-            results_text = []
-
-            # Search Heart memory types
-            heart_types = []
-            if search_all or any(t in search_types for t in ["episode", "fact", "procedure", "censor"]):
-                # Determine specific Heart types
-                if search_all:
-                    heart_types = ["episode", "fact", "procedure", "censor"]
-                else:
-                    heart_types = [t for t in search_types if t in ["episode", "fact", "procedure", "censor"]]
-
-                if heart_types:
-                    heart_results = await heart.recall(query, limit=limit, types=heart_types)
-                    if heart_results:
-                        results_text.append("=== Heart Memory ===")
-                        for i, result in enumerate(heart_results, 1):
-                            results_text.append(
-                                f"{i}. [{result.type}] {result.summary} "
-                                f"(id: {result.id}, score: {result.score:.3f})"
-                            )
-                    else:
-                        results_text.append("=== Heart Memory ===\nNo results found.")
-
-            # F022 Phase 2: Cross-type graph expansion — find decisions linked to Heart results
-            if heart_types and heart_results and settings.graph_recall_enabled and settings.cross_type_linking_enabled:
-                heart_graph_decisions = []
-                seen_graph_ids: set = set()
-                for hr in heart_results[:3]:
-                    if hr.type in ("fact", "episode"):
-                        try:
-                            neighbors = await brain.neighbors(
-                                hr.id,
-                                node_type=hr.type,
-                                limit=2,
-                            )
-                            for n in neighbors:
-                                if n.node_type == "decision" and n.id not in seen_graph_ids:
-                                    heart_graph_decisions.append(n)
-                                    seen_graph_ids.add(n.id)
-                        except Exception:
-                            pass
-
-                if heart_graph_decisions:
-                    results_text.append("\n=== Graph-Connected Decisions ===")
-                    for i, n in enumerate(heart_graph_decisions, 1):
-                        decayed = n.edge_weight * settings.graph_recall_decay
-                        results_text.append(
-                            f"{i}. [via {n.edge_relation}] {n.description} "
-                            f"(id: {n.id}, score: {decayed:.3f})"
-                        )
-
-            # Search Brain decisions
-            if search_all or "decision" in search_types:
-                decision_results = await brain.query(query, limit=limit)
-
-                # F022: Graph expansion — expand top decisions
-                graph_expanded = []
-                if decision_results and settings.graph_recall_enabled:
-                    seen_ids = {d.id for d in decision_results}
-
-                    # F022 Phase 4: Check if spreading activation should be used
-                    use_spreading = False
-                    if settings.spreading_activation_enabled != "false":
-                        try:
-                            from nous.brain.spreading_activation import (
-                                compute_graph_density,
-                                should_use_spreading_activation,
-                                spreading_activation_search,
-                            )
-                            async with brain.db.session() as sa_session:
-                                density = await compute_graph_density(sa_session, brain.agent_id)
-                                use_spreading = should_use_spreading_activation(settings, density)
-                        except Exception:
-                            logger.debug("Density check failed, using 1-hop")
-
-                    if use_spreading:
-                        # Use spreading activation CTE for multi-hop expansion
-                        try:
-                            async with brain.db.session() as sa_session:
-                                seeds = [
-                                    (d.id, "decision", d.score or 0.5)
-                                    for d in decision_results[:settings.graph_recall_max_expand]
-                                ]
-                                activated = await spreading_activation_search(
-                                    sa_session, brain.agent_id, seeds, settings
-                                )
-                                seed_ids = {s[0] for s in seeds}
-                                for nid, ntype, activation in activated:
-                                    if nid not in seed_ids and nid not in seen_ids and activation > 0.1:
-                                        from nous.brain.schemas import NeighborResult
-                                        from datetime import UTC, datetime
-                                        graph_expanded.append(NeighborResult(
-                                            id=nid,
-                                            node_type=ntype,
-                                            description=f"[{ntype}] {str(nid)[:8]}",
-                                            edge_relation="spreading_activation",
-                                            edge_weight=activation,
-                                            created_at=datetime.now(UTC),
-                                        ))
-                                        seen_ids.add(nid)
-                        except Exception:
-                            logger.debug("Spreading activation failed, falling back to 1-hop")
-                            use_spreading = False
-
-                    if not use_spreading:
-                        # Fall back to 1-hop expansion
-                        for dec in decision_results[:settings.graph_recall_max_expand]:
-                            if dec.score is None:
-                                continue
-                            try:
-                                neighbors = await brain.neighbors(
-                                    dec.id,
-                                    node_type="decision",
-                                    limit=settings.graph_recall_max_neighbors,
-                                )
-                                for n in neighbors:
-                                    if n.id not in seen_ids:
-                                        graph_expanded.append(n)
-                                        seen_ids.add(n.id)
-                            except Exception:
-                                logger.debug("Graph expansion failed for decision %s", dec.id)
-
-                if decision_results or graph_expanded:
-                    results_text.append("\n=== Brain Decisions ===")
-                    for i, dec in enumerate(decision_results, 1):
-                        score_str = f", score: {dec.score:.3f}" if dec.score else ""
-                        results_text.append(
-                            f"{i}. {dec.description} | {dec.category} | {dec.stakes} | "
-                            f"confidence: {dec.confidence:.2f} "
-                            f"(id: {dec.id}{score_str})"
-                        )
-                    for j, n in enumerate(graph_expanded, len(decision_results) + 1):
-                        decayed_score = n.edge_weight * settings.graph_recall_decay
-                        results_text.append(
-                            f"{j}. [via graph: {n.edge_relation}] {n.description} "
-                            f"(id: {n.id}, score: {decayed_score:.3f})"
-                        )
-                else:
-                    results_text.append("\n=== Brain Decisions ===\nNo results found.")
-
-            # F022 Phase 3: Surface contradictions among results
-            if settings.graph_recall_enabled and settings.contradiction_detection:
-                try:
-                    # Collect all decision IDs from results (including graph-expanded)
-                    all_ids: set = set()
-                    if search_all or "decision" in search_types:
-                        for d in (decision_results or []):
-                            all_ids.add(d.id)
-                        for n in graph_expanded:
-                            all_ids.add(n.id)
-
-                    if len(all_ids) >= 2:
-                        from nous.storage.models import GraphEdge as GE
-                        async with brain.db.session() as cs:
-                            cr = await cs.execute(
-                                select(GE).where(
-                                    GE.relation == "contradicts",
-                                    GE.source_id.in_(all_ids),
-                                    GE.target_id.in_(all_ids),
-                                )
-                            )
-                            for c in cr.scalars().all():
-                                results_text.append(
-                                    f"\nWarning: Contradiction detected between "
-                                    f"{c.source_type}({str(c.source_id)[:8]}) and "
-                                    f"{c.target_type}({str(c.target_id)[:8]})"
-                                )
-                except Exception:
-                    pass  # Non-critical
-
-            if not results_text:
-                results_text.append("No results found.")
-
-            return {"content": [{"type": "text", "text": "\n".join(results_text)}]}
-
+            results, stats = await run_recall_pipeline(
+                query=query,
+                heart=heart,
+                brain=brain,
+                settings=settings,
+                limit=limit,
+                memory_types=memory_types,
+            )
+            text = _format_pipeline_text(results, stats, search_types)
+            return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("recall_deep tool failed")
             return {"content": [{"type": "text", "text": f"Error searching memory: {e}"}]}
