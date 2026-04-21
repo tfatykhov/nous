@@ -485,6 +485,7 @@ async def _run_async(
             threshold=eval_settings.f050_gate_threshold,
             max_single_regression=eval_settings.f050_gate_max_single_regression,
             require_majority_positive=eval_settings.f050_gate_require_majority_positive,
+            top_k=eval_settings.top_k,
         )
         logger.info(
             "F051: gate_decision feature=F050 result=%s reason=%s",

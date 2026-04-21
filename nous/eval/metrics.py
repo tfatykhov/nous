@@ -73,49 +73,65 @@ def _reciprocal_rank(qrel_result: QrelResult) -> float:
     return 1.0 / float(rank)
 
 
-def _precision_from_counts(q: QrelResult, k: int) -> float:
-    """P@K from counts, adjusted by rank_of_first_gold.
+def _hits_at_k(q: QrelResult, k: int) -> int:
+    """Exact count of gold IDs in the first K retrieved IDs.
 
-    ``n_gold_in_top_k`` is the count of gold in the full top-K_top (the
-    runner's retrieval depth, typically 10). For K smaller than
-    ``rank_of_first_gold``, no gold appears → 0. Otherwise we cap the
-    hit count at K and divide by K, matching the standard P@K formula.
+    Computed from ``retrieved_ids[:k] ∩ gold_ids`` — authoritative,
+    no over-counting. Falls back to ``rank_of_first_gold``-based bound
+    only when ``gold_ids`` is empty (test-constructed QrelResult without
+    gold plumbing).
     """
     if k <= 0:
-        return 0.0
+        return 0
+    if q.gold_ids:
+        gold_set = set(q.gold_ids)
+        return sum(1 for rid in q.retrieved_ids[:k] if rid in gold_set)
+    # Legacy fallback — only rank-of-first-gold known. At most 1 hit at or
+    # above rank k, and that hit must be exactly at rank_of_first_gold.
     rank = q.rank_of_first_gold
     if rank is None or rank > k:
-        # First gold is beyond position K → zero gold in top-K
+        return 0
+    return 1
+
+
+def _precision_from_counts(q: QrelResult, k: int) -> float:
+    """P@K = |top-K ∩ gold| / K. Uses exact set intersection at rank K."""
+    if k <= 0:
         return 0.0
-    # At least one gold in top-K; upper-bound at min(n_gold_in_top_k, k)
-    hits = min(q.n_gold_in_top_k, k)
-    return hits / float(k)
+    return _hits_at_k(q, k) / float(k)
 
 
 def _recall_from_counts(q: QrelResult, k: int) -> float:
-    """R@K from counts, adjusted by rank_of_first_gold.
-
-    Same rank-cap logic as P@K: if the first gold is beyond position K,
-    recall is zero; else cap hits at K before dividing by ``n_gold_total``.
-    """
+    """R@K = |top-K ∩ gold| / |gold|. Uses exact set intersection at rank K."""
     if q.n_gold_total <= 0:
         return 0.0
-    rank = q.rank_of_first_gold
-    if rank is None or rank > k:
-        return 0.0
-    hits = min(q.n_gold_in_top_k, k)
-    return hits / float(q.n_gold_total)
+    return _hits_at_k(q, k) / float(q.n_gold_total)
 
 
 def _ndcg_from_counts(q: QrelResult, k: int = 10) -> float:
-    """Fallback nDCG@K using only rank_of_first_gold + n_gold_in_top_k.
+    """nDCG@K with binary gains.
 
-    This is a lower bound — we only know the *first* gold's rank exactly,
-    not the others. Places the first gold at rank_of_first_gold and
-    (n_in_top_k - 1) subsequent golds at contiguous positions immediately
-    after it, which is the worst-case (least-DCG) valid placement.
+    Preferred path: compute DCG from exact (position, gold?) pairs via
+    ``retrieved_ids[:k] ∩ gold_ids``. Fallback path (no gold_ids on the
+    QrelResult): place the first gold at ``rank_of_first_gold`` and
+    ``(n_gold_in_top_k - 1)`` subsequent golds contiguously after it — a
+    worst-case placement that under-states DCG but never over-states it.
     """
-    if q.n_gold_total <= 0 or q.n_gold_in_top_k <= 0:
+    if q.n_gold_total <= 0:
+        return 0.0
+
+    if q.gold_ids:
+        gold_set = set(q.gold_ids)
+        dcg = 0.0
+        for i, rid in enumerate(q.retrieved_ids[:k], start=1):
+            if rid in gold_set:
+                dcg += 1.0 / math.log2(i + 1)
+        ideal_hits = min(q.n_gold_total, k)
+        idcg = sum(1.0 / math.log2(i + 1) for i in range(1, ideal_hits + 1))
+        return 0.0 if idcg == 0.0 else dcg / idcg
+
+    # Legacy fallback for test-constructed QrelResults without gold_ids.
+    if q.n_gold_in_top_k <= 0:
         return 0.0
     rank = q.rank_of_first_gold or 1
     dcg = 0.0

@@ -69,6 +69,7 @@ def decide_gate_f050(
     threshold: float = 0.07,
     max_single_regression: float = 0.03,
     require_majority_positive: bool = True,
+    top_k: int = 10,
 ) -> GateDecision:
     """Evaluate F050's enable-gate against a baseline / experimental run pair.
 
@@ -93,6 +94,11 @@ def decide_gate_f050(
             (fraction).
         require_majority_positive: Require majority of sources to have
             positive delta.
+        top_k: Retrieval cutoff used by the matrix run. Passed into
+            ``compute_metrics`` so gate math is evaluated at the same K
+            the runner scored at; mismatching this with the runner's
+            ``eval_settings.top_k`` produces inconsistent pass/fail decisions
+            (Codex P2 fix).
     """
     base = next((r for r in run_results if r.config.name == "baseline"), None)
     exp = next((r for r in run_results if r.config.name == "f050_on"), None)
@@ -117,8 +123,8 @@ def decide_gate_f050(
     # --- Rule 1: aggregate ---
     base_filtered = filter_by_sources(base.per_qrel, gate_source_names)
     exp_filtered = filter_by_sources(exp.per_qrel, gate_source_names)
-    base_agg = compute_metrics(base_filtered)
-    exp_agg = compute_metrics(exp_filtered)
+    base_agg = compute_metrics(base_filtered, top_k=top_k)
+    exp_agg = compute_metrics(exp_filtered, top_k=top_k)
     agg_delta = compute_delta(base_agg, exp_agg, "mrr")
 
     if agg_delta.relative_pct < threshold * 100.0:
@@ -137,8 +143,12 @@ def decide_gate_f050(
     per_source_deltas: dict[str, float] = {}
     for src in gate_sources:
         src_name = src.spec.name
-        base_src = compute_metrics(filter_by_sources(base.per_qrel, {src_name}))
-        exp_src = compute_metrics(filter_by_sources(exp.per_qrel, {src_name}))
+        base_src = compute_metrics(
+            filter_by_sources(base.per_qrel, {src_name}), top_k=top_k
+        )
+        exp_src = compute_metrics(
+            filter_by_sources(exp.per_qrel, {src_name}), top_k=top_k
+        )
         d = compute_delta(base_src, exp_src, "mrr")
         per_source_deltas[src_name] = d.relative_pct
 
