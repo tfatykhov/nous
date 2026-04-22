@@ -1,0 +1,12 @@
+# F051 smoke qrels - ten queries with gold IDs in eval_smoke_corpus.jsonl
+# UUIDs from uuid5(NAMESPACE_URL, f'nous-eval-smoke-{i}')
+{"query": "what is F049 session cleanup", "gold_ids": ["adc27e49-9e89-5ac2-96f8-866656faa3e8"], "source": "probes", "confidence": "high", "reasoning_type": "specific_lookup", "memory_types": ["fact"], "notes": "F049 fact"}
+{"query": "F050 multi-query expansion", "gold_ids": ["308149a7-b317-5528-a06d-7aa6b1b2da84"], "source": "probes", "confidence": "high", "reasoning_type": "specific_lookup", "memory_types": ["fact"]}
+{"query": "pgvector HNSW semantic search", "gold_ids": ["2657670f-309b-5f27-a1b8-f899e19c653a"], "source": "probes", "confidence": "high", "reasoning_type": "concept", "memory_types": ["fact"]}
+{"query": "why LongMemEval_S subset choice", "gold_ids": ["28da1d8b-3574-55f8-9f05-0d6e24d340d5"], "source": "probes", "confidence": "medium", "reasoning_type": "specific_lookup", "memory_types": ["decision"]}
+{"query": "docker image for eval DB distribution", "gold_ids": ["efd390f7-5627-502e-98c3-830212fda2cc"], "source": "probes", "confidence": "high", "reasoning_type": "specific_lookup", "memory_types": ["decision"]}
+{"query": "discussed retrieval eval harness with Tim", "gold_ids": ["188d7a7b-2eb4-5d8b-8544-9cde2b497ff7"], "source": "probes", "confidence": "medium", "reasoning_type": "temporal", "memory_types": ["episode"]}
+{"query": "phantom API bug in F051 v1 plan", "gold_ids": ["109fe782-423a-5828-8d0c-3efe7f12b8ab"], "source": "probes", "confidence": "high", "reasoning_type": "specific_lookup", "memory_types": ["episode"]}
+{"query": "review team architect devil python-pro", "gold_ids": ["62c1fca0-62f5-55f6-9ebf-5bdb4471d9c1"], "source": "probes", "confidence": "high", "reasoning_type": "concept", "memory_types": ["procedure"]}
+{"query": "pipeline refactor snapshot before after", "gold_ids": ["22feea3c-05f6-5a5a-9201-c4127a2105e9"], "source": "probes", "confidence": "high", "reasoning_type": "concept", "memory_types": ["procedure"]}
+{"query": "do not mutate eval database", "gold_ids": ["d8e77423-2b5c-57d5-b406-e26b48c9a258"], "source": "probes", "confidence": "medium", "reasoning_type": "concept", "memory_types": ["fact"]}

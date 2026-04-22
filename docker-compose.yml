@@ -121,6 +121,24 @@ services:
       timeout: 5s
       retries: 5
 
+  # F051: retrieval-eval harness DB (baked-fixture Postgres image).
+  # Activated only under `--profile eval`; bound to 127.0.0.1 so the ingested
+  # prod-replay corpus is never exposed to the LAN.
+  nous-eval-db:
+    image: ghcr.io/tfatykhov/nous-eval-db:${NOUS_EVAL_FIXTURE_VERSION:-v2026-Q2}
+    profiles: [eval]
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - nous_eval_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "nous", "-d", "nous_eval"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
 volumes:
   pgdata:
   huggingface_cache:
+  nous_eval_db_data:

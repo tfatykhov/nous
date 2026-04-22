@@ -32,9 +32,9 @@ async def test_extensions(db):
 
 
 async def test_all_tables_exist(db):
-    """All 34 tables exist in correct schemas."""
+    """All tables exist in correct schemas."""
     expected = {
-        # nous_system (7)
+        # nous_system
         ("nous_system", "agents"),
         ("nous_system", "frames"),
         ("nous_system", "events"),
@@ -47,6 +47,7 @@ async def test_all_tables_exist(db):
         ("nous_system", "execution_dags"),
         ("nous_system", "dag_nodes"),
         ("nous_system", "dag_edges"),
+        ("nous_system", "eval_runs"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),

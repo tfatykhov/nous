@@ -48,7 +48,11 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["nous*"]
+# `nous*` = runtime package (shipped in prod Dockerfile via COPY nous/).
+# `nous_eval*` = F051 dev-only eval harness; discovered for editable install
+# so `python -m nous_eval.retrieval` works locally, but the prod Dockerfile's
+# COPY nous/ nous/ does NOT include this sibling package.
+include = ["nous*", "nous_eval*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -56,6 +60,7 @@ asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 markers = [
     "integration: requires live PostgreSQL (run with --integration)",
+    "eval: F051 retrieval-eval-harness unit tests (no DB required)",
 ]
 
 [tool.ruff]

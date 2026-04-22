@@ -1,0 +1,152 @@
+"""Qrel — a single query/gold-IDs record — and JSONL loader.
+
+Each qrel carries enough metadata that the harness can:
+
+- Score retrieval against ``gold_ids``.
+- Filter rows per-source (``source``), per-reasoning-type (``reasoning_type``),
+  and per-review status (``reviewed_by``).
+- Route to the right pipeline branch (``memory_types``).
+
+The on-disk format is JSONL (one Qrel per line, UTF-8). Schema validation
+happens at load time via pydantic; a malformed line raises with the offending
+line number so operators can fix the source fast.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from enum import Enum
+from pathlib import Path
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, ValidationError
+
+logger = logging.getLogger(__name__)
+
+
+class QrelSource(str, Enum):
+    """Canonical source tags (must match ``sources.yaml`` entry names)."""
+
+    LONGMEMEVAL = "longmemeval"
+    AI_HAND_LABELED = "ai_hand_labeled"
+    PROBES = "probes"
+    SILVER_EPISODES = "silver_episodes"
+    SYNTHETIC_HAIKU = "synthetic_haiku"
+
+
+# Literal set for memory_types (subset of what recall_deep accepts).
+# Includes "decision" because the pipeline refactor (F051 prereq) makes
+# brain.decisions a first-class memory type at the Qrel level.
+MemoryType = Literal["fact", "decision", "episode", "procedure"]
+
+
+class Qrel(BaseModel):
+    """A single qrel record — query, gold IDs, provenance metadata.
+
+    ``gold_ids`` is a list because multi-answer queries are allowed; any
+    overlap with the top-K retrieval counts as positive for P@K / R@K, but
+    MRR uses the highest-ranked gold.
+    """
+
+    query: str = Field(..., min_length=1)
+    gold_ids: list[UUID] = Field(..., min_length=1)
+    source: QrelSource
+    confidence: Literal["high", "medium", "low"] = "high"
+    reasoning_type: str | None = None
+    memory_types: list[MemoryType] | None = None
+    notes: str | None = None
+    reviewed_by: str | None = None
+
+
+def load_qrels(
+    path: Path,
+    source_override: QrelSource | None = None,
+    review_filter_enabled: bool = False,
+) -> list[Qrel]:
+    """Load qrels from a JSONL file with row-level validation.
+
+    Args:
+        path: Path to the JSONL file.
+        source_override: If set, every loaded row gets this source tag
+            (useful when a file's ``source`` field is missing or wrong —
+            the registry knows which source the file belongs to).
+        review_filter_enabled: If True, rows with ``reviewed_by is None``
+            are dropped. Used by ``--gate-only`` + source-level
+            ``review_filter: "reviewed_by != null"``.
+
+    Returns:
+        List of :class:`Qrel` instances, in file order. Empty list if the
+        file is missing — caller decides whether that's fatal.
+
+    Raises:
+        ValueError: If any line fails schema validation; error text
+            includes the 1-based line number and the pydantic message.
+    """
+    if not path.exists():
+        logger.warning("Qrels file not found: %s", path)
+        return []
+
+    qrels: list[Qrel] = []
+    with path.open("r", encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                # Comment-style line; ingest scripts sometimes prepend
+                # provenance comments.
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"Malformed JSON at {path}:{lineno}: {exc.msg}"
+                ) from exc
+            if source_override is not None:
+                data["source"] = source_override.value
+            try:
+                qrel = Qrel.model_validate(data)
+            except ValidationError as exc:
+                raise ValueError(
+                    f"Schema violation at {path}:{lineno}: {exc}"
+                ) from exc
+            qrels.append(qrel)
+
+    if review_filter_enabled:
+        before = len(qrels)
+        qrels = [q for q in qrels if q.reviewed_by is not None]
+        dropped = before - len(qrels)
+        if dropped:
+            logger.info(
+                "Applied review_filter to %s: dropped %d/%d unreviewed qrels",
+                path.name,
+                dropped,
+                before,
+            )
+
+    return qrels
+
+
+def group_by_source(qrels: list[Qrel]) -> dict[QrelSource, list[Qrel]]:
+    """Group qrels by their ``source`` tag.
+
+    Useful for per-source metric breakdowns in the report.
+    """
+    grouped: dict[QrelSource, list[Qrel]] = {}
+    for q in qrels:
+        grouped.setdefault(q.source, []).append(q)
+    return grouped
+
+
+def group_by_reasoning_type(qrels: list[Qrel]) -> dict[str, list[Qrel]]:
+    """Group qrels by ``reasoning_type`` (e.g. ``temporal``, ``concept``).
+
+    Qrels with no reasoning_type land in the ``"(unspecified)"`` bucket.
+    """
+    grouped: dict[str, list[Qrel]] = {}
+    for q in qrels:
+        key = q.reasoning_type or "(unspecified)"
+        grouped.setdefault(key, []).append(q)
+    return grouped
