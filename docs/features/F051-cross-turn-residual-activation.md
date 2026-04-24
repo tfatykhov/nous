@@ -1,6 +1,6 @@
 # F051: Cross-Turn Residual Activation
 
-**Status:** 📝 Draft (v3 — post Codex PR review)
+**Status:** 📝 Draft (v4 — address Codex P1 #3 session_id injection)
 **Proposed by:** Tim (human-brain association framing — "train of thought between turns")
 **Date:** 2026-04-21
 **Depends on:** F002 (Heart — shipped), F022 (Graph-Augmented Recall & Spreading Activation — shipped), F025 (RRF hybrid search — shipped), F042 (CE reranking — shipped)
@@ -11,9 +11,17 @@
 
 ## Changelog
 
+- **v4 (2026-04-24):** Addressed Codex P1 #3 (missed in v3): `recall_deep` has no
+  `session_id` in its closure. `ToolDispatcher.dispatch` only injects session identity for
+  `spawn_task`, `cache_retrieve`, and `run_python` — not `recall_deep`. Fix:
+  1. **`ToolDispatcher.dispatch`** — add `recall_deep` injection (mirrors the `run_python` pattern).
+  2. **`recall_deep` signature** — add `_session_id: str | None = None` parameter.
+  3. Guard added: if `_session_id is None`, residual activation is silently skipped (fail-open;
+     sessions without an ID get cold recall, not an error).
+  4. All `session_id` bare references in the diff blocks replaced with `_session_id`.
 - **v3 (2026-04-21):** Folded 2 Codex review findings on PR #343:
   1. **WorkingMemory item schema** — actual `WorkingMemoryItem` contract (`nous/heart/schemas.py:289`) is `{type, ref_id: UUID, summary, relevance, loaded_at}` — NOT `{id, activation_count, ...}` as v2 wrote. Spec now shows correct base schema; residual adds are two optional JSONB-only fields.
-  2. **Session plumbing for post-fusion boost** — v2 showed boost applied in `Heart._recall` but `Heart.recall()` has no `agent_id`/`session_id` parameters (`nous/heart/heart.py:736`). v3 plumbs `residual_activations: dict[UUID, float] | None = None` through `Heart.recall`/`_recall` so the boost can apply before MMR. The tool layer (where `agent_id`/`session_id` live) computes activations and passes them in.
+  2. **Session plumbing for post-fusion boost** — v2 showed boost applied in `Heart._recall` but `Heart.recall()` has no `agent_id`/`session_id` parameters (`nous/heart/heart.py:736`). v3 plumbs `residual_activations: dict[UUID, float] | None = None` through `Heart.recall`/`_recall` so the boost can apply before MMR. The tool layer computes activations and passes them in. NOTE: `agent_id` is available via `brain.agent_id` inside the closure; `session_id` requires explicit injection via `ToolDispatcher.dispatch` — addressed in v4 (P1 #3).
 - **v2 (2026-04-21):** Folded 5 fixes from multi-agent review:
   1. Reuse existing `ConversationState.turn_count` — drop the proposed `working_memory.turn_counter` migration
   2. Mandate isolated DB session in `record_surfaced` — prevents AsyncSession corruption from fire-and-forget task
@@ -190,15 +198,46 @@ class ResidualActivator:
 
 The real call site for `spreading_activation_search` lives in `nous/api/tools.py:424` inside the `recall` tool. That's where residual seeds merge in. (v2 fix #3: concrete diff, not pseudocode.)
 
+
+**v4 fix #3 — ToolDispatcher injection for `recall_deep`.**
+`session_id` is not captured in the `recall_deep` closure. `ToolDispatcher.dispatch`
+injects it per-call only for `spawn_task`, `cache_retrieve`, and `run_python`
+(see `nous/api/tools.py:74-79`). The same pattern must extend to `recall_deep`:
+
+```diff
+# nous/api/tools.py — ToolDispatcher.dispatch, around line 74-80
+            if session_id is not None and name == "run_python":
+                args = {**args, "_session_id": session_id}
++           if session_id is not None and name == "recall_deep":
++               args = {**args, "_session_id": session_id}
+```
+
+And `recall_deep`'s function signature receives it:
+
+```diff
+  async def recall_deep(
+      query: str,
+      limit: int = 10,
+      memory_types: list[str] | None = None,
++     _session_id: str | None = None,
+  ) -> dict[str, Any]:
+```
+
+If `_session_id is None` (heartbeat, direct CLI calls, any dispatch without a session),
+residual activation is skipped via the `if not _session_id: raise ValueError(...)` guard
+already present in the diff below. The result is cold recall — no error, no degradation.
+
 ```diff
 # nous/api/tools.py — recall tool, around line 395-440
 + residual_activations: dict[UUID, float] = {}
 + current_turn = 0
 + if settings.residual_activation_enabled:
 +     try:
-+         current_turn = await residual.current_turn(agent_id, session_id)
++         if not _session_id:
++             raise ValueError("no session_id — skip residual")
++         current_turn = await residual.current_turn(brain.agent_id, _session_id)
 +         residual_activations = await residual.compute_activations(
-+             agent_id, session_id, current_turn
++             brain.agent_id, _session_id, current_turn
 +         )
 +     except Exception:
 +         logger.warning("residual_activation: compute failed, continuing cold")
@@ -278,7 +317,7 @@ And the tool layer (`nous/api/tools.py::recall_deep`) becomes:
 +     # Fire-and-forget; record_surfaced opens its OWN AsyncSession (v2 fix #2)
 +     asyncio.create_task(
 +         residual.record_surfaced(
-+             brain.agent_id, session_id, current_turn, surfaced
++             brain.agent_id, _session_id, current_turn, surfaced
 +         )
 +     )
 ```
