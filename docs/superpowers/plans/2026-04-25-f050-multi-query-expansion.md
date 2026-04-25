@@ -4,7 +4,25 @@
 **Author:** orchestrator (`nous-f050-plan`, decision `ecf364d7`)
 **Spec:** `docs/features/F050-multi-query-expansion.md` (PR #342, branch `spec/F050-multi-query-expansion`)
 **Predecessor plan template:** `docs/superpowers/plans/2026-04-20-f051-retrieval-eval-harness.md`
-**Status:** **draft v1** — awaiting 3-agent review (architecture / devil / python-pro)
+**Status:** **v2** — 3-agent review folded in (arch `cc845823`, devil `755eae99`, python-pro `fe53b1ee`). 3 P1s addressed, key P2s resolved inline. Ready for implementation dispatch.
+
+## v2 review-fixes summary
+
+| # | Reviewer | Severity | Resolution location |
+|---|---|---|---|
+| RRF normalization mismatch (convergent arch P1-1 + devil P1) | both | P1 | §"hybrid_search_multi" — explicit byte-identical normalization + mandatory regression test |
+| `canonical_input_hash` missing Unicode normalization (devil P1) | devil | P1 | §"hashing.py" — added `unicodedata.normalize("NFKC", text)` to canonicalization order |
+| `facts.py` `active_only=False` bypass note (arch P1-2) | arch | P1 | §"facts.py::_search" — documented unreachable variant routing on the bypass path with grep-friendly comment |
+| `_rrf_merge_n` import hoist (arch P2) | arch | P2 | §"facts.py::_search" — module-top import |
+| Migration 035/036 gap comment (arch P2) | arch | P2 | §"038_query_expansions.sql" header comment |
+| asyncio.Lock pattern explicit (python-pro P2) | python-pro | P2 | §"Budget counter" — concrete `async with self._budget_lock:` + `time.monotonic()` sketch |
+| `asyncio.TimeoutError` BEFORE `Exception` (python-pro P2) | python-pro | P2 | §"Haiku call" — explicit ordering |
+| 401 → WARN-once with `_warned_once` flag (python-pro P2) | python-pro | P2 | §"Failure modes" — status-code branching |
+| `SQLAlchemyError` not bare `Exception` (python-pro P2) | python-pro | P2 | §"Cache _get/_put" — narrow exception |
+| Single-flight cache pattern (devil P2) | devil | P2 | §"Cache" — `_inflight: dict[hash, asyncio.Event]` for novel-query dedup |
+| Trim-leading-whitespace before injection-prefix match (devil P3) | devil | P3 | §"Sanitization" — fold into existing strip pass |
+
+Re-review remains optional but cheap; dispatch implementation when comfortable.
 **Branch:** `feat/F050-multi-query-expansion`
 
 ---
@@ -172,7 +190,9 @@ async def _search(
     # ... extra_where / extra_params construction unchanged ...
 
     if variant_pairs and len(variant_pairs) > 1:
-        from nous.heart.search import hybrid_search_multi
+        # v2 (arch P2): hoist `hybrid_search_multi` import to module top instead
+        # of per-call. Per-call import inside a hot path adds ~50µs overhead and
+        # confuses static analysis. Move to nous/heart/facts.py module-level imports.
         results = await hybrid_search_multi(
             session=session, table="heart.facts",
             queries=variant_pairs, agent_id=self.agent_id,
@@ -190,19 +210,25 @@ async def _search(
 
 `episodes._search` and `procedures._search` follow the same pattern; `procedures` must keep its F037 utility-boost step downstream of the routing decision.
 
+**v2 (arch P1-2) — `active_only=False` bypass note for `nous/heart/facts.py`.** `FactManager._search` at `nous/heart/facts.py:1055-1059` (the public path through `Heart._recall` always passes `active_only=True`) routes the `active_only=False` branch through `_search_all`, which does NOT call `hybrid_search` at all — it does a simple `SELECT * FROM heart.facts WHERE ...` scan. The `variant_pairs` kwarg is therefore unreachable on that path. **Currently safe** because the only `_search` caller from `Heart._recall` defaults to `active_only=True`. **Documented for the future:** if F050 is later wired to a path that surfaces `active_only=False` queries (e.g. memory-management UI showing inactive facts), the variant routing will silently skip there. Add a `# F050 routing: active_only=False bypasses hybrid_search; variants ignored.` comment at `_search_all` so the silent-skip is visible to grep.
+
 #### `nous/heart/search.py::hybrid_search_multi` + `_rrf_merge_n`
 
 Verbatim from spec §8 with two clarifications:
 
 - The single-element fast-path (`if len(queries) == 1: delegate to hybrid_search`) MUST also handle the case where `queries[0][1] is None` (no embedding) — keyword-only fallback already handled inside `hybrid_search`.
-- `_rrf_merge_n` returns scores normalized identically to `_rrf_merge` for cross-source comparability: `score / max_score` where `max_score = N / k` (N = number of variants, since each list contributes ≤ `1/k` at rank 1). This matters because downstream consumers (frame boost, MMR, CE rerank) read `.score` as a `[0, 1]` magnitude.
+- **(v2 — convergent arch + devil P1)** `_rrf_merge_n` returns scores normalized **byte-identical** to single-query `_rrf_merge` so downstream consumers (frame boost, MMR, CE rerank, F017 relevance floor) see the same `[0, 1]` magnitude regardless of variant count. Inspect `nous/heart/search.py:58-99` for the exact normalization formula `_rrf_merge` applies; replicate. Mandatory regression test: `test_rrf_merge_n_n1_byte_identical_to_rrf_merge` — feeds the same `(ids, ranks)` to both code paths, asserts the per-id score lists are identical to within float tolerance. Without this test, the score scale silently drifts and the gate decision against baseline becomes incomparable.
 
 #### `sql/migrations/038_query_expansions.sql`
 
 ```sql
 -- F050: Multi-query expansion cache.
 -- Global table (no agent_id) — variants are semantic, not per-agent.
--- Keyed by SHA-256 of canonicalized query (lowercased + stripped).
+-- Keyed by SHA-256 of canonicalized query (NFKC-normalize → lowercase → strip).
+--
+-- Migration numbering: 035 and 036 are intentional gaps in the migrations
+-- folder (post-mortem: F049-era was renumbered after merge conflicts left holes
+-- in the sequence). 037 = F051 eval_runs. 038 = this F050 cache.
 
 CREATE TABLE IF NOT EXISTS heart.query_expansions (
     input_hash    BYTEA PRIMARY KEY,
@@ -220,7 +246,7 @@ CREATE INDEX IF NOT EXISTS idx_query_expansions_last_used
 COMMENT ON TABLE heart.query_expansions IS
     'F050: Haiku-generated query-expansion variants, keyed by SHA-256 input hash.';
 COMMENT ON COLUMN heart.query_expansions.input_hash IS
-    'F050: canonical_input_hash(query) = sha256(query.lower().strip()) — 32 bytes.';
+    'F050: canonical_input_hash(query) = sha256(NFKC-normalize → lower → strip) — 32 bytes.';
 COMMENT ON COLUMN heart.query_expansions.variants IS
     'F050: JSON array of variant strings, e.g. ["original", "variant1", "variant2"].';
 ```
@@ -232,21 +258,32 @@ Migrator note: `nous/storage/migrator.py` strips `-- ...` comments before splitt
 ```python
 """Canonical input hashing — shared by F047 Phase 3 (planned) and F050 cache.
 
-Stable digest semantics: sha256(text.lower().strip()) -> 32 bytes.
+Stable digest semantics: sha256(NFKC-normalize → lowercase → strip) -> 32 bytes.
 Returned as bytes for direct binding to BYTEA columns.
+
+NFKC normalization (v2 — devil P1) defends against:
+  - NFC vs NFD cache misses (same visual char, different bytes)
+  - ZWS / bidi / NBSP slipping past .strip() and creating unbounded
+    cache rows for visually-identical adversarial queries
+  - Compatibility decompositions (eg ½ → 1/2, ﬁ → fi)
 """
 from __future__ import annotations
 import hashlib
+import unicodedata
 
 def canonical_input_hash(text: str) -> bytes:
     """Return SHA-256 of the canonicalized text as 32 raw bytes.
 
-    Canonicalization: lowercase + strip leading/trailing whitespace.
+    Canonicalization order (must stay stable — F047 Phase 3 will import this):
+      1. NFKC Unicode normalization (compatibility-decomposition + canonical-combine)
+      2. lowercase
+      3. strip leading/trailing whitespace
     Used by:
       - F050 query_expansions.input_hash
       - F047 Phase 3 (planned) classifier_input_hash
     """
-    canonical = text.lower().strip()
+    canonical = unicodedata.normalize("NFKC", text).lower().strip()
+    return hashlib.sha256(canonical.encode("utf-8")).digest()
     return hashlib.sha256(canonical.encode("utf-8")).digest()
 ```
 
