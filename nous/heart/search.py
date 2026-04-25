@@ -199,6 +199,153 @@ async def hybrid_search(
     return _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, limit)
 
 
+# ---------------------------------------------------------------------------
+# F050: Multi-query expansion — wrapper that fans `hybrid_search` over N
+# (text, embedding) pairs and fuses the per-variant ranked lists with
+# equal-weight Reciprocal Rank Fusion.
+# ---------------------------------------------------------------------------
+
+
+def _rrf_merge_n(
+    ranked_lists: list[list[tuple[UUID, float]]],
+    k: int,
+    limit: int,
+) -> list[tuple[UUID, float]]:
+    """Equal-weight Reciprocal Rank Fusion across N ranked lists.
+
+    Score formula (per doc):
+        score = sum_{i=1..N} (1/N) / (k + rank_i)
+    where ``rank_i`` is the doc's 0-indexed position in list ``i`` (or the
+    penalty rank ``limit + 1`` if the doc is missing from list ``i``).
+
+    Normalization is **byte-identical** to ``_rrf_merge`` at N=1: the
+    theoretical max of the unnormalized sum is ``N * (1/N) * (1/k) = 1/k``
+    regardless of N, and we divide by ``1/k`` so the returned scores live
+    in the same ``[0, 1]`` range every downstream consumer (frame boost,
+    MMR, CE rerank, F017 relevance floor) already expects.
+
+    Note: the single-query fast-path in ``hybrid_search_multi`` short-circuits
+    before reaching this function; it is only invoked when ``len(ranked_lists) >= 2``.
+    """
+    n = len(ranked_lists)
+    if n == 0:
+        return []
+
+    penalty_rank = limit + 1
+    per_list_weight = 1.0 / n
+
+    rank_maps: list[dict[UUID, int]] = [
+        {doc_id: i for i, (doc_id, _) in enumerate(rl)} for rl in ranked_lists
+    ]
+
+    all_ids: set[UUID] = set()
+    for rm in rank_maps:
+        all_ids.update(rm)
+
+    if not all_ids:
+        return []
+
+    scored: list[tuple[UUID, float]] = []
+    for doc_id in all_ids:
+        score = 0.0
+        for rm in rank_maps:
+            r = rm.get(doc_id, penalty_rank)
+            score += per_list_weight / (k + r)
+        scored.append((doc_id, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Same normalization as _rrf_merge: divide by theoretical max = 1/k.
+    # Independent of N because per-list weights sum to 1.0 and best per-list
+    # contribution is (1/N) / k, summing to 1/k across N lists.
+    max_score = 1.0 / k
+    if max_score > 0 and scored:
+        scored = [(doc_id, score / max_score) for doc_id, score in scored]
+
+    return scored[:limit]
+
+
+async def hybrid_search_multi(
+    session: AsyncSession,
+    table: str,
+    queries: list[tuple[str, list[float] | None]],
+    agent_id: str,
+    extra_where: str = "",
+    extra_params: dict | None = None,
+    limit: int = 10,
+    vector_weight: float | None = None,
+    active_filter: bool = True,
+) -> list[tuple[UUID, float]]:
+    """Multi-query hybrid search over a Heart table (F050).
+
+    Runs ``hybrid_search`` once per (text, embedding) pair in ``queries`` and
+    fuses the per-variant ranked lists with equal-weight Reciprocal Rank Fusion
+    via ``_rrf_merge_n``. Score scale matches single-query ``hybrid_search``.
+
+    Single-element fast-path: when ``len(queries) == 1`` (or a degenerate empty
+    list collapses to one), this delegates directly to ``hybrid_search`` so the
+    no-expansion call path is **byte-identical** to today's behavior — no
+    over-fetch, no extra Python merge work.
+
+    Each per-variant call internally over-fetches ``limit * 3`` (matching
+    ``hybrid_search``) to give the cross-variant RRF something to work with.
+
+    Args:
+        session: Active SQLAlchemy async session.
+        table: Fully qualified table name (e.g. ``"heart.facts"``).
+        queries: List of ``(query_text, embedding)`` pairs. Each embedding may
+            be ``None`` to force keyword-only fallback for that variant.
+        agent_id: Agent ID filter (always applied).
+        extra_where: Additional SQL WHERE clauses; applied to every variant.
+        extra_params: Additional parameters for ``extra_where`` bindings.
+        limit: Maximum number of results to return.
+        vector_weight: Weight for vector score within each per-variant call.
+        active_filter: Whether to include ``AND t.active = true``.
+
+    Returns:
+        List of ``(id, rrf_score)`` ordered by score DESC, length ``<= limit``.
+    """
+    if not queries:
+        return []
+
+    # Single-element fast-path — delegate to hybrid_search so flag-off /
+    # single-variant call sites are byte-identical to today's behavior.
+    if len(queries) == 1:
+        text_only, embedding = queries[0]
+        return await hybrid_search(
+            session=session,
+            table=table,
+            embedding=embedding,
+            query_text=text_only,
+            agent_id=agent_id,
+            extra_where=extra_where,
+            extra_params=extra_params,
+            limit=limit,
+            vector_weight=vector_weight,
+            active_filter=active_filter,
+        )
+
+    rrf_k = _resolve_rrf_k()
+
+    ranked_lists: list[list[tuple[UUID, float]]] = []
+    for query_text_i, embedding_i in queries:
+        per_variant = await hybrid_search(
+            session=session,
+            table=table,
+            embedding=embedding_i,
+            query_text=query_text_i,
+            agent_id=agent_id,
+            extra_where=extra_where,
+            extra_params=extra_params,
+            limit=limit,
+            vector_weight=vector_weight,
+            active_filter=active_filter,
+        )
+        ranked_lists.append(per_variant)
+
+    return _rrf_merge_n(ranked_lists, rrf_k, limit)
+
+
 class _ScoredWrapper:
     """Lightweight proxy that overrides .score without mutating the ORM object."""
     __slots__ = ("_item", "_score")
