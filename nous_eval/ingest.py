@@ -59,13 +59,15 @@ REQUIRED_PROD_ENV_VARS = (
 )
 
 # Tables dumped in dependency order — decisions first so brain rows exist
-# before facts/episodes that reference them via graph edges.
+# before facts/episodes that reference them via graph edges. Graph edges
+# come last because they reference all other types via (source_id, target_id).
 INGEST_TABLES = (
     ("brain.decisions", "decisions.jsonl"),
     ("heart.facts", "facts.jsonl"),
     ("heart.episodes", "episodes.jsonl"),
     ("heart.procedures", "procedures.jsonl"),
     ("heart.censors", "censors.jsonl"),
+    ("brain.graph_edges", "graph_edges.jsonl"),
 )
 
 DEFAULT_EVAL_AGENT_ID = "nous-eval-corpus"

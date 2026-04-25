@@ -1,0 +1,43 @@
+# F051 source registry — points all qrels at $NOUS_EVAL_FIXTURES_DIR/qrels_*.jsonl.
+# The expected fixtures-dir layout is the version subdir of the nous-eval-fixtures
+# repo (e.g. NOUS_EVAL_FIXTURES_DIR=/path/to/nous-eval-fixtures/v2026-Q2).
+#
+# Probes lives alongside the other qrels in the same version subdir for v2026-Q2+,
+# replacing the earlier "tests/fixtures/eval_probes.jsonl" public-repo path which
+# was the smoke fallback when no fixtures dir was set.
+sources:
+  - name: longmemeval
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_longmemeval.jsonl"
+    enabled_by_default: true
+    gate_eligible: true
+    requires_fixtures_dir: true
+    description: "Stratified 20-Q LongMemEval_S subset"
+
+  - name: ai_hand_labeled
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_hand_labels.jsonl"
+    enabled_by_default: true
+    gate_eligible: false
+    requires_fixtures_dir: true
+    review_filter: "reviewed_by != null"
+    description: "AI-drafted hand-labeled qrels (reviewed_by gates eligibility)"
+
+  - name: probes
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_probes.jsonl"
+    enabled_by_default: true
+    gate_eligible: true
+    requires_fixtures_dir: true
+    description: "Auto-generated deterministic probes ('What does F<NN> ship?')"
+
+  - name: silver_episodes
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_silver.jsonl"
+    enabled_by_default: true
+    gate_eligible: false
+    requires_fixtures_dir: true
+    description: "Click-model-style silver labels mined from heart.episodes"
+
+  - name: synthetic_haiku
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_synthetic.jsonl"
+    enabled_by_default: false
+    gate_eligible: false
+    requires_fixtures_dir: true
+    description: "Haiku-reverse-generated (informational only, circular risk)"
