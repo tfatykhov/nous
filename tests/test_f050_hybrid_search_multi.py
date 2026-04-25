@@ -246,18 +246,19 @@ class TestHybridSearchMultiRouting:
         assert result_ids == expected
 
     @pytest.mark.asyncio
-    async def test_hybrid_search_multi_empty_queries_returns_empty(self) -> None:
-        """Empty queries list → no hybrid_search calls, empty result."""
-        with patch(
-            "nous.heart.search.hybrid_search",
-            new=AsyncMock(return_value=[]),
-        ) as mock_single:
-            result = await hybrid_search_multi(
+    async def test_hybrid_search_multi_empty_queries_raises(self) -> None:
+        """Empty queries list → ValueError (silent-failure-hunter WARN #12).
+
+        Previously returned silently — that masked caller bugs by producing
+        empty recall with no signal. Now raises loudly so a caller passing
+        an empty variant_pairs list (e.g. from a buggy QueryExpander) surfaces
+        the bug at the call site instead of as 'recall returns nothing'.
+        """
+        with pytest.raises(ValueError, match="at least one"):
+            await hybrid_search_multi(
                 session=AsyncMock(),
                 table="heart.facts",
                 queries=[],
                 agent_id="nous-test",
                 limit=10,
             )
-        assert mock_single.await_count == 0
-        assert list(result) == []

@@ -109,6 +109,26 @@ async def create_components(settings: Settings) -> dict:
     api_client = create_client(settings)
     await api_client.start()
 
+    # F050: wire QueryExpander into Heart (only if flag enabled).
+    # Without this wiring NOUS_QUERY_EXPANSION_ENABLED=true is a no-op
+    # because heart._query_expander stays None. Construct here so the
+    # OAT-capable shared api_client is reused (single auth path).
+    if settings.query_expansion_enabled:
+        from nous.heart.query_expansion import QueryExpander
+        query_expander = QueryExpander(
+            llm=api_client,
+            settings=settings,
+            db=database,
+            model=settings.query_expansion_model,
+        )
+        heart.set_query_expander(query_expander)
+        logger.info(
+            "F050: QueryExpander wired (model=%s, max_variants=%d, timeout=%.1fs)",
+            settings.query_expansion_model,
+            settings.query_expansion_max_variants,
+            settings.query_expansion_timeout_seconds,
+        )
+
     # F024: Critic Agent (uses shared api_client)
     critic = None
     if settings.critic_enabled:

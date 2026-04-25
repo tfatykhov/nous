@@ -768,7 +768,17 @@ class Heart:
 
         Mirrors FactManager.set_llm_client at facts.py:141. Called from
         main.py after api_client.start(); test fixtures may skip this.
+
+        Surfaces a DEBUG log on overwrite (silent-failure-hunter WARN #15)
+        so accidental double-wiring during dev/test boot becomes visible
+        without raising — set_query_expander is intentionally idempotent.
         """
+        if self._query_expander is not None and expander is not None:
+            logger.debug(
+                "F050: set_query_expander called twice; replacing %r with %r",
+                type(self._query_expander).__name__,
+                type(expander).__name__,
+            )
         self._query_expander = expander
 
     async def _recall(

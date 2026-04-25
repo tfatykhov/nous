@@ -306,7 +306,13 @@ async def hybrid_search_multi(
         List of ``(id, rrf_score)`` ordered by score DESC, length ``<= limit``.
     """
     if not queries:
-        return []
+        # Loud raise (silent-failure-hunter WARN #12). Empty queries is a
+        # caller bug, not a normal degenerate condition. Returning [] would
+        # silently swallow the bad call and produce empty recall results
+        # downstream — exactly the failure mode F050 is supposed to surface.
+        raise ValueError(
+            "hybrid_search_multi requires at least one (text, embedding) pair"
+        )
 
     # Single-element fast-path — delegate to hybrid_search so flag-off /
     # single-variant call sites are byte-identical to today's behavior.

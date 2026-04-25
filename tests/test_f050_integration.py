@@ -28,9 +28,11 @@ import pytest
 try:
     from nous.heart.heart import Heart
     from nous.heart.facts import FactManager
+    from nous.heart.episodes import EpisodeManager
+    from nous.heart.procedures import ProcedureManager
 except ImportError:
     pytest.skip(
-        "Heart / FactManager import failed — integration agent in flight",
+        "Heart / FactManager / EpisodeManager / ProcedureManager import failed",
         allow_module_level=True,
     )
 
@@ -410,3 +412,158 @@ class TestActiveOnlyFalseBypass:
             )
         except ImportError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Episodes + Procedures variant_pairs routing — test-coverage P1-1
+# Mirrors TestFactSearchVariantPairsRouting; without these the copy-paste
+# parity between the three sub-managers' routing blocks could silently
+# diverge (typo in table, swapped extra_where, wrong keyword arg name).
+# ---------------------------------------------------------------------------
+
+
+class TestEpisodesSearchVariantPairsRouting:
+    @pytest.mark.asyncio
+    async def test_episodes_search_variant_pairs_routes_to_multi(self) -> None:
+        """EpisodeManager.search with variant_pairs (len > 1) routes to
+        hybrid_search_multi. Mirrors the FactManager test."""
+        if not _has_variant_pairs_kwarg(EpisodeManager.search):
+            pytest.skip("EpisodeManager.search lacks variant_pairs kwarg yet")
+
+        em = EpisodeManager.__new__(EpisodeManager)
+        em.agent_id = "nous-test"
+        em.embeddings = MagicMock()
+        em.embeddings.embed = AsyncMock(return_value=[0.1] * 4)
+        em.db = MagicMock()
+
+        session = AsyncMock()
+        scalars = MagicMock()
+        scalars.all = MagicMock(return_value=[])
+        result_proxy = MagicMock()
+        result_proxy.scalars = MagicMock(return_value=scalars)
+        session.execute = AsyncMock(return_value=result_proxy)
+
+        variant_pairs = [
+            ("three word query", [0.1] * 4),
+            ("alt phrasing", [0.2] * 4),
+        ]
+
+        with (
+            patch(
+                "nous.heart.episodes.hybrid_search_multi",
+                new=AsyncMock(return_value=[]),
+            ) as mock_multi,
+            patch(
+                "nous.heart.episodes.hybrid_search",
+                new=AsyncMock(return_value=[]),
+            ) as mock_single,
+        ):
+            await em.search(
+                "three word query",
+                limit=10,
+                session=session,
+                variant_pairs=variant_pairs,
+            )
+
+        assert mock_multi.await_count == 1
+        assert mock_single.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_episodes_search_variant_pairs_none_unchanged_path(self) -> None:
+        """variant_pairs=None → byte-identical to today's single-query path."""
+        em = EpisodeManager.__new__(EpisodeManager)
+        em.agent_id = "nous-test"
+        em.embeddings = MagicMock()
+        em.embeddings.embed = AsyncMock(return_value=[0.1] * 4)
+        em.db = MagicMock()
+
+        session = AsyncMock()
+        scalars = MagicMock()
+        scalars.all = MagicMock(return_value=[])
+        result_proxy = MagicMock()
+        result_proxy.scalars = MagicMock(return_value=scalars)
+        session.execute = AsyncMock(return_value=result_proxy)
+
+        with patch(
+            "nous.heart.episodes.hybrid_search",
+            new=AsyncMock(return_value=[]),
+        ) as mock_single:
+            kwargs: dict = {"limit": 10, "session": session}
+            if _has_variant_pairs_kwarg(EpisodeManager.search):
+                kwargs["variant_pairs"] = None
+            await em.search("three word query", **kwargs)
+
+        assert mock_single.await_count == 1
+
+
+class TestProceduresSearchVariantPairsRouting:
+    @pytest.mark.asyncio
+    async def test_procedures_search_variant_pairs_routes_to_multi(self) -> None:
+        """ProcedureManager.search with variant_pairs routes to multi
+        AND the F037 utility-boost remains downstream of the routing decision."""
+        if not _has_variant_pairs_kwarg(ProcedureManager.search):
+            pytest.skip("ProcedureManager.search lacks variant_pairs kwarg yet")
+
+        pm = ProcedureManager.__new__(ProcedureManager)
+        pm.agent_id = "nous-test"
+        pm.embeddings = MagicMock()
+        pm.embeddings.embed = AsyncMock(return_value=[0.1] * 4)
+        pm.db = MagicMock()
+
+        session = AsyncMock()
+        scalars = MagicMock()
+        scalars.all = MagicMock(return_value=[])
+        result_proxy = MagicMock()
+        result_proxy.scalars = MagicMock(return_value=scalars)
+        session.execute = AsyncMock(return_value=result_proxy)
+
+        variant_pairs = [
+            ("three word query", [0.1] * 4),
+            ("alt phrasing", [0.2] * 4),
+        ]
+
+        with (
+            patch(
+                "nous.heart.procedures.hybrid_search_multi",
+                new=AsyncMock(return_value=[]),
+            ) as mock_multi,
+            patch(
+                "nous.heart.procedures.hybrid_search",
+                new=AsyncMock(return_value=[]),
+            ) as mock_single,
+        ):
+            await pm.search(
+                "three word query",
+                limit=10,
+                session=session,
+                variant_pairs=variant_pairs,
+            )
+
+        assert mock_multi.await_count == 1
+        assert mock_single.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_procedures_search_variant_pairs_none_unchanged_path(self) -> None:
+        pm = ProcedureManager.__new__(ProcedureManager)
+        pm.agent_id = "nous-test"
+        pm.embeddings = MagicMock()
+        pm.embeddings.embed = AsyncMock(return_value=[0.1] * 4)
+        pm.db = MagicMock()
+
+        session = AsyncMock()
+        scalars = MagicMock()
+        scalars.all = MagicMock(return_value=[])
+        result_proxy = MagicMock()
+        result_proxy.scalars = MagicMock(return_value=scalars)
+        session.execute = AsyncMock(return_value=result_proxy)
+
+        with patch(
+            "nous.heart.procedures.hybrid_search",
+            new=AsyncMock(return_value=[]),
+        ) as mock_single:
+            kwargs: dict = {"limit": 10, "session": session}
+            if _has_variant_pairs_kwarg(ProcedureManager.search):
+                kwargs["variant_pairs"] = None
+            await pm.search("three word query", **kwargs)
+
+        assert mock_single.await_count == 1

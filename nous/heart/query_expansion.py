@@ -148,6 +148,14 @@ class QueryExpander:
 
         Never raises. Every error path returns ``[query]``.
         """
+        # Defensive: caller-typo guard (silent-failure-hunter WARN #10).
+        # Without this, canonical_input_hash raises on None/bytes/int, and
+        # only the Heart-layer try/except catches it — fragile if the wiring
+        # ever changes. Short-circuit cleanly and let the caller's existing
+        # downstream code handle a non-string the same as today.
+        if not isinstance(query, str):
+            return [query]
+
         # Tier 0: master flag + LLM availability
         if not self._settings.query_expansion_enabled or self._llm is None:
             return [query]

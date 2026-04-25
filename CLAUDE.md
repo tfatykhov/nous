@@ -386,6 +386,13 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_MMR_ENABLED` | `false` | Enable MMR diversity re-ranking in recall_deep |
 | `NOUS_MMR_DIVERSITY_WEIGHT` | `0.7` | MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity) |
 | `NOUS_CROSS_ENCODER_ENABLED` | `false` | Enable F042 cross-encoder reranking in recall_deep (requires sentence-transformers) |
+| `NOUS_QUERY_EXPANSION_ENABLED` | `false` | F050 master flag — enable Haiku-driven multi-query expansion at recall time (Phase 1 lands dark; flip after harness gate) |
+| `NOUS_QUERY_EXPANSION_MODEL` | `claude-haiku-4-5-20251001` | F050 model used for the expansion call (forced tool use, ~256 tok output) |
+| `NOUS_QUERY_EXPANSION_TIMEOUT_SECONDS` | `2.0` | F050 per-call timeout (seconds); on timeout, expand() fails open to [query] |
+| `NOUS_QUERY_EXPANSION_MAX_VARIANTS` | `3` | F050 max variants returned including the original query |
+| `NOUS_QUERY_EXPANSION_MIN_WORDS` | `3` | F050 gate threshold — queries shorter than this skip expansion |
+| `NOUS_QUERY_EXPANSION_MAX_PER_HOUR` | `500` | F050 budget cap on Haiku calls per hour (asyncio.Lock-serialized in-process counter) |
+| `NOUS_QUERY_EXPANSION_CACHE_TTL_DAYS` | `30` | F050 cache retention for `heart.query_expansions` rows |
 | `NOUS_CROSS_ENCODER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model name for F042 reranking |
 | `NOUS_CROSS_ENCODER_MAX_CANDIDATES` | `30` | Max candidates to rerank (head-truncation, tail untouched) |
 | `NOUS_CROSS_ENCODER_TEXT_LIMIT` | `512` | Max chars per doc fed to cross-encoder |

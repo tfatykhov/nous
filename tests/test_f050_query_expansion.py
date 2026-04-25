@@ -592,7 +592,12 @@ class TestAuthFailure:
 
             status_code = 401
 
-        llm = _make_llm(call_side_effect=_AuthError("401 unauthorized"))
+        # Production regex at query_expansion.py:_log_haiku_error matches r"\((\d{3})\)" —
+        # parens-required form, e.g. "got status (401)". Without parens, the regex
+        # returns None, status routes to DEBUG branch, _warned_once never sets,
+        # and the WARN log never fires — making the assertion below trivially
+        # pass at 0 (test-coverage reviewer P1-2). Mock message must contain "(401)".
+        llm = _make_llm(call_side_effect=_AuthError("got status (401) unauthorized"))
         expander = _make_expander(llm=llm)
 
         with caplog.at_level(logging.WARNING):
@@ -600,14 +605,21 @@ class TestAuthFailure:
                 result = await expander.expand("three word query", agent_id="a")
                 assert result == ["three word query"]
 
-        # WARN logged AT MOST ONCE for the auth-specific path. We tolerate
-        # implementations that always WARN-once-per-process via _warned_once
-        # (preferred) OR that choose to DEBUG-log auth failures entirely
-        # (acceptable variant — spec is "WARN-once-per-process").
+        # WARN logged EXACTLY ONCE across 3 calls (the plan v2 contract:
+        # _warned_once flag fires WARN on first 401, DEBUG on subsequent).
+        # Lower bound matters — without it, a regex change that silently
+        # routes 401 to DEBUG-only would let this assertion pass trivially
+        # (test-coverage reviewer P1-2: "tautological 401 test").
         warn_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert len(warn_records) <= 1, (
-            f"Expected ≤1 WARN for repeated 401s (plan v2 _warned_once flag), "
+        assert len(warn_records) == 1, (
+            f"Expected EXACTLY 1 WARN for 3x 401s (plan v2 _warned_once), "
             f"got {len(warn_records)}: {[r.getMessage() for r in warn_records]}"
+        )
+        # Verify the WARN actually mentions the 401 / auth path so a future
+        # log-message refactor doesn't silently route it elsewhere.
+        msg = warn_records[0].getMessage().lower()
+        assert "401" in msg or "auth" in msg, (
+            f"WARN message should reference the 401/auth path, got: {msg!r}"
         )
 
 
