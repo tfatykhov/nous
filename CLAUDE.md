@@ -385,6 +385,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_PROCEDURE_SCORE_FLOOR` | `0.40` | Minimum score for procedures when embeddings enabled (F038) |
 | `NOUS_MMR_ENABLED` | `false` | Enable MMR diversity re-ranking in recall_deep |
 | `NOUS_MMR_DIVERSITY_WEIGHT` | `0.7` | MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity) |
+| `NOUS_MMR_SKIP_AFTER_CE` | `true` | F030.1: skip MMR when CE rerank just reordered the head. F051 harness measured +30% MRR (0.372 -> 0.484, +190% on jargon-drift) when MMR is gated this way. Set `false` to restore pre-F030.1 chained CE-then-MMR behavior. |
 | `NOUS_CROSS_ENCODER_ENABLED` | `false` | Enable F042 cross-encoder reranking in recall_deep (requires sentence-transformers) |
 | `NOUS_CROSS_ENCODER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model name for F042 reranking |
 | `NOUS_CROSS_ENCODER_MAX_CANDIDATES` | `30` | Max candidates to rerank (head-truncation, tail untouched) |
