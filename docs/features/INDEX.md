@@ -33,6 +33,7 @@
 | F033 | Multi-Tier Search Routing | ✅ Shipped | Tavily primary + Exa research + Brave fallback, query classification router |
 | F025 | [Amnesia Prevention](F025-amnesia-prevention.md) | ✅ Shipped | Staleness exemptions, budget scaling, transcript 16K, dedup 0.92, source text passthrough, chunked summarization, transcript persistence |
 | F051 | [Retrieval Eval Harness](F051-retrieval-eval-harness.md) | ✅ Shipped | Local-first retrieval evaluation: pipeline refactor + per-source qrels + paired A/B configs + persistent eval-DB Docker image + F050 gate-decision logic |
+| F050 | [Multi-Query Expansion](F050-multi-query-expansion.md) | 🌑 Phase 1 (dark) | Haiku-driven query expansion behind `NOUS_QUERY_EXPANSION_ENABLED=false`. Module + cache + wiring + 64 tests landed; Phase 3 flag-flip gated on F051 harness MRR +7% |
 
 ### P0: Identity & Context
 | Feature | Name | Status | Description |
