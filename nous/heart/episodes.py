@@ -18,7 +18,7 @@ from nous.utils import text_overlap
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
-from nous.heart.search import hybrid_search
+from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Episode, EpisodeDecision, EpisodeProcedure, Event
 
@@ -471,14 +471,32 @@ class EpisodeManager:
     # search()
     # ------------------------------------------------------------------
 
-    async def search(self, query: str, limit: int = 10, session: AsyncSession | None = None) -> list[EpisodeSummary]:
-        """Hybrid search over episodes using search.py helper."""
+    async def search(
+        self,
+        query: str,
+        limit: int = 10,
+        session: AsyncSession | None = None,
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+    ) -> list[EpisodeSummary]:
+        """Hybrid search over episodes using search.py helper.
+
+        Args:
+            variant_pairs: F050 — when set with len > 1, routes through
+                hybrid_search_multi for RRF fusion across query variants.
+                Defaults to None (single-query path; backwards compatible).
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, session)
-        return await self._search(query, limit, session)
+                return await self._search(query, limit, session, variant_pairs)
+        return await self._search(query, limit, session, variant_pairs)
 
-    async def _search(self, query: str, limit: int, session: AsyncSession) -> list[EpisodeSummary]:
+    async def _search(
+        self,
+        query: str,
+        limit: int,
+        session: AsyncSession,
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+    ) -> list[EpisodeSummary]:
         # Generate query embedding
         embedding = None
         if self.embeddings:
@@ -487,15 +505,25 @@ class EpisodeManager:
             except Exception:
                 logger.warning("Embedding generation failed for episode search")
 
-        results = await hybrid_search(
-            session=session,
-            table="heart.episodes",
-            embedding=embedding,
-            query_text=query,
-            agent_id=self.agent_id,
-            limit=limit,
-            extra_where="AND t.outcome != 'abandoned'",
-        )
+        if variant_pairs and len(variant_pairs) > 1:
+            results = await hybrid_search_multi(
+                session=session,
+                table="heart.episodes",
+                queries=variant_pairs,
+                agent_id=self.agent_id,
+                limit=limit,
+                extra_where="AND t.outcome != 'abandoned'",
+            )
+        else:
+            results = await hybrid_search(
+                session=session,
+                table="heart.episodes",
+                embedding=embedding,
+                query_text=query,
+                agent_id=self.agent_id,
+                limit=limit,
+                extra_where="AND t.outcome != 'abandoned'",
+            )
 
         if not results:
             return []

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
-from nous.heart.search import hybrid_search
+from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, GraphEdge
 
@@ -1014,12 +1014,19 @@ class FactManager:
         active_only: bool = True,
         exclude_categories: list[str] | None = None,
         session: AsyncSession | None = None,
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None,
     ) -> list[FactSummary]:
-        """Hybrid search over facts."""
+        """Hybrid search over facts.
+
+        Args:
+            variant_pairs: F050 — when set with len > 1, routes through
+                hybrid_search_multi for RRF fusion across query variants.
+                Defaults to None (single-query path; backwards compatible).
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session)
-        return await self._search(query, limit, category, active_only, exclude_categories, session)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs)
 
     async def _search(
         self,
@@ -1029,6 +1036,7 @@ class FactManager:
         active_only: bool,
         exclude_categories: list[str] | None,
         session: AsyncSession,
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -1053,21 +1061,35 @@ class FactManager:
         # Note: hybrid_search always applies active=true filter.
         # For active_only=False, we need a different approach.
         if not active_only:
+            # F050 routing: active_only=False bypasses hybrid_search; variants ignored
+            # on this path. If variant routing is needed here, wire hybrid_search_multi
+            # similarly to the active_only=True path below.
             # Override the default active filter by using raw search
             # The hybrid_search helper always filters active=true,
             # so for inactive facts we do a simpler query.
             return await self._search_all(query, embedding, limit, category, session)
 
-        results = await hybrid_search(
-            session=session,
-            table="heart.facts",
-            embedding=embedding,
-            query_text=query,
-            agent_id=self.agent_id,
-            extra_where=extra_where,
-            extra_params=extra_params,
-            limit=limit,
-        )
+        if variant_pairs and len(variant_pairs) > 1:
+            results = await hybrid_search_multi(
+                session=session,
+                table="heart.facts",
+                queries=variant_pairs,
+                agent_id=self.agent_id,
+                extra_where=extra_where,
+                extra_params=extra_params,
+                limit=limit,
+            )
+        else:
+            results = await hybrid_search(
+                session=session,
+                table="heart.facts",
+                embedding=embedding,
+                query_text=query,
+                agent_id=self.agent_id,
+                extra_where=extra_where,
+                extra_params=extra_params,
+                limit=limit,
+            )
 
         if not results:
             return []

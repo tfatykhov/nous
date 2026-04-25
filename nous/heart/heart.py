@@ -10,9 +10,13 @@ transaction injection (P1-1).
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select
+
+if TYPE_CHECKING:
+    from nous.heart.query_expansion import QueryExpander
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -118,6 +122,12 @@ class Heart:
         # Injected post-construction in main.py (not a constructor param
         # to keep Heart's interface stable).
         self._bus: EventBus | None = None
+
+        # F050: Optional QueryExpander for multi-query expansion.
+        # Wired via set_query_expander() in main.py (mirrors set_llm_client
+        # pattern at facts.py:141). None when flag is off or test fixture
+        # skipped wiring; _recall handles None as a no-op.
+        self._query_expander: "QueryExpander | None" = None
 
     # ------------------------------------------------------------------
     # Lifecycle (P2-2)
@@ -753,6 +763,14 @@ class Heart:
                 return await self._recall(query, limit, types, session)
         return await self._recall(query, limit, types, session)
 
+    def set_query_expander(self, expander: "QueryExpander | None") -> None:
+        """F050: Wire a QueryExpander instance for multi-query recall.
+
+        Mirrors FactManager.set_llm_client at facts.py:141. Called from
+        main.py after api_client.start(); test fixtures may skip this.
+        """
+        self._query_expander = expander
+
     async def _recall(
         self,
         query: str,
@@ -778,18 +796,53 @@ class Heart:
         if not search_map:
             return []
 
+        # F050: Optionally expand the query into variants via Haiku, then embed
+        # them in a single batch call. variant_pairs stays None on any failure
+        # so sub-managers fall back to the existing single-query path
+        # (byte-identical when variant_pairs is None — see plan v2 §invariant).
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None
+        if (
+            self.settings.query_expansion_enabled
+            and self._query_expander is not None
+            and self._embeddings is not None
+        ):
+            try:
+                variants = await self._query_expander.expand(query, self.agent_id)
+            except Exception as exc:
+                # Defensive — expand() should never raise per spec, but belt & braces.
+                logger.warning("F050: query_expander.expand raised, using [query]: %s", exc)
+                variants = [query]
+
+            if len(variants) > 1:
+                try:
+                    embeddings = await self._embeddings.embed_batch(variants)
+                    variant_pairs = list(zip(variants, embeddings))
+                except Exception as exc:
+                    logger.warning(
+                        "F050: embed_batch failed for %d variants, falling back to single-query: %s",
+                        len(variants), exc,
+                    )
+                    variant_pairs = None
+
         keys: list[str] = []
         results_list: list[object] = []
         for memory_type, (_mgr_name, _kw) in search_map.items():
             try:
                 if memory_type == "episode":
-                    result = await self.episodes.search(query, fetch_limit, session)
+                    result = await self.episodes.search(
+                        query, fetch_limit, session, variant_pairs=variant_pairs,
+                    )
                 elif memory_type == "fact":
-                    result = await self.facts.search(query, fetch_limit, session=session)
+                    result = await self.facts.search(
+                        query, fetch_limit, session=session, variant_pairs=variant_pairs,
+                    )
                 elif memory_type == "procedure":
-                    result = await self.procedures.search(query, fetch_limit, session=session)
+                    result = await self.procedures.search(
+                        query, fetch_limit, session=session, variant_pairs=variant_pairs,
+                    )
                 else:
-                    # P1-5: Use read-only search, not check
+                    # P1-5: Use read-only search, not check.
+                    # censors use cosine similarity, not hybrid_search — variants do not apply.
                     result = await self.censors.search(query, fetch_limit, session=session)
                 keys.append(memory_type)
                 results_list.append(result)
