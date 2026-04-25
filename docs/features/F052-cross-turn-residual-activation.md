@@ -1,4 +1,4 @@
-# F051: Cross-Turn Residual Activation
+# F052: Cross-Turn Residual Activation
 
 **Status:** 📝 Draft (v4 — address Codex P1 #3 session_id injection)
 **Proposed by:** Tim (human-brain association framing — "train of thought between turns")
@@ -438,14 +438,14 @@ Phase 1 is ~1–1.5 days of work. Phase 2 is eval-bound.
 
 ## Traceability
 
-- FR-051.1 — Turn counter sourced from `ConversationState.turn_count` (no new column)
-- FR-051.2 — `ResidualActivator.compute_activations` returns a bounded, decayed activation map under geometric or power-law mode
-- FR-051.3 — Residual seeds flow into F022 spreading activation alongside current-query seeds at the `nous/api/tools.py::recall` call-site
-- FR-051.4 — Post-fusion score boost is additive, bounded, and clamped
-- FR-051.5 — `record_surfaced` persists to `WorkingMemory.items` without blocking the recall return **and uses its own isolated DB session**
-- FR-051.6 — Decay mode selectable via `residual_decay_mode` setting; both geometric and power-law implemented and unit-tested
-- NFR-051.1 — Zero added LLM calls
-- NFR-051.2 — Overhead per recall ≤ 5ms p95 (measured: one WM read, one turn-count read, one WM write, O(K) math)
-- NFR-051.3 — Fails open — any exception returns uncorrected ranking and logs WARN
-- NFR-051.4 — Behind `residual_activation_enabled` flag, default off
-- NFR-051.5 — Zero migrations
+- FR-052.1 — Turn counter sourced from `ConversationState.turn_count` (no new column)
+- FR-052.2 — `ResidualActivator.compute_activations` returns a bounded, decayed activation map under geometric or power-law mode
+- FR-052.3 — Residual seeds flow into F022 spreading activation alongside current-query seeds at the `nous/api/tools.py::recall` call-site
+- FR-052.4 — Post-fusion score boost is additive, bounded, and clamped
+- FR-052.5 — `record_surfaced` persists to `WorkingMemory.items` without blocking the recall return **and uses its own isolated DB session**
+- FR-052.6 — Decay mode selectable via `residual_decay_mode` setting; both geometric and power-law implemented and unit-tested
+- NFR-052.1 — Zero added LLM calls
+- NFR-052.2 — Overhead per recall ≤ 5ms p95 (measured: one WM read, one turn-count read, one WM write, O(K) math)
+- NFR-052.3 — Fails open — any exception returns uncorrected ranking and logs WARN
+- NFR-052.4 — Behind `residual_activation_enabled` flag, default off
+- NFR-052.5 — Zero migrations
