@@ -57,10 +57,21 @@ long-term memory. Memory contains facts, decisions, episodes, procedures, and
 censors stored in PostgreSQL with pgvector embeddings.
 
 For each query you draft:
-  - It must be a realistic question a user might ask.
+  - It must be a realistic question a user might ask in everyday English.
   - It must be answerable from a single retrieved memory item (no multi-hop reasoning).
   - State the most likely memory_types ordering (most likely first).
   - Provide a short rationale for what the gold answer would look like.
+
+CRITICAL — instance-agnostic vocabulary only:
+  - DO NOT use feature codes (F001, F022, F050, etc.), PR numbers (#123), commit
+    SHAs, or any identifier that only makes sense inside one specific Nous
+    deployment. Those are internal jargon, not what real users say.
+  - DO NOT reference internal-only file paths, module names, or class names
+    (e.g. "QueryExpander", "Heart._recall", "nous/heart/search.py").
+  - DO use conceptual/functional terminology a Nous user or operator would
+    actually say: "cross-encoder reranking", "diversity reranker", "session
+    cleanup", "graph-augmented recall", "memory contradiction detection",
+    "context pruning", "hybrid search", etc.
 
 Return STRICT JSON: a list of {query, memory_types, rationale} objects, length N.
 Do NOT include anything outside the JSON array.
@@ -117,20 +128,80 @@ async def _draft_batch(config: HLDConfig, batch_index: int) -> list[dict[str, An
             for i in range(n_this_batch)
         ]
 
-    # Lazy import so unit tests of the parser do not require anthropic SDK.
-    from anthropic import AsyncAnthropic
+    # Use Nous's existing AnthropicClient (HttpxAnthropicClient under the hood)
+    # so OAT auth + beta headers + Bearer-token + Stainless headers all match
+    # what prod uses. Vanilla `anthropic.AsyncAnthropic()` rejects OAT with
+    # `OAuth authentication is currently not supported` — Nous's wrapper adds
+    # the `anthropic-dangerous-direct-browser-access` + `oauth-2025-04-20`
+    # beta headers that make OAT actually work. See
+    # `nous/api/anthropic_client.py::HttpxAnthropicClient` lines 367-396.
+    from nous.api.anthropic_client import create_client
+    from nous.config import Settings
 
-    client = AsyncAnthropic()
-    user_prompt = USER_PROMPT_TEMPLATE.format(n=n_this_batch, seed=config.seed)
-    msg = await client.messages.create(
-        model=config.model,
-        max_tokens=4096,
-        temperature=config.temperature,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    raw = "".join(blk.text for blk in msg.content if getattr(blk, "type", "") == "text")
-    return _parse_batch_response(raw, batch_index)
+    settings = Settings()
+    client = create_client(settings)
+    await client.start()
+    try:
+        user_prompt = USER_PROMPT_TEMPLATE.format(n=n_this_batch, seed=config.seed)
+        # OAT auth requires Block 0 to be the Claude Code preamble — without it
+        # Anthropic returns 429 (not 401, despite being an auth-shape problem).
+        # Mirrors nous/api/runner.py:488-495 prod usage.
+        payload = {
+            "model": config.model,
+            "max_tokens": 4096,
+            "temperature": config.temperature,
+            "system": [
+                {
+                    "type": "text",
+                    "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                },
+            ],
+            "messages": [{"role": "user", "content": user_prompt}],
+        }
+        # Retry on 429 (rate-limit) with exponential backoff. Prod uses the
+        # same OAT actively (heartbeat, subtasks) and short bursts can collide.
+        # 5 attempts: 0s, 4s, 12s, 28s, 60s gaps.
+        last_exc = None
+        for attempt in range(5):
+            try:
+                resp = await client.call(payload)
+                break
+            except RuntimeError as exc:
+                if "429" not in str(exc) or attempt == 4:
+                    raise
+                wait = (2 ** (attempt + 1)) * 2
+                logger.warning(
+                    "hand_labels_draft: 429 from Anthropic on attempt %d/5; "
+                    "retrying in %ds", attempt + 1, wait,
+                )
+                await asyncio.sleep(wait)
+                last_exc = exc
+        else:
+            assert last_exc is not None
+            raise last_exc
+        # AnthropicClient response shape: resp.content is a list of dicts
+        # with `type` and `text` fields (matches the QueryExpander pattern
+        # in nous/heart/query_expansion.py:309-315).
+        raw_chunks = []
+        for block in resp.content or []:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    raw_chunks.append(block.get("text", ""))
+            else:  # SDK-style typed object
+                if getattr(block, "type", "") == "text":
+                    raw_chunks.append(getattr(block, "text", ""))
+        raw = "".join(raw_chunks)
+        return _parse_batch_response(raw, batch_index)
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            logger.debug("hand_labels_draft: client.close raised", exc_info=True)
 
 
 def _parse_batch_response(raw: str, batch_index: int) -> list[dict[str, Any]]:

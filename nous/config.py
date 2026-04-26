@@ -12,7 +12,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="NOUS_", env_file=".env")
+    model_config = SettingsConfigDict(
+        env_prefix="NOUS_",
+        env_file=".env",
+        # Tolerate env vars beyond what's declared on Settings — production
+        # carries feature-specific env vars (Google Drive, integrations,
+        # scratch experiments) that the in-tree Settings doesn't know about.
+        # Without this, pydantic's default extra='forbid' makes Settings()
+        # raise on first unknown var. Matches EvalSettings behavior.
+        # (Mirror of the same fix landed in PR #346.)
+        extra="ignore",
+    )
 
     # DB connection — unprefixed aliases match docker-compose env vars
     db_host: str = Field("localhost", validation_alias="DB_HOST")

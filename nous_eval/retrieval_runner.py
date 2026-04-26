@@ -318,13 +318,43 @@ async def _build_heart_for_eval(
         embedding_provider=embedding_provider,
         owns_embeddings=True,
     )
+
+    # F050: wire QueryExpander into Heart when query_expansion_enabled=True.
+    # Mirrors nous/main.py:108-130 — without this wiring, the harness's
+    # f050_on config flag is a no-op (heart._query_expander stays None).
+    # We construct an HttpxAnthropicClient locally rather than reusing
+    # main.py's shared one because the harness lifecycle is one-shot.
+    api_client = None
+    if settings.query_expansion_enabled:
+        try:
+            from nous.api.anthropic_client import create_client
+            from nous.heart.query_expansion import QueryExpander
+            api_client = create_client(settings)
+            await api_client.start()
+            heart.set_query_expander(QueryExpander(
+                llm=api_client,
+                settings=settings,
+                db=db,
+                model=settings.query_expansion_model,
+            ))
+        except Exception:
+            logger.warning(
+                "F050: harness QueryExpander wiring failed; f050_on collapses to baseline",
+                exc_info=True,
+            )
+
     try:
         async with heart:
             yield heart
     finally:
-        # Heart's __aexit__ calls close(); belt-and-suspenders in case of
-        # embedding_provider construction failure before the yield.
-        pass
+        # Heart's __aexit__ calls close(); also close any harness-owned
+        # AnthropicClient created above so the per-config asyncpg/httpx
+        # pools don't leak across configs in run_matrix.
+        if api_client is not None:
+            try:
+                await api_client.close()
+            except Exception:
+                logger.debug("F050: api_client.close raised", exc_info=True)
 
 
 def _build_brain_for_eval(
