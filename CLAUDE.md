@@ -400,15 +400,18 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CE_BACKFILL_ENABLED` | `false` | Enable F043 cross-encoder reranking in F040 sleep-cycle graph backfill (requires sentence-transformers, reuses F042 model) |
 | `NOUS_CE_BACKFILL_TOP_K` | `10` | Max candidates per orphan reranked by cross-encoder before cosine verification |
 | `NOUS_CE_BACKFILL_MIN_SCORE` | `0.30` | Sigmoid-normalized CE score floor — candidates below this are dropped before the cosine gate |
-| `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT` | `0.65` | F045: CE-mode fact↔fact cosine threshold (only applies when CE backfill enabled). Empirically validated at 80% precision on 2026-04-14 A/B. |
-| `NOUS_CE_BACKFILL_THRESHOLD_FACT_DECISION` | `0.55` | F045: CE-mode fact→decision threshold |
-| `NOUS_CE_BACKFILL_THRESHOLD_FACT_EPISODE` | `0.55` | F045: CE-mode fact→episode threshold |
-| `NOUS_CE_BACKFILL_THRESHOLD_DECISION_DECISION` | `0.60` | F045: CE-mode decision↔decision threshold |
-| `NOUS_CE_BACKFILL_THRESHOLD_EPISODE_EPISODE` | `0.58` | F045: CE-mode episode↔episode threshold |
-| `NOUS_CE_BACKFILL_THRESHOLD_PROCEDURE_ANY` | `0.55` | F045: CE-mode procedure→* threshold |
+| `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT` | `0.55` | F054 (was F045 0.65): CE-mode fact↔fact cosine threshold. Relaxed 2026-04-26 — F053 density-eval measured +67% same-type edges at unchanged 0.83 LLM-judged precision. |
+| `NOUS_CE_BACKFILL_THRESHOLD_FACT_DECISION` | `0.55` | F045: CE-mode fact→decision threshold (KEPT STRICT by F054 — loosening regressed cross-type precision in the 2026-04-26 audit; corpus-quality issue addressed via the new decision content guard below). |
+| `NOUS_CE_BACKFILL_THRESHOLD_FACT_EPISODE` | `0.55` | F045: CE-mode fact→episode threshold (KEPT STRICT by F054 — same rationale as fact_decision). |
+| `NOUS_CE_BACKFILL_THRESHOLD_DECISION_DECISION` | `0.50` | F054 (was F045 0.60): CE-mode decision↔decision threshold. Relaxed 2026-04-26. |
+| `NOUS_CE_BACKFILL_THRESHOLD_EPISODE_EPISODE` | `0.50` | F054 (was F045 0.58): CE-mode episode↔episode threshold. Relaxed 2026-04-26 (extrapolated — eval corpus had 0 episode orphans). |
+| `NOUS_CE_BACKFILL_THRESHOLD_PROCEDURE_ANY` | `0.45` | F054 (was F045 0.55): CE-mode procedure→* threshold. Relaxed 2026-04-26. |
 | `NOUS_CE_BACKFILL_MIN_CONTENT_CHARS` | `80` | F045: drop candidates whose content (after strip) is shorter than this before CE inference. Filters URL-only / boilerplate facts. |
+| `NOUS_CE_BACKFILL_MIN_DECISION_CHARS` | `40` | F054: type-aware content guard for decisions. Mirrors `ce_backfill_min_content_chars=80` for facts. Set to 0 to disable. Addresses empty `brain.decisions.context` polluting cross-type edges (root cause of ~5/9 evidence_for NO/WEAK verdicts in the 2026-04-26 F053 audit). |
 
-**F045 migration note:** When `NOUS_CE_BACKFILL_ENABLED=true`, the `NOUS_GRAPH_THRESHOLD_*` env overrides below are **ignored** — `_get_threshold()` routes to the `NOUS_CE_BACKFILL_THRESHOLD_*` set instead. Operators upgrading from an F043-only deployment that had `NOUS_GRAPH_THRESHOLD_FACT_FACT` overridden must re-set the equivalent `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT` to keep their override effective. Only `fact_fact=0.65` is empirically validated; the other five CE-mode defaults are histogram estimates — tune per deployment.
+**F045 migration note:** When `NOUS_CE_BACKFILL_ENABLED=true`, the `NOUS_GRAPH_THRESHOLD_*` env overrides below are **ignored** — `_get_threshold()` routes to the `NOUS_CE_BACKFILL_THRESHOLD_*` set instead. Operators upgrading from an F043-only deployment that had `NOUS_GRAPH_THRESHOLD_FACT_FACT` overridden must re-set the equivalent `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT` to keep their override effective.
+
+**F054 rollback note:** F054 relaxed four same-type CE-mode thresholds and added the decision content guard. To revert to pre-F054 (F045) behavior, set: `NOUS_CE_BACKFILL_THRESHOLD_FACT_FACT=0.65`, `NOUS_CE_BACKFILL_THRESHOLD_DECISION_DECISION=0.60`, `NOUS_CE_BACKFILL_THRESHOLD_EPISODE_EPISODE=0.58`, `NOUS_CE_BACKFILL_THRESHOLD_PROCEDURE_ANY=0.55`, `NOUS_CE_BACKFILL_MIN_DECISION_CHARS=0`.
 | `NOUS_CRITIC_SKILL_INJECTION` | `disabled` | Critic skill injection mode: enabled, disabled, log_only |
 | `NOUS_CRITIC_SKILL_SLOTS` | `2` | Reserved procedure slots for Critic-recommended skills |
 | `NOUS_EMBEDDING_SKILL_SLOTS` | `3` | Procedure slots for embedding similarity search |
