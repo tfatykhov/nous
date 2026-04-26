@@ -69,7 +69,17 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
     "ce_off": RetrievalConfig(
         name="ce_off",
         flags={"cross_encoder_enabled": False},
-        description="Cross-encoder reranking disabled.",
+        description="Cross-encoder reranking disabled (no-op against default-off baseline).",
+    ),
+    "ce_on": RetrievalConfig(
+        name="ce_on",
+        flags={"cross_encoder_enabled": True},
+        description="F042 cross-encoder reranking enabled (retroactive A/B vs default-off).",
+    ),
+    "ce_on_mmr_off": RetrievalConfig(
+        name="ce_on_mmr_off",
+        flags={"cross_encoder_enabled": True, "mmr_enabled": False},
+        description="CE rerank + MMR off — isolates CE's effect from MMR's diversity re-pick.",
     ),
     "mmr_off": RetrievalConfig(
         name="mmr_off",
@@ -99,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--configs",
         type=str,
         default="baseline",
-        help="Comma-separated config names (baseline, f050_on, ce_off, mmr_off, graph_off).",
+        help="Comma-separated config names (baseline, f050_on, ce_off, ce_on, mmr_off, graph_off).",
     )
     parser.add_argument(
         "--sources",
