@@ -372,11 +372,17 @@ def _write_qrels(
                 gold_ids.extend(str(u) for u in ids_for_session.get("episode", []))
                 gold_ids.extend(str(u) for u in ids_for_session.get("fact", []))
             if not gold_ids:
+                # F051.5 hotfix: skip empty-gold qrels entirely. The Qrel
+                # pydantic model requires gold_ids min_length=1, so emitting
+                # them would produce a JSONL file load_qrels rejects on the
+                # first such row. Operator sees the count via the WARN log
+                # below and the final aggregate stat.
                 n_missing_gold += 1
                 logger.warning(
-                    "F051.5: qid=%s no gold_ids populated — answer_session_ids=%r produced 0 memories",
+                    "F051.5: qid=%s no gold_ids populated — answer_session_ids=%r produced 0 memories (skipping qrel emit)",
                     qid, answer_sids,
                 )
+                continue
             fh.write(
                 json.dumps(
                     {

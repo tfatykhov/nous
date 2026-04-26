@@ -146,7 +146,11 @@ def _make_qrels_inputs(tmp_path: Path) -> tuple[Path, list[dict]]:
 
 
 def test_write_qrels_populates_gold_ids_from_provenance(tmp_path: Path) -> None:
-    """gold_ids = (episodes ∪ facts) from sessions named in answer_session_ids."""
+    """gold_ids = (episodes ∪ facts) from sessions named in answer_session_ids.
+
+    F051.5 hotfix: empty-gold qrels are SKIPPED. q-missing here has no
+    provenance → no emitted row.
+    """
     out, picked = _make_qrels_inputs(tmp_path)
     ep1, fact1, fact2 = uuid4(), uuid4(), uuid4()
     ep2, fact3 = uuid4(), uuid4()
@@ -157,11 +161,14 @@ def test_write_qrels_populates_gold_ids_from_provenance(tmp_path: Path) -> None:
             1: {"episode": [ep2], "fact": [fact3]},
             # session 2 absent → contributes nothing
         },
-        "q-missing": {},  # no provenance for any session
+        "q-missing": {},  # no provenance for any session → SKIPPED post-hotfix
     }
     _write_qrels(picked, LMEIngestStats(), provenance, out)
     rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 3
+    # Only 2 rows emitted (q-single + q-multi); q-missing skipped per hotfix.
+    assert len(rows) == 2
+    qids = {r["notes"]["question_id"] for r in rows}
+    assert qids == {"q-single", "q-multi"}
 
     single_row = next(r for r in rows if r["notes"]["question_id"] == "q-single")
     assert set(single_row["gold_ids"]) == {str(ep1), str(fact1), str(fact2)}
@@ -169,14 +176,14 @@ def test_write_qrels_populates_gold_ids_from_provenance(tmp_path: Path) -> None:
     multi_row = next(r for r in rows if r["notes"]["question_id"] == "q-multi")
     assert set(multi_row["gold_ids"]) == {str(ep1), str(fact1), str(ep2), str(fact3)}
 
-    missing_row = next(r for r in rows if r["notes"]["question_id"] == "q-missing")
-    assert missing_row["gold_ids"] == []
-
 
 def test_write_qrels_uses_correct_source_value(tmp_path: Path) -> None:
     """F051.5 P1 (devil): source='longmemeval' (NOT 'longmemeval_s' — Phase-1 latent bug)."""
     out, picked = _make_qrels_inputs(tmp_path)
-    _write_qrels(picked[:1], LMEIngestStats(), {}, out)
+    # Need to give q-single provenance so it actually emits (post-hotfix skip).
+    ep = uuid4()
+    provenance = {"q-single": {0: {"episode": [ep], "fact": []}}}
+    _write_qrels(picked[:1], LMEIngestStats(), provenance, out)
     row = json.loads(out.read_text(encoding="utf-8").strip())
     assert row["source"] == "longmemeval"
 
@@ -202,16 +209,90 @@ def test_write_qrels_skips_non_int_answer_session_id(tmp_path: Path, caplog) -> 
     assert len(warns) == 2
 
 
-def test_write_qrels_warns_on_empty_gold_ids(tmp_path: Path, caplog) -> None:
-    """Question whose answer_session_ids produced no provenance still emits + WARNs."""
+def test_write_qrels_skips_when_no_gold(tmp_path: Path, caplog) -> None:
+    """F051.5 hotfix: question with no provenance produces NO emitted row + WARN.
+
+    Pre-hotfix this emitted an empty-gold row that load_qrels then rejected
+    (Qrel requires gold_ids min_length=1). Now we skip + count.
+    """
     out, picked = _make_qrels_inputs(tmp_path)
     with caplog.at_level(logging.WARNING):
         _write_qrels([picked[2]], LMEIngestStats(), {"q-missing": {}}, out)
-    row = json.loads(out.read_text(encoding="utf-8").strip())
-    assert row["notes"]["question_id"] == "q-missing"
-    assert row["gold_ids"] == []
+    # File should exist but be empty (the qrel was skipped)
+    content = out.read_text(encoding="utf-8")
+    assert content == "", "empty-gold qrels should not emit"
     warns = [r for r in caplog.records if "no gold_ids populated" in r.getMessage()]
     assert len(warns) == 1
+
+
+def test_write_qrels_skips_empty_gold_qrels(tmp_path: Path, caplog) -> None:
+    """F051.5 hotfix: qrels with empty gold_ids are SKIPPED (not emitted).
+
+    Qrel pydantic model requires gold_ids min_length=1. Emitting empty-gold
+    rows would make the resulting JSONL un-loadable by load_qrels (rejects
+    on the first such row). The hotfix counts them via WARN but skips emit.
+    """
+    out, picked = _make_qrels_inputs(tmp_path)
+    # All three qrels in fixture; only q-single has provenance.
+    ep, fact = uuid4(), uuid4()
+    provenance = {"q-single": {0: {"episode": [ep], "fact": [fact]}}}
+    with caplog.at_level(logging.WARNING):
+        _write_qrels(picked, LMEIngestStats(), provenance, out)
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 1, "only q-single should emit; q-multi + q-missing have no gold"
+    assert rows[0]["notes"]["question_id"] == "q-single"
+    # Verify the file is round-trippable through the loader (this would have
+    # caught the pre-hotfix bug where notes-as-dict crashed pydantic).
+    from nous_eval.qrels_loader import load_qrels
+    loaded = load_qrels(out)
+    assert len(loaded) == 1
+    assert loaded[0].notes["question_id"] == "q-single"  # type: ignore[index]
+
+
+def test_qrels_round_trip_loads_dict_notes(tmp_path: Path) -> None:
+    """F051.5 hotfix regression test: ingest emits notes as dict; loader
+    must accept dict shape (was str|None pre-hotfix; widened to dict|str|None)."""
+    from nous_eval.qrels_loader import load_qrels
+
+    qrel_row = {
+        "query": "test",
+        "gold_ids": ["00000000-0000-0000-0000-000000000001"],
+        "memory_types": ["episode", "fact"],
+        "source": "longmemeval",
+        "notes": {
+            "question_id": "q1",
+            "question_type": "single-session-user",
+            "answer_session_ids": [0, 1],
+            "n_replayed_sessions": 2,
+        },
+        "reviewed_by": None,
+    }
+    out = tmp_path / "qrels.jsonl"
+    out.write_text(json.dumps(qrel_row) + "\n", encoding="utf-8")
+
+    loaded = load_qrels(out)
+    assert len(loaded) == 1
+    # notes is preserved as dict (not coerced to str or rejected)
+    assert isinstance(loaded[0].notes, dict)
+    assert loaded[0].notes["question_id"] == "q1"
+    assert loaded[0].notes["answer_session_ids"] == [0, 1]
+
+
+def test_qrels_round_trip_loads_string_notes(tmp_path: Path) -> None:
+    """Backward compat: existing qrels with string notes (probes, hand_labels) still load."""
+    from nous_eval.qrels_loader import load_qrels
+
+    qrel_row = {
+        "query": "test",
+        "gold_ids": ["00000000-0000-0000-0000-000000000001"],
+        "source": "probes",
+        "notes": "F049 fact",
+    }
+    out = tmp_path / "qrels.jsonl"
+    out.write_text(json.dumps(qrel_row) + "\n", encoding="utf-8")
+    loaded = load_qrels(out)
+    assert len(loaded) == 1
+    assert loaded[0].notes == "F049 fact"
 
 
 def test_write_qrels_string_answer_session_id_parsed(tmp_path: Path) -> None:
