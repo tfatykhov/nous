@@ -130,6 +130,31 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         flags={"graph_recall_enabled": False},
         description="F022 graph recall + spreading activation disabled.",
     ),
+    # ------------------------------------------------------------------
+    # F053 — density-eval diagnostic configs (used by
+    # `python -m nous_eval.density_eval`, not the retrieval matrix).
+    # ------------------------------------------------------------------
+    "baseline_loose_ce": RetrievalConfig(
+        name="baseline_loose_ce",
+        flags={
+            # F045 CE-mode thresholds, relaxed ~10% across the board.
+            # 2026-04-26 density-eval measured +59.6% edges over baseline
+            # at identical related_to precision (0.83 → 0.83).
+            "ce_backfill_threshold_fact_fact": 0.55,
+            "ce_backfill_threshold_decision_decision": 0.50,
+            "ce_backfill_threshold_fact_decision": 0.45,
+            "ce_backfill_threshold_fact_episode": 0.45,
+            "ce_backfill_threshold_episode_episode": 0.50,
+            "ce_backfill_threshold_procedure_any": 0.45,
+        },
+        description=(
+            "F053 diagnostic — F040+F043+F045 with CE-mode cosine thresholds "
+            "loosened ~10%. Empirically catches +59.6% more edges on the "
+            "F051 eval corpus at identical related_to precision (0.83). "
+            "Cross-type evidence_for precision degrades (0.57 → 0.47), so "
+            "any production tune-down should be selective per spec F054."
+        ),
+    ),
 }
 
 

@@ -375,6 +375,47 @@ def _build_brain_for_eval(
 
 
 # ---------------------------------------------------------------------------
+# Density-eval helper (F053)
+# ---------------------------------------------------------------------------
+
+
+async def _build_densifier_for_eval(
+    settings: Settings,
+    db: Database,
+    agent_id: str,
+):
+    """F053 — construct ``GraphDensifier`` against the eval DB.
+
+    Mirrors the production wiring at ``nous/main.py:300`` so density_eval
+    invokes the same densifier the prod sleep handler does. ``EmbeddingProvider``
+    is required (raises ``RuntimeError`` if ``OPENAI_API_KEY`` is unset) since
+    backfill is meaningless without embeddings.
+    """
+    from nous.brain.graph_densifier import GraphDensifier
+    from nous.brain.graph_linker import GraphLinker
+    from nous.brain.embeddings import EmbeddingProvider
+
+    embedder = EmbeddingProvider(settings) if settings.openai_api_key else None
+    if embedder is None:
+        raise RuntimeError(
+            "F053 density_eval requires an embedder (set OPENAI_API_KEY)"
+        )
+    linker = GraphLinker(
+        db=db,
+        embedder=embedder,
+        settings=settings,
+        agent_id=agent_id,
+    )
+    return GraphDensifier(
+        db=db,
+        graph_linker=linker,
+        embedder=embedder,
+        settings=settings,
+        agent_id=agent_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Single-qrel scoring
 # ---------------------------------------------------------------------------
 
