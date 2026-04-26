@@ -215,6 +215,7 @@ class GraphDensifier:
                 self._agent_id,
                 entity_type,
                 [c[0] for c in candidates],
+                settings=self._settings,  # F054: enables decision-content guard
             )
             before = len(candidates)
             candidates = await ce_rerank_backfill_candidates(

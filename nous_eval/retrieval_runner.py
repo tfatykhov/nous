@@ -395,11 +395,21 @@ async def _build_densifier_for_eval(
     from nous.brain.graph_linker import GraphLinker
     from nous.brain.embeddings import EmbeddingProvider
 
-    embedder = EmbeddingProvider(settings) if settings.openai_api_key else None
-    if embedder is None:
+    # F054 fix: EmbeddingProvider takes api_key as a string, not a Settings
+    # object. The previous `EmbeddingProvider(settings)` call silently produced
+    # a client whose Authorization header was `Bearer Settings(...)`, causing
+    # 401 on every embed call. Same-type backfill survived (uses stored
+    # embeddings) but cross-type re-embedding was broken on every density_eval
+    # run between F053 merge (b258cbe) and this fix.
+    if not settings.openai_api_key:
         raise RuntimeError(
             "F053 density_eval requires an embedder (set OPENAI_API_KEY)"
         )
+    embedder = EmbeddingProvider(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+    )
     linker = GraphLinker(
         db=db,
         embedder=embedder,
