@@ -534,6 +534,36 @@ class Settings(BaseSettings):
     actionability_backfill_on_startup: bool = True
     actionability_backfill_token_budget: int = 10_000  # rough Haiku daily cap
 
+    # F050: Multi-query expansion via Haiku (spec §Config)
+    query_expansion_enabled: bool = Field(
+        default=False,
+        description="F050 master switch — expand recall queries via Haiku before hybrid_search.",
+    )
+    query_expansion_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="F050 — Haiku model used for query expansion.",
+    )
+    query_expansion_timeout_seconds: float = Field(
+        default=2.0,
+        description="F050 — per-call Haiku timeout. Blown timeout falls through to [query].",
+    )
+    query_expansion_max_variants: int = Field(
+        default=3,
+        description="F050 — total variants returned including the original.",
+    )
+    query_expansion_min_words: int = Field(
+        default=3,
+        description="F050 — gate threshold; queries with fewer words skip expansion.",
+    )
+    query_expansion_max_per_hour: int = Field(
+        default=500,
+        description="F050 — sliding-window budget cap on Haiku calls. Breach => fail open + WARN.",
+    )
+    query_expansion_cache_ttl_days: int = Field(
+        default=30,
+        description="F050 — cache row retention; sweep handler ships in F050.2.",
+    )
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

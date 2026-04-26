@@ -65,6 +65,7 @@ async def test_all_tables_exist(db):
         ("heart", "episode_procedures"),
         ("heart", "censors"),
         ("heart", "working_memory"),
+        ("heart", "query_expansions"),
         ("heart", "tool_cache"),
         ("heart", "subtasks"),
         ("heart", "schedules"),

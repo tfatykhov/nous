@@ -81,6 +81,45 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         flags={"cross_encoder_enabled": True, "mmr_enabled": False},
         description="CE rerank + MMR off — isolates CE's effect from MMR's diversity re-pick.",
     ),
+    "f050_on_ce_mmr_off": RetrievalConfig(
+        name="f050_on_ce_mmr_off",
+        flags={
+            "query_expansion_enabled": True,
+            "cross_encoder_enabled": True,
+            "mmr_enabled": False,
+        },
+        description="F050 multi-query expansion + CE rerank + MMR off — peak combo to measure F050's marginal lift on top of the CE-on-MMR-off ceiling.",
+    ),
+    "ce_mmr_on_lambda_0.7": RetrievalConfig(
+        name="ce_mmr_on_lambda_0.7",
+        flags={
+            "cross_encoder_enabled": True,
+            "mmr_enabled": True,
+            "mmr_skip_after_ce": False,
+            "mmr_diversity_weight": 0.7,
+        },
+        description="CE + MMR with default λ=0.7 (70% relevance, 30% diversity). F030.1's 'always skip' default validation.",
+    ),
+    "ce_mmr_on_lambda_0.85": RetrievalConfig(
+        name="ce_mmr_on_lambda_0.85",
+        flags={
+            "cross_encoder_enabled": True,
+            "mmr_enabled": True,
+            "mmr_skip_after_ce": False,
+            "mmr_diversity_weight": 0.85,
+        },
+        description="CE + MMR with λ=0.85 (relevance-heavy). MMR as light tiebreaker.",
+    ),
+    "ce_mmr_on_lambda_0.95": RetrievalConfig(
+        name="ce_mmr_on_lambda_0.95",
+        flags={
+            "cross_encoder_enabled": True,
+            "mmr_enabled": True,
+            "mmr_skip_after_ce": False,
+            "mmr_diversity_weight": 0.95,
+        },
+        description="CE + MMR with λ=0.95 (near-pure relevance). MMR almost a no-op except for near-duplicate breakup.",
+    ),
     "mmr_off": RetrievalConfig(
         name="mmr_off",
         flags={"mmr_enabled": False},

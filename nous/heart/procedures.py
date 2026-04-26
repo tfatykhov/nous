@@ -21,7 +21,7 @@ from nous.heart.schemas import (
     ProcedureOutcome,
     ProcedureSummary,
 )
-from nous.heart.search import hybrid_search
+from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Event, Procedure, ProcedureTaskAffinity
 
@@ -265,16 +265,23 @@ class ProcedureManager:
         domain: str | None = None,
         frame_type: str | None = None,
         session: AsyncSession | None = None,
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None,
     ) -> list[ProcedureSummary]:
         """Hybrid search over procedures. Optional domain filter.
 
         When utility boost is enabled (F037), applies an effectiveness-weighted
         score boost: final_score = hybrid_score * (1 + α*utility + β*affinity).
+
+        Args:
+            variant_pairs: F050 — when set with len > 1, routes through
+                hybrid_search_multi for RRF fusion across query variants.
+                F037 utility-boost still applies downstream of routing.
+                Defaults to None (single-query path; backwards compatible).
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, domain, frame_type, session)
-        return await self._search(query, limit, domain, frame_type, session)
+                return await self._search(query, limit, domain, frame_type, session, variant_pairs)
+        return await self._search(query, limit, domain, frame_type, session, variant_pairs)
 
     async def _search(
         self,
@@ -283,6 +290,7 @@ class ProcedureManager:
         domain: str | None,
         frame_type: str | None,
         session: AsyncSession,
+        variant_pairs: list[tuple[str, list[float] | None]] | None = None,
     ) -> list[ProcedureSummary]:
         embedding = None
         if self.embeddings:
@@ -297,16 +305,27 @@ class ProcedureManager:
             extra_where += " AND t.domain = :domain"
             extra_params["domain"] = domain
 
-        results = await hybrid_search(
-            session=session,
-            table="heart.procedures",
-            embedding=embedding,
-            query_text=query,
-            agent_id=self.agent_id,
-            extra_where=extra_where,
-            extra_params=extra_params,
-            limit=limit,
-        )
+        if variant_pairs and len(variant_pairs) > 1:
+            results = await hybrid_search_multi(
+                session=session,
+                table="heart.procedures",
+                queries=variant_pairs,
+                agent_id=self.agent_id,
+                extra_where=extra_where,
+                extra_params=extra_params,
+                limit=limit,
+            )
+        else:
+            results = await hybrid_search(
+                session=session,
+                table="heart.procedures",
+                embedding=embedding,
+                query_text=query,
+                agent_id=self.agent_id,
+                extra_where=extra_where,
+                extra_params=extra_params,
+                limit=limit,
+            )
 
         if not results:
             return []

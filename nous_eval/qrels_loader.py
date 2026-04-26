@@ -36,10 +36,11 @@ class QrelSource(str, Enum):
     SYNTHETIC_HAIKU = "synthetic_haiku"
 
 
-# Literal set for memory_types (subset of what recall_deep accepts).
+# Literal set for memory_types — full Heart memory taxonomy plus brain.decisions.
 # Includes "decision" because the pipeline refactor (F051 prereq) makes
-# brain.decisions a first-class memory type at the Qrel level.
-MemoryType = Literal["fact", "decision", "episode", "procedure"]
+# brain.decisions a first-class memory type at the Qrel level. Includes
+# "censor" so hand-label drafts about guardrails/safety load cleanly.
+MemoryType = Literal["fact", "decision", "episode", "procedure", "censor"]
 
 
 class Qrel(BaseModel):
