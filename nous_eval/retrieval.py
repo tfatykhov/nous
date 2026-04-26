@@ -190,6 +190,45 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "guard (40 chars). Eval gate config for the F054 PR."
         ),
     ),
+    # ------------------------------------------------------------------
+    # F055 — Cross-Turn Residual Activation (used by multi_turn_eval).
+    # Pre-stages the F055 flag values; harmless until F055's Settings
+    # fields exist (`_apply_config_flags` warns + ignores unknown keys).
+    # When F055 ships, no eval-side changes needed — the config becomes
+    # meaningful automatically.
+    # ------------------------------------------------------------------
+    "f055_on": RetrievalConfig(
+        name="f055_on",
+        flags={
+            "residual_activation_enabled": True,
+            "residual_decay_mode": "geometric",
+            "residual_decay_per_turn": 0.5,
+        },
+        description=(
+            "F055 Cross-Turn Residual Activation enabled (geometric decay). "
+            "Used by `python -m nous_eval.multi_turn_eval` against "
+            "LongMemEval qrels (F051.5). Pre-F055 implementation, this "
+            "config produces baseline numbers (unknown keys ignored)."
+        ),
+    ),
+    "f055_seed_only": RetrievalConfig(
+        name="f055_seed_only",
+        flags={
+            "residual_activation_enabled": True,
+            "residual_seed_weight": 0.3,
+            "residual_boost_weight": 0.0,  # post-fusion boost off
+        },
+        description="F055 ablation A: seed injection only, no post-fusion boost.",
+    ),
+    "f055_boost_only": RetrievalConfig(
+        name="f055_boost_only",
+        flags={
+            "residual_activation_enabled": True,
+            "residual_seed_weight": 0.0,  # seed injection off
+            "residual_boost_weight": 0.15,
+        },
+        description="F055 ablation B: post-fusion boost only, no seed injection.",
+    ),
 }
 
 
