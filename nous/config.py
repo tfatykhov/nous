@@ -360,20 +360,35 @@ class Settings(BaseSettings):
 
     # F045: CE-aware relaxed thresholds. Only apply when ce_backfill_enabled=True;
     # when CE is off, _get_threshold() falls back to the strict graph_threshold_*
-    # defaults above. fact_fact=0.65 empirically validated at 80% LLM-judged
-    # precision in the 2026-04-14 A/B experiment on a 1693-fact corpus.
-    ce_backfill_threshold_fact_fact: float = 0.65
-    ce_backfill_threshold_fact_decision: float = 0.55
-    ce_backfill_threshold_fact_episode: float = 0.55
-    ce_backfill_threshold_decision_decision: float = 0.60
-    ce_backfill_threshold_episode_episode: float = 0.58
-    ce_backfill_threshold_procedure_any: float = 0.55
+    # defaults above. fact_fact originally 0.65 (2026-04-14 A/B at 80% precision).
+    # F054 (2026-04-26 F053 density-eval): same-type relations were over-filtered;
+    # relaxing fact_fact/decision_decision/episode_episode/procedure_any to
+    # 0.55/0.50/0.50/0.45 produced +71% same-type edges at unchanged precision
+    # (related_to 0.83 → 0.83 on 30-edge sample). Cross-type fact_decision and
+    # fact_episode KEPT STRICT at 0.55 because precision regressed (0.57 → 0.47)
+    # when loosened — corpus-quality issue (empty brain.decisions.context),
+    # addressed via the new ce_backfill_min_decision_chars guard below.
+    ce_backfill_threshold_fact_fact: float = 0.55  # F054: 0.65 -> 0.55
+    ce_backfill_threshold_fact_decision: float = 0.55  # KEEP STRICT (F054)
+    ce_backfill_threshold_fact_episode: float = 0.55  # KEEP STRICT (F054)
+    ce_backfill_threshold_decision_decision: float = 0.50  # F054: 0.60 -> 0.50
+    ce_backfill_threshold_episode_episode: float = 0.50  # F054: 0.58 -> 0.50
+    ce_backfill_threshold_procedure_any: float = 0.45  # F054: 0.55 -> 0.45
 
     # F045: content-length guard for CE backfill. Candidates whose content is
     # shorter than this (after strip) are dropped before CE inference — filters
     # URL-only / boilerplate facts that would otherwise co-score highly on
     # shared token shape with no semantic signal.
     ce_backfill_min_content_chars: int = 80
+
+    # F054: content-length guard specifically for brain.decisions.context.
+    # 2026-04-26 F053 edge_judge audit found ~5/9 NO/WEAK verdicts on
+    # evidence_for edges traced to "source content is empty" (decisions
+    # routinely have null/whitespace-only context in the eval corpus).
+    # Symmetric to ce_backfill_min_content_chars but applies only when the
+    # candidate's entity_type == 'decision'. Default 40 chars (lower than
+    # facts because decisions are naturally shorter).
+    ce_backfill_min_decision_chars: int = 40
 
     # F012: Procedure Learning (K-Line auto-creation)
     procedure_learning_enabled: bool = True

@@ -54,6 +54,8 @@ async def fetch_candidate_content(
     agent_id: str,
     entity_type: str,
     candidate_ids: Sequence[UUID],
+    *,
+    settings: object | None = None,
 ) -> dict[UUID, str]:
     """Batch-fetch reranking text for F040 backfill candidates.
 
@@ -61,6 +63,14 @@ async def fetch_candidate_content(
     column. Adds ``AND t.agent_id = :agent_id`` for defense-in-depth even
     though upstream ``hybrid_search`` already scopes IDs by agent. Rows
     whose content is ``None`` / empty / whitespace-only are omitted.
+
+    F054: when ``entity_type == "decision"`` and ``settings`` is provided,
+    decision rows whose ``context.strip()`` is shorter than
+    ``settings.ce_backfill_min_decision_chars`` (default 40) are also dropped.
+    Mirrors the F045 fact-content guard (`ce_backfill_min_content_chars=80`)
+    but applies at fetch time so the threshold is type-aware. Pass
+    ``settings=None`` (or omit) to skip the guard — kept backward-compatible
+    so existing callers don't break.
     """
     if not candidate_ids:
         return {}
@@ -79,11 +89,24 @@ async def fetch_candidate_content(
         f"WHERE t.id IN ({placeholders}) AND t.agent_id = :agent_id"
     )
     rows = await session.execute(sql, params)
+
+    # F054: type-aware min-content guard. Default 0 means "no guard"
+    # (preserves behavior for callers that don't pass settings).
+    min_chars = 0
+    if settings is not None and entity_type == "decision":
+        min_chars = int(getattr(settings, "ce_backfill_min_decision_chars", 0))
+
     result: dict[UUID, str] = {}
     for row in rows:
         content = row.content
-        if content and str(content).strip():
-            result[row.id] = str(content)
+        if not content:
+            continue
+        stripped = str(content).strip()
+        if not stripped:
+            continue
+        if min_chars > 0 and len(stripped) < min_chars:
+            continue  # F054: drop short-content decisions
+        result[row.id] = str(content)
     return result
 
 

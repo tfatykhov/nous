@@ -155,6 +155,41 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "any production tune-down should be selective per spec F054."
         ),
     ),
+    # ------------------------------------------------------------------
+    # F054 — selective CE-threshold relaxation (this PR's gate configs).
+    # ------------------------------------------------------------------
+    # Reproduces pre-F054 behavior. Use as the comparison baseline since
+    # `baseline` on this branch already picks up the new F054 defaults.
+    "f045_strict_baseline": RetrievalConfig(
+        name="f045_strict_baseline",
+        flags={
+            "ce_backfill_threshold_fact_fact": 0.65,
+            "ce_backfill_threshold_decision_decision": 0.60,
+            "ce_backfill_threshold_episode_episode": 0.58,
+            "ce_backfill_threshold_procedure_any": 0.55,
+            "ce_backfill_min_decision_chars": 0,  # disable F054 guard
+        },
+        description=(
+            "Pre-F054 strict thresholds. Reproduces F045 default behavior "
+            "for comparison against f054_proposed on this branch."
+        ),
+    ),
+    "f054_proposed": RetrievalConfig(
+        name="f054_proposed",
+        flags={
+            "ce_backfill_threshold_fact_fact": 0.55,
+            "ce_backfill_threshold_decision_decision": 0.50,
+            "ce_backfill_threshold_episode_episode": 0.50,
+            "ce_backfill_threshold_procedure_any": 0.45,
+            # cross-type fact_decision/fact_episode UNCHANGED at 0.55
+            "ce_backfill_min_decision_chars": 40,
+        },
+        description=(
+            "F054 selective CE relaxation: same-type loosened, cross-type "
+            "fact_decision/fact_episode KEPT STRICT, +decision content "
+            "guard (40 chars). Eval gate config for the F054 PR."
+        ),
+    ),
 }
 
 
