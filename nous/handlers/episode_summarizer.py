@@ -87,7 +87,7 @@ class EpisodeSummarizer:
         heart: Heart,
         brain: Brain | None,
         settings: Settings,
-        bus: EventBus,
+        bus: EventBus | None,  # F051.5: nullable for direct-invocation paths (ingest)
         llm_client: LLMClient | None = None,
         graph_linker: GraphLinker | None = None,
     ):
@@ -98,7 +98,46 @@ class EpisodeSummarizer:
         self._llm = llm_client
         self._graph_linker = graph_linker
         self._embedder = None  # F040: Set externally for episode↔episode linking
-        bus.on("session_ended", self.handle)
+        if bus is not None:
+            bus.on("session_ended", self.handle)
+
+    async def summarize_episode(
+        self,
+        episode_id: UUID,
+        transcript: str,
+        agent_id: str | None = None,
+    ) -> dict | None:
+        """F051.5: Public direct-invocation entry point.
+
+        Mirrors lines 110-129 of handle(): fetches the episode, checks not-already-
+        summarized, generates summary via LLM, persists. Returns the summary dict
+        on success, or None on early-return (already summarized, transcript too
+        short) or LLM failure.
+
+        Does NOT emit ``episode_summarized`` — caller's responsibility (production
+        bus path uses handle() which still emits; ingest paths invoke fact_extractor
+        directly so don't need the event).
+
+        Does NOT trigger graph linking — caller-driven side effects belong on
+        handle(), not the core summarization path.
+        """
+        try:
+            episode = await self._heart.get_episode(episode_id)
+            if episode.structured_summary is not None:
+                logger.debug("F051.5: episode %s already summarized, skipping", episode_id)
+                return None
+            if not transcript or len(transcript) < 50:
+                logger.debug("F051.5: episode %s transcript too short, skipping", episode_id)
+                return None
+            decision_context = await self._build_decision_context(str(episode_id))
+            summary = await self._generate_summary(transcript, decision_context)
+            if not summary:
+                return None
+            await self._heart.update_episode_summary(episode_id, summary)
+            return summary
+        except Exception:
+            logger.exception("F051.5: summarize_episode raised for %s", episode_id)
+            return None
 
     async def handle(self, event: Event) -> None:
         """Handle session_ended — summarize the episode if one exists."""
@@ -107,26 +146,16 @@ class EpisodeSummarizer:
             return
 
         try:
-            # Fetch episode — skip if already summarized
-            episode = await self._heart.get_episode(UUID(episode_id))
-            if episode.structured_summary is not None:
-                logger.debug("Episode %s already summarized, skipping", episode_id)
-                return
-
-            # Get transcript from event data
+            # F051.5: delegate to the directly-invocable core. None return covers
+            # all early-return + LLM-failure cases — same skip semantics as before.
             transcript = event.data.get("transcript", "")
-            if not transcript or len(transcript) < 50:
-                logger.debug("Episode %s too short for summary, skipping", episode_id)
+            summary = await self.summarize_episode(
+                episode_id=UUID(episode_id),
+                transcript=transcript,
+                agent_id=event.agent_id,
+            )
+            if summary is None:
                 return
-
-            # Call LLM for summary
-            decision_context = await self._build_decision_context(episode_id)
-            summary = await self._generate_summary(transcript, decision_context)
-            if not summary:
-                return
-
-            # Store summary on episode
-            await self._heart.update_episode_summary(UUID(episode_id), summary)
 
             # Emit for downstream handlers (fact extraction)
             await self._bus.emit(Event(
