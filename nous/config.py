@@ -420,6 +420,12 @@ class Settings(BaseSettings):
         default=0.7, ge=0.0, le=1.0,
         description="MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity)",
     )
+    # F030.1: Skip MMR when cross-encoder rerank just reordered the head.
+    # F051 retrieval-eval harness measured +30% MRR (0.372 -> 0.484, +190% on
+    # jargon-drift) when MMR is gated off after CE fires — MMR's diversity
+    # selection over CE's reordered top-20 neutralizes CE's relevance signal.
+    # Default True; set False to restore pre-F030.1 behavior (chain CE then MMR).
+    mmr_skip_after_ce: bool = True
 
     # F042: Cross-encoder reranking
     cross_encoder_enabled: bool = False

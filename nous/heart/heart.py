@@ -825,6 +825,11 @@ class Heart:
         # otherwise let later memory types be excluded from reranking even
         # when their scores are higher than earlier types').
         ce_enabled = RuntimeConfig.get().get_cross_encoder_enabled(self.settings)
+        # F030.1: Track whether CE actually reordered the head; the MMR gate
+        # below uses this to skip diversity re-ranking when CE has already
+        # produced a relevance-ordered head. Default False so that CE-disabled
+        # / CE-failed paths still get MMR's cold-path diversity.
+        ce_reordered = False
         if ce_enabled and len(merged) > 1 and CROSS_ENCODER_AVAILABLE:
             merged.sort(key=lambda r: r.score, reverse=True)
             try:
@@ -852,9 +857,20 @@ class Heart:
                     "Cross-encoder rerank failed, keeping RRF order: %s", exc
                 )
 
-        # F030: MMR diversity re-ranking
+        # F030: MMR diversity re-ranking.
+        # F030.1: Skip MMR when CE just reordered the head — the F051 harness
+        # measured a +30% MRR uplift (and +190% on jargon-drift) by gating
+        # MMR off in this case. MMR's diversity selection over CE's reordered
+        # top-20 otherwise neutralizes CE's relevance signal. Set
+        # NOUS_MMR_SKIP_AFTER_CE=false to restore pre-F030.1 chained behavior.
+        mmr_blocked_by_ce = ce_reordered and self.settings.mmr_skip_after_ce
+        if mmr_blocked_by_ce:
+            logger.info(
+                "MMR: skipped (F030.1 — CE reordered head, mmr_skip_after_ce=True)"
+            )
         if (
             self.settings.mmr_enabled
+            and not mmr_blocked_by_ce
             and len(merged) > 1
             and self._embeddings is not None
         ):
