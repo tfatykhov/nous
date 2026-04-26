@@ -301,6 +301,7 @@ async def create_components(settings: Settings) -> dict:
                     db=database, graph_linker=graph_linker,
                     embedder=embedding_provider, settings=settings,
                     agent_id=settings.agent_id,
+                    heart=heart,  # F052 — enables expand_query_pairs in _backfill_same_type
                 )
                 logger.debug("F040: GraphDensifier created")
         except ImportError:

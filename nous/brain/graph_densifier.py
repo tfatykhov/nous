@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import text
@@ -23,8 +24,12 @@ from nous.brain.backfill_rerank import (
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.graph_linker import GraphLinker, common_template_text, edge_confidence
 from nous.config import Settings
-from nous.heart.search import hybrid_search
+from nous.heart.search import hybrid_search, hybrid_search_multi  # F052
 from nous.storage.database import Database
+
+if TYPE_CHECKING:
+    # F052 — forward-only to avoid the heart->brain.embeddings circular import.
+    from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
 
@@ -107,12 +112,14 @@ class GraphDensifier:
         embedder: EmbeddingProvider | None,
         settings: Settings,
         agent_id: str,
+        heart: "Heart | None" = None,  # F052 — for expand_query_pairs in same-type backfill
     ) -> None:
         self.db = db
         self._linker = graph_linker
         self._embedder = embedder
         self._settings = settings
         self._agent_id = agent_id
+        self._heart = heart  # F052 — None keeps pre-F052 behavior (single-query path)
         self._interrupted = False
         self._last_cluster_discovery: datetime | None = None
 
@@ -192,11 +199,45 @@ class GraphDensifier:
         # Hybrid search: vector + keyword via RRF
         # brain.decisions has no `active` column — disable active filter for it
         has_active = entity_type != "decision"
-        candidates = await hybrid_search(
+
+        # F052: When enabled + Heart wired + non-empty orphan content, expand the
+        # orphan into N (text, embedding) variants via Heart.expand_query_pairs and
+        # route through hybrid_search_multi. The helper guarantees a non-empty
+        # list and never raises (single-pair fallback on any internal failure).
+        # When the helper returns the single-pair fallback `[(content, None)]`,
+        # we substitute the orphan's stored embedding so the short-circuit at
+        # search.py:319-332 is byte-identical to today's hybrid_search call.
+        # When the feature flag is off OR heart is None OR orphan_content is
+        # empty, queries_pairs falls back to a single (content, orphan_embedding)
+        # pair that triggers the same short-circuit. Cosine verification at
+        # :244-256 still uses orphan_embedding (NOT variant embeddings) — variants
+        # only widen candidate generation. _backfill_cross_type is intentionally
+        # NOT wedged in Phase 1.
+        if (
+            self._settings.graph_backfill_multi_embedding_enabled
+            and self._heart is not None
+            and orphan_content
+        ):
+            queries_pairs = await self._heart.expand_query_pairs(orphan_content[:500])
+            # Helper contract: never None, never empty. Single-pair-with-None-
+            # embedding means expansion was unavailable (disabled / no expander /
+            # Haiku failed / embed_batch failed) — substitute orphan_embedding
+            # so we still get vector signal.  Note: orphan_embedding may itself
+            # be None for rows without an embedding — hybrid_search_multi's
+            # short-circuit then routes to hybrid_search(embedding=None, ...),
+            # which is the existing keyword-only path; the weight branch at
+            # :259-260 already handles that via the RRF score proxy.
+            if len(queries_pairs) == 1 and queries_pairs[0][1] is None:
+                queries_pairs = [(orphan_content[:500], orphan_embedding)]
+        else:
+            queries_pairs = [
+                (orphan_content[:500] if orphan_content else "", orphan_embedding)
+            ]
+
+        candidates = await hybrid_search_multi(
             session=session,
             table=table,
-            embedding=orphan_embedding,
-            query_text=orphan_content[:500] if orphan_content else "",
+            queries=queries_pairs,
             agent_id=self._agent_id,
             extra_where=f"AND t.id != :orphan_id",
             extra_params={"orphan_id": orphan_id},
