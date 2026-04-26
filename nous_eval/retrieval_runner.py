@@ -374,6 +374,54 @@ def _build_brain_for_eval(
     )
 
 
+async def _build_densifier_for_eval(
+    settings: Settings,
+    db: Database,
+    agent_id: str,
+    heart: Heart,
+):
+    """F052 eval helper — construct a GraphDensifier with Heart wired.
+
+    Mirrors the production wiring at ``nous/main.py:300`` so density_eval
+    invokes the same densifier the production sleep handler does.
+
+    The embedding provider is reused from ``heart._embeddings`` (rather than
+    re-constructed) so the per-config asyncpg/httpx pools don't double up
+    inside one eval run — same pattern as ``_build_brain_for_eval``.
+
+    Args:
+        settings: Eval-scoped Settings (after ``_settings_for_eval_db``).
+        db: Eval Database.
+        agent_id: Eval agent_id (typically ``settings.agent_id`` ==
+            ``eval_settings.agent_id``).
+        heart: The Heart constructed by ``_build_heart_for_eval`` —
+            must be inside its ``async with`` block so the wiring is alive
+            for the densifier's lifetime.
+
+    Returns:
+        Constructed ``GraphDensifier`` with ``heart=`` wired (F052).
+    """
+    # Late imports keep this module light when only the retrieval matrix runs.
+    from nous.brain.graph_densifier import GraphDensifier
+    from nous.brain.graph_linker import GraphLinker
+
+    embedder = heart._embeddings  # share with Heart — see docstring
+    linker = GraphLinker(
+        db=db,
+        embedder=embedder,
+        settings=settings,
+        agent_id=agent_id,
+    )
+    return GraphDensifier(
+        db=db,
+        graph_linker=linker,
+        embedder=embedder,
+        settings=settings,
+        agent_id=agent_id,
+        heart=heart,  # F052 — enables expand_query_pairs in _backfill_same_type
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single-qrel scoring
 # ---------------------------------------------------------------------------

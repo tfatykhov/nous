@@ -66,6 +66,25 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         flags={"query_expansion_enabled": True},
         description="F050 multi-query expansion enabled.",
     ),
+    "f052_on": RetrievalConfig(
+        name="f052_on",
+        flags={
+            "graph_backfill_multi_embedding_enabled": True,
+            # F052 depends on the F050 expander being live — without it,
+            # Heart.expand_query_pairs returns the single-pair fallback
+            # and the densifier wedge collapses to byte-identical baseline.
+            "query_expansion_enabled": True,
+            # density_eval forces this to 0.0 for re-run determinism;
+            # the retrieval-side matrix gets the same override here so
+            # the two surfaces agree on the determinism contract.
+            "query_expansion_temperature": 0.0,
+        },
+        description=(
+            "F052 multi-embedding seed for _backfill_same_type. "
+            "Eval-only retrieval-side measurement; density-side lives in "
+            "`python -m nous_eval.density_eval`."
+        ),
+    ),
     "ce_off": RetrievalConfig(
         name="ce_off",
         flags={"cross_encoder_enabled": False},
