@@ -406,6 +406,14 @@ async def _build_densifier_for_eval(
     from nous.brain.graph_linker import GraphLinker
 
     embedder = heart._embeddings  # share with Heart — see docstring
+    if embedder is None:
+        # SFH P2-6: density_eval depends on embeddings for both candidate generation
+        # AND the F052 wedge. Silent degradation here would collapse the F052
+        # measurement to a baseline-vs-baseline no-op. Fail loud so the operator
+        # sets OPENAI_API_KEY before re-running.
+        raise RuntimeError(
+            "density_eval requires an embedder (Heart._embeddings is None — set OPENAI_API_KEY)"
+        )
     linker = GraphLinker(
         db=db,
         embedder=embedder,

@@ -1014,6 +1014,18 @@ class Heart:
             )
             return [(query, None)]
 
+        # SFH P2-3: defensive — embed_batch may return fewer items on partial
+        # OpenAI response. Without this guard, zip(variants, embeddings)
+        # silently truncates the variant list, masking a real provider quirk.
+        # NEVER returns []/None per contract — fall through to single-pair.
+        if len(embeddings) != len(variants):
+            logger.warning(
+                "F050/F052: embed_batch returned %d embeddings for %d variants (%s), "
+                "falling back to [query]",
+                len(embeddings), len(variants), self.agent_id,
+            )
+            return [(query, None)]
+
         return list(zip(variants, embeddings))
 
     def _to_recall_result(self, memory_type: str, item: object, score: float) -> RecallResult | None:

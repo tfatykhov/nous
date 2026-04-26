@@ -31,11 +31,15 @@ try:
     from nous.config import Settings
     _settings_probe = Settings()
     if not hasattr(_settings_probe, "graph_backfill_multi_embedding_enabled"):
-        raise ImportError(
+        raise AttributeError(
             "Settings.graph_backfill_multi_embedding_enabled missing "
             "(F052 Subagent A not yet merged)"
         )
-except (ImportError, Exception) as exc:  # pragma: no cover - skip path
+except (ImportError, AttributeError) as exc:  # pragma: no cover - skip path
+    # SFH P2-1: narrow to (ImportError, AttributeError). The prior `except Exception`
+    # would silently mask any future Settings ValidationError / RuntimeError under
+    # the misleading "F052 Settings field not yet merged" banner — letting a real
+    # bug skip-pass in CI for weeks.
     pytest.skip(
         f"F052 Settings field not yet merged ({exc!r}) — skipping module",
         allow_module_level=True,

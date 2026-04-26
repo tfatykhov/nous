@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -75,12 +77,11 @@ def _parse_response(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
     raw = "".join(text_parts).strip()
     if not raw:
         raise ValueError("edge_judge: empty Sonnet response")
-    # Trim possible Markdown code fences
-    if raw.startswith("```"):
-        raw = raw.strip("`")
-        # Strip an optional leading "json\n" tag
-        if raw.lower().startswith("json"):
-            raw = raw[4:]
+    # Trim possible Markdown code fences. Surgical regex avoids stripping
+    # legitimate backticks inside JSON string payloads (the prior `.strip("`")`
+    # was over-broad and could chew into content).
+    raw = re.sub(r"^```(?:json)?\s*\n?", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\n?```\s*$", "", raw)
     parsed = json.loads(raw)
     if not isinstance(parsed, list):
         raise ValueError(
@@ -149,7 +150,32 @@ async def judge_edges(
                     )
                 continue
 
-            for src_edge, verdict_obj in zip(batch, parsed):
+            # SFH P1-2: zip would silently truncate when Sonnet returns fewer
+            # verdicts than the batch (max_tokens cutoff, ambiguous-skip). Use
+            # zip_longest + PARSE_ERROR pad so the precision denominator stays
+            # honest. Docstring promises one EdgeJudgment per input edge.
+            if len(parsed) < len(batch):
+                logger.warning(
+                    "edge_judge: short_response — Sonnet returned %d of %d verdicts in batch %d-%d; "
+                    "padding missing verdicts with PARSE_ERROR",
+                    len(parsed), len(batch), batch_start, batch_start + len(batch),
+                )
+            for src_edge, verdict_obj in zip_longest(batch, parsed, fillvalue=None):
+                if src_edge is None:
+                    # Sonnet returned MORE verdicts than we sent — log + drop the trailing extras.
+                    logger.warning("edge_judge: extra verdict beyond batch length — dropping")
+                    continue
+                if verdict_obj is None:
+                    judgments.append(
+                        EdgeJudgment(
+                            source_id=str(src_edge.get("source_id", "")),
+                            target_id=str(src_edge.get("target_id", "")),
+                            relation=str(src_edge.get("relation", "")),
+                            verdict="PARSE_ERROR",
+                            reasoning="short_response: Sonnet did not return a verdict for this edge",
+                        )
+                    )
+                    continue
                 judgments.append(
                     EdgeJudgment(
                         source_id=str(src_edge.get("source_id", "")),

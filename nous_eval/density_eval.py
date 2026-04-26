@@ -76,7 +76,7 @@ class DensitySnapshot:
     orphan_count_per_type: dict[str, int] = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(frozen=True)
 class DensityRunResult:
     """Outcome of one config under one density-eval run."""
 
@@ -228,6 +228,15 @@ async def _run_one_config(
     logger.info("F052: running density config=%s", config.name)
     overridden = _apply_config_flags(main_settings_template, config)
     eval_scoped = _settings_for_eval_db(eval_settings, overridden)
+    # SFH P1-1: F051's _settings_for_eval_db forces graph_backfill_enabled=False
+    # to suppress the production sleep handler. density_eval invokes the densifier
+    # DIRECTLY, so we must re-enable backfill here or every config silently
+    # returns 0 edges. Same applies to event_bus (we want emission events from
+    # backfill to fire) and a few related toggles. We override only what we need.
+    eval_scoped = eval_scoped.model_copy(update={"graph_backfill_enabled": True})
+    assert eval_scoped.graph_backfill_enabled, (
+        "density_eval requires graph_backfill_enabled=True; check _settings_for_eval_db override"
+    )
     agent_id = eval_scoped.agent_id
 
     t0 = time.monotonic()
@@ -283,13 +292,17 @@ async def _run_one_config(
             post = await _snapshot(db, agent_id)
     except Exception as exc:
         logger.exception("F052: harness setup failed for config=%s", config.name)
+        restore_failure: str | None = None
         try:
             await _restore_baseline(db, agent_id)
-        except Exception:
+        except Exception as restore_exc:
             logger.exception(
                 "F052: _restore_baseline also failed for config=%s", config.name
             )
+            restore_failure = f"{type(restore_exc).__name__}: {restore_exc}"
         failure = f"{type(exc).__name__}: {exc}"
+        if restore_failure is not None:
+            failure = f"{failure} | restore_also_failed: {restore_failure}"
 
     wall = time.monotonic() - t0
     return DensityRunResult(
