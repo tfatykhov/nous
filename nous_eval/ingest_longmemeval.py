@@ -62,16 +62,28 @@ QUESTION_TYPES = (
 )
 
 
+def _default_out_qrels() -> Path:
+    """F051.5: source_registry expects ``<NOUS_EVAL_FIXTURES_DIR>/qrels_longmemeval.jsonl``.
+
+    Falls back to ``tests/fixtures`` when the env var is unset (Phase-1 default
+    location, kept for back-compat with smoke tests).
+    """
+    fixtures_dir = os.environ.get("NOUS_EVAL_FIXTURES_DIR")
+    base = Path(fixtures_dir) if fixtures_dir else Path("tests/fixtures")
+    return base / "qrels_longmemeval.jsonl"
+
+
 @dataclass
 class IngestLMEConfig:
     """Operator inputs for LongMemEval ingest."""
 
     n: int = DEFAULT_N
     cache_dir: Path = DEFAULT_CACHE_DIR
-    out_qrels: Path = Path("tests/fixtures/longmemeval_qrels.jsonl")
+    out_qrels: Path = field(default_factory=_default_out_qrels)
     scratch_db_url: str = "postgresql+asyncpg://nous:nous_eval@localhost:5433/nous_eval_scratch"
     skip_download: bool = False
     seed: int = 0
+    max_sessions_per_question: int = 10  # F051.5: cost guardrail (devil P2)
 
 
 @dataclass
@@ -79,8 +91,24 @@ class LMEIngestStats:
     picked_question_ids: list[str] = field(default_factory=list)
     per_type_counts: dict[str, int] = field(default_factory=dict)
     n_sessions_replayed: int = 0
+    n_sessions_reused: int = 0  # F051.5: cross-question episode dedup hits
     n_facts_extracted: int = 0
     n_episodes_summarised: int = 0
+
+
+def _session_to_transcript(session: list | dict) -> str:
+    """F051.5: render LongMemEval session as a transcript matching prod handler format.
+
+    LongMemEval sessions are either a list of turns or a dict with a "turns" key.
+    Prod handlers expect ``"\\n\\n"``-joined ``"role: content"`` lines with at least
+    50 chars total (see episode_summarizer.py:118).
+    """
+    turns = session if isinstance(session, list) else (session.get("turns") or [])
+    return "\n\n".join(
+        f"{t.get('role', 'user')}: {t.get('content', '')}"
+        for t in turns
+        if t.get("content")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,31 +216,121 @@ def _stratify(
 async def _replay_sessions_into_scratch(
     picked: list[dict[str, Any]],
     scratch_db_url: str,
-) -> LMEIngestStats:
-    """Drive ``fact_extractor`` + ``episode_summarizer`` over each haystack session.
+    max_sessions_per_question: int = 10,
+) -> tuple[LMEIngestStats, dict[str, dict[int, dict[str, list]]]]:
+    """F051.5 Phase 2: actually replay each haystack session into the scratch DB.
 
-    Phase 1 ships the skeleton: we construct Settings for the scratch DB (via
-    :func:`nous_eval.ingest._settings_for_ingest`) and log the intended actions.
-    Phase 2 wires the actual replay call — blocked on a small refactor of the
-    fact_extractor handler so it can run without a live EventBus.
+    For each picked question, walks haystack_sessions; for each session creates
+    an Episode via ``Heart.start_episode``, calls ``EpisodeSummarizer.summarize_episode``
+    directly (no bus), then ``FactExtractor.extract_and_store`` directly. Records
+    the resulting episode + fact UUIDs into a provenance map that ``_write_qrels``
+    consumes to populate ``gold_ids``.
+
+    Cross-question episode dedup: hashes session content; if the same conversation
+    appears in another question's haystack (LongMemEval reuses sessions across
+    paraphrase questions), reuse the cached UUIDs rather than ingesting twice.
+
+    Returns:
+        ``(stats, provenance)`` where
+        ``provenance[question_id][session_idx] = {"episode": [UUID], "fact": [UUID]}``.
     """
+    from nous.brain.embeddings import EmbeddingProvider
+    from nous.heart.heart import Heart
+    from nous.heart.schemas import EpisodeInput
+    from nous.handlers.episode_summarizer import EpisodeSummarizer
+    from nous.handlers.fact_extractor import FactExtractor
+    from nous.storage.database import Database
     from nous_eval.ingest import _settings_for_ingest
 
-    # Build Settings now so mis-wiring surfaces at code-review time, not Phase 2.
-    _ = _settings_for_ingest(scratch_db_url)
+    settings = _settings_for_ingest(scratch_db_url)
+    if not settings.openai_api_key:
+        raise SystemExit("F051.5: OPENAI_API_KEY required for replay")
+    # Dedicated agent_id partitions LongMemEval episodes from the F051
+    # stratified corpus (both live in the scratch DB; same agent_id would
+    # cross-pollute Heart.recall results).
+    settings = settings.model_copy(update={"agent_id": "nous-lme-corpus"})
 
+    db = Database(settings)
     stats = LMEIngestStats()
-    for q in picked:
-        sessions = q.get("haystack_sessions") or []
-        stats.n_sessions_replayed += len(sessions)
-        stats.picked_question_ids.append(q.get("question_id", ""))
-        # TODO(phase-2): for each session, call:
-        #     await episode_summarizer.summarise(session_text, settings, db=scratch_db)
-        #     facts = await fact_extractor.extract(session_text, settings, db=scratch_db)
-        # and collect the produced UUIDs for the qrels output.
-        logger.debug("[eval.ingest_lme] (phase-1 stub) replay qid=%s sessions=%d",
-                     q.get("question_id"), len(sessions))
-    return stats
+    provenance: dict[str, dict[int, dict[str, list]]] = {}
+    try:
+        await db.connect()
+        embedder = EmbeddingProvider(
+            api_key=settings.openai_api_key,
+            model=settings.embedding_model,
+            dimensions=settings.embedding_dimensions,
+        )
+        heart = Heart(database=db, settings=settings, embedding_provider=embedder)
+        # bus=None: handlers' constructors tolerate this (F051.5 refactor).
+        summarizer = EpisodeSummarizer(heart=heart, brain=None, settings=settings, bus=None)
+        extractor = FactExtractor(heart=heart, settings=settings, bus=None)
+
+        # Cross-question episode dedup: keyed on session-content hash.
+        seen_session_episode: dict[str, Any] = {}
+        seen_session_facts: dict[str, list] = {}
+
+        for q in picked:
+            qid = q.get("question_id", "")
+            provenance[qid] = {}
+            sessions = (q.get("haystack_sessions") or [])[:max_sessions_per_question]
+            for session_idx, session in enumerate(sessions):
+                transcript = _session_to_transcript(session)
+                if not transcript:
+                    logger.debug("F051.5: qid=%s session=%d empty transcript, skipping", qid, session_idx)
+                    continue
+                session_hash = hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+
+                # Reuse cached UUIDs when the same session appeared in a prior question.
+                if session_hash in seen_session_episode:
+                    provenance[qid][session_idx] = {
+                        "episode": [seen_session_episode[session_hash]],
+                        "fact": list(seen_session_facts[session_hash]),
+                    }
+                    stats.n_sessions_reused += 1
+                    continue
+
+                # 1. Materialize episode (EpisodeInput.summary required).
+                ep = await heart.start_episode(EpisodeInput(
+                    summary=transcript[:500] or "(empty)",
+                    trigger="lme_replay",
+                    tags=["longmemeval", q.get("question_type", "")],
+                ))
+
+                # 2. Summarize directly. Returns None on early-return / LLM error.
+                summary = await summarizer.summarize_episode(
+                    episode_id=ep.id,
+                    transcript=transcript,
+                    agent_id=settings.agent_id,
+                )
+                fact_ids: list = []
+                if summary is not None:
+                    # 3. Extract facts directly. Returns canonical UUIDs even on dedup.
+                    fact_ids = await extractor.extract_and_store(
+                        summary=summary,
+                        episode_id=str(ep.id),
+                        transcript=transcript,
+                    )
+                    stats.n_episodes_summarised += 1
+                    stats.n_facts_extracted += len(fact_ids)
+
+                # 4. End episode with VALID outcome value (EpisodeOutcome Literal
+                # accepts {success, partial, failure, ongoing, abandoned} — no
+                # custom values). Episode has tags=["longmemeval", ...] so any
+                # future filter can use the tag, not the outcome.
+                await heart.end_episode(ep.id, outcome="success")
+
+                # 5. Cache + provenance.
+                seen_session_episode[session_hash] = ep.id
+                seen_session_facts[session_hash] = list(fact_ids)
+                provenance[qid][session_idx] = {
+                    "episode": [ep.id],
+                    "fact": fact_ids,
+                }
+                stats.n_sessions_replayed += 1
+            stats.picked_question_ids.append(qid)
+        return stats, provenance
+    finally:
+        await db.disconnect()
 
 
 # ---------------------------------------------------------------------------
@@ -220,32 +338,69 @@ async def _replay_sessions_into_scratch(
 # ---------------------------------------------------------------------------
 
 
-def _write_qrels(picked: list[dict[str, Any]], stats: LMEIngestStats, out_path: Path) -> None:
-    """Emit one qrel row per picked question to ``out_path``.
+def _write_qrels(
+    picked: list[dict[str, Any]],
+    stats: LMEIngestStats,
+    provenance: dict[str, dict[int, dict[str, list]]],
+    out_path: Path,
+) -> None:
+    """F051.5: emit one qrel per picked question with populated ``gold_ids``.
 
-    gold_ids is left empty in Phase 1 — Phase 2 fills it from the replayed
-    UUIDs produced by ``_replay_sessions_into_scratch``.
+    For each question, gold_ids = (episodes ∪ facts) UUIDs from the haystack
+    sessions named in the question's ``answer_session_ids`` field. Sessions
+    whose answer_session_id is non-int or out-of-range are logged WARN and
+    skipped; questions where the resulting gold_ids is empty are emitted
+    anyway so downstream code can count "missing-gold" qrels separately.
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    n_missing_gold = 0
     with out_path.open("w", encoding="utf-8") as fh:
         for q in picked:
+            qid = q.get("question_id", "")
+            answer_sids = q.get("answer_session_ids") or []
+            gold_ids: list[str] = []
+            for sid in answer_sids:
+                try:
+                    idx = int(sid)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "F051.5: qid=%s answer_session_id %r is not an int — skipping",
+                        qid, sid,
+                    )
+                    continue
+                ids_for_session = provenance.get(qid, {}).get(idx, {})
+                gold_ids.extend(str(u) for u in ids_for_session.get("episode", []))
+                gold_ids.extend(str(u) for u in ids_for_session.get("fact", []))
+            if not gold_ids:
+                n_missing_gold += 1
+                logger.warning(
+                    "F051.5: qid=%s no gold_ids populated — answer_session_ids=%r produced 0 memories",
+                    qid, answer_sids,
+                )
             fh.write(
                 json.dumps(
                     {
                         "query": q.get("question"),
-                        "gold_ids": [],  # populated in Phase 2
+                        "gold_ids": gold_ids,
                         "memory_types": ["episode", "fact"],
-                        "source": "longmemeval_s",
+                        # F051.5 (devil P1): QrelSource enum value is "longmemeval",
+                        # not "longmemeval_s". Phase-1 had this latent bug.
+                        "source": "longmemeval",
                         "notes": {
-                            "question_id": q.get("question_id"),
+                            "question_id": qid,
                             "question_type": q.get("question_type"),
-                            "answer_session_ids": q.get("answer_session_ids", []),
+                            "answer_session_ids": answer_sids,
+                            "n_replayed_sessions": len(provenance.get(qid, {})),
                         },
                         "reviewed_by": None,
                     }
                 )
                 + "\n"
             )
+    logger.info(
+        "F051.5: wrote %d qrels to %s (%d with empty gold_ids, %d sessions reused)",
+        len(picked), out_path, n_missing_gold, stats.n_sessions_reused,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,21 +412,27 @@ def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
     p = argparse.ArgumentParser(prog="python -m nous_eval.ingest_longmemeval")
     p.add_argument("--n", type=int, default=DEFAULT_N)
     p.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
-    p.add_argument("--out-qrels", type=Path, default=Path("tests/fixtures/longmemeval_qrels.jsonl"))
+    p.add_argument("--out-qrels", type=Path, default=None)  # falls back to _default_out_qrels()
     p.add_argument("--scratch-db-url", default=os.environ.get(
         "NOUS_EVAL_SCRATCH_DB_URL",
         "postgresql+asyncpg://nous:nous_eval@localhost:5433/nous_eval_scratch",
     ))
     p.add_argument("--skip-download", action="store_true")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument(
+        "--max-sessions-per-question", type=int, default=10,
+        help="F051.5 cost guardrail. LongMemEval haystacks can have 30-50 sessions; "
+             "default 10 caps Sonnet spend at ~$15-25 for N=20.",
+    )
     ns = p.parse_args(argv)
     return IngestLMEConfig(
         n=ns.n,
         cache_dir=ns.cache_dir,
-        out_qrels=ns.out_qrels,
+        out_qrels=ns.out_qrels if ns.out_qrels is not None else _default_out_qrels(),
         scratch_db_url=ns.scratch_db_url,
         skip_download=ns.skip_download,
         seed=ns.seed,
+        max_sessions_per_question=ns.max_sessions_per_question,
     )
 
 
@@ -286,14 +447,16 @@ async def run(config: IngestLMEConfig) -> LMEIngestStats:
 
     data = json.loads(src.read_text(encoding="utf-8"))
     if not isinstance(data, list):
-        raise SystemExit(f"[eval.ingest_lme] Unexpected LongMemEval format at {src}")
+        raise SystemExit(f"F051.5: Unexpected LongMemEval format at {src}")
 
     picked, counts = _stratify(data, config.n, config.seed)
-    logger.info("[eval.ingest_lme] picked=%d types=%s", len(picked), counts)
+    logger.info("F051.5: picked=%d types=%s", len(picked), counts)
 
-    stats = await _replay_sessions_into_scratch(picked, config.scratch_db_url)
+    stats, provenance = await _replay_sessions_into_scratch(
+        picked, config.scratch_db_url, config.max_sessions_per_question,
+    )
     stats.per_type_counts = counts
-    _write_qrels(picked, stats, config.out_qrels)
+    _write_qrels(picked, stats, provenance, config.out_qrels)
     return stats
 
 
