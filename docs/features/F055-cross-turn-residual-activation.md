@@ -112,7 +112,22 @@ Two places in the recall pipeline consume `a(m, t)`:
 Top-N residually-activated nodes (default N=5) are added to `seed_nodes` alongside the current query's vector hits, each with seed score = `a(m, t) * residual_seed_weight` (default 0.3). Their 1-hop neighbors then get pulled by the existing CTE — no CTE changes.
 
 **B. Post-fusion score boost.**
-After RRF fusion (and graph merge) but before MMR, each candidate's score gets `+ a(m, t) * residual_boost_weight` (default 0.15). Bounded so a cold, highly-relevant hit still beats a hot-but-irrelevant one. Boost is applied additively in RRF-normalized score space.
+The boost is applied additively in RRF-normalized score space. Pipeline ordering must be made explicit because F042 (CE rerank) and F030/F030.1 (MMR / skip-after-CE) both sit downstream of RRF fusion. F055 boost lands **after RRF fusion + graph merge, BEFORE F042 CE rerank**, with the following rationale:
+
+```
+hybrid_search → RRF fuse → graph merge → [F055 BOOST APPLIED HERE]
+  → F042 CE rerank (if enabled, head-truncated to cross_encoder_max_candidates=30)
+  → F030 MMR (skipped when F030.1 mmr_skip_after_ce=True AND CE just fired)
+  → return top-K
+```
+
+Why this position:
+- **CE rerank uses sigmoid-normalized scores.** Boosting *after* CE would override CE's careful relevance signal — exactly the failure mode F030.1 was designed to prevent (decision `2112106`). Boosting *before* CE biases which candidates make CE's `max_candidates=30` head-cut, then CE re-scores them on its own model. CE's output stands; boost has already done its work by improving candidate-set composition.
+- **MMR-skipped path (F030.1 default)**: when CE fires, MMR skips. The boost effect persists through CE's re-ranking (since boosted items entered CE's head set) and reaches the final ranking unchanged.
+- **MMR-active path (CE off, or F030.1=False)**: the boost is in the score space MMR consumes, so MMR's diversity selection sees residual-activated items at their boosted scores. Matches the spec's original "before MMR" intent.
+- **Both paths preserved by single insertion point** at `Heart._recall` immediately after the per-type RRF merge, before the existing CE/MMR/return tail. One insertion site, two correct behaviors.
+
+Boost is bounded so a cold, highly-relevant hit (RRF score 0.8) still beats a hot-but-irrelevant one (RRF 0.3 + boost 0.15 = 0.45).
 
 ### 2. State — reuse `ConversationState.turn_count` + extend `WorkingMemory.items`
 
@@ -365,7 +380,7 @@ Add metrics counter `nous_residual_activation_hits_total` and histogram `nous_re
 
 Cannot ship without measurement. Plan:
 
-- **Eval harness:** reuse the retrieval eval harness referenced in F022/F045/F050 (sparklingdataocean ROC / Cohen's d / Lift@q). Add a **multi-turn test set** — sequences of 3–5 related queries — which the existing single-query harness doesn't cover.
+- **Eval harness:** uses the **F051 retrieval-eval harness** (shipped 2026-04-20) as the gate substrate. F051 today supports single-query MRR/P@K/R@K/nDCG; F055 needs **multi-turn extension F051.4** (sibling to `nous_eval/density_eval.py` from F053): new qrel format with `session_id`-scoped turn sequences, session-lifecycle wrapping in `retrieval_runner` so turn N+1 sees turn N's `record_surfaced` writes, and the new TCSR (Topic Chain Success Rate) metric. F051.4 ships as a separate PR before F055 implementation can be eval-gated.
 - **Primary metrics:**
   - recall@10 and nDCG@10 on turn N+1 queries, conditional on turn N having surfaced the gold item. Target: ≥ +5% recall@10 on follow-up queries without degrading cold queries by more than 1%.
   - **Topic Chain Success Rate (TCSR) — new, v2 fix #5.** For a 5-turn topic-coherent sequence, fraction of turns 2–5 where recall@5 contains ≥ 1 item that was also in the previous turn's recall@10. Measures "train of thought" continuity, which recall@10 alone misses. Target: ≥ +15% vs. flag-off baseline on topic-coherent sequences, ≤ 2% degradation on topic-drift sequences.
