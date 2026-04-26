@@ -18,7 +18,7 @@ import json
 import logging
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
@@ -57,7 +57,12 @@ class Qrel(BaseModel):
     confidence: Literal["high", "medium", "low"] = "high"
     reasoning_type: str | None = None
     memory_types: list[MemoryType] | None = None
-    notes: str | None = None
+    # F051.5 hotfix: widen notes from `str | None` to accept structured dicts.
+    # F051.5's ingest_longmemeval emits notes as a dict (question_id,
+    # question_type, answer_session_ids, n_replayed_sessions); the prior
+    # `str | None` typing rejected those qrels at load time. Existing
+    # string-shape qrels (probes, hand_labels) are unaffected.
+    notes: dict[str, Any] | str | None = None
     reviewed_by: str | None = None
 
 
