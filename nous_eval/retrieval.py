@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--configs",
         type=str,
         default="baseline",
-        help="Comma-separated config names (baseline, f050_on, ce_off, mmr_off, graph_off).",
+        help="Comma-separated config names (baseline, f050_on, ce_off, ce_on, mmr_off, graph_off).",
     )
     parser.add_argument(
         "--sources",

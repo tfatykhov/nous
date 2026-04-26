@@ -15,12 +15,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="NOUS_",
         env_file=".env",
-        # Tolerate env vars beyond what's declared on Settings — production
-        # carries feature-specific env vars (Google Drive, integrations,
-        # scratch experiments) that the in-tree Settings doesn't know about.
-        # Without this, pydantic's default extra='forbid' makes Settings()
-        # raise on first unknown var. Matches EvalSettings behavior.
-        # (Mirror of the same fix landed in PR #346.)
+        # Tolerate env vars beyond what's declared on Settings. Production
+        # deployments often carry feature-specific env vars (Google Drive,
+        # third-party integrations, scratch experiments) that the in-tree
+        # Settings doesn't know about yet. Without this, pydantic's
+        # default extra="forbid" makes Settings() raise on first unknown
+        # var — turning every prod-current .env into a checkout breakage
+        # waiting for a config.py PR. Matches EvalSettings's behavior.
         extra="ignore",
     )
 
@@ -430,6 +431,12 @@ class Settings(BaseSettings):
         default=0.7, ge=0.0, le=1.0,
         description="MMR relevance vs diversity weight (1.0=pure relevance, 0.0=pure diversity)",
     )
+    # F030.1: Skip MMR when cross-encoder rerank just reordered the head.
+    # F051 retrieval-eval harness measured +30% MRR (0.372 -> 0.484, +190% on
+    # jargon-drift) when MMR is gated off after CE fires — MMR's diversity
+    # selection over CE's reordered top-20 neutralizes CE's relevance signal.
+    # Default True; set False to restore pre-F030.1 behavior (chain CE then MMR).
+    mmr_skip_after_ce: bool = True
 
     # F042: Cross-encoder reranking
     cross_encoder_enabled: bool = False
