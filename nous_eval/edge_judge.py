@@ -82,6 +82,9 @@ def _parse_response(content: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # was over-broad and could chew into content).
     raw = re.sub(r"^```(?:json)?\s*\n?", "", raw, flags=re.IGNORECASE)
     raw = re.sub(r"\n?```\s*$", "", raw)
+    # Strip trailing commas before ] or } — Sonnet sometimes emits
+    # JSON5-style trailing commas which strict json.loads rejects.
+    raw = re.sub(r",(\s*[}\]])", r"\1", raw)
     parsed = json.loads(raw)
     if not isinstance(parsed, list):
         raise ValueError(
@@ -125,13 +128,20 @@ async def judge_edges(
             prompt_body = template + "\n\n" + _format_edge_payload(batch)
 
             try:
-                resp = await client.call(
-                    model=model,
-                    system=[{"type": "text", "text": "You are a careful precision judge. Return JSON only."}],
-                    messages=[{"role": "user", "content": prompt_body}],
-                    max_tokens=2048,
-                    temperature=0.0,
-                )
+                # AnthropicClient.call() takes a single payload dict, not kwargs.
+                # OAT auth requires the Claude Code preamble as system block 0
+                # (per project memory feedback_claude_code_preamble — without it,
+                # OAT returns 429 rate_limit_error). Mirrors hand_labels_draft.py.
+                resp = await client.call({
+                    "model": model,
+                    "system": [
+                        {"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": "You are a careful precision judge. Return JSON only."},
+                    ],
+                    "messages": [{"role": "user", "content": prompt_body}],
+                    "max_tokens": 8192,
+                    "temperature": 0.0,
+                })
                 parsed = _parse_response(resp.content)
             except Exception as exc:
                 logger.warning(
