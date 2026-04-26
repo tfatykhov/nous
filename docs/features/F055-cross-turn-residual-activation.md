@@ -1,4 +1,4 @@
-# F052: Cross-Turn Residual Activation
+# F055: Cross-Turn Residual Activation
 
 **Status:** 📝 Draft (v4 — address Codex P1 #3 session_id injection)
 **Proposed by:** Tim (human-brain association framing — "train of thought between turns")
@@ -429,7 +429,7 @@ Phase 1 is ~1–1.5 days of work. Phase 2 is eval-bound.
 ## Out of scope explicitly
 
 - Edge-level Hebbian reinforcement
-- Frame-primed activation (new: "current frame seeds memories tagged with this frame") — strong candidate for **F052** as a follow-up, but conceptually distinct
+- Frame-primed activation (new: "current frame seeds memories tagged with this frame") — strong candidate for a future follow-up (F056+), but conceptually distinct from cross-turn residual
 - Emotional/salience-weighted activation
 - Consolidation of hot clusters into abstraction nodes during sleep (A-MEM / H-MEM direction)
 - Lateral inhibition (Phase 2 follow-up)
@@ -438,14 +438,14 @@ Phase 1 is ~1–1.5 days of work. Phase 2 is eval-bound.
 
 ## Traceability
 
-- FR-052.1 — Turn counter sourced from `ConversationState.turn_count` (no new column)
-- FR-052.2 — `ResidualActivator.compute_activations` returns a bounded, decayed activation map under geometric or power-law mode
-- FR-052.3 — Residual seeds flow into F022 spreading activation alongside current-query seeds at the `nous/api/tools.py::recall` call-site
-- FR-052.4 — Post-fusion score boost is additive, bounded, and clamped
-- FR-052.5 — `record_surfaced` persists to `WorkingMemory.items` without blocking the recall return **and uses its own isolated DB session**
-- FR-052.6 — Decay mode selectable via `residual_decay_mode` setting; both geometric and power-law implemented and unit-tested
-- NFR-052.1 — Zero added LLM calls
-- NFR-052.2 — Overhead per recall ≤ 5ms p95 (measured: one WM read, one turn-count read, one WM write, O(K) math)
-- NFR-052.3 — Fails open — any exception returns uncorrected ranking and logs WARN
-- NFR-052.4 — Behind `residual_activation_enabled` flag, default off
-- NFR-052.5 — Zero migrations
+- FR-055.1 — Turn counter sourced from `ConversationState.turn_count` (no new column)
+- FR-055.2 — `ResidualActivator.compute_activations` returns a bounded, decayed activation map under geometric or power-law mode
+- FR-055.3 — Residual seeds flow into F022 spreading activation alongside current-query seeds at the `nous/api/tools.py::recall` call-site
+- FR-055.4 — Post-fusion score boost is additive, bounded, and clamped
+- FR-055.5 — `record_surfaced` persists to `WorkingMemory.items` without blocking the recall return **and uses its own isolated DB session**
+- FR-055.6 — Decay mode selectable via `residual_decay_mode` setting; both geometric and power-law implemented and unit-tested
+- NFR-055.1 — Zero added LLM calls
+- NFR-055.2 — Overhead per recall ≤ 5ms p95 (measured: one WM read, one turn-count read, one WM write, O(K) math)
+- NFR-055.3 — Fails open — any exception returns uncorrected ranking and logs WARN
+- NFR-055.4 — Behind `residual_activation_enabled` flag, default off
+- NFR-055.5 — Zero migrations
