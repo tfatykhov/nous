@@ -280,6 +280,7 @@ class QueryExpander:
         payload: dict[str, Any] = {
             "model": self._model,
             "max_tokens": 256,
+            "temperature": self._settings.query_expansion_temperature,
             "system": _SYSTEM_PROMPT,
             "tools": [_TOOL],
             "tool_choice": _TOOL_CHOICE,

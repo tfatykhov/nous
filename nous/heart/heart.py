@@ -806,33 +806,14 @@ class Heart:
         if not search_map:
             return []
 
-        # F050: Optionally expand the query into variants via Haiku, then embed
-        # them in a single batch call. variant_pairs stays None on any failure
-        # so sub-managers fall back to the existing single-query path
-        # (byte-identical when variant_pairs is None — see plan v2 §invariant).
-        variant_pairs: list[tuple[str, list[float] | None]] | None = None
-        if (
-            self.settings.query_expansion_enabled
-            and self._query_expander is not None
-            and self._embeddings is not None
-        ):
-            try:
-                variants = await self._query_expander.expand(query, self.agent_id)
-            except Exception as exc:
-                # Defensive — expand() should never raise per spec, but belt & braces.
-                logger.warning("F050: query_expander.expand raised, using [query]: %s", exc)
-                variants = [query]
-
-            if len(variants) > 1:
-                try:
-                    embeddings = await self._embeddings.embed_batch(variants)
-                    variant_pairs = list(zip(variants, embeddings))
-                except Exception as exc:
-                    logger.warning(
-                        "F050: embed_batch failed for %d variants, falling back to single-query: %s",
-                        len(variants), exc,
-                    )
-                    variant_pairs = None
+        # F050: Expand query via Haiku + embed variants. Helper guarantees a
+        # non-empty list with single-pair fallback on any failure (NEVER None).
+        pairs = await self.expand_query_pairs(query)
+        # Translate single-pair-with-None-embedding back to "no expansion"
+        # so sub-managers route through their existing hybrid_search fast path.
+        variant_pairs: list[tuple[str, list[float] | None]] | None = (
+            pairs if len(pairs) > 1 else None
+        )
 
         keys: list[str] = []
         results_list: list[object] = []
@@ -980,6 +961,60 @@ class Heart:
             merged = merged[:limit]
 
         return merged
+
+    async def expand_query_pairs(
+        self, query: str
+    ) -> list[tuple[str, list[float] | None]]:
+        """F050+F052 — expand a query into (text, embedding) pairs for
+        hybrid_search_multi.
+
+        **Contract: NEVER raises, NEVER returns None or [].**
+
+        On any failure path (expansion disabled, no expander, no embeddings,
+        Haiku raises, embed_batch raises, gate trips), returns
+        ``[(query, None)]`` — a single pair with no precomputed embedding.
+        Callers route this through ``hybrid_search_multi(queries=...)``,
+        which short-circuits at search.py:319-332 to byte-identical behavior
+        vs single-query ``hybrid_search``.
+
+        F052 callers (graph_densifier._backfill_same_type) MUST NOT
+        catch ``asyncio.CancelledError`` from this call — task cancellation
+        must propagate. The implementation only catches ``Exception``,
+        which excludes ``CancelledError`` in Python 3.8+.
+
+        Edge case: if cancelled mid-``embed_batch`` after Haiku already
+        succeeded, the Haiku tokens are spent but the helper raises
+        ``CancelledError`` upward — accepted cost per spec §Risks #6.
+        """
+        if not (
+            self.settings.query_expansion_enabled
+            and self._query_expander is not None
+            and self._embeddings is not None
+        ):
+            return [(query, None)]
+
+        try:
+            variants = await self._query_expander.expand(query, self.agent_id)
+        except Exception as exc:
+            logger.warning(
+                "F050/F052: query_expander.expand raised for %s, falling back to [query]: %s",
+                self.agent_id, exc,
+            )
+            return [(query, None)]
+
+        if len(variants) <= 1:
+            return [(query, None)]
+
+        try:
+            embeddings = await self._embeddings.embed_batch(variants)
+        except Exception as exc:
+            logger.warning(
+                "F050/F052: embed_batch failed for %d variants (%s), falling back to [query]: %s",
+                len(variants), self.agent_id, exc,
+            )
+            return [(query, None)]
+
+        return list(zip(variants, embeddings))
 
     def _to_recall_result(self, memory_type: str, item: object, score: float) -> RecallResult | None:
         """Convert a typed search result to a RecallResult."""

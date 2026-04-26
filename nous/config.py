@@ -564,6 +564,26 @@ class Settings(BaseSettings):
         description="F050 — cache row retention; sweep handler ships in F050.2.",
     )
 
+    # F050/F052 — Haiku temperature for query expansion. Default 1.0 matches
+    # Anthropic's stock value (preserves F050's implicit behavior — F050 didn't
+    # set temperature, so Haiku used its default). density_eval overrides to
+    # 0.0 for re-run determinism.
+    query_expansion_temperature: float = Field(
+        default=1.0,
+        description="F050/F052 — Haiku temperature for query expansion. "
+                    "Default 1.0 matches Anthropic stock; F052 density_eval "
+                    "overrides to 0.0 for re-run determinism.",
+    )
+
+    # F052 — Multi-embedding seed for _backfill_same_type. Default-off ship.
+    # When enabled, the densifier expands each orphan's content into N=K_50
+    # variants via Heart.expand_query_pairs and routes through hybrid_search_multi.
+    graph_backfill_multi_embedding_enabled: bool = Field(
+        default=False,
+        description="F052 master switch — multi-embedding seed for graph "
+                    "densification backfill (_backfill_same_type only in Phase 1).",
+    )
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',
