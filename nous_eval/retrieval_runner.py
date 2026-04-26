@@ -63,6 +63,12 @@ _EVAL_DISABLE_FIELDS: tuple[tuple[str, Any], ...] = (
     ("correction_extraction_enabled", False),
     ("graph_backfill_enabled", False),
     ("rubric_outcome_detection_enabled", False),
+    # F051.4: disable F050 query expansion in eval by default. Each recall
+    # would otherwise burn 1 Haiku call; multi-turn-replay walks 600+
+    # recalls per matrix run = ~$0.30 + non-determinism poisoning the
+    # gate signal. Operators who explicitly want F050+F055 interaction
+    # measurement can override via a config that sets it true.
+    ("query_expansion_enabled", False),
 )
 
 

@@ -75,6 +75,13 @@ class ToolDispatcher:
                 args = {**args, "session_id": session_id}
             if session_id is not None and name == "run_python":
                 args = {**args, "_session_id": session_id}
+            if session_id is not None and name == "recall_deep":
+                # F051.4 / F055: inject session_id into recall_deep so
+                # F055's Cross-Turn Residual Activation can read it via
+                # the _session_id kwarg. Until F055 ships, recall_deep
+                # silently accepts the kwarg (added by F051.4) and ignores
+                # it — fail-open contract.
+                args = {**args, "_session_id": session_id}
             result = await handler(**args)  # P0-6: **kwargs unpacking
             # P1-1: Extract text from MCP-format response
             return result["content"][0]["text"], False
@@ -448,6 +455,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         query: str,
         limit: int = 10,
         memory_types: list[str] | None = None,
+        _session_id: str | None = None,
     ) -> dict[str, Any]:
         """Search across all memory types in Heart and Brain.
 
@@ -460,6 +468,13 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             limit: Maximum results to return
             memory_types: Types to search (episode, fact, procedure, censor, decision)
                          If None or contains "all", searches everything
+            _session_id: F051.4/F055 — session identifier injected by
+                ``ToolDispatcher.dispatch``. When F055 (Cross-Turn Residual
+                Activation) ships, the residual_activations path reads this
+                to bias recall toward recently-surfaced items in the same
+                session. Pre-F055 the kwarg is silently accepted and ignored
+                (fail-open). Underscore prefix marks it as
+                infrastructure-injected, not a tool-schema-declared parameter.
 
         Returns:
             MCP-compliant response with ranked results or error message
