@@ -213,6 +213,16 @@ def _settings_for_ingest(scratch_db_url: str) -> Any:
             "correction_extraction_enabled": False,
             "graph_backfill_enabled": False,
             "rubric_outcome_detection_enabled": False,
+            # F023 admission control silently rejected ~999/1000 candidate_facts
+            # during F051.5 LongMemEval ingest because:
+            # (a) admission_shadow_mode defaults to False (production tightens),
+            # (b) admission_threshold=0.6 with no LLM utility scorer wired
+            # during ingest → most facts score below threshold → rejected.
+            # This is the same class of silent-pipeline-mismatch as issue #354
+            # (edge_audit/densifier column drift).
+            # Ingest is a bulk-load of vetted benchmark data; admission control
+            # is for filtering production traffic. Disable here.
+            "admission_control_enabled": False,
         }
     )
 
