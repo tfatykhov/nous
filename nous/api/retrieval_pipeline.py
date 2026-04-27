@@ -154,6 +154,7 @@ async def run_recall_pipeline(
     settings: "Settings",
     limit: int = 10,
     memory_types: list[str] | None = None,
+    residual_activations: dict[UUID, float] | None = None,
 ) -> tuple[list[PipelineResult], PipelineStats]:
     """Run the full retrieval pipeline.
 
@@ -180,7 +181,7 @@ async def run_recall_pipeline(
         fired. Contradiction edges are surfaced via ``stats.contradiction_checks_ran``
         plus the per-result ``contradicts`` field.
     """
-    acc = await _run_stages(query, heart, brain, settings, limit, memory_types)
+    acc = await _run_stages(query, heart, brain, settings, limit, memory_types, residual_activations)
 
     # Build flat PipelineResult list in stage order
     results: list[PipelineResult] = []
@@ -220,6 +221,7 @@ async def _run_stages(
     settings: "Settings",
     limit: int,
     memory_types: list[str] | None,
+    residual_activations: dict[UUID, float] | None = None,
 ) -> _PipelineAccumulator:
     acc = _PipelineAccumulator()
 
@@ -246,7 +248,10 @@ async def _run_stages(
         if heart_types:
             acc.searched_heart = True
             acc.heart_types_searched = heart_types
-            heart_results = await heart.recall(query, limit=limit, types=heart_types)
+            heart_results = await heart.recall(
+                query, limit=limit, types=heart_types,
+                residual_activations=residual_activations,  # F055
+            )
             acc.heart_results = list(heart_results or [])
 
     # ------------------------------------------------------------------

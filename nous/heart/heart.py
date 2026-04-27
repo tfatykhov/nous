@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 if TYPE_CHECKING:
     from nous.heart.query_expansion import QueryExpander
+    from nous.heart.residual_activation import ResidualActivator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,6 +129,11 @@ class Heart:
         # pattern at facts.py:141). None when flag is off or test fixture
         # skipped wiring; _recall handles None as a no-op.
         self._query_expander: "QueryExpander | None" = None
+
+        # F055: Optional ResidualActivator for cross-turn residual activation.
+        # Wired via set_residual_activator() in main.py. None when flag is off;
+        # _recall handles None as a no-op (boost branch skipped).
+        self._residual_activator: "ResidualActivator | None" = None
 
     # ------------------------------------------------------------------
     # Lifecycle (P2-2)
@@ -749,6 +755,7 @@ class Heart:
         limit: int = 10,
         types: list[str] | None = None,
         session: AsyncSession | None = None,
+        residual_activations: dict[UUID, float] | None = None,
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
 
@@ -757,11 +764,32 @@ class Heart:
         overridable at runtime). Censors use cosine similarity. Since
         most sub-searches use the same scoring formula, scores are
         directly comparable.
+
+        F055: ``residual_activations`` is an optional ``{node_id: activation}``
+        dict computed by ``ResidualActivator.compute_activations`` in the
+        recall_deep tool layer. When provided + non-empty, ``_recall``
+        applies an additive boost before CE rerank (spec §B). None or
+        empty dict skips the boost (cold recall).
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._recall(query, limit, types, session)
-        return await self._recall(query, limit, types, session)
+                return await self._recall(query, limit, types, session, residual_activations)
+        return await self._recall(query, limit, types, session, residual_activations)
+
+    def set_residual_activator(self, activator: "ResidualActivator | None") -> None:
+        """F055: Wire a ResidualActivator instance.
+
+        Mirrors set_query_expander pattern. Called from main.py after
+        Heart is built. Test fixtures may skip this; _recall handles
+        ``self._residual_activator is None`` as a no-op.
+        """
+        if self._residual_activator is not None and activator is not None:
+            logger.debug(
+                "F055: set_residual_activator called twice; replacing %r with %r",
+                type(self._residual_activator).__name__,
+                type(activator).__name__,
+            )
+        self._residual_activator = activator
 
     def set_query_expander(self, expander: "QueryExpander | None") -> None:
         """F050: Wire a QueryExpander instance for multi-query recall.
@@ -787,6 +815,7 @@ class Heart:
         limit: int,
         types: list[str] | None,
         session: AsyncSession,
+        residual_activations: dict[UUID, float] | None = None,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -881,6 +910,19 @@ class Heart:
                 recall_result = self._to_recall_result(memory_type, item, original_score)
                 if recall_result is not None:
                     merged.append(recall_result)
+
+        # F055: post-fusion residual-activation boost. Position is AFTER
+        # RRF/graph merge but BEFORE F042 CE rerank (spec §B) — biases CE's
+        # head-cut selection rather than overriding CE's sigmoid-normalized
+        # output. None or empty activations dict → no-op.
+        if (
+            residual_activations
+            and self._residual_activator is not None
+        ):
+            try:
+                merged = self._residual_activator.boost_scores(merged, residual_activations)
+            except Exception:
+                logger.warning("F055: boost_scores raised, continuing without boost", exc_info=True)
 
         # F042: Cross-encoder reranking (between RRF merge and MMR).
         # Sort by hybrid score globally first so the head slice for CE is

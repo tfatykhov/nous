@@ -129,6 +129,25 @@ async def create_components(settings: Settings) -> dict:
             settings.query_expansion_timeout_seconds,
         )
 
+    # F055: Cross-Turn Residual Activation. Default-off; flag-gated.
+    if settings.residual_activation_enabled:
+        from nous.heart.residual_activation import ResidualActivator
+        residual_activator = ResidualActivator(
+            settings=settings,
+            wm=heart.working_memory,
+            db=database,
+        )
+        heart.set_residual_activator(residual_activator)
+        logger.info(
+            "F055: ResidualActivator wired (decay_mode=%s, decay=%.2f, top_k=%d, "
+            "seed_weight=%.2f, boost_weight=%.2f)",
+            settings.residual_decay_mode,
+            settings.residual_decay_per_turn,
+            settings.residual_top_k_carried,
+            settings.residual_seed_weight,
+            settings.residual_boost_weight,
+        )
+
     # F024: Critic Agent (uses shared api_client)
     critic = None
     if settings.critic_enabled:
