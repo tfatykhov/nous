@@ -72,11 +72,25 @@ class FactExtractor:
         settings: Settings,
         bus: EventBus | None,  # F051.5: nullable for direct-invocation paths (ingest)
         llm_client: LLMClient | None = None,
+        dedup_via_search: bool = True,
     ):
+        """
+        Args:
+            dedup_via_search: when True (production default), pre-checks
+                ``search_facts(content)`` against ``fact_dedup_threshold``
+                before calling ``Heart.learn``. The pre-check uses HYBRID
+                search (vector + keyword RRF) which catches lexical
+                paraphrases pure cosine misses. F051.5 ingest sets this
+                False because hybrid RRF scores are unreliable on a
+                near-empty corpus (the lone existing fact RRF≈1.0 trips
+                dedup for every subsequent candidate). Heart.learn's
+                native cosine > 0.95 dedup still runs regardless.
+        """
         self._heart = heart
         self._settings = settings
         self._bus = bus
         self._llm = llm_client
+        self._dedup_via_search = dedup_via_search
         if bus is not None:
             bus.on("episode_summarized", self.handle)
 
@@ -140,20 +154,17 @@ class FactExtractor:
                 logger.debug("Skipping low-confidence fact: %s", fact.get("content", "")[:50])
                 continue
 
-            # Dedup: check if similar fact exists
+            # Dedup: check if similar fact exists (production paraphrase guard)
             content = fact.get("content", "")
-            existing = await self._heart.search_facts(content, limit=1)
-            if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
-                # F051.5 P2-fix: don't lose the canonical UUID — caller (ingest)
-                # needs it for gold_ids matching when this fact came from a
-                # different session that already stored the canonical row.
-                # handle() callers ignore the return so prod behavior is intact.
-                stored_ids.append(existing[0].id)
-                logger.debug(
-                    "Dedup skip — adding canonical UUID %s for content: %s",
-                    existing[0].id, content[:50],
-                )
-                continue
+            if self._dedup_via_search:
+                existing = await self._heart.search_facts(content, limit=1)
+                if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
+                    stored_ids.append(existing[0].id)
+                    logger.debug(
+                        "Dedup skip — adding canonical UUID %s for content: %s",
+                        existing[0].id, content[:50],
+                    )
+                    continue
 
             # Store — P1-8 fix: pass category from LLM response
             fact_input = FactInput(
@@ -228,15 +239,13 @@ class FactExtractor:
             if not content or not str(content).strip():
                 continue
 
-            # Dedup against existing facts
-            existing = await self._heart.search_facts(content, limit=1)
-            if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
-                # F051.5 P2-fix: don't lose the canonical UUID — caller (ingest)
-                # needs it for gold_ids matching when this fact came from a
-                # different session that already stored the canonical row.
-                stored_ids.append(existing[0].id)
-                logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
-                continue
+            # Dedup: check if similar fact exists
+            if self._dedup_via_search:
+                existing = await self._heart.search_facts(content, limit=1)
+                if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
+                    stored_ids.append(existing[0].id)
+                    logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
+                    continue
 
             fact_input = FactInput(
                 content=content,
