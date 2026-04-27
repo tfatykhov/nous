@@ -252,6 +252,7 @@ async def _replay_sessions_into_scratch(
         ``(stats, provenance)`` where
         ``provenance[question_id][session_idx] = {"episode": [UUID], "fact": [UUID]}``.
     """
+    from nous.api.anthropic_client import create_client
     from nous.brain.embeddings import EmbeddingProvider
     from nous.heart.heart import Heart
     from nous.heart.schemas import EpisodeInput
@@ -271,6 +272,7 @@ async def _replay_sessions_into_scratch(
     db = Database(settings)
     stats = LMEIngestStats()
     provenance: dict[str, dict[int, dict[str, list]]] = {}
+    api_client = None
     try:
         await db.connect()
         embedder = EmbeddingProvider(
@@ -279,9 +281,26 @@ async def _replay_sessions_into_scratch(
             dimensions=settings.embedding_dimensions,
         )
         heart = Heart(database=db, settings=settings, embedding_provider=embedder)
+
+        # F051.5 hotfix: wire a live AnthropicClient into the handlers.
+        # Without this, EpisodeSummarizer._generate_summary and
+        # FactExtractor._extract_facts both early-return (`if not self._llm`),
+        # so summarize_episode returns None and zero facts get extracted —
+        # episodes land as bare rows and qrels have no gold_ids to point at.
+        # create_client handles OAT/Bearer auth + Claude Code preamble per
+        # call_background_llm, matching production wiring.
+        api_client = create_client(settings)
+        await api_client.start()
+
         # bus=None: handlers' constructors tolerate this (F051.5 refactor).
-        summarizer = EpisodeSummarizer(heart=heart, brain=None, settings=settings, bus=None)
-        extractor = FactExtractor(heart=heart, settings=settings, bus=None)
+        summarizer = EpisodeSummarizer(
+            heart=heart, brain=None, settings=settings,
+            bus=None, llm_client=api_client,
+        )
+        extractor = FactExtractor(
+            heart=heart, settings=settings,
+            bus=None, llm_client=api_client,
+        )
 
         # Cross-question episode dedup: keyed on session-content hash.
         seen_session_episode: dict[str, Any] = {}
@@ -290,13 +309,34 @@ async def _replay_sessions_into_scratch(
         for q_idx, q in enumerate(picked):
             qid = q.get("question_id", "")
             provenance[qid] = {}
-            sessions = (q.get("haystack_sessions") or [])[:max_sessions_per_question]
+            all_sessions = q.get("haystack_sessions") or []
             # Cleaned upstream (2026-04-26 onward): haystack_session_ids is a
             # parallel string-ID array; answer_session_ids references THESE
             # strings, NOT integer indices. Pre-cleaned upstream had no such
             # field — fall back to integer-index keying for back-compat.
             session_ids = q.get("haystack_session_ids") or []
-            for session_idx, session in enumerate(sessions):
+            answer_sids = set(q.get("answer_session_ids") or [])
+
+            # F051.5 hotfix: prioritize answer-bearing sessions when capping.
+            # Without this, --max-sessions-per-question=10 drops most
+            # answer-bearing sessions for questions with long haystacks
+            # (LongMemEval haystacks routinely have 30-50 sessions, and the
+            # answer can be in any of them). Result: empty gold_ids on most
+            # qrels, harness throws away the row.
+            answer_indices = [
+                i for i, sid in enumerate(session_ids)
+                if sid in answer_sids
+            ]
+            selected = list(answer_indices)
+            for i in range(len(all_sessions)):
+                if len(selected) >= max_sessions_per_question:
+                    break
+                if i not in selected:
+                    selected.append(i)
+            selected.sort()  # replay in original haystack order for transcript coherence
+            indexed_sessions = [(i, all_sessions[i]) for i in selected]
+
+            for session_idx, session in indexed_sessions:
                 # Per-session key for provenance lookup. Prefer the string ID
                 # when present (cleaned upstream); fall back to int index.
                 session_key = (
@@ -380,6 +420,11 @@ async def _replay_sessions_into_scratch(
                 await asyncio.sleep(inter_question_sleep_seconds)
         return stats, provenance
     finally:
+        if api_client is not None:
+            try:
+                await api_client.close()
+            except Exception:
+                logger.warning("F051.5: api_client.close raised", exc_info=True)
         await db.disconnect()
 
 
