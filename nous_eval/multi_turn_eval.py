@@ -47,12 +47,13 @@ from nous_eval.retrieval_runner import (
     _build_heart_for_eval,
     _settings_for_eval_db,
 )
+from nous_eval.run_history import persist_run_history
 
 logger = logging.getLogger(__name__)
 
 
 _LME_AGENT_ID = "nous-lme-corpus"  # F051.5 ingest agent_id
-_DEFAULT_LME_CACHE = Path.home() / ".cache" / "nous-eval" / "longmemeval" / "longmemeval_s.json"
+_DEFAULT_LME_CACHE = Path.home() / ".cache" / "nous-eval" / "longmemeval" / "longmemeval_s_cleaned.json"
 
 
 # ---------------------------------------------------------------------------
@@ -218,20 +219,49 @@ async def _run_one_config(
             brain = _build_brain_for_eval(eval_db, eval_scoped, heart._embeddings)
             dispatcher = ToolDispatcher()
 
-            # Inline a minimal recall_deep wrapper for the dispatcher. We
-            # don't call available_tools() because that drags in prod-only
-            # deps (anthropic client, tool registry, bus). The wrapper
-            # mirrors the production recall_deep closure: takes _session_id
-            # via dispatcher injection (F051.4 added the branch) and
-            # delegates to run_recall_pipeline. F055 reads _session_id off
-            # the args dict to compute residual_activations (when shipped).
+            # Per-session walk turn counter. Eval bypasses cognitive/layer.py:928
+            # which is the only site that bumps ConversationState.turn_count in
+            # production, so activator.current_turn() always reads 0 → decay
+            # function sees turns_since=-1 → returns 0.0 → activations always
+            # empty → F055 silently no-ops. Track turns locally instead.
+            walk_turns: dict[str, int] = {}
+
+            # Inline recall_deep wrapper for the dispatcher. Mirrors the
+            # production recall_deep at nous/api/tools.py:494-548 — takes
+            # _session_id via dispatcher injection (F051.4) and threads
+            # F055's compute_activations / record_surfaced when the
+            # ResidualActivator is wired (residual_activation_enabled=True).
+            # Eval AWAITS record_surfaced (vs prod's create_task) so the
+            # WM write completes before eval_db.dispose() in finally.
             async def _eval_recall_deep(
                 query: str,
                 limit: int = 10,
                 memory_types: list[str] | None = None,
                 _session_id: str | None = None,
             ) -> dict[str, Any]:
-                _ = _session_id  # consumed by F055 when implemented
+                residual_activations: dict | None = None
+                activator = getattr(heart, "_residual_activator", None)
+                f055_on = (
+                    getattr(eval_scoped, "residual_activation_enabled", False)
+                    and _session_id
+                    and activator is not None
+                )
+                current_turn = walk_turns.get(_session_id or "", 0) if f055_on else 0
+                if f055_on:
+                    try:
+                        residual_activations = await activator.compute_activations(
+                            eval_scoped.agent_id, _session_id, current_turn,
+                        )
+                        logger.info(
+                            "F055-eval: compute_activations sid=%s turn=%d n=%d",
+                            _session_id, current_turn,
+                            len(residual_activations) if residual_activations else 0,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "F055-eval: compute_activations raised sid=%s",
+                            _session_id, exc_info=True,
+                        )
                 try:
                     results, _stats = await run_recall_pipeline(
                         query=query,
@@ -240,9 +270,35 @@ async def _run_one_config(
                         settings=eval_scoped,
                         limit=limit,
                         memory_types=memory_types,
+                        residual_activations=residual_activations,
                     )
                 except Exception as exc:
                     return {"content": [{"type": "text", "text": f"recall error: {exc}"}]}
+
+                if f055_on and results:
+                    try:
+                        surfaced = [
+                            (r.id, r.type, float(r.score) if r.score is not None else 0.0)
+                            for r in results
+                        ]
+                        next_turn = current_turn + 1
+                        await activator.record_surfaced(
+                            agent_id=eval_scoped.agent_id,
+                            session_id=_session_id,
+                            current_turn=next_turn,
+                            surfaced=surfaced,
+                        )
+                        walk_turns[_session_id] = next_turn
+                        logger.info(
+                            "F055-eval: record_surfaced sid=%s turn=%d n=%d",
+                            _session_id, next_turn, len(surfaced),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "F055-eval: record_surfaced raised sid=%s",
+                            _session_id, exc_info=True,
+                        )
+
                 lines = [f"{r.id} ({r.type}, score={r.score:.3f})" for r in results]
                 return {"content": [{"type": "text", "text": "\n".join(lines) or "(no results)"}]}
 
@@ -289,6 +345,30 @@ async def _run_one_config(
                         )
 
                 # Final gold-question turn: bypass dispatcher for structured results.
+                # F055: must compute residual_activations here too — this is the
+                # SCORED retrieval, walks only build state. Without this the boost
+                # never reaches metrics.
+                gold_residuals: dict | None = None
+                gold_activator = getattr(heart, "_residual_activator", None)
+                if (
+                    getattr(eval_scoped, "residual_activation_enabled", False)
+                    and gold_activator is not None
+                ):
+                    try:
+                        gold_turn = walk_turns.get(session_id, 0)
+                        gold_residuals = await gold_activator.compute_activations(
+                            eval_scoped.agent_id, session_id, gold_turn,
+                        )
+                        logger.info(
+                            "F055-eval: GOLD compute_activations sid=%s turn=%d n=%d",
+                            session_id, gold_turn,
+                            len(gold_residuals) if gold_residuals else 0,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "F055-eval: GOLD compute_activations raised sid=%s",
+                            session_id, exc_info=True,
+                        )
                 try:
                     pipeline_results, _stats = await run_recall_pipeline(
                         query=qrel.query,
@@ -297,6 +377,7 @@ async def _run_one_config(
                         settings=eval_scoped,
                         limit=top_k,
                         memory_types=qrel.memory_types,
+                        residual_activations=gold_residuals,
                     )
                     pr = _build_qrel_result(qrel, qrel_index, pipeline_results, top_k)
                 except Exception as exc:
@@ -439,7 +520,72 @@ async def run_multi_turn_eval(
         / f"multi-turn-eval-{datetime.now(tz=UTC):%Y%m%d-%H%M%S}.md"
     )
     _write_report(results, out_path, len(qrels), max_turns)
+
+    # Phase 1 finish: persist multi-turn run to nous_system.eval_runs (eval DB).
+    # Same table the F051 retrieval harness writes to — regression script reads
+    # both kinds of rows and matches by ``configs`` + ``agent_id``.
+    try:
+        await persist_run_history(
+            eval_settings=eval_settings,
+            main_settings=main_settings_template,
+            git_sha=_git_sha_short(),
+            fixture_version=eval_settings.fixture_version,
+            configs_payload=[
+                {
+                    "name": r.config.name,
+                    "flags": r.config.flags,
+                    "description": r.config.description,
+                    "harness": "multi_turn_eval",  # disambiguate from retrieval rows
+                    "max_turns_per_haystack": max_turns,
+                }
+                for r in results
+            ],
+            metrics_payload={
+                r.config.name: {
+                    "metrics": _metrics_compact(r.overall),
+                    "per_question_type": {
+                        qtype: _metrics_compact(m)
+                        for qtype, m in r.per_question_type.items()
+                    },
+                    "duration_seconds": r.duration_seconds,
+                    "n_walk_calls": r.n_walk_calls,
+                }
+                for r in results
+            },
+            qrel_counts={"longmemeval": len(qrels)},
+            report_path=str(out_path),
+            notes=f"multi_turn_eval max_turns={max_turns} top_k={top_k}",
+        )
+    except Exception:
+        logger.exception("F051.4: persist_run_history failed (non-blocking)")
+
     return out_path
+
+
+def _metrics_compact(m: MetricsResult) -> dict[str, Any]:
+    """Mirror nous_eval/retrieval.py::_metrics_compact for eval_runs payload."""
+    return {
+        "mrr": m.mrr,
+        "p_at_1": m.p_at_1,
+        "p_at_5": m.p_at_5,
+        "p_at_10": m.p_at_10,
+        "r_at_1": m.r_at_1,
+        "r_at_5": m.r_at_5,
+        "r_at_10": m.r_at_10,
+        "ndcg_at_10": m.ndcg_at_10,
+        "n_qrels": m.n_qrels,
+    }
+
+
+def _git_sha_short() -> str:
+    """Resolve current git SHA; mirror retrieval.py::_resolve_git_sha behavior."""
+    import subprocess
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, timeout=2,
+        ).strip()
+    except Exception:
+        return "unknown"
 
 
 # ---------------------------------------------------------------------------

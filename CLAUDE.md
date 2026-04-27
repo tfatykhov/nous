@@ -125,7 +125,10 @@ nous/
 │   ├── ingest.py               # Quarterly prod-DB fixture refresh
 │   ├── ingest_longmemeval.py   # 20-Q stratified LongMemEval_S subset ingestion
 │   ├── probe_gen.py            # Auto-generate probes from INDEX.md + git log
-│   └── hand_labels_draft.py    # AI-drafted hand-label qrels
+│   ├── hand_labels_draft.py    # AI-drafted hand-label qrels
+│   ├── multi_turn_eval.py      # F051.4: walks LongMemEval haystacks via dispatcher; per-config metrics
+│   ├── run_history.py          # F051 Phase 1 finish (#365/#366/#367): persists eval_runs to EVAL DB
+│   └── regression.py           # `python -m nous_eval.regression` — compares latest run vs N-day-old baseline, exits non-zero on regression
 ├── tests/                      # 1750+ tests across 91 files
 └── docs/
     ├── research/               # Theory & design notes (001-016)

@@ -229,6 +229,35 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         },
         description="F055 ablation B: post-fusion boost only, no seed injection.",
     ),
+    # ------------------------------------------------------------------
+    # F055 diagnostic configs — answer "is F055 masked by CE rerank?"
+    # ------------------------------------------------------------------
+    "ce_off": RetrievalConfig(
+        name="ce_off",
+        flags={"cross_encoder_enabled": False},
+        description="Baseline with cross-encoder disabled — isolation control for f055_no_ce.",
+    ),
+    "f055_no_ce": RetrievalConfig(
+        name="f055_no_ce",
+        flags={
+            "residual_activation_enabled": True,
+            "cross_encoder_enabled": False,
+            "residual_decay_mode": "geometric",
+            "residual_decay_per_turn": 0.5,
+            "residual_boost_weight": 0.15,
+        },
+        description="F055 on, CE off — does F055 help when nothing downstream overrides it?",
+    ),
+    "f055_high_boost": RetrievalConfig(
+        name="f055_high_boost",
+        flags={
+            "residual_activation_enabled": True,
+            "residual_boost_weight": 0.5,
+            "residual_decay_mode": "geometric",
+            "residual_decay_per_turn": 0.5,
+        },
+        description="F055 on with boost=0.5 (vs default 0.15) — can bigger boost escape CE head-cut?",
+    ),
 }
 
 
@@ -668,28 +697,37 @@ async def _run_async(
     print(f"Wrote: {md_path}")
     print(f"Wrote: {json_path}")
 
-    # Persist run history (best-effort)
+    # Persist run history (best-effort) — uses shared helper that targets
+    # the EVAL DB (Phase 1 finish, 2026-04-27).
     if eval_settings.run_history_enabled and not args.no_history:
-        try:
-            await asyncio.wait_for(
-                _persist_run_history(
-                    eval_settings=eval_settings,
-                    main_settings=main_settings,
-                    run_results=run_results,
-                    git_sha=git_sha,
-                    fixture_version=fixture_version,
-                    report_path=str(md_path),
-                    notes=args.notes,
-                ),
-                timeout=eval_settings.run_history_insert_timeout_s,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "F051: run_history_persist_timed_out (%.1fs)",
-                eval_settings.run_history_insert_timeout_s,
-            )
-        except Exception:
-            logger.exception("F051: run_history_persist_failed")
+        from nous_eval.run_history import persist_run_history as _persist_shared
+
+        await _persist_shared(
+            eval_settings=eval_settings,
+            main_settings=main_settings,
+            git_sha=git_sha,
+            fixture_version=fixture_version,
+            configs_payload=[
+                {
+                    "name": r.config.name,
+                    "flags": r.config.flags,
+                    "description": r.config.description,
+                    "harness": "retrieval",
+                }
+                for r in run_results
+            ],
+            metrics_payload={
+                r.config.name: {
+                    "metrics": _metrics_compact(r),
+                    "duration_seconds": r.duration_seconds,
+                    "pipeline_stats_summary": r.pipeline_stats_summary,
+                }
+                for r in run_results
+            },
+            qrel_counts=_qrel_counts(run_results),
+            report_path=str(md_path),
+            notes=args.notes,
+        )
 
     if gate_decision is not None and not gate_decision.passed:
         # Non-zero exit so CI / shell pipelines can detect failed gates.
@@ -731,84 +769,6 @@ def _resolve_git_sha(eval_settings: EvalSettings) -> str:
         return proc.stdout.strip()
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return "unknown"
-
-
-async def _persist_run_history(
-    eval_settings: EvalSettings,
-    main_settings: Settings,
-    run_results: list["RunResult"],
-    git_sha: str,
-    fixture_version: str,
-    report_path: str,
-    notes: str,
-) -> None:
-    """Insert one row into ``nous_system.eval_runs`` on the main DB.
-
-    Best-effort: caller wraps this in ``asyncio.wait_for`` so it can never
-    block the harness for more than ``run_history_insert_timeout_s``.
-    """
-    from sqlalchemy import text
-
-    from nous.storage.database import Database
-
-    db = Database(main_settings)
-    try:
-        await db.connect()
-    except Exception as exc:
-        logger.warning("F051: main DB unreachable for run_history: %s", exc)
-        await db.engine.dispose()
-        return
-
-    try:
-        async with db.session() as session:
-            metrics_payload = {
-                r.config.name: {
-                    "metrics": _metrics_compact(r),
-                    "duration_seconds": r.duration_seconds,
-                    "pipeline_stats_summary": r.pipeline_stats_summary,
-                }
-                for r in run_results
-            }
-            qrel_counts = _qrel_counts(run_results)
-            configs_payload = [
-                {
-                    "name": r.config.name,
-                    "flags": r.config.flags,
-                    "description": r.config.description,
-                }
-                for r in run_results
-            ]
-            await session.execute(
-                text(
-                    """
-                    INSERT INTO nous_system.eval_runs (
-                        agent_id, git_sha, fixture_version, configs,
-                        metrics, qrel_counts, report_path, notes
-                    )
-                    VALUES (
-                        :agent_id, :git_sha, :fixture_version,
-                        CAST(:configs AS JSONB),
-                        CAST(:metrics AS JSONB),
-                        CAST(:qrel_counts AS JSONB),
-                        :report_path, :notes
-                    )
-                    """
-                ),
-                {
-                    "agent_id": eval_settings.agent_id,
-                    "git_sha": git_sha,
-                    "fixture_version": fixture_version,
-                    "configs": json.dumps(configs_payload),
-                    "metrics": json.dumps(metrics_payload),
-                    "qrel_counts": json.dumps(qrel_counts),
-                    "report_path": report_path,
-                    "notes": notes,
-                },
-            )
-            await session.commit()
-            logger.info("F051: run_history_persisted")
-    finally:
-        await db.engine.dispose()
 
 
 def _metrics_compact(run: "RunResult") -> dict:
