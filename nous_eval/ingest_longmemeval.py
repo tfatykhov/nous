@@ -143,7 +143,12 @@ def _download_if_missing(cache_dir: Path, url: str, expected_sha: str | None) ->
         try:
             import httpx
 
-            with httpx.Client(timeout=60) as c:
+            # Hugging Face hosts the dataset behind a CAS bridge that 302's to
+            # a presigned S3-compatible URL. Without follow_redirects=True
+            # httpx surfaces the 302 as an HTTPStatusError instead of fetching
+            # the actual file. Increased timeout to 600s because the LongMemEval
+            # corpus is ~265 MB.
+            with httpx.Client(timeout=600, follow_redirects=True) as c:
                 r = c.get(url)
                 r.raise_for_status()
                 target.write_bytes(r.content)
