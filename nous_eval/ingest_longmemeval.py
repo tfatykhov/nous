@@ -6,7 +6,7 @@ with 20 stratified chat-history-replayed episodes + extracted facts.
 
 Pipeline:
 
-1. Download ``longmemeval_data/longmemeval_s.json`` from the LongMemEval
+1. Download ``longmemeval_data/longmemeval_s_cleaned.json`` from the LongMemEval
    GitHub repo (cached at ``~/.cache/nous-eval/longmemeval/``). Skip if
    already present + hash-checked.
 2. Parse the file (list of ``{question_id, question_type, question,
@@ -41,13 +41,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 2026-04-26 update: upstream moved from GitHub raw to Hugging Face dataset
+# repo. The cleaned variant ("longmemeval_s_cleaned.json") supersedes the
+# original — same schema, sessions cleaned to remove answer-leakage. See
+# repo README: https://github.com/xiaowu0162/LongMemEval (data section).
 LONGMEMEVAL_URL = (
-    "https://raw.githubusercontent.com/xiaowu0162/LongMemEval/main/"
-    "longmemeval_data/longmemeval_s.json"
+    "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/"
+    "resolve/main/longmemeval_s_cleaned.json"
 )
-# SHA-256 of the upstream file as of 2026-04-20. Updated when upstream changes;
-# mismatch aborts the download (fail-closed).
-LONGMEMEVAL_SHA256 = ""  # populated in Phase 2 once the file is first downloaded
+# SHA-256 of the upstream file. Empty = skip verification (first download).
+# Updated when upstream changes; mismatch aborts the download (fail-closed).
+LONGMEMEVAL_SHA256 = ""
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "nous-eval" / "longmemeval"
 DEFAULT_N = 20
@@ -124,14 +128,14 @@ def _session_to_transcript(session: list | dict) -> str:
 
 
 def _download_if_missing(cache_dir: Path, url: str, expected_sha: str | None) -> Path:
-    """Fetch ``url`` to ``cache_dir/longmemeval_s.json`` once; return path.
+    """Fetch ``url`` to ``cache_dir/longmemeval_s_cleaned.json`` once; return path.
 
     Uses ``httpx`` if available (already a Nous dep), falls back to ``urllib``.
     When ``expected_sha`` is non-empty, abort on hash mismatch — prevents a
     silent upstream change from polluting the qrels set.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    target = cache_dir / "longmemeval_s.json"
+    target = cache_dir / "longmemeval_s_cleaned.json"
     if target.exists():
         logger.info("[eval.ingest_lme] cached %s", target)
     else:
@@ -282,7 +286,19 @@ async def _replay_sessions_into_scratch(
             qid = q.get("question_id", "")
             provenance[qid] = {}
             sessions = (q.get("haystack_sessions") or [])[:max_sessions_per_question]
+            # Cleaned upstream (2026-04-26 onward): haystack_session_ids is a
+            # parallel string-ID array; answer_session_ids references THESE
+            # strings, NOT integer indices. Pre-cleaned upstream had no such
+            # field — fall back to integer-index keying for back-compat.
+            session_ids = q.get("haystack_session_ids") or []
             for session_idx, session in enumerate(sessions):
+                # Per-session key for provenance lookup. Prefer the string ID
+                # when present (cleaned upstream); fall back to int index.
+                session_key = (
+                    session_ids[session_idx]
+                    if session_idx < len(session_ids)
+                    else session_idx
+                )
                 transcript = _session_to_transcript(session)
                 if not transcript:
                     logger.debug("F051.5: qid=%s session=%d empty transcript, skipping", qid, session_idx)
@@ -291,7 +307,7 @@ async def _replay_sessions_into_scratch(
 
                 # Reuse cached UUIDs when the same session appeared in a prior question.
                 if session_hash in seen_session_episode:
-                    provenance[qid][session_idx] = {
+                    provenance[qid][session_key] = {
                         "episode": [seen_session_episode[session_hash]],
                         "fact": list(seen_session_facts[session_hash]),
                     }
@@ -331,7 +347,7 @@ async def _replay_sessions_into_scratch(
                 # 5. Cache + provenance.
                 seen_session_episode[session_hash] = ep.id
                 seen_session_facts[session_hash] = list(fact_ids)
-                provenance[qid][session_idx] = {
+                provenance[qid][session_key] = {
                     "episode": [ep.id],
                     "fact": fact_ids,
                 }
@@ -388,16 +404,28 @@ def _write_qrels(
             qid = q.get("question_id", "")
             answer_sids = q.get("answer_session_ids") or []
             gold_ids: list[str] = []
+            qid_provenance = provenance.get(qid, {})
             for sid in answer_sids:
-                try:
-                    idx = int(sid)
-                except (TypeError, ValueError):
+                # Cleaned upstream uses string session IDs (e.g. "answer_280352e9");
+                # pre-cleaned upstream used 0-based integer indices. Try both.
+                ids_for_session = None
+                if sid in qid_provenance:
+                    ids_for_session = qid_provenance[sid]
+                else:
+                    try:
+                        idx = int(sid)
+                        if idx in qid_provenance:
+                            ids_for_session = qid_provenance[idx]
+                    except (TypeError, ValueError):
+                        pass
+                if ids_for_session is None:
                     logger.warning(
-                        "F051.5: qid=%s answer_session_id %r is not an int — skipping",
+                        "F051.5: qid=%s answer_session_id %r not found in "
+                        "provenance map (was the session capped by "
+                        "--max-sessions-per-question?) — skipping",
                         qid, sid,
                     )
                     continue
-                ids_for_session = provenance.get(qid, {}).get(idx, {})
                 gold_ids.extend(str(u) for u in ids_for_session.get("episode", []))
                 gold_ids.extend(str(u) for u in ids_for_session.get("fact", []))
             if not gold_ids:
@@ -492,7 +520,7 @@ async def run(config: IngestLMEConfig) -> LMEIngestStats:
             config.cache_dir, LONGMEMEVAL_URL, LONGMEMEVAL_SHA256 or None
         )
     else:
-        src = config.cache_dir / "longmemeval_s.json"
+        src = config.cache_dir / "longmemeval_s_cleaned.json"
 
     data = json.loads(src.read_text(encoding="utf-8"))
     if not isinstance(data, list):

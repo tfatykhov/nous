@@ -188,25 +188,47 @@ def test_write_qrels_uses_correct_source_value(tmp_path: Path) -> None:
     assert row["source"] == "longmemeval"
 
 
-def test_write_qrels_skips_non_int_answer_session_id(tmp_path: Path, caplog) -> None:
-    """answer_session_id 'abc' (TypeError) and None (TypeError) are skipped with WARN."""
+def test_write_qrels_handles_unmatched_answer_session_ids(tmp_path: Path, caplog) -> None:
+    """Unmatched answer_session_ids are skipped with WARN; matched ones contribute.
+
+    Cleaned upstream uses string IDs; pre-cleaned upstream used int indices.
+    Loader tries both — string lookup first, then int(sid) fallback. IDs that
+    match neither produce a "not found in provenance map" WARN.
+    """
     out = tmp_path / "qrels.jsonl"
     picked = [{
         "question_id": "q-bad",
         "question": "?",
         "question_type": "single-session-user",
-        "answer_session_ids": ["abc", None, 0],  # str-non-int + None + valid
+        "answer_session_ids": ["nonexistent_id", None, 0],  # unmatched + None + matched-as-int
     }]
     ep = uuid4()
     provenance = {"q-bad": {0: {"episode": [ep], "fact": []}}}
     with caplog.at_level(logging.WARNING):
         _write_qrels(picked, LMEIngestStats(), provenance, out)
     row = json.loads(out.read_text(encoding="utf-8").strip())
-    # Only the valid sid=0 contributes → 1 episode UUID
+    # Only sid=0 (matched as int index) contributes
     assert row["gold_ids"] == [str(ep)]
-    # WARN fired twice (once for "abc", once for None)
-    warns = [r for r in caplog.records if "is not an int" in r.getMessage()]
+    # WARN fired twice (once for "nonexistent_id", once for None)
+    warns = [r for r in caplog.records if "not found in provenance map" in r.getMessage()]
     assert len(warns) == 2
+
+
+def test_write_qrels_handles_string_session_ids(tmp_path: Path) -> None:
+    """Cleaned upstream: answer_session_ids are strings matching haystack_session_ids."""
+    out = tmp_path / "qrels.jsonl"
+    picked = [{
+        "question_id": "q-clean",
+        "question": "?",
+        "question_type": "single-session-user",
+        "answer_session_ids": ["answer_280352e9"],
+    }]
+    ep, fact = uuid4(), uuid4()
+    # Provenance keyed by string session ID (cleaned-upstream shape).
+    provenance = {"q-clean": {"answer_280352e9": {"episode": [ep], "fact": [fact]}}}
+    _write_qrels(picked, LMEIngestStats(), provenance, out)
+    row = json.loads(out.read_text(encoding="utf-8").strip())
+    assert set(row["gold_ids"]) == {str(ep), str(fact)}
 
 
 def test_write_qrels_skips_when_no_gold(tmp_path: Path, caplog) -> None:
@@ -349,7 +371,7 @@ def test_download_aborts_on_sha256_mismatch(tmp_path: Path) -> None:
     # Pre-populate cache with known-bad content
     cache = tmp_path / "cache"
     cache.mkdir()
-    (cache / "longmemeval_s.json").write_text('{"some": "content"}', encoding="utf-8")
+    (cache / "longmemeval_s_cleaned.json").write_text('{"some": "content"}', encoding="utf-8")
     correct_hash = hashlib.sha256(b'{"some": "content"}').hexdigest()
     wrong_hash = "0" * 64
 
