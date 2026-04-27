@@ -349,6 +349,25 @@ async def _build_heart_for_eval(
                 exc_info=True,
             )
 
+    # F055: wire ResidualActivator when residual_activation_enabled=True.
+    # Mirrors nous/main.py:132-140. Without this wiring,
+    # heart._residual_activator stays None and the f055_on config collapses
+    # to baseline silently (sibling-of-#354 silent-pipeline-mismatch).
+    if getattr(settings, "residual_activation_enabled", False):
+        try:
+            from nous.heart.residual_activation import ResidualActivator
+            heart.set_residual_activator(ResidualActivator(
+                settings=settings,
+                wm=heart.working_memory,
+                db=db,
+            ))
+            logger.info("F055: harness ResidualActivator wired for eval")
+        except Exception:
+            logger.warning(
+                "F055: harness ResidualActivator wiring failed; f055_on collapses to baseline",
+                exc_info=True,
+            )
+
     try:
         async with heart:
             yield heart
