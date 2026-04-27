@@ -300,6 +300,12 @@ async def _replay_sessions_into_scratch(
         extractor = FactExtractor(
             heart=heart, settings=settings,
             bus=None, llm_client=api_client,
+            # F051.5: disable the hybrid-search pre-check — RRF score is
+            # unreliable on a near-empty corpus (lone fact returns ≈1.0
+            # → trips dedup for every subsequent candidate). Heart.learn's
+            # native cosine > 0.95 dedup still runs. Without this flag,
+            # ingest #5 stored only 1 fact across 200 episodes.
+            dedup_via_search=False,
         )
 
         # Cross-question episode dedup: keyed on session-content hash.
