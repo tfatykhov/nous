@@ -397,6 +397,68 @@ class WorkingMemoryManager:
         return total_deleted
 
     # ------------------------------------------------------------------
+    # F055 — Cross-Turn Residual Activation helpers
+    # ------------------------------------------------------------------
+
+    async def list_raw_items(self, agent_id: str, session_id: str) -> list[dict]:
+        """F055: return raw JSONB ``items`` (pre-pydantic-parse).
+
+        ResidualActivator needs access to the F055-extension keys
+        (``activation``, ``last_surfaced_turn``) which are NOT in
+        ``WorkingMemoryItem`` Pydantic v1. This bypasses the parse so
+        those extra keys remain accessible. Returns ``[]`` on missing row.
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                select(WorkingMemory.items)
+                .where(WorkingMemory.agent_id == agent_id)
+                .where(WorkingMemory.session_id == session_id)
+            )
+            row = result.scalar_one_or_none()
+            return list(row) if row else []
+
+    async def upsert_residual_items(
+        self,
+        agent_id: str,
+        session_id: str,
+        items: list[dict],
+    ) -> None:
+        """F055: persist residual-activation entries into WorkingMemory.items.
+
+        Replaces the items list wholesale — caller composes the final list
+        (after rank-norm + top-K bounding). Uses an isolated DB session so
+        it can be safely fired as ``asyncio.create_task`` from recall_deep.
+
+        Creates the WorkingMemory row if missing (matches F049 lifecycle).
+        """
+        async with self.db.session() as session:
+            wm = await session.execute(
+                select(WorkingMemory)
+                .where(WorkingMemory.agent_id == agent_id)
+                .where(WorkingMemory.session_id == session_id)
+                .with_for_update()
+            )
+            existing = wm.scalars().first()
+            if existing is None:
+                # Create row — F055's record_surfaced may fire before any
+                # other WM write (cold session start).
+                from datetime import UTC, datetime
+                new_wm = WorkingMemory(
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    items=items,
+                    open_threads=[],
+                    current_task=None,
+                    current_frame=None,
+                    created_at=datetime.now(tz=UTC),
+                    updated_at=datetime.now(tz=UTC),
+                )
+                session.add(new_wm)
+            else:
+                existing.items = items
+            await session.commit()
+
+    # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 

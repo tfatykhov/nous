@@ -451,7 +451,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("learn_fact tool failed")
             return {"content": [{"type": "text", "text": f"Error learning fact: {e}"}]}
 
-    async def recall_deep(
+    async def recall_deep(  # noqa: C901
         query: str,
         limit: int = 10,
         memory_types: list[str] | None = None,
@@ -483,6 +483,32 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         try:
             search_types = memory_types or ["all"]
+
+            # F055: compute residual activations BEFORE recall (consumed
+            # inside Heart._recall via the threaded `residual_activations`
+            # kwarg). Skipped when feature flag off, no session_id, or
+            # no activator wired (test fixtures, smoke). Fail-open: any
+            # exception falls through to cold recall.
+            residual_activations: dict[UUID, float] = {}
+            current_turn = 0
+            if (
+                getattr(settings, "residual_activation_enabled", False)
+                and _session_id
+                and getattr(heart, "_residual_activator", None) is not None
+            ):
+                try:
+                    activator = heart._residual_activator
+                    current_turn = await activator.current_turn(brain.agent_id, _session_id)
+                    residual_activations = await activator.compute_activations(
+                        brain.agent_id, _session_id, current_turn,
+                    )
+                except Exception:
+                    logger.warning(
+                        "F055: compute_activations failed for %s/%s, continuing cold",
+                        brain.agent_id, _session_id, exc_info=True,
+                    )
+                    residual_activations = {}
+
             results, stats = await run_recall_pipeline(
                 query=query,
                 heart=heart,
@@ -490,8 +516,37 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 settings=settings,
                 limit=limit,
                 memory_types=memory_types,
+                residual_activations=residual_activations or None,  # F055
             )
             text = _format_pipeline_text(results, stats, search_types)
+
+            # F055: fire-and-forget record_surfaced so the request returns
+            # immediately. record_surfaced opens its OWN DB session inside
+            # the WorkingMemoryManager helper (spec §3 fix #2 — must NOT
+            # reuse the caller's AsyncSession across asyncio.create_task).
+            if (
+                results
+                and getattr(settings, "residual_activation_enabled", False)
+                and _session_id
+                and getattr(heart, "_residual_activator", None) is not None
+            ):
+                try:
+                    import asyncio
+                    surfaced = [
+                        (r.id, r.type, float(r.score) if r.score is not None else 0.0)
+                        for r in results
+                    ]
+                    asyncio.create_task(
+                        heart._residual_activator.record_surfaced(
+                            agent_id=brain.agent_id,
+                            session_id=_session_id,
+                            current_turn=current_turn + 1,  # this turn becomes turn N+1
+                            surfaced=surfaced,
+                        )
+                    )
+                except Exception:
+                    logger.warning("F055: failed to schedule record_surfaced", exc_info=True)
+
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
             logger.exception("recall_deep tool failed")

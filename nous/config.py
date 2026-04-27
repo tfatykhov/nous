@@ -549,6 +549,45 @@ class Settings(BaseSettings):
     actionability_backfill_on_startup: bool = True
     actionability_backfill_token_budget: int = 10_000  # rough Haiku daily cap
 
+    # F055 — Cross-Turn Residual Activation (spec docs/features/F055-...md)
+    # Default OFF until eval gate via F051.4 multi_turn_eval validates.
+    residual_activation_enabled: bool = Field(
+        default=False,
+        description="F055 master switch — enable session-scoped residual activation.",
+    )
+    residual_decay_mode: Literal["geometric", "power_law"] = Field(
+        default="geometric",
+        description="F055 — decay function: geometric (decay^t) or power_law (ACT-R style).",
+    )
+    residual_decay_per_turn: float = Field(
+        default=0.5, ge=0.0, le=1.0,
+        description="F055 — geometric decay base; activation drops by this factor per turn.",
+    )
+    residual_power_law_alpha: float = Field(
+        default=0.5, ge=0.0, le=2.0,
+        description="F055 — power-law decay exponent (ACT-R default 0.5).",
+    )
+    residual_activation_floor: float = Field(
+        default=0.05, ge=0.0, le=1.0,
+        description="F055 — drop activations below this floor (prunes long tail).",
+    )
+    residual_top_k_carried: int = Field(
+        default=20, ge=1,
+        description="F055 — max activations carried forward per session.",
+    )
+    residual_top_n_seeds: int = Field(
+        default=5, ge=0,
+        description="F055 — max residually-activated nodes added to F022 spreading seeds.",
+    )
+    residual_seed_weight: float = Field(
+        default=0.3, ge=0.0, le=1.0,
+        description="F055 — multiplier on activation when injecting into F022 seeds.",
+    )
+    residual_boost_weight: float = Field(
+        default=0.15, ge=0.0, le=1.0,
+        description="F055 — additive boost on RRF score (applied before F042 CE rerank).",
+    )
+
     # F050: Multi-query expansion via Haiku (spec §Config)
     query_expansion_enabled: bool = Field(
         default=False,
