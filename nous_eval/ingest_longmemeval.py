@@ -29,6 +29,7 @@ the EventBus disabled per ingest.py's `_settings_for_ingest` contract.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import logging
@@ -84,6 +85,12 @@ class IngestLMEConfig:
     skip_download: bool = False
     seed: int = 0
     max_sessions_per_question: int = 10  # F051.5: cost guardrail (devil P2)
+    # F051.5.x: paced batching. Default 0 = no sleep (matches original behavior).
+    # When >0, replay sleeps for this many seconds after every
+    # `inter_question_batch` questions complete, spreading Sonnet load and
+    # giving operators a clean break-point if they want to Ctrl-C between batches.
+    inter_question_sleep_seconds: float = 0.0
+    inter_question_batch: int = 5
 
 
 @dataclass
@@ -217,6 +224,8 @@ async def _replay_sessions_into_scratch(
     picked: list[dict[str, Any]],
     scratch_db_url: str,
     max_sessions_per_question: int = 10,
+    inter_question_sleep_seconds: float = 0.0,
+    inter_question_batch: int = 5,
 ) -> tuple[LMEIngestStats, dict[str, dict[int, dict[str, list]]]]:
     """F051.5 Phase 2: actually replay each haystack session into the scratch DB.
 
@@ -269,7 +278,7 @@ async def _replay_sessions_into_scratch(
         seen_session_episode: dict[str, Any] = {}
         seen_session_facts: dict[str, list] = {}
 
-        for q in picked:
+        for q_idx, q in enumerate(picked):
             qid = q.get("question_id", "")
             provenance[qid] = {}
             sessions = (q.get("haystack_sessions") or [])[:max_sessions_per_question]
@@ -328,6 +337,26 @@ async def _replay_sessions_into_scratch(
                 }
                 stats.n_sessions_replayed += 1
             stats.picked_question_ids.append(qid)
+
+            # F051.5.x: paced batching. After every `inter_question_batch`
+            # questions, sleep `inter_question_sleep_seconds` so OAT rate
+            # limits + operator interrupt windows have natural break-points.
+            # Skip the sleep on the very last question (no point waiting).
+            completed = q_idx + 1
+            if (
+                inter_question_sleep_seconds > 0
+                and inter_question_batch > 0
+                and completed < len(picked)
+                and completed % inter_question_batch == 0
+            ):
+                logger.info(
+                    "F051.5: completed %d/%d questions (n_sessions_replayed=%d, "
+                    "n_sessions_reused=%d), sleeping %.1fs before next batch",
+                    completed, len(picked),
+                    stats.n_sessions_replayed, stats.n_sessions_reused,
+                    inter_question_sleep_seconds,
+                )
+                await asyncio.sleep(inter_question_sleep_seconds)
         return stats, provenance
     finally:
         await db.disconnect()
@@ -430,6 +459,18 @@ def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
         help="F051.5 cost guardrail. LongMemEval haystacks can have 30-50 sessions; "
              "default 10 caps Sonnet spend at ~$15-25 for N=20.",
     )
+    p.add_argument(
+        "--inter-question-sleep-seconds", type=float, default=0.0,
+        help="F051.5: pause this many seconds after every "
+             "--inter-question-batch questions complete. Default 0 = no pacing "
+             "(matches original behavior). Set to e.g. 30 to spread Sonnet load "
+             "across natural break-points.",
+    )
+    p.add_argument(
+        "--inter-question-batch", type=int, default=5,
+        help="F051.5: questions per pacing batch (default 5; ~100 Sonnet calls "
+             "at default --max-sessions-per-question=10).",
+    )
     ns = p.parse_args(argv)
     return IngestLMEConfig(
         n=ns.n,
@@ -439,6 +480,8 @@ def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
         skip_download=ns.skip_download,
         seed=ns.seed,
         max_sessions_per_question=ns.max_sessions_per_question,
+        inter_question_sleep_seconds=ns.inter_question_sleep_seconds,
+        inter_question_batch=ns.inter_question_batch,
     )
 
 
@@ -459,7 +502,11 @@ async def run(config: IngestLMEConfig) -> LMEIngestStats:
     logger.info("F051.5: picked=%d types=%s", len(picked), counts)
 
     stats, provenance = await _replay_sessions_into_scratch(
-        picked, config.scratch_db_url, config.max_sessions_per_question,
+        picked,
+        config.scratch_db_url,
+        max_sessions_per_question=config.max_sessions_per_question,
+        inter_question_sleep_seconds=config.inter_question_sleep_seconds,
+        inter_question_batch=config.inter_question_batch,
     )
     stats.per_type_counts = counts
     _write_qrels(picked, stats, provenance, config.out_qrels)
