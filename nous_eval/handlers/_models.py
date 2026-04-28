@@ -44,6 +44,49 @@ class DedupPair(BaseModel):
     reviewed_by: str | None = None
 
 
+class SummaryRow(BaseModel):
+    """One row in `tests/fixtures/handlers/summary_transcripts.jsonl`.
+
+    Per F056 spec §D: 80 transcripts (raised from N=20 in v1 — Wilson 95%
+    CI for baseline 0.85 at N=20 is ~30pp wide; the 5pp gate would either
+    thrash with false positives or never fire). At N=80 paired comparison
+    in regression.py tightens effective sensitivity to comfortably catch
+    5pp drift.
+
+    Each row: a transcript (>= 50 chars per `episode_summarizer.py:130`'s
+    short-transcript skip) + 3-7 gold key-points the produced summary
+    MUST surface + gold themes.
+
+    Mixed provenance per spec §"Closed open questions" #2: AI-drafted
+    gold key-points reviewed by Tim → reviewed_by="tim+ai-draft" (gate-
+    eligible) or reviewed_by="tim" (hand-curated, gate-eligible). AI-only
+    rows have reviewed_by=None and are skipped from the gating run unless
+    `--include-unreviewed` is passed.
+    """
+
+    row_id: str = Field(min_length=1)
+    transcript: str = Field(
+        min_length=50,
+        description=">= 50 chars or summarize_episode short-transcript skip "
+                    "(episode_summarizer.py:130) returns None.",
+    )
+    gold_key_points: list[str] = Field(
+        min_length=1,
+        description="3-7 short factual claims the produced summary must surface.",
+    )
+    gold_summary_themes: list[str] = Field(
+        default_factory=list,
+        description="Higher-level themes (informational; not gated).",
+    )
+    question_type: str | None = Field(
+        default=None,
+        description="LongMemEval question_type for per-type breakdown "
+                    "(knowledge-update, multi-session, single-session-{user,"
+                    "assistant,preference}, temporal-reasoning).",
+    )
+    reviewed_by: str | None = None
+
+
 class BackfillEntity(BaseModel):
     """One row in `tests/fixtures/handlers/backfill_corpus.jsonl`.
 
