@@ -24,6 +24,7 @@ from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, GraphEdge
 
 if TYPE_CHECKING:
+    from nous.config import Settings
     from nous.handlers import LLMClient
     from nous.heart.actionability import ActionabilityClassifier
 

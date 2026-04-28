@@ -173,6 +173,23 @@ class TestSettingsOverrides:
         assert overridden.agent_id == _AGENT_ID
 
 
+class TestSummaryPromptFaithfulnessClause:
+    """F056 #379 fix regression: prompt must contain the FAITHFULNESS RULE.
+
+    The fix landed via prompt edit; if a future refactor accidentally drops
+    or rewrites the clause, summary_quality regresses from 0.619 back toward
+    0.303. This test catches the regression at test time.
+    """
+
+    def test_faithfulness_rule_present(self):
+        from nous.handlers.episode_summarizer import _SUMMARY_PROMPT
+        assert "FAITHFULNESS RULE" in _SUMMARY_PROMPT
+        # The clause-specific guidance words that drive the +631% lift on
+        # single-session-assistant transcripts:
+        assert "directly supported by the transcript" in _SUMMARY_PROMPT
+        assert "do not invent" in _SUMMARY_PROMPT.lower()
+
+
 # ---------------------------------------------------------------------------
 # Constructor signature regression (F056 PR #4 v2 review caught this)
 # ---------------------------------------------------------------------------

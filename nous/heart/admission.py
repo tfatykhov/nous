@@ -44,6 +44,32 @@ DEFAULT_THRESHOLD = 0.55
 # Exponential decay: λ = 0.01/hour → half-life ≈ 69 hours (~3 days)
 RECENCY_DECAY_LAMBDA = 0.01
 
+# F056 #376: confidence cap when source_text is absent AND source is not in
+# the known-handler list (`SOURCE_PENALTIES` below). Prior to this constant
+# being introduced, `_score_confidence` returned `fact_input.confidence`
+# unchanged — defaulting to 1.0 — which let ungrounded vague facts slip
+# through admission with max confidence. F056 admission smoke measured
+# 32% FP rate from this single root cause.
+UNGROUNDED_CONFIDENCE_FLOOR = 0.3
+
+# F056 #376: per-source mild penalties for known handlers that produce
+# facts with implicit grounding (no transcript source_text needed because
+# the handler itself audits its inputs). Module-level so external callers
+# can extend without subclassing AdmissionController.
+SOURCE_PENALTIES: dict[str, float] = {
+    "knowledge_extractor": 0.10,
+    "episode_summarizer": 0.05,
+    "sleep_reflection": 0.15,
+    "compaction_extraction": 0.10,
+    # F039 correction-learning paths — surfaced by PR #380 architect review
+    # as previously-unknown-source production callers that the v1 fix would
+    # have silently capped at the 0.3 floor. These ARE intentional grounded
+    # signals (LLM introspection during active conversation); apply the
+    # mild-penalty pattern instead so the composite score doesn't tank.
+    "correction_extraction": 0.10,
+    "inline_correction": 0.10,
+}
+
 
 @dataclass
 class AdmissionResult:
@@ -229,31 +255,25 @@ class AdmissionController:
         """Hallucination grounding via ROUGE-L, with source-penalty fallback.
 
         F056 #376 fix: when source_text is absent AND source is not in the
-        known-handler list, the previous behavior returned `fact_input.confidence`
-        (default 1.0) unchanged — meaning ungrounded facts from unknown sources
-        got max confidence. The F056 admission smoke showed this caused 32%
-        false-positive admit rate on vague rejects. Now caps unknown-ungrounded
-        paths at `_UNGROUNDED_FLOOR` (0.3) to penalize undemonstrated grounding.
+        `SOURCE_PENALTIES` known-handler list, the previous behavior returned
+        `fact_input.confidence` (default 1.0) unchanged — meaning ungrounded
+        facts from unknown sources got max confidence. The F056 admission
+        smoke showed this caused 32% false-positive admit rate on vague
+        rejects. Now caps unknown-ungrounded paths at
+        `UNGROUNDED_CONFIDENCE_FLOOR` (0.3) to penalize undemonstrated grounding.
         """
         if source_text:
             return self._rouge_l_score(fact_input.content, source_text)
 
-        source_penalties = {
-            "knowledge_extractor": 0.10,
-            "episode_summarizer": 0.05,
-            "sleep_reflection": 0.15,
-            "compaction_extraction": 0.10,
-        }
-        if fact_input.source in source_penalties:
+        if fact_input.source in SOURCE_PENALTIES:
             # Known handler with implicit grounding — apply mild penalty to
             # declared confidence (preserves pre-fix behavior for these paths).
             base = fact_input.confidence
-            return max(0.0, min(1.0, base - source_penalties[fact_input.source]))
+            return max(0.0, min(1.0, base - SOURCE_PENALTIES[fact_input.source]))
 
         # Unknown source + no source_text = cannot demonstrate grounding.
-        # Cap at 0.3 (heavier penalty than any per-source mild penalty).
-        _UNGROUNDED_FLOOR = 0.3
-        return min(_UNGROUNDED_FLOOR, fact_input.confidence)
+        # Cap at the module-level floor (heavier than any per-source penalty).
+        return min(UNGROUNDED_CONFIDENCE_FLOOR, fact_input.confidence)
 
     # ------------------------------------------------------------------
     # Utility scoring

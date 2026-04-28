@@ -361,7 +361,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `30` | Half-life in days for staleness decay |
 | `NOUS_TRANSCRIPT_MAX_CHARS` | `16000` | Max chars for episode transcript truncation before summarization |
-| `NOUS_FACT_DEDUP_THRESHOLD` | `0.92` | Hybrid search score threshold for fact extractor dedup |
+| `NOUS_FACT_DEDUP_THRESHOLD` | `0.92` | Hybrid search score threshold for fact extractor dedup (Leg 1, RRF pre-check at fact_extractor.py:243) |
+| `NOUS_FACT_NATIVE_COSINE_THRESHOLD` | `0.95` | Native cosine threshold for Heart.learn dedup (Leg 2, facts.py:691). F056 #377 made this env-tunable; the F056 dedup eval found 0.80 lifts combined F1 from 0.40 → 0.76 on the smoke fixture. Default kept 0.95 for backwards-compat. |
 | `NOUS_RRF_K` | `60` | RRF smoothing constant for hybrid search rank fusion |
 | `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
 | `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |

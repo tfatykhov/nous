@@ -238,6 +238,22 @@ class TestConfidence:
         score = ctrl._score_confidence(fact, None)
         assert score == pytest.approx(0.10, abs=0.01)
 
+    def test_correction_extraction_uses_known_handler_path(self):
+        """F039 correction-learning sources must apply the mild per-source penalty,
+        NOT the 0.3 ungrounded floor (PR #380 architect-review finding)."""
+        ctrl = _controller()
+        # confidence=0.7 (F039 default) → penalty 0.10 → 0.60 (NOT the 0.3 floor)
+        fact = _fact(source="correction_extraction", confidence=0.7)
+        score = ctrl._score_confidence(fact, None)
+        assert score == pytest.approx(0.60, abs=0.01)
+
+    def test_inline_correction_uses_known_handler_path(self):
+        ctrl = _controller()
+        fact = _fact(source="inline_correction", confidence=0.8)
+        score = ctrl._score_confidence(fact, None)
+        # 0.8 - 0.10 = 0.70
+        assert score == pytest.approx(0.70, abs=0.01)
+
 
 # ---------------------------------------------------------------------------
 # Utility — Heuristic
