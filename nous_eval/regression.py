@@ -93,13 +93,18 @@ def _primary_metric_for(harness: str) -> str:
 
 
 def _validate_primary_metric(value: str, harness: str | None) -> str:
-    """Resolve `--primary-metric` value, errors clearly on unknown metric.
+    """Resolve `--primary-metric` value, returns error string on unknown metric.
+
+    Returns the resolved metric string on success. Raises `ValueError` with
+    a user-facing message on failure — caller is responsible for translating
+    to a clean CLI exit (matches the `retrieval.py:372-377` pattern, where
+    argparse errors are rendered via `print(..., file=sys.stderr); return 2`).
 
     `value="auto"` → return registry default for `harness`.
     `value` in `_ALL_REPORTED_METRICS_BY_HARNESS[harness]` → return as-is.
     `value` valid for SOME harness but not the requested one → still accept
         (multi-harness reports may need to compare across harness types).
-    `value` not in any registry → raise.
+    `value` not in any registry → raise `ValueError`.
 
     `harness=None` (multi-harness run) → accept any value present in at least
     one harness's reported metrics.
@@ -115,9 +120,27 @@ def _validate_primary_metric(value: str, harness: str | None) -> str:
     for tup in _ALL_REPORTED_METRICS_BY_HARNESS.values():
         all_known.update(tup)
     if value not in all_known:
-        raise argparse.ArgumentTypeError(
+        raise ValueError(
             f"--primary-metric={value!r} is not a known metric. "
             f"Known: {sorted(all_known)}"
+        )
+    return value
+
+
+def _validate_harness(value: str | None) -> str | None:
+    """Validate --harness against the registry, raising on typos.
+
+    Without this guard a typo like `--harness adminssion` parses cleanly,
+    matches no rows in `_fetch_rows`, and exits 0 with "No comparable runs
+    found" — silently passing weekly cron forever. Raises `ValueError` on
+    unknown value; caller translates to a clean CLI exit.
+    """
+    if value is None:
+        return None
+    if value not in _PRIMARY_METRIC_BY_HARNESS:
+        raise ValueError(
+            f"--harness={value!r} is not a known harness. "
+            f"Known: {sorted(_PRIMARY_METRIC_BY_HARNESS)}"
         )
     return value
 
@@ -385,8 +408,17 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     args = p.parse_args(argv)
 
-    # F056: post-parse validation since --primary-metric depends on --harness.
-    args.primary_metric = _validate_primary_metric(args.primary_metric, args.harness)
+    # F056: post-parse validation. --primary-metric depends on --harness so
+    # cannot use argparse's `choices=`. Errors render via project-conventional
+    # `print(..., file=sys.stderr); sys.exit(2)` pattern (matches
+    # `nous_eval/retrieval.py:372-377`) — argparse.ArgumentTypeError only
+    # works inside `type=` callables, not post-parse, so we use ValueError
+    # + parser.error() to get clean output.
+    try:
+        args.harness = _validate_harness(args.harness)
+        args.primary_metric = _validate_primary_metric(args.primary_metric, args.harness)
+    except ValueError as exc:
+        p.error(str(exc))  # exits 2 with friendly "prog: error: ..." prefix
     return args
 
 

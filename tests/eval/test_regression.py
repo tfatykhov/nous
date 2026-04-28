@@ -1,7 +1,6 @@
 """F056 PR #0: tests for nous_eval/regression.py per-harness extensibility."""
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,9 +12,11 @@ from nous_eval.regression import (
     _Comparison,
     _compare_bucket,
     _format_report,
+    _parse_args,
     _primary_metric_for,
     _reported_metrics_for,
     _RunRow,
+    _validate_harness,
     _validate_primary_metric,
 )
 
@@ -78,8 +79,42 @@ class TestValidatePrimaryMetric:
         assert _validate_primary_metric("mrr", "admission") == "mrr"
 
     def test_unknown_metric_raises(self):
-        with pytest.raises(argparse.ArgumentTypeError):
+        # F056 PR #0 fix: ValueError (was ArgumentTypeError, but that only
+        # renders cleanly when raised from a `type=` callable; we raise post-
+        # parse and the parser.error() call translates to a clean CLI exit).
+        with pytest.raises(ValueError, match="not_a_real_metric"):
             _validate_primary_metric("not_a_real_metric", "admission")
+
+
+class TestValidateHarness:
+    """F056 PR #0: --harness must reject typos.
+
+    Without validation, a typo like `--harness adminssion` parses cleanly,
+    matches no rows, exits 0 with "no comparable runs found" — silently
+    passing weekly cron forever. Devil's advocate review of PR #371 caught
+    this.
+    """
+
+    def test_known_harness_accepted(self):
+        for h in _PRIMARY_METRIC_BY_HARNESS:
+            assert _validate_harness(h) == h
+
+    def test_none_returns_none(self):
+        assert _validate_harness(None) is None
+
+    def test_typo_raises_with_helpful_message(self):
+        with pytest.raises(ValueError, match="adminssion"):
+            _validate_harness("adminssion")
+
+    def test_parse_args_translates_typo_to_clean_exit(self, capsys):
+        # parser.error() should give "prog: error: ..." and SystemExit(2),
+        # NOT a Python traceback (was the prior ArgumentTypeError bug).
+        with pytest.raises(SystemExit) as excinfo:
+            _parse_args(["--harness", "adminssion"])
+        assert excinfo.value.code == 2
+        captured = capsys.readouterr()
+        assert "adminssion" in captured.err
+        assert "Known:" in captured.err
 
 
 # ---------------------------------------------------------------------------
