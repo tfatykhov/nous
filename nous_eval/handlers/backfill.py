@@ -57,6 +57,17 @@ _HANDLER_NAME = "backfill"
 _DEFAULT_FIXTURE = Path("tests/fixtures/handlers/backfill_corpus.jsonl")
 _LLM_JUDGE_SAMPLE_N = 20
 _LLM_JUDGE_SEED = 42  # Deterministic per F056 spec §"Determinism"
+# Match summary handler — Haiku is plenty for "yes|no|borderline" verdicts
+# and ~5x faster + cheaper than the Sonnet default in main_settings.
+_DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _add_judge_model_arg(parser) -> None:
+    """Extra CLI flag: --judge-model overrides the LLM-judge model."""
+    parser.add_argument(
+        "--judge-model", default=_DEFAULT_JUDGE_MODEL,
+        help=f"Anthropic model for LLM-judge calls (default {_DEFAULT_JUDGE_MODEL}).",
+    )
 
 
 def _settings_with_backfill_overrides(base: Settings) -> Settings:
@@ -99,9 +110,11 @@ async def _seed_facts(
         if ent.entity_type != "fact":
             skipped_types[ent.entity_type] = skipped_types.get(ent.entity_type, 0) + 1
             continue
+        # Heart.learn doesn't expose check_contradictions (FactManager-
+        # level only); subject=None on FactInput makes the contradiction
+        # check at facts.py:407 a no-op without needing the kwarg.
         result = await heart.learn(
             FactInput(content=ent.content, source="backfill_eval"),
-            check_contradictions=False,
         )
         if isinstance(result, FactRejected):
             logger.warning(
@@ -193,6 +206,7 @@ async def _judge_edge(
         "model": model,
         "max_tokens": 16,
         "temperature": 0,
+        "system": "",  # SdkAnthropicClient requires this key (anthropic_client.py:1014)
         "messages": [{"role": "user", "content": prompt}],
     }
     try:
@@ -375,8 +389,9 @@ async def _run_backfill_eval(
                 if src is None or tgt is None:
                     judgments.append("borderline")
                     continue
+                judge_model = getattr(args, "judge_model", _DEFAULT_JUDGE_MODEL)
                 verdict = await _judge_edge(
-                    llm_client, main_settings.background_model,
+                    llm_client, judge_model,
                     src, tgt, edge["relation"],
                 )
                 judgments.append(verdict)
@@ -436,7 +451,7 @@ async def _run_backfill_eval(
         fixture_size=len(entities),
         handler_specific_notes=(
             f"sample_n={_LLM_JUDGE_SAMPLE_N}, sample_seed={_LLM_JUDGE_SEED}, "
-            f"judge_model={main_settings.background_model}"
+            f"judge_model={getattr(args, 'judge_model', _DEFAULT_JUDGE_MODEL)}"
         ),
     )
 
@@ -446,6 +461,7 @@ def main(argv: list[str] | None = None) -> int:
         _HANDLER_NAME,
         _run_backfill_eval,
         default_threshold=0.10,  # 10pp per F056 spec §C
+        extra_args_fn=_add_judge_model_arg,
         argv=argv,
     )
 
