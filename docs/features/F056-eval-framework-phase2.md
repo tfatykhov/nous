@@ -11,6 +11,7 @@
 - v1 (2026-04-27): initial draft, surfaced via PR #370
 - v2 (2026-04-28): amended after 3-agent review (architect / devil / python-pro). All P1 entry-point names, regression-CLI extensibility, LLM determinism, tear-down ordering, and cost numbers verified against the actual code.
 - v3 (2026-04-28): amended after second 3-agent review. Fixed: GraphDensifier missing `GraphLinker` constructor arg + wrong arg order; regression.py PR #0 plan missed `_fetch_rows` + `_format_report` rewrites; dedup Leg 2 used non-existent `Heart.learn(dedup_via_search=)` kwarg; `AnthropicClient.aclose()` is `close()`; LLM-client lifecycle leaks injected mocks; `temperature=0` is `payload["temperature"]=0`, not a kwarg; advisory-lock placement contradicted post-disposal TRUNCATE; lock-key needs `[:4] + % 2**31` truncation; Episode seeding needs explicit NOT-NULL columns.
+- v4 (2026-04-28): amended after third 3-agent review. Fixed: PR #0 missed `--primary-metric` argparse `choices=` (4th call site at `regression.py:263`); `confusion_matrix` was listed as persisted in admission §A but absent from `_ALL_REPORTED_METRICS_BY_HARNESS` registry — clarified it lives as a nested JSONB sub-key, not a delta-table metric.
 
 ---
 
@@ -79,7 +80,9 @@ Three call sites in `regression.py` need updating; spec v2 missed two of them:
 
 4. **`--harness` `choices=`** replaced with free-form `str` (validated as non-empty; existing rows define the valid set).
 
-5. **Backwards-compat for legacy rows lacking `harness` key** (PR #368 added it; older rows would default to "retrieval"). `_fetch_rows` defaults `harness="retrieval"` when the configs row's harness key is missing — preserves current behavior for old rows.
+5. **`--primary-metric` `choices=` (line 263)** — fourth call site, missed in v3's enumeration. Today: `choices=sorted(_TRACKED_METRICS.keys())` rejects any handler-metric value at argparse time (`argument --primary-metric: invalid choice: 'admission_f1' (choose from mrr, ndcg_at_10, p_at_1, r_at_10)`). Fix: replace `choices=` with free-form `str`; default to `"auto"` (use `_PRIMARY_METRIC_BY_HARNESS[harness]`). Add a `_validate_primary_metric(value, harness)` helper that errors clearly when an unknown metric is requested for a known harness.
+
+6. **Backwards-compat for legacy rows lacking `harness` key** (PR #368 added it; older rows would default to "retrieval"). `_fetch_rows` defaults `harness="retrieval"` when the configs row's harness key is missing — preserves current behavior for old rows.
 
 The full registries (no `...` placeholders):
 
@@ -184,9 +187,9 @@ The `async with _build_heart_for_eval` exit releases all heart-held connections 
 
 **Metrics (all persisted to `eval_runs`):**
 - `admission_f1` (primary, gated)
-- `admission_precision` (informational)
-- `admission_recall` (informational)
-- `confusion_matrix: {tp, fp, tn, fn}` (informational, supports debugging)
+- `admission_precision` (informational, surfaced in delta table)
+- `admission_recall` (informational, surfaced in delta table)
+- `confusion_matrix: {tp, fp, tn, fn}` (informational sub-payload — stored as nested JSONB inside `metrics_payload[<config_name>]["metrics"]["confusion_matrix"]`, NOT a top-level metric. Excluded from `_ALL_REPORTED_METRICS_BY_HARNESS["admission"]` because it's a struct, not a scalar; `regression.py` delta tables only handle scalars. Inspect via raw `eval_runs` queries when debugging.)
 
 **Gating threshold:** `admission_f1` drop > 5pp → regression.
 
@@ -433,6 +436,11 @@ v2 of this spec amends the following from v1, all empirically verified:
 - **Closed open questions 1-3** with rationale.
 - **Reused F053 `density_eval.py`** instead of re-implementing.
 - **Added `_cli_base.py`, `_jsonl.py`, `_models.py`** shared helpers (~80 LOC saved across 4 handlers; prevents drift like F051.4 dropping `--log-level`).
+
+### v4 amendments (2026-04-28, after third 3-agent review)
+
+- **`--primary-metric` `choices=` was a missed PR #0 call site** (architect P1): `regression.py:263` hardcodes `choices=sorted(_TRACKED_METRICS.keys())`, so any handler metric value would argparse-fail at the CLI before reaching the registry. PR #0 now lists 4 call sites, not 3. Added `_validate_primary_metric` helper to error clearly on unknown metric names.
+- **`confusion_matrix` registry mismatch** (architect P2): admission §A listed it as persisted but the registry tuple omitted it — silent drop in delta tables. Clarified that `confusion_matrix` is a struct sub-payload (nested JSONB), explicitly NOT a scalar metric, and excluded from `_ALL_REPORTED_METRICS_BY_HARNESS["admission"]` by design. Inspect via raw `eval_runs` queries when debugging.
 
 ### v3 amendments (2026-04-28, after second 3-agent review)
 
