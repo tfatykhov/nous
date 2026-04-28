@@ -104,7 +104,10 @@ class Heart:
 
         # Initialize managers
         self.episodes = EpisodeManager(database, embedding_provider, settings.agent_id)
-        self.facts = FactManager(database, embedding_provider, settings.agent_id, admission_controller)
+        self.facts = FactManager(
+            database, embedding_provider, settings.agent_id, admission_controller,
+            settings=settings,  # F056 #377: enables fact_native_cosine_threshold tuning
+        )
         self.procedures = ProcedureManager(
             database,
             embedding_provider,

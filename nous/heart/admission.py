@@ -226,19 +226,34 @@ class AdmissionController:
         return max(0.0, min(1.0, 1.0 - max_existing_similarity))
 
     def _score_confidence(self, fact_input: FactInput, source_text: str | None) -> float:
-        """Hallucination grounding via ROUGE-L, with source-penalty fallback."""
+        """Hallucination grounding via ROUGE-L, with source-penalty fallback.
+
+        F056 #376 fix: when source_text is absent AND source is not in the
+        known-handler list, the previous behavior returned `fact_input.confidence`
+        (default 1.0) unchanged — meaning ungrounded facts from unknown sources
+        got max confidence. The F056 admission smoke showed this caused 32%
+        false-positive admit rate on vague rejects. Now caps unknown-ungrounded
+        paths at `_UNGROUNDED_FLOOR` (0.3) to penalize undemonstrated grounding.
+        """
         if source_text:
             return self._rouge_l_score(fact_input.content, source_text)
 
-        base = fact_input.confidence
         source_penalties = {
             "knowledge_extractor": 0.10,
             "episode_summarizer": 0.05,
             "sleep_reflection": 0.15,
             "compaction_extraction": 0.10,
         }
-        penalty = source_penalties.get(fact_input.source or "", 0.0)
-        return max(0.0, min(1.0, base - penalty))
+        if fact_input.source in source_penalties:
+            # Known handler with implicit grounding — apply mild penalty to
+            # declared confidence (preserves pre-fix behavior for these paths).
+            base = fact_input.confidence
+            return max(0.0, min(1.0, base - source_penalties[fact_input.source]))
+
+        # Unknown source + no source_text = cannot demonstrate grounding.
+        # Cap at 0.3 (heavier penalty than any per-source mild penalty).
+        _UNGROUNDED_FLOOR = 0.3
+        return min(_UNGROUNDED_FLOOR, fact_input.confidence)
 
     # ------------------------------------------------------------------
     # Utility scoring

@@ -34,13 +34,15 @@ Transcript:
 
 {decision_context}
 
+CRITICAL FAITHFULNESS RULE (F056 #379): Only include claims directly supported by the transcript above. Do NOT invent user motivation, prior session context, or success criteria that are not literally in the transcript. If the transcript is primarily an assistant action (e.g. "I sent X", "I booked Y", "I added a reminder"), summarize what was DONE — do not speculate about why the user wanted it.
+
 Return ONLY valid JSON (no markdown, no explanation):
 {{
   "title": "<5-10 word descriptive title focusing on WHAT WAS ACCOMPLISHED>",
-  "summary": "<100-150 word prose summary emphasizing decisions made, problems solved, and outcomes>",
+  "summary": "<100-150 word prose summary. Faithful to the transcript only. For assistant-action transcripts, describe the action(s) the assistant took.>",
   "key_points": [
-    "<lesson or reusable knowledge, not just event description>",
-    "<pattern or insight that would help in similar future situations>"
+    "<lesson or reusable knowledge that IS supported by the transcript — NOT speculation>",
+    "<pattern or insight that would help in similar future situations, only if it appears in the transcript>"
   ],
   "outcome": "<resolved|partial|unresolved|informational>",
   "outcome_rationale": "<1 sentence explaining why this outcome classification>",

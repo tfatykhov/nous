@@ -216,12 +216,27 @@ class TestConfidence:
         score = ctrl._score_confidence(fact, None)
         assert score == pytest.approx(0.65, abs=0.01)  # 0.8 - 0.15
 
-    def test_no_source_text_no_penalty(self):
-        """Unknown source without source text -> use raw confidence."""
+    def test_no_source_text_unknown_source_caps_at_ungrounded_floor(self):
+        """F056 #376 fix: unknown source + no source_text caps confidence at 0.3.
+
+        Previous behavior returned `fact_input.confidence` (default 1.0)
+        unchanged, which let ungrounded vague facts slip through admission
+        with high confidence. F056 admission smoke showed 32% FP rate caused
+        by this. New behavior: cap at _UNGROUNDED_FLOOR=0.3 so undemonstrated
+        grounding can't fake confidence.
+        """
         ctrl = _controller()
+        # confidence=0.8 input but no source_text + unknown source → capped at 0.3
         fact = _fact(source="some_other_source", confidence=0.8)
         score = ctrl._score_confidence(fact, None)
-        assert score == pytest.approx(0.80, abs=0.01)
+        assert score == pytest.approx(0.30, abs=0.01)
+
+    def test_no_source_text_low_confidence_unchanged(self):
+        """Cap is min(0.3, confidence) — already-low confidence passes through."""
+        ctrl = _controller()
+        fact = _fact(source="some_other_source", confidence=0.1)
+        score = ctrl._score_confidence(fact, None)
+        assert score == pytest.approx(0.10, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
