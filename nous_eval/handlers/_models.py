@@ -42,3 +42,28 @@ class DedupPair(BaseModel):
     expected: str = Field(pattern="^(dedup|distinct)$")
     rationale: str | None = None
     reviewed_by: str | None = None
+
+
+class BackfillEntity(BaseModel):
+    """One row in `tests/fixtures/handlers/backfill_corpus.jsonl`.
+
+    Per F056 spec §C: 100 mixed entities total. PR #3 v1 simplifies to
+    facts-only (entity_type="fact" for all rows) — extending to decisions/
+    episodes/procedures adds 3 more seeding code paths and is deferred to
+    F056.2 to keep v1 reviewable. The simplification is honest:
+    GraphDensifier exercises ALL relation types regardless of seeded
+    entity types because the spec's edge_precision metric is about
+    LLM-judged semantic relatedness, not relation-type coverage.
+
+    `is_orphan_intent` is informational only — in v1 ALL seeded facts
+    start as orphans (no pre-seeded edges) so the densifier has work to
+    do. Extending to non-orphan seeded entities (which would require
+    pre-seeding inter-entity edges) is also F056.2.
+    """
+
+    row_id: str = Field(min_length=1)
+    entity_type: str = Field(pattern="^(fact|decision|episode|procedure)$")
+    content: str = Field(min_length=30, description=">= 30 chars per F038-1.2")
+    is_orphan_intent: bool = True
+    rationale: str | None = None
+    reviewed_by: str | None = None
