@@ -10,6 +10,7 @@
 **Review history:**
 - v1 (2026-04-27): initial draft, surfaced via PR #370
 - v2 (2026-04-28): amended after 3-agent review (architect / devil / python-pro). All P1 entry-point names, regression-CLI extensibility, LLM determinism, tear-down ordering, and cost numbers verified against the actual code.
+- v3 (2026-04-28): amended after second 3-agent review. Fixed: GraphDensifier missing `GraphLinker` constructor arg + wrong arg order; regression.py PR #0 plan missed `_fetch_rows` + `_format_report` rewrites; dedup Leg 2 used non-existent `Heart.learn(dedup_via_search=)` kwarg; `AnthropicClient.aclose()` is `close()`; LLM-client lifecycle leaks injected mocks; `temperature=0` is `payload["temperature"]=0`, not a kwarg; advisory-lock placement contradicted post-disposal TRUNCATE; lock-key needs `[:4] + % 2**31` truncation; Episode seeding needs explicit NOT-NULL columns.
 
 ---
 
@@ -60,29 +61,52 @@ The 3-agent review surfaced that `nous_eval/regression.py` has two hard-coded co
 
 **Fix (lands as PR #0 of the F056 sequence):**
 
-- Replace `--harness` `choices=` with free-form `str` (validated only as "non-empty"; existing rows in `eval_runs` define the valid set).
-- Replace `_TRACKED_METRICS` constant with a `_PRIMARY_METRIC_BY_HARNESS` dict registry:
-  ```python
-  _PRIMARY_METRIC_BY_HARNESS = {
-      "retrieval": "mrr",
-      "multi_turn_eval": "mrr",
-      "admission": "admission_f1",
-      "dedup": "dedup_f1",
-      "backfill": "edge_precision",
-      "summary": "summary_quality",
-  }
-  _ALL_REPORTED_METRICS_BY_HARNESS = {  # what to display in the report (informational deltas)
-      "retrieval": ("mrr", "r_at_10", "p_at_1", "ndcg_at_10"),
-      "admission": ("admission_f1", "admission_precision", "admission_recall"),
-      ...
-  }
-  ```
-- `_compare_bucket` reads `primary_metric` from the registry by `harness`, not from a single `--primary-metric` CLI override.
-- The `--primary-metric` CLI override still exists but defaults to "auto" (use registry).
+Three call sites in `regression.py` need updating; spec v2 missed two of them:
 
-This PR also adds 5-7 unit tests in `tests/eval/test_regression.py` covering the registry lookup + missing-metric fallback behavior.
+1. **`_fetch_rows` (line 135)** truncates `_RunRow.metrics` to the 4 retrieval keys at fetch time:
+   ```python
+   metrics={k: float(cfg_metrics.get(k, 0.0)) for k in _TRACKED_METRICS}
+   ```
+   Replace with harness-aware key set so handler metrics survive the fetch:
+   ```python
+   reported = _ALL_REPORTED_METRICS_BY_HARNESS.get(harness, _ALL_REPORTED_METRICS_BY_HARNESS["retrieval"])
+   metrics={k: float(cfg_metrics.get(k, 0.0)) for k in reported}
+   ```
 
-LOC estimate: ~80 LOC change in `regression.py` + ~120 LOC tests.
+2. **`_compare_bucket` (line 174)** computes deltas via `for metric in _TRACKED_METRICS`. Same fix — pass the harness-specific reported-metrics tuple from the bucket key down into the loop.
+
+3. **`_format_report` (lines 214, 220-234)** hard-codes `MRR/R@10/P@1` as table headers. Make headers per-row by harness; `_format_report` reads each row's `harness` field and chooses headers from `_ALL_REPORTED_METRICS_BY_HARNESS`. Multi-harness reports get one section per harness with appropriate headers.
+
+4. **`--harness` `choices=`** replaced with free-form `str` (validated as non-empty; existing rows define the valid set).
+
+5. **Backwards-compat for legacy rows lacking `harness` key** (PR #368 added it; older rows would default to "retrieval"). `_fetch_rows` defaults `harness="retrieval"` when the configs row's harness key is missing — preserves current behavior for old rows.
+
+The full registries (no `...` placeholders):
+
+```python
+_PRIMARY_METRIC_BY_HARNESS = {
+    "retrieval": "mrr",
+    "multi_turn_eval": "mrr",
+    "admission": "admission_f1",
+    "dedup": "dedup_f1",
+    "backfill": "edge_precision",
+    "summary": "summary_quality",
+}
+_ALL_REPORTED_METRICS_BY_HARNESS = {
+    "retrieval":      ("mrr", "r_at_10", "p_at_1", "ndcg_at_10"),
+    "multi_turn_eval":("mrr", "r_at_10", "p_at_1", "ndcg_at_10"),
+    "admission":      ("admission_f1", "admission_precision", "admission_recall"),
+    "dedup":          ("dedup_f1", "dedup_f1_leg1", "dedup_f1_leg2"),
+    "backfill":       ("edge_precision", "orphan_resolution_rate", "density_delta"),
+    "summary":        ("summary_quality", "mean_key_point_coverage", "mean_summary_faithfulness"),
+}
+```
+
+`_compare_bucket` reads `primary_metric` from `_PRIMARY_METRIC_BY_HARNESS[harness]`. The existing `--primary-metric` CLI override still works but defaults to "auto" (use registry).
+
+This PR also adds 5-7 unit tests in `tests/eval/test_regression.py` covering registry lookup + missing-metric fallback + legacy-row backwards-compat.
+
+LOC estimate: **~150 LOC** change in `regression.py` (was undercounted in v2) + ~150 LOC tests.
 
 ### Architecture
 
@@ -124,19 +148,21 @@ tests/fixtures/handlers/                # NEW
 
 ### Per-handler eval lifecycle (shared across all 4)
 
-Every handler CLI follows the same shape, codified in `nous_eval/handlers/_cli_base.py::run_handler_eval(name, async_fn)`:
+Every handler CLI follows the same shape, codified in `nous_eval/handlers/_cli_base.py::run_handler_eval(name, async_fn, *, default_threshold: float)`:
 
-1. Parse args (shared `--log-level`, `--report-only`, `--no-history`, `--threshold`, `--notes`, `--fixture-path`).
+1. Parse args (shared `--log-level`, `--report-only`, `--no-history`, `--threshold`, `--notes`, `--fixture-path`). `default_threshold` is a **required** kwarg per handler — different handlers gate at different rates (5pp for admission/dedup/summary, 10pp for backfill — see per-handler sections). A shared default would silently mis-gate.
+
+   `_load_jsonl(path, model_cls)` (in `_jsonl.py`) raises on `pydantic.ValidationError` — corpus integrity is a hard precondition (do not silently shrink the corpus, which is the F051.5 999/1000 admission bug pattern).
 2. Build `EvalSettings()` + `Settings()`. Apply per-handler Settings overrides explicitly (e.g. `admission_shadow_mode=False`, `admission_control_enabled=True`, `graph_backfill_enabled=True`).
 3. Use a dedicated per-handler `agent_id` (`nous-eval-handler-<name>`) so writes are idempotent and isolated from other handlers.
 4. Build the eval DB connection via `_settings_for_eval_db(eval_settings, main_overridden_settings)` → `Database(...)`.
 5. Inside `async with _build_heart_for_eval(eval_db, eval_scoped) as heart`: load fixture → invoke production handler → measure → compute primary metric.
-6. **Exit `async with` block (this disposes the asyncpg pool).** ONLY THEN: optional truncate of handler-specific `agent_id` rows for next-run hygiene. The `pg_try_advisory_xact_lock` pattern from F049 working_memory sweep keyed on a SHA-256 hash of `<handler-name>:<agent_id>` serializes concurrent CLI invocations.
+6. **Truncate handler-scoped rows BEFORE the next handler's seed step**, NOT after. Mechanism: a `_clear_handler_state(db, agent_id)` helper that runs **inside its own `async with db.session()` block** under `pg_try_advisory_xact_lock` (xact-scoped, auto-released on transaction end — matches `nous/heart/working_memory.py:343-355` exactly). Lock key: `int.from_bytes(sha256(f"{name}:{agent_id}".encode())[:4], "big") % (2**31)` — the `[:4] + % 2**31` truncation is required because asyncpg's `bigint` codec rejects raw 256-bit ints. Concurrent runs of the same handler+agent_id serialize on the same key; different handlers don't collide. The truncate runs at **session start (clean slate before seed)**, not session end — avoids the race v2 had where post-disposal TRUNCATE conflicted with held connections.
 7. Write markdown report under `Path(eval_settings.report_dir) / "handlers" / f"{name}-<timestamp>.md"`.
 8. Persist to `eval_runs` via `persist_run_history(harness=name, ...)`.
 9. Exit 0 on pass / 4 on regression (matching `regression.py` exit code).
 
-Order matters: step 6 (engine dispose) MUST precede any TRUNCATE, or asyncpg connections will deadlock against the lock TRUNCATE acquires.
+The `async with _build_heart_for_eval` exit releases all heart-held connections back to the pool (the `Database` engine itself stays open — owned by the caller, not heart). The pre-seed TRUNCATE acquires a fresh connection from that same pool. There is no held-connection conflict because TRUNCATE happens before any heart writes.
 
 ### Per-handler specs
 
@@ -186,15 +212,17 @@ The eval measures **both legs separately** so a regression in either is attribut
 - Example dedup pair: `{"anchor": "Tim prefers FastAPI for new services", "paraphrase": "For new microservices, Tim's choice is FastAPI", "expected": "dedup", "reviewed_by": "tim"}`
 - Example distinct pair: `{"anchor": "PostgreSQL 17 is the production database", "paraphrase": "PostgreSQL 17 was deprecated last quarter", "expected": "distinct", "reviewed_by": "tim"}`
 
-**Procedure for Leg 1 (hybrid-search):**
-1. Seed eval DB with 50 unrelated background facts under handler-scoped `agent_id` (so search isn't returning trivially-empty results).
-2. For each pair: insert anchor via `Heart.learn` → call `Heart.learn(FactInput(content=paraphrase))` directly (NOT `extract_and_store`, which adds an LLM call to the metric path and silently caps at 5 candidates per `fact_extractor.py:151`).
-3. Read result.id; if it equals anchor_id → dedup fired (Leg 1 caught it). If new id → no dedup.
+**Important constraint:** `dedup_via_search` is a `FactExtractor.__init__` parameter (`nous/handlers/fact_extractor.py:75-93`), NOT a `Heart.learn` kwarg. v2 of this spec was wrong about that. The eval routes through `FactExtractor.extract_and_store` with the `candidate_facts=[...]` parameter — `extract_and_store` short-circuits the LLM extraction when `candidate_facts` is provided (`fact_extractor.py:127-130`), routing directly to `_store_candidate_facts` which still exercises the dedup branch (`fact_extractor.py:243-248`). This avoids the LLM-in-metric-path concern *and* uses real production code paths.
 
-**Procedure for Leg 2 (native cosine):**
-1. Same seed.
-2. For each pair: insert anchor via `Heart.learn` → call `Heart.learn(FactInput(content=paraphrase))` with `dedup_via_search=False` setting (to bypass Leg 1 and isolate Leg 2's behavior).
-3. Same read-back.
+**Procedure for Leg 1 (hybrid-search pre-check):**
+1. Construct `FactExtractor(heart=heart, settings=settings, bus=None, llm_client=None, dedup_via_search=True)`.
+2. Seed eval DB with 50 unrelated background facts under handler-scoped `agent_id`.
+3. For each pair: insert anchor via `Heart.learn(FactInput(content=anchor))` → capture anchor_uuid → call `await fact_extractor.extract_and_store(summary={}, episode_id="dedup-eval", candidate_facts=[{"content": paraphrase, "subject": ..., "category": ...}])` → returned list contains either anchor_uuid (dedup fired) or a new UUID (no dedup).
+
+**Procedure for Leg 2 (native cosine, FactExtractor pre-check disabled):**
+1. Construct `FactExtractor(heart=heart, settings=settings, bus=None, llm_client=None, dedup_via_search=False)`.
+2. Same seed as Leg 1.
+3. Same per-pair routine. Because `dedup_via_search=False`, the FactExtractor pre-check is bypassed; only `Heart.learn`'s native cosine `>0.95` dedup can fire (`nous/heart/facts.py::FactManager.learn`).
 
 **Metrics:**
 - `dedup_f1_leg1`, `dedup_precision_leg1`, `dedup_recall_leg1` (Leg 1 hybrid-search)
@@ -222,11 +250,25 @@ The eval measures **both legs separately** so a regression in either is attribut
 1. Build Settings with `graph_backfill_enabled=True` + current F045/F054 thresholds. (`graph_backfill_enabled` defaults True in prod, but per-PR review noted it's gated at 4 sites in `graph_densifier.py:429,456,483,510` — explicit override removes ambiguity.)
 2. Truncate eval DB graph tables under handler `agent_id`; load fixture (entities + their existing edges).
 3. Snapshot initial state via existing `nous_eval/density_eval.py::_snapshot_density()` — DO NOT re-implement this; F053 already shipped it.
-4. Construct `GraphDensifier(embedding_provider, db, agent_id, settings)` — embedding provider built same way as `_build_heart_for_eval`. DB MUST come from `_settings_for_eval_db` (the eval DB), not a raw `Database(Settings())` (which would target main DB).
+4. Construct dependencies in order, mirroring `nous_eval/retrieval_runner.py::_build_densifier_for_eval` (lines 407-449):
+   ```python
+   embedder = heart._embeddings  # from _build_heart_for_eval — already constructed
+   from nous.brain.graph_linker import GraphLinker
+   graph_linker = GraphLinker(db=eval_db, embedder=embedder, settings=eval_scoped, agent_id=agent_id)
+   from nous.brain.graph_densifier import GraphDensifier
+   densifier = GraphDensifier(
+       db=eval_db,
+       graph_linker=graph_linker,   # REQUIRED — was missing in v2
+       embedder=embedder,
+       settings=eval_scoped,
+       agent_id=agent_id,
+   )
+   ```
+   Verified against `nous/brain/graph_densifier.py:103-110` real signature: `(db, graph_linker, embedder, settings, agent_id)`. v2's call pattern was wrong.
 5. Call `await densifier.run_backfill_cycle()`.
 6. Snapshot final state via the same density_eval helper.
 7. Compute deltas: new edges per relation type, orphans resolved, cross-type vs same-type breakdown.
-8. **Sample 20 new edges** (deterministic seed via `random.Random(42).sample(...)`) → call Haiku LLM-judge with `temperature=0` to score each (`semantically_related: true|false|borderline`).
+8. **Sort the new-edges list** by `(source_id, target_id, relation)` for deterministic ordering (asyncpg row order is undefined). **Then sample 20** via seeded `random.Random(42).sample(sorted_new_edges, k=min(20, len(sorted_new_edges)))` → call Haiku LLM-judge with `payload["temperature"] = 0` to score each (`semantically_related: true|false|borderline`).
 
 **Metrics:**
 - `density_delta` (new edges total) — informational, no gate.
@@ -252,10 +294,14 @@ The eval measures **both legs separately** so a regression in either is attribut
 - Mixed provenance: AI-drafted gold key-points reviewed by Tim → `reviewed_by="tim+ai-draft"` (matches `qrels_loader.py:80-85` reviewed_by pattern; gate-eligible only when `reviewed_by` is set).
 
 **Procedure:**
-1. For each transcript row: INSERT a stub `Episode` row into `heart.episodes` under handler `agent_id` (this is the seeding step v1 omitted). Capture the new `episode_id`.
+1. For each transcript row: INSERT a stub `Episode` row into `heart.episodes` under handler `agent_id`. Required NOT-NULL columns (verified `nous/storage/models.py:310-345`):
+   - `agent_id` (Text NOT NULL)
+   - `summary` (Text NOT NULL — confusingly named: this is the existing short-form summary column, NOT the `structured_summary` we're testing the production code generates. Set it to a placeholder like `"<eval-stub>"`. The eval is testing whether `summarize_episode` populates `structured_summary`, which the early-return at `episode_summarizer.py:126` checks must be NULL).
+   - `started_at` has `server_default=func.now()` so can be omitted.
+   - `id` is UUID with default — capture from RETURNING clause.
 2. Call `await summarizer.summarize_episode(episode_id=new_id, transcript=row.transcript, agent_id=eval_agent_id)`.
-3. **Handle `None` return path explicitly**: if returned, the summarizer skipped this transcript (already-summarized or LLM error) — count as a `null_returns` informational metric, not a failure.
-4. For non-None returns, call Haiku LLM-judge with `temperature=0` twice per row:
+3. **Handle `None` return path explicitly**: if returned, the summarizer skipped this transcript (already-summarized — won't happen on freshly-seeded rows — or transcript too short — guard at line 130 rejects <50 chars — or LLM error). Count as a `null_returns` informational metric, not a failure.
+4. For non-None returns, call Haiku LLM-judge with `payload["temperature"] = 0` twice per row:
    - `key_point_coverage`: of N gold key-points, how many appear in the produced `key_points` list (sub-string OR semantic match)? Returns 0..1.
    - `summary_faithfulness`: does the produced `summary` contain any claim NOT supported by the transcript? Returns 0..1.
 
@@ -289,34 +335,36 @@ This bumps Phase 2 total eval cost to **~$0.40/run** — still cheap for a weekl
 
 5. **`density_eval.py` (F053)** — reused for backfill snapshot/delta. The backfill handler imports `_snapshot_density()` directly; do NOT re-implement.
 
-### LLM client injection (matches existing pattern)
+### LLM client injection (matches existing pattern, ownership-aware)
 
-Handlers C (backfill) and D (summary) call Haiku for judging. Following the existing pattern from `EpisodeSummarizer.__init__` and `FactExtractor.__init__`:
+Handlers C (backfill) and D (summary) call Haiku for judging. The `AnthropicClient` Protocol at `nous/api/anthropic_client.py:64-71` defines `start()` and `close()` (NOT `aclose()` — that's on the underlying `httpx.AsyncClient`). Lifecycle must be **ownership-aware** so test-injected clients are not closed by the eval (which would invalidate the test's mock for subsequent assertions):
 
 ```python
 async def run_handler_eval(
     eval_settings: EvalSettings,
     *,
-    llm_client: LLMClient | None = None,  # injected for tests; otherwise built from settings
+    llm_client: AnthropicClient | None = None,  # injected for tests; otherwise built from settings
     fixture_path: Path,
     ...
 ) -> int:
-    if llm_client is None:
+    owns_client = llm_client is None
+    if owns_client:
         from nous.api.anthropic_client import create_client
         llm_client = create_client(main_settings)
         await llm_client.start()
     try:
         # ... handler-specific logic
     finally:
-        await llm_client.aclose()
+        if owns_client:
+            await llm_client.close()  # Protocol method; NOT aclose()
 ```
 
-Tests inject a `FakeJudge` (mirroring `nous-longMemEval` pattern). Production runs use `HttpxAnthropicClient` (default per `create_client`).
+Tests inject a `FakeJudge` mock implementing the `AnthropicClient` Protocol (mirroring `nous-longMemEval` pattern + F051 `tests/eval/conftest.py` style). Production runs use `HttpxAnthropicClient` (default per `create_client(settings)`).
 
 ### Determinism (mandatory)
 
-- **Every Haiku judge call:** `temperature=0`. Haiku 4.5 does not yet expose `seed`; document this explicitly in the spec so future versions can lock seed when supported.
-- **Sampling for backfill 20-edge LLM-judge:** seeded `random.Random(42).sample(...)` over the new-edges list. Re-runs against identical fixture+code MUST produce byte-identical sample.
+- **Every Haiku judge call:** the `AnthropicClient.call(payload: dict)` is payload-pass-through (`anthropic_client.py:69`). The judge wrapper must inject `payload["temperature"] = 0` (NOT a kwarg — there is no `temperature` parameter on the Protocol). Haiku 4.5 does not yet expose `seed`; document this explicitly so future versions can lock seed when supported.
+- **Sampling for backfill 20-edge LLM-judge:** sort the new-edges list by `(source_id, target_id, relation)` first (asyncpg row order is undefined — without sort, `Random(42)` is deterministic but the input is not), then `random.Random(42).sample(...)`. Re-runs against identical fixture+code MUST produce byte-identical sample.
 - **Fixture loaders:** sort rows by a stable key (`row_id` field added to all fixtures). Avoids order-dependent admission/dedup interactions.
 - **Without these guarantees:** N=20 fixture sizes (admission, dedup) would generate 1-2 false-positive regressions per week per handler in a weekly cron.
 
@@ -334,12 +382,12 @@ Total Phase 2 test count target: **54 tests** across 4 PRs (12 + 14 + 16 + 12 �
 
 | PR | Handler | LOC est | Tests | Eval cost/run |
 |---|---|---|---|---|
-| 0 | regression.py + run_history.py extensions | ~80 + ~120 tests | ~7 | $0 |
+| 0 | regression.py extensions (3 call sites: `_fetch_rows`, `_compare_bucket`, `_format_report`) + legacy-row backwards-compat | ~150 | ~7 | $0 |
 | 1 | admission | ~280 | ~12 | $0 |
 | 2 | dedup | ~320 | ~14 | $0 |
 | 3 | backfill | ~420 | ~16 | $0.035 (Haiku) |
 | 4 | summary | ~360 | ~12 | $0.36 (Haiku) |
-| **Total** | — | **~1460** | **~61** | **~$0.40/run** |
+| **Total** | — | **~1530** | **~61** | **~$0.40/run** |
 
 Each handler PR (1-4) follows the project's standard cycle: spec section above → 3-agent review → impl → review → merge.
 
@@ -385,3 +433,20 @@ v2 of this spec amends the following from v1, all empirically verified:
 - **Closed open questions 1-3** with rationale.
 - **Reused F053 `density_eval.py`** instead of re-implementing.
 - **Added `_cli_base.py`, `_jsonl.py`, `_models.py`** shared helpers (~80 LOC saved across 4 handlers; prevents drift like F051.4 dropping `--log-level`).
+
+### v3 amendments (2026-04-28, after second 3-agent review)
+
+- **PR #0 plan was incomplete** (architect P1 + devil P1-1): only `_compare_bucket` was named, but `_fetch_rows` truncates to `_TRACKED_METRICS` at fetch time AND `_format_report` hard-codes `MRR/R@10/P@1` headers. All 3 call sites must be updated together; LOC bumped 80 → 150.
+- **GraphDensifier construction was wrong** (architect P1): real signature is `(db, graph_linker, embedder, settings, agent_id)` — v2 missed `GraphLinker` entirely and had wrong arg order. Fixed in §C step 4 with exact mirror of `_build_densifier_for_eval` (`retrieval_runner.py:407-449`).
+- **Dedup Leg 2 used a non-existent kwarg** (devil P1-2): `dedup_via_search` is `FactExtractor.__init__` only, NOT a `Heart.learn` parameter. Both legs now route through `FactExtractor.extract_and_store(candidate_facts=[...])` which short-circuits LLM extraction; legs differ only in the FactExtractor's `dedup_via_search` constructor flag.
+- **`AnthropicClient.aclose()` doesn't exist** (python-pro P1-A): Protocol defines `close()`. Fixed throughout §"LLM client injection".
+- **Test-injected client lifecycle leak** (python-pro P1-B): added `owns_client = llm_client is None` pattern; `close()` only fires when eval owns the client.
+- **`temperature=0` is not a kwarg** (python-pro P1-C): Protocol's `call(payload: dict)` is pass-through; judge wrapper sets `payload["temperature"] = 0`.
+- **Advisory-lock placement contradicted post-disposal TRUNCATE** (architect P2 + python-pro P3-B): clarified — TRUNCATE runs at session start (clean slate before seed) inside its own `async with db.session()` block, NOT after the heart's async-with exits. Also clarified that `Database.engine` stays open across heart's exit (engine is caller-owned).
+- **Lock-key needs `[:4] + % 2**31` truncation** (python-pro P2-A): asyncpg's `bigint` codec rejects raw 256-bit ints. Spec now mirrors `working_memory.py:347-348` exactly.
+- **Episode required NOT-NULL columns** (devil P2-2): listed `agent_id`, `summary` (the latter confusingly shares its name with the `structured_summary` column the eval is testing — must set placeholder).
+- **Old retrieval rows lacking `harness` key** (devil P2-1): `_fetch_rows` defaults `harness="retrieval"` when missing — preserves backwards-compat for pre-PR-#368 rows.
+- **Per-handler threshold drift** (python-pro P2-D): `run_handler_eval(name, async_fn, *, default_threshold)` requires the threshold per handler — different handlers gate at different rates.
+- **`_load_jsonl` validation policy** (python-pro P2-C): raises on ValidationError (no skip-with-warn), per F051.5-bug rationale.
+- **Edge sample needs deterministic sort** (python-pro P3-A): sort new-edges by `(source_id, target_id, relation)` before `Random(42).sample(...)`.
+- **Removed `...` placeholder** (architect P3): full `_ALL_REPORTED_METRICS_BY_HARNESS` registry spelled out.
