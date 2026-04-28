@@ -189,24 +189,33 @@ class TestEpisodeSummarizerConstructorContract:
     at the first eval invocation.
     """
 
-    def test_episode_summarizer_constructor_accepts_required_kwargs(self):
-        # Inspect the signature without instantiating (no real DB/heart
-        # needed). Verifies the constructor's required kwargs match what
-        # _run_summary_eval passes.
+    def test_episode_summarizer_constructor_accepts_eval_kwargs(self):
+        # Use sig.bind to verify the EXACT kwarg set _run_summary_eval
+        # uses still satisfies EpisodeSummarizer.__init__. This is stronger
+        # than a "param exists" check: bind() raises TypeError if any
+        # required arg is missing OR if any kwarg is unexpected. Future
+        # regressions in either direction (eval drops brain=, or constructor
+        # adds a new required arg) fail at test time instead of at runtime.
         import inspect
         from nous.handlers.episode_summarizer import EpisodeSummarizer
 
         sig = inspect.signature(EpisodeSummarizer.__init__)
-        params = sig.parameters
-        # All four kwargs the eval passes must exist in the constructor:
-        for required_kwarg in ("heart", "brain", "settings", "bus"):
-            assert required_kwarg in params, (
-                f"EpisodeSummarizer.__init__ no longer accepts {required_kwarg!r} "
-                f"— summary handler eval must be updated."
+        # Bind exactly what summary.py:_run_summary_eval passes.
+        # Use sentinels — no real DB/heart needed.
+        try:
+            sig.bind(
+                self=object(),  # __init__ takes self positionally
+                heart=object(),
+                brain=None,
+                settings=object(),
+                bus=None,
+                llm_client=object(),
             )
-        # `brain` must be either required (no default) OR have a None-compatible
-        # default. Either way, passing brain=None should always work.
-        # If brain becomes required-positional (no default), the eval's
-        # explicit `brain=None` still satisfies it. If brain becomes
-        # optional, also fine. We just need to ensure the parameter exists.
-        # (PR #4 v1 omitted brain entirely — that's what this test catches.)
+        except TypeError as exc:
+            raise AssertionError(
+                f"EpisodeSummarizer.__init__ signature has drifted from what "
+                f"summary.py::_run_summary_eval passes: {exc}. Update either "
+                f"the eval call site or the constructor — but the two MUST "
+                f"stay in sync, or the eval crashes at first row with no "
+                f"unit-test signal."
+            ) from exc
