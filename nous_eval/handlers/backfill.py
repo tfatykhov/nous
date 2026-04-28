@@ -22,7 +22,6 @@ PR #3 v1 simplifies the spec's "100 mixed entities" to facts-only — see
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import random
 from pathlib import Path
@@ -285,7 +284,21 @@ async def _run_backfill_eval(
 
     overridden = _settings_with_backfill_overrides(main_settings)
     eval_scoped = _settings_for_eval_db(eval_settings, overridden)
-    eval_scoped = eval_scoped.model_copy(update={"agent_id": _AGENT_ID})
+    # CRITICAL — _settings_for_eval_db applies _EVAL_DISABLE_FIELDS at
+    # retrieval_runner.py:64, which hard-codes ("graph_backfill_enabled",
+    # False). That OVERRIDES our True flag from _settings_with_backfill_overrides
+    # one line above. Without this re-apply, all 4 gates in graph_densifier.py
+    # (lines 429, 456, 483, 510) short-circuit and run_backfill_cycle does
+    # nothing — every eval reports density_delta=0, edge_precision=0.
+    # Mirrors density_eval.py:235 which hit and fixed the same trap.
+    eval_scoped = eval_scoped.model_copy(update={
+        "agent_id": _AGENT_ID,
+        "graph_backfill_enabled": True,
+    })
+    assert eval_scoped.graph_backfill_enabled is True, (
+        "graph_backfill_enabled was not re-enabled after _settings_for_eval_db; "
+        "see comment above — eval would be a no-op"
+    )
 
     # Ownership-aware LLM client lifecycle (per F056 spec §"LLM client
     # injection"). Tests inject a FakeJudge; eval owns close() only when
@@ -411,7 +424,12 @@ async def _run_backfill_eval(
             "pre_orphan_total": sum(pre.orphan_count_per_type.values()),
             "post_orphan_total": sum(post.orphan_count_per_type.values()),
             "sample_size": len(sample),
-            "judged_edges": json.dumps(judged_edges),  # JSON string for JSONB sub-payload
+            # Pass raw list — run_history.py:127 calls json.dumps on the
+            # whole metrics_payload, so pre-serializing here would
+            # double-encode (JSONB would store "[{...}]" as a quoted string
+            # instead of [{...}] as an array, breaking metrics->'judged_edges'
+            # JSONB path queries).
+            "judged_edges": judged_edges,
         },
         report_lines=report_lines,
         primary_metric="edge_precision",

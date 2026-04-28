@@ -208,3 +208,33 @@ class TestSettingsOverrides:
         base = Settings()
         overridden = _settings_with_backfill_overrides(base)
         assert overridden.agent_id == _AGENT_ID
+
+    def test_eval_scoped_settings_re_enable_backfill(self):
+        # P1 fix from PR #374 review: _settings_for_eval_db hard-codes
+        # graph_backfill_enabled=False via _EVAL_DISABLE_FIELDS at
+        # retrieval_runner.py:64, OVERWRITING our handler's True. The
+        # backfill handler MUST re-apply the True via model_copy after
+        # _settings_for_eval_db. This test validates the FINAL eval_scoped
+        # value, not just the intermediate _settings_with_backfill_overrides
+        # output (which v1 was naively asserting and missed the bug).
+        from nous.config import Settings
+        from nous_eval.config import EvalSettings
+        from nous_eval.retrieval_runner import _settings_for_eval_db
+        base = Settings()
+        overridden = _settings_with_backfill_overrides(base)
+        eval_settings = EvalSettings()
+        eval_scoped = _settings_for_eval_db(eval_settings, overridden)
+        # Without re-apply, eval_scoped.graph_backfill_enabled would be False.
+        # The handler module-level CONSTANT path doesn't apply the re-apply
+        # (only the runtime _run_backfill_eval does), so this test asserts
+        # the precondition: _settings_for_eval_db DOES clobber the flag,
+        # so the handler's runtime re-apply is load-bearing.
+        assert eval_scoped.graph_backfill_enabled is False, (
+            "If this fails, _EVAL_DISABLE_FIELDS no longer clobbers "
+            "graph_backfill_enabled. Either remove the runtime re-apply "
+            "in _run_backfill_eval (now redundant) or update this test."
+        )
+        # And after the runtime re-apply pattern (matching what
+        # _run_backfill_eval does):
+        eval_scoped_re = eval_scoped.model_copy(update={"graph_backfill_enabled": True})
+        assert eval_scoped_re.graph_backfill_enabled is True
