@@ -126,19 +126,27 @@ class TestClassifyDedupOutcome:
     def test_anchor_in_returned_means_dedup(self):
         anchor = uuid4()
         other = uuid4()
-        # FactExtractor returns [anchor_uuid] when dedup fires
-        assert _classify_dedup_outcome("dedup", [anchor], anchor) == "dedup"
-        # Even when the expectation is "distinct", presence of anchor_uuid
-        # still means dedup fired (the outcome — caller compares to expected)
-        assert _classify_dedup_outcome("distinct", [anchor, other], anchor) == "dedup"
+        # FactExtractor returns [anchor_uuid] when dedup fires against anchor
+        assert _classify_dedup_outcome([anchor], anchor) == "dedup"
+        # Multiple UUIDs returned, anchor present → still dedup
+        assert _classify_dedup_outcome([anchor, other], anchor) == "dedup"
 
     def test_anchor_not_in_returned_means_distinct(self):
         anchor = uuid4()
         other = uuid4()
-        # New UUID means a new fact was stored — no dedup
-        assert _classify_dedup_outcome("dedup", [other], anchor) == "distinct"
-        # Empty return list (e.g. all admitted-rejected) also means no dedup
-        assert _classify_dedup_outcome("distinct", [], anchor) == "distinct"
+        # New UUID means a new fact was stored — no dedup against anchor
+        assert _classify_dedup_outcome([other], anchor) == "distinct"
+        # Empty return list also means no dedup against anchor
+        assert _classify_dedup_outcome([], anchor) == "distinct"
+
+    def test_dedup_against_background_classifies_distinct(self):
+        # If the paraphrase dedup'd against a non-anchor (background) fact,
+        # the eval treats it as "didn't dedup against THIS anchor" — see
+        # docstring "Eval correctness depends on background facts being
+        # dissimilar from anchors/paraphrases".
+        anchor = uuid4()
+        background_hit = uuid4()
+        assert _classify_dedup_outcome([background_hit], anchor) == "distinct"
 
 
 # ---------------------------------------------------------------------------

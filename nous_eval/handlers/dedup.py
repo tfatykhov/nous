@@ -29,6 +29,10 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+from uuid import UUID
+
+from sqlalchemy import text
 
 from nous.config import Settings
 from nous.handlers.fact_extractor import FactExtractor
@@ -44,6 +48,9 @@ from nous_eval.handlers._cli_base import (
 from nous_eval.handlers._jsonl import load_jsonl
 from nous_eval.handlers._models import DedupPair
 from nous_eval.retrieval_runner import _build_heart_for_eval, _settings_for_eval_db
+
+if TYPE_CHECKING:
+    from nous.heart.heart import Heart
 
 logger = logging.getLogger(__name__)
 
@@ -65,11 +72,27 @@ def _settings_with_dedup_overrides(base: Settings) -> Settings:
     Heart.learn at all). Easiest correct stance: admission off for dedup
     eval, since we're measuring dedup in isolation.
     """
-    update: dict = {
+    update: dict[str, Any] = {
         "admission_control_enabled": False,
+        # F056 PR #2 v2: also disable cross-type linking + graph backfill
+        # so Heart.learn doesn't trigger GraphLinker work that's irrelevant
+        # to dedup measurement and adds non-determinism.
+        "cross_type_linking_enabled": False,
+        "graph_backfill_enabled": False,
         "agent_id": _AGENT_ID,
     }
     return base.model_copy(update=update)
+
+
+# F056 PR #2 v2: 50 unrelated background facts per spec §B procedure step 2.
+# Without these, Leg 1 hybrid-search runs against a near-empty corpus —
+# RRF behavior is unrepresentative of production and the PR #364 over-dedup
+# bug class (which the spec explicitly cites as motivation for measuring
+# Leg 1) cannot reproduce. Each string is >= 30 chars per F038-1.2.
+_BACKGROUND_FACTS: tuple[str, ...] = tuple(
+    f"Generic background fact #{i:02d} about a topic unrelated to any pair."
+    for i in range(50)
+)
 
 
 def filter_pairs(pairs: list[DedupPair], *, include_unreviewed: bool) -> list[DedupPair]:
@@ -95,22 +118,26 @@ def compute_f1(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
 
 
 def _classify_dedup_outcome(
-    expected: str, returned_uuids: list, anchor_uuid,
+    returned_uuids: list[UUID], anchor_uuid: UUID,
 ) -> str:
-    """Pure helper: given the FactExtractor return + anchor UUID, return
-    "dedup" if dedup fired (anchor_uuid present in returned list), else
-    "distinct".
+    """Pure helper: did the FactExtractor return signal dedup against `anchor_uuid`?
+
+    Returns "dedup" iff `anchor_uuid` is present in the returned UUID list.
+    Returns "distinct" otherwise (which covers: no dedup at all, OR dedup
+    against a non-anchor fact like a background seed — the eval treats both
+    cases as "did NOT dedup against this specific anchor", which matches the
+    test's intent).
 
     Production behavior: `_store_candidate_facts` (`fact_extractor.py:243-248`
     Leg 1; `:259` Leg 2 via Heart.learn → `_confirm`) appends the EXISTING
     fact's UUID when dedup fires. So `anchor_uuid in returned_uuids` is the
-    dedup signal regardless of which leg fired.
+    dedup-against-anchor signal regardless of which leg fired.
 
-    `expected` is unused here but kept in the signature so the helper can
-    later return a bool comparison if needed. Currently the caller does
-    the comparison.
+    Eval correctness depends on background facts being dissimilar from
+    anchors/paraphrases (else the paraphrase might dedup against background
+    instead of anchor — which classifies as "distinct" but is actually
+    misattribution). `_BACKGROUND_FACTS` are designed for this property.
     """
-    _ = expected  # intentionally unused (see docstring)
     if anchor_uuid in returned_uuids:
         return "dedup"
     return "distinct"
@@ -128,14 +155,65 @@ def _confusion_increment(cm: dict[str, int], expected: str, outcome: str) -> Non
         cm["fn"] += 1
 
 
+async def _seed_background_facts(heart: "Heart") -> list[UUID]:
+    """Seed 50 unrelated background facts per spec §B procedure step 2.
+
+    Returns the list of seeded UUIDs so the caller can preserve them
+    during per-pair cleanup (per-pair DELETE wipes anchor + new facts only,
+    never background).
+    """
+    bg_uuids: list[UUID] = []
+    for content in _BACKGROUND_FACTS:
+        result = await heart.learn(
+            FactInput(content=content, source="dedup_eval_background"),
+            check_contradictions=False,
+        )
+        if isinstance(result, FactRejected):
+            logger.warning(
+                "dedup eval: background fact rejected: %s", result.explanation,
+            )
+            continue
+        bg_uuids.append(result.id)
+    logger.info("dedup eval: seeded %d background facts", len(bg_uuids))
+    return bg_uuids
+
+
+async def _delete_facts_by_ids(heart: "Heart", fact_ids: list[UUID]) -> None:
+    """Targeted per-pair cleanup: DELETE only the listed UUIDs.
+
+    Replaces v1's blanket `DELETE WHERE agent_id` which would have wiped
+    the background seed too. Targeted deletion preserves the 50-row
+    background corpus across all pair iterations.
+    """
+    if not fact_ids:
+        return
+    async with heart.db.session() as session:
+        await session.execute(
+            text("DELETE FROM heart.facts WHERE id = ANY(:ids)").bindparams(
+                ids=[str(fid) for fid in fact_ids],
+            )
+        )
+        await session.commit()
+
+
 async def _run_one_leg(
-    pairs: list[DedupPair], heart, settings: Settings, *, dedup_via_search: bool,
+    pairs: list[DedupPair],
+    heart: "Heart",
+    settings: Settings,
+    background_uuids: set[UUID],
+    *,
+    dedup_via_search: bool,
 ) -> dict[str, int]:
     """Run one leg (Leg 1 if dedup_via_search=True, else Leg 2).
 
     For each pair: insert anchor → call FactExtractor.extract_and_store
     with the paraphrase as a single candidate → check whether the returned
-    UUID list contains the anchor's UUID (dedup signal).
+    UUID list contains the anchor's UUID (dedup signal). After scoring,
+    DELETE the anchor + any newly-stored UUIDs by ID — preserves the
+    background seed across iterations.
+
+    `background_uuids` is used to identify which UUIDs in `returned_uuids`
+    are NEW (not background, not anchor) and so need cleanup.
     """
     extractor = FactExtractor(
         heart=heart,
@@ -147,10 +225,12 @@ async def _run_one_leg(
     cm = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
     for pair in pairs:
-        # Insert anchor
-        anchor_result = await heart.learn(FactInput(
-            content=pair.anchor, source="dedup_eval",
-        ))
+        # Insert anchor (check_contradictions=False — costs Haiku $ + adds
+        # non-determinism; not measured here)
+        anchor_result = await heart.learn(
+            FactInput(content=pair.anchor, source="dedup_eval"),
+            check_contradictions=False,
+        )
         if isinstance(anchor_result, FactRejected):
             logger.warning(
                 "dedup eval: anchor rejected (skipping pair %s): %s",
@@ -170,23 +250,22 @@ async def _run_one_leg(
                 "category": "technical",
             }],
         )
-        outcome = _classify_dedup_outcome(pair.expected, returned_uuids, anchor_uuid)
+        outcome = _classify_dedup_outcome(returned_uuids, anchor_uuid)
         _confusion_increment(cm, pair.expected, outcome)
 
-        # Clean up the anchor + any new fact so the next pair starts fresh
-        # (otherwise pair N+1's paraphrase might dedup against pair N's
-        # anchor by accident).
+        # Targeted cleanup: anchor + any new (non-background) UUID returned.
+        to_delete = [anchor_uuid]
+        for ruid in returned_uuids:
+            if ruid != anchor_uuid and ruid not in background_uuids:
+                to_delete.append(ruid)
         try:
-            from sqlalchemy import text
-            async with heart.db.session() as session:
-                await session.execute(
-                    text("DELETE FROM heart.facts WHERE agent_id = :aid").bindparams(
-                        aid=settings.agent_id,
-                    )
-                )
-                await session.commit()
+            await _delete_facts_by_ids(heart, to_delete)
         except Exception:
-            logger.exception("dedup eval: per-pair cleanup failed for %s", pair.row_id)
+            logger.exception(
+                "dedup eval: per-pair cleanup failed for %s — subsequent pairs "
+                "may see stale state and produce incorrect metrics",
+                pair.row_id,
+            )
 
     return cm
 
@@ -230,8 +309,18 @@ async def _run_dedup_eval(
         )
 
         async with _build_heart_for_eval(eval_db, eval_scoped) as heart:
-            cm_leg1 = await _run_one_leg(pairs, heart, eval_scoped, dedup_via_search=True)
-            cm_leg2 = await _run_one_leg(pairs, heart, eval_scoped, dedup_via_search=False)
+            # Seed 50 background facts ONCE. They survive per-pair cleanup
+            # (which DELETEs by ID, not by agent_id). Both legs share the
+            # same background corpus so per-leg numbers are comparable.
+            bg_uuids = await _seed_background_facts(heart)
+            bg_set: set[UUID] = set(bg_uuids)
+
+            cm_leg1 = await _run_one_leg(
+                pairs, heart, eval_scoped, bg_set, dedup_via_search=True,
+            )
+            cm_leg2 = await _run_one_leg(
+                pairs, heart, eval_scoped, bg_set, dedup_via_search=False,
+            )
     finally:
         await eval_db.disconnect()
 
