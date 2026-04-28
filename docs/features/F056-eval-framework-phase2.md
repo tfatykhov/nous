@@ -1,6 +1,6 @@
 # F056 — Eval Framework Phase 2: Handler-Level Evals
 
-**Status:** 📝 Draft v2 (2026-04-28, post-3-agent-review)
+**Status:** 📝 Draft v5 (2026-04-28, after multi-pass 3-agent reviews)
 **Proposed by:** Tim
 **Date:** 2026-04-27
 **Depends on:** F051 (retrieval eval harness — shipped), F051.4 (multi-turn replay — shipped), F051 Phase 1 finish (eval_runs to eval DB + regression CLI — PR #368 shipped)

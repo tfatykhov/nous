@@ -135,12 +135,14 @@ _DELETE_ALLOWLIST: frozenset[str] = frozenset({
 async def clear_handler_state(
     db: Database, *, name: str, agent_id: str, deletes: list[_DeleteSpec],
 ) -> None:
-    """Truncate handler-scoped rows BEFORE seed under advisory lock.
+    """Delete handler-scoped rows BEFORE seed under advisory lock.
 
-    Per F056 spec §"Per-handler eval lifecycle" step 6: TRUNCATE runs at
+    Per F056 spec §"Per-handler eval lifecycle" step 6: cleanup runs at
     session START (clean slate before seed), inside its own session under
     `pg_try_advisory_xact_lock` (xact-scoped, auto-released on commit).
     Concurrent same-handler+agent_id runs serialize on the same lock key.
+    Helper does parameterized DELETE WHERE agent_id, not TRUNCATE — only
+    the handler's own rows are removed.
 
     Raises `RuntimeError` when the advisory lock is contended — concurrent
     handler runs against the same agent_id are a configuration problem
@@ -156,7 +158,7 @@ async def clear_handler_state(
     for spec in deletes:
         if spec.schema_table not in _DELETE_ALLOWLIST:
             raise ValueError(
-                f"clear_handler_state: {spec.schema_table!r} not in TRUNCATE allowlist. "
+                f"clear_handler_state: {spec.schema_table!r} not in DELETE allowlist. "
                 f"Add to nous_eval.handlers._cli_base._DELETE_ALLOWLIST in your handler PR."
             )
     key = lock_key_for(name, agent_id)

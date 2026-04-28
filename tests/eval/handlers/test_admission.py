@@ -230,7 +230,7 @@ class TestClearHandlerStateSafety:
         import asyncio
 
         async def go():
-            with pytest.raises(ValueError, match="not in TRUNCATE allowlist"):
+            with pytest.raises(ValueError, match="not in DELETE allowlist"):
                 await clear_handler_state(
                     db=None,  # not reached — validation runs first
                     name="test",
