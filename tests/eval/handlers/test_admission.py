@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from nous_eval.handlers._jsonl import load_jsonl
 from nous_eval.handlers._models import AdmissionRow
 from nous.heart.schemas import FactRejected
-from nous_eval.handlers._cli_base import _DeleteSpec, _TRUNCATE_ALLOWLIST, clear_handler_state
+from nous_eval.handlers._cli_base import _DeleteSpec, _DELETE_ALLOWLIST, clear_handler_state
 from nous_eval.handlers.admission import (
     _AGENT_ID,
     _classify_outcome,
@@ -241,6 +241,6 @@ class TestClearHandlerStateSafety:
 
     def test_allowlist_includes_handler_targets(self):
         # All 4 F056 handlers must be able to TRUNCATE their target tables.
-        assert "heart.facts" in _TRUNCATE_ALLOWLIST  # admission
-        assert "heart.episodes" in _TRUNCATE_ALLOWLIST  # summary
-        assert "brain.graph_edges" in _TRUNCATE_ALLOWLIST  # backfill
+        assert "heart.facts" in _DELETE_ALLOWLIST  # admission
+        assert "heart.episodes" in _DELETE_ALLOWLIST  # summary
+        assert "brain.graph_edges" in _DELETE_ALLOWLIST  # backfill

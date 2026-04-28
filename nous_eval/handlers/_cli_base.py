@@ -119,9 +119,10 @@ class _DeleteSpec:
 
 
 # Allowlist of fully-qualified table names handler evals are permitted to
-# truncate. New handlers add to this set in their PR, ensuring the SQL
-# builder never executes attacker-controlled identifiers.
-_TRUNCATE_ALLOWLIST: frozenset[str] = frozenset({
+# DELETE from (helper does parameterized DELETE WHERE agent_id, not TRUNCATE).
+# New handlers add to this set in their PR, ensuring the SQL builder never
+# executes attacker-controlled identifiers.
+_DELETE_ALLOWLIST: frozenset[str] = frozenset({
     "heart.facts",
     "heart.episodes",
     "heart.procedures",
@@ -147,16 +148,16 @@ async def clear_handler_state(
     not a gracefully-degradable situation.
 
     Raises `ValueError` when any `DeleteSpec.schema_table` is not in the
-    allowlist (`_TRUNCATE_ALLOWLIST`). New handlers add table names to the
+    allowlist (`_DELETE_ALLOWLIST`). New handlers add table names to the
     allowlist in their own PR, eliminating SQL-identifier injection risk.
     """
     if not deletes:
         return
     for spec in deletes:
-        if spec.schema_table not in _TRUNCATE_ALLOWLIST:
+        if spec.schema_table not in _DELETE_ALLOWLIST:
             raise ValueError(
                 f"clear_handler_state: {spec.schema_table!r} not in TRUNCATE allowlist. "
-                f"Add to nous_eval.handlers._cli_base._TRUNCATE_ALLOWLIST in your handler PR."
+                f"Add to nous_eval.handlers._cli_base._DELETE_ALLOWLIST in your handler PR."
             )
     key = lock_key_for(name, agent_id)
     async with db.session() as session:
@@ -317,12 +318,13 @@ async def _run_async(
             notes=args.notes or f"{name} handler eval",
         )
 
-    # Per F056 spec v4 §"Per-handler eval lifecycle" step 9 + appendix:
-    # handlers always return 0 on a clean run. Regression gating is the
-    # separate `nous_eval.regression` CLI step (reads eval_runs across
-    # multiple persisted runs and exits 4 on regression). Single-run
-    # gating in the handler isn't possible without a baseline, which the
-    # handler doesn't fetch. `--report-only` is accepted for API parity
-    # with regression.py but is currently a no-op (no gating code path
-    # to suppress); kept so future per-run thresholds can land cleanly.
+    # Per F056 spec v5 §"Per-handler eval lifecycle" step 9 (clarified
+    # during PR #372 v2 review): handlers always return 0 on a clean run.
+    # Regression gating is the separate `python -m nous_eval.regression
+    # --harness <name>` step, which reads the row this handler just wrote
+    # to eval_runs (step 8) and exits 4 on regression vs prior baseline.
+    # CI wires both as two steps: `handler-eval && regression-check`.
+    # `--report-only` is accepted for API parity with regression.py but is
+    # currently a no-op (no gating code path to suppress); kept so future
+    # per-run thresholds can land cleanly without a CLI break.
     return 0
