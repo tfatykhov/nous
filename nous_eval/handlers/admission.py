@@ -33,6 +33,7 @@ from nous.storage.database import Database
 from nous_eval.config import EvalSettings
 from nous_eval.handlers._cli_base import (
     HandlerResult,
+    _DeleteSpec,
     clear_handler_state,
     run_handler_eval,
 )
@@ -83,6 +84,32 @@ def compute_f1(tp: int, fp: int, fn: int) -> tuple[float, float, float]:
     return precision, recall, f1
 
 
+def _classify_outcome(label: str, learn_result) -> str:
+    """Pure helper — given a label and Heart.learn return, return "admit" or "reject".
+
+    Extracted from `_seed_and_score` so the outcome-derivation logic
+    (F056 spec §A: `isinstance(result, FactRejected)` only, NOT
+    `active=true`) can be unit-tested without a DB.
+    """
+    return "reject" if isinstance(learn_result, FactRejected) else "admit"
+
+
+def _confusion_increment(cm: dict[str, int], label: str, outcome: str) -> None:
+    """Mutate `cm` to increment the right tp/fp/tn/fn counter.
+
+    `cm` keys: tp (correctly admitted), tn (correctly rejected),
+    fp (incorrectly admitted), fn (incorrectly rejected).
+    """
+    if label == "admit" and outcome == "admit":
+        cm["tp"] += 1
+    elif label == "reject" and outcome == "reject":
+        cm["tn"] += 1
+    elif label == "reject" and outcome == "admit":
+        cm["fp"] += 1
+    else:  # label == "admit" and outcome == "reject"
+        cm["fn"] += 1
+
+
 async def _seed_and_score(
     rows: list[AdmissionRow], heart, eval_scoped: Settings,
 ) -> tuple[dict[str, int], list[tuple[str, str, str]]]:
@@ -107,18 +134,8 @@ async def _seed_and_score(
             logger.exception("admission eval: Heart.learn raised on row_id=%s", row.row_id)
             continue
 
-        # F056 spec §A: outcome via isinstance, NOT active=true.
-        rejected = isinstance(result, FactRejected)
-        outcome = "reject" if rejected else "admit"
-
-        if row.label == "admit" and outcome == "admit":
-            cm["tp"] += 1
-        elif row.label == "reject" and outcome == "reject":
-            cm["tn"] += 1
-        elif row.label == "reject" and outcome == "admit":
-            cm["fp"] += 1
-        else:  # row.label == "admit" and outcome == "reject"
-            cm["fn"] += 1
+        outcome = _classify_outcome(row.label, result)
+        _confusion_increment(cm, row.label, outcome)
         per_row.append((row.row_id, row.label, outcome))
 
     return cm, per_row
@@ -145,6 +162,12 @@ async def _run_admission_eval(
         )
 
     overridden = _settings_with_admission_overrides(main_settings)
+    # CAREFUL: _settings_for_eval_db's `update` dict picks up
+    # `eval_settings.agent_id` (default "nous-eval-corpus") and would clobber
+    # our handler-scoped agent_id from `_settings_with_admission_overrides`.
+    # The third model_copy below restores it. If a future refactor drops
+    # the third copy, writes silently land under "nous-eval-corpus" and
+    # pollute the retrieval corpus — keep the comment + the restore.
     eval_scoped = _settings_for_eval_db(eval_settings, overridden)
     eval_scoped = eval_scoped.model_copy(update={"agent_id": _AGENT_ID})
 
@@ -160,15 +183,13 @@ async def _run_admission_eval(
         # to clear admitted facts under our handler's agent_id.
         await clear_handler_state(
             eval_db, name=_HANDLER_NAME, agent_id=_AGENT_ID,
-            table_truncate_sql=[
-                f"DELETE FROM heart.facts WHERE agent_id = '{_AGENT_ID}'",
-            ],
+            deletes=[_DeleteSpec(schema_table="heart.facts", agent_id=_AGENT_ID)],
         )
 
         async with _build_heart_for_eval(eval_db, eval_scoped) as heart:
             cm, per_row = await _seed_and_score(rows, heart, eval_scoped)
     finally:
-        await eval_db.engine.dispose()
+        await eval_db.disconnect()
 
     precision, recall, f1 = compute_f1(cm["tp"], cm["fp"], cm["fn"])
 

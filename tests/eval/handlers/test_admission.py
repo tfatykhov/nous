@@ -9,8 +9,12 @@ from pydantic import ValidationError
 
 from nous_eval.handlers._jsonl import load_jsonl
 from nous_eval.handlers._models import AdmissionRow
+from nous.heart.schemas import FactRejected
+from nous_eval.handlers._cli_base import _DeleteSpec, _TRUNCATE_ALLOWLIST, clear_handler_state
 from nous_eval.handlers.admission import (
     _AGENT_ID,
+    _classify_outcome,
+    _confusion_increment,
     _settings_with_admission_overrides,
     compute_f1,
     filter_rows,
@@ -167,3 +171,76 @@ class TestSettingsOverrides:
         base = Settings()
         overridden = _settings_with_admission_overrides(base)
         assert overridden.agent_id == _AGENT_ID
+
+
+# ---------------------------------------------------------------------------
+# _classify_outcome (extracted for unit test per architect P2)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyOutcome:
+    def test_fact_rejected_returns_reject(self):
+        rejected = FactRejected(
+            content="x", composite_score=0.1, threshold=0.5,
+            scores={}, explanation="below threshold",
+        )
+        assert _classify_outcome("admit", rejected) == "reject"
+        assert _classify_outcome("reject", rejected) == "reject"
+
+    def test_non_fact_rejected_returns_admit(self):
+        # Anything that's not a FactRejected instance counts as admit (the
+        # production code path returns FactDetail on success). Using a sentinel
+        # object keeps this a true unit test — no need to construct FactDetail.
+        admitted = object()
+        assert _classify_outcome("admit", admitted) == "admit"
+        assert _classify_outcome("reject", admitted) == "admit"
+
+
+class TestConfusionIncrement:
+    def test_tp(self):
+        cm = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+        _confusion_increment(cm, "admit", "admit")
+        assert cm == {"tp": 1, "fp": 0, "tn": 0, "fn": 0}
+
+    def test_tn(self):
+        cm = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+        _confusion_increment(cm, "reject", "reject")
+        assert cm == {"tp": 0, "fp": 0, "tn": 1, "fn": 0}
+
+    def test_fp(self):
+        cm = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+        _confusion_increment(cm, "reject", "admit")
+        assert cm == {"tp": 0, "fp": 1, "tn": 0, "fn": 0}
+
+    def test_fn(self):
+        cm = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
+        _confusion_increment(cm, "admit", "reject")
+        assert cm == {"tp": 0, "fp": 0, "tn": 0, "fn": 1}
+
+
+# ---------------------------------------------------------------------------
+# clear_handler_state safety (allowlist + lock contention)
+# ---------------------------------------------------------------------------
+
+
+class TestClearHandlerStateSafety:
+    def test_unknown_table_raises_value_error(self):
+        # Allowlist guard prevents future PRs from running TRUNCATE on any
+        # arbitrary table name passed in via DeleteSpec.
+        import asyncio
+
+        async def go():
+            with pytest.raises(ValueError, match="not in TRUNCATE allowlist"):
+                await clear_handler_state(
+                    db=None,  # not reached — validation runs first
+                    name="test",
+                    agent_id="x",
+                    deletes=[_DeleteSpec(schema_table="public.evil", agent_id="x")],
+                )
+        asyncio.run(go())
+
+    def test_allowlist_includes_handler_targets(self):
+        # All 4 F056 handlers must be able to TRUNCATE their target tables.
+        assert "heart.facts" in _TRUNCATE_ALLOWLIST  # admission
+        assert "heart.episodes" in _TRUNCATE_ALLOWLIST  # summary
+        assert "brain.graph_edges" in _TRUNCATE_ALLOWLIST  # backfill

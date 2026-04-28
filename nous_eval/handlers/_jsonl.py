@@ -12,10 +12,13 @@ callers apply the `--include-unreviewed` filter before metric computation.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -23,9 +26,14 @@ T = TypeVar("T", bound=BaseModel)
 def load_jsonl(path: Path, model_cls: type[T]) -> list[T]:
     """Load a JSONL file into a list of validated pydantic models.
 
+    Lines that are blank or start with `#` are skipped (project-specific
+    extension to standard JSONL — useful for fixture commentary).
+
     Raises:
         FileNotFoundError: when `path` does not exist.
-        pydantic.ValidationError: on the FIRST row that fails schema validation.
+        pydantic.ValidationError: on the FIRST row that fails schema validation
+            (re-raised as-is; the wrapping `ValueError` adds file/line context
+            and chains to the original via `__cause__`).
             Caller should treat this as a hard precondition violation — do not
             silently shrink the corpus.
         json.JSONDecodeError: on malformed JSON.
@@ -46,9 +54,15 @@ def load_jsonl(path: Path, model_cls: type[T]) -> list[T]:
                 ) from exc
             try:
                 rows.append(model_cls.model_validate(payload))
-            except ValidationError as exc:
-                raise ValidationError.from_exception_data(
-                    title=f"{model_cls.__name__} at {path}:{line_num}",
-                    line_errors=exc.errors(),  # type: ignore[arg-type]
-                ) from exc
+            except ValidationError:
+                # Re-raise the original — pydantic's ValidationError formatting
+                # already includes field/error detail. We don't reconstruct via
+                # from_exception_data because its `line_errors` parameter
+                # expects InitErrorDetails (internal API), not ErrorDetails
+                # (what .errors() returns) — using the wrong shape crashes with
+                # TypeError instead of cleanly propagating ValidationError.
+                logger.error(
+                    "load_jsonl: schema validation failed at %s:%d", path, line_num,
+                )
+                raise
     return rows

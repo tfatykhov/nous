@@ -104,8 +104,35 @@ def lock_key_for(name: str, agent_id: str) -> int:
     return int.from_bytes(digest[:4], "big") % (2**31)
 
 
+@dataclass(frozen=True)
+class _DeleteSpec:
+    """Parameterized DELETE for `clear_handler_state` — replaces raw SQL strings.
+
+    Forces handlers to declare (table, agent_id) explicitly so the helper
+    can build a safe parameterized DELETE. Original API took raw `list[str]`,
+    which trained future handlers to f-string-interpolate runtime values
+    into SQL — a real injection vector once values stop being constants.
+    """
+
+    schema_table: str  # e.g. "heart.facts" — validated against allowlist
+    agent_id: str
+
+
+# Allowlist of fully-qualified table names handler evals are permitted to
+# truncate. New handlers add to this set in their PR, ensuring the SQL
+# builder never executes attacker-controlled identifiers.
+_TRUNCATE_ALLOWLIST: frozenset[str] = frozenset({
+    "heart.facts",
+    "heart.episodes",
+    "heart.procedures",
+    "heart.working_memory",
+    "brain.graph_edges",
+    "brain.decisions",
+})
+
+
 async def clear_handler_state(
-    db: Database, *, name: str, agent_id: str, table_truncate_sql: list[str],
+    db: Database, *, name: str, agent_id: str, deletes: list[_DeleteSpec],
 ) -> None:
     """Truncate handler-scoped rows BEFORE seed under advisory lock.
 
@@ -114,12 +141,23 @@ async def clear_handler_state(
     `pg_try_advisory_xact_lock` (xact-scoped, auto-released on commit).
     Concurrent same-handler+agent_id runs serialize on the same lock key.
 
-    `table_truncate_sql` is a list of fully-qualified DELETE/TRUNCATE
-    statements the handler wants run under the lock — keeps this helper
-    reusable across handlers without hardcoding table names.
+    Raises `RuntimeError` when the advisory lock is contended — concurrent
+    handler runs against the same agent_id are a configuration problem
+    (would silently produce wrong metrics by seeding on top of stale data),
+    not a gracefully-degradable situation.
+
+    Raises `ValueError` when any `DeleteSpec.schema_table` is not in the
+    allowlist (`_TRUNCATE_ALLOWLIST`). New handlers add table names to the
+    allowlist in their own PR, eliminating SQL-identifier injection risk.
     """
-    if not table_truncate_sql:
+    if not deletes:
         return
+    for spec in deletes:
+        if spec.schema_table not in _TRUNCATE_ALLOWLIST:
+            raise ValueError(
+                f"clear_handler_state: {spec.schema_table!r} not in TRUNCATE allowlist. "
+                f"Add to nous_eval.handlers._cli_base._TRUNCATE_ALLOWLIST in your handler PR."
+            )
     key = lock_key_for(name, agent_id)
     async with db.session() as session:
         acquired = (
@@ -128,15 +166,21 @@ async def clear_handler_state(
             )
         ).scalar()
         if not acquired:
-            logger.warning(
-                "%s eval: another process holds advisory lock for agent_id=%s; skipping clear",
-                name, agent_id,
+            raise RuntimeError(
+                f"{name} eval: advisory lock contended for agent_id={agent_id!r}. "
+                f"Another handler-eval process is running against the same agent_id. "
+                f"This would silently produce wrong metrics by seeding on stale data. "
+                f"Wait for the other run to finish, or pick a different agent_id."
             )
-            return
-        for stmt in table_truncate_sql:
-            await session.execute(text(stmt))
+        for spec in deletes:
+            # Identifier is validated against allowlist above; agent_id is bound.
+            await session.execute(
+                text(f"DELETE FROM {spec.schema_table} WHERE agent_id = :aid").bindparams(
+                    aid=spec.agent_id,
+                )
+            )
         await session.commit()
-        logger.info("%s eval: cleared %d table(s) under lock", name, len(table_truncate_sql))
+        logger.info("%s eval: cleared %d table(s) under lock", name, len(deletes))
 
 
 def _git_sha_short() -> str:
@@ -273,11 +317,12 @@ async def _run_async(
             notes=args.notes or f"{name} handler eval",
         )
 
-    # Gate: did the primary metric drop below an absolute floor? Per spec,
-    # gating happens via `nous_eval.regression` reading eval_runs after
-    # multiple runs accumulate — single-run gating in the handler itself
-    # would require a baseline, which the handler doesn't have access to.
-    # Handlers exit 0 on success; regression gating is a separate CLI step.
-    if args.report_only:
-        return 0
+    # Per F056 spec v4 §"Per-handler eval lifecycle" step 9 + appendix:
+    # handlers always return 0 on a clean run. Regression gating is the
+    # separate `nous_eval.regression` CLI step (reads eval_runs across
+    # multiple persisted runs and exits 4 on regression). Single-run
+    # gating in the handler isn't possible without a baseline, which the
+    # handler doesn't fetch. `--report-only` is accepted for API parity
+    # with regression.py but is currently a no-op (no gating code path
+    # to suppress); kept so future per-run thresholds can land cleanly.
     return 0
