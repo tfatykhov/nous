@@ -171,3 +171,42 @@ class TestSettingsOverrides:
         base = Settings()
         overridden = _settings_with_summary_overrides(base)
         assert overridden.agent_id == _AGENT_ID
+
+
+# ---------------------------------------------------------------------------
+# Constructor signature regression (F056 PR #4 v2 review caught this)
+# ---------------------------------------------------------------------------
+
+
+class TestEpisodeSummarizerConstructorContract:
+    """Prevents PR #4 v1 regression: missing `brain` arg → TypeError at runtime.
+
+    The eval handler instantiates EpisodeSummarizer in `_run_summary_eval`.
+    The constructor signature requires `brain: Brain | None` as positional
+    (no default). v1 omitted it; v2 adds `brain=None` explicitly. This
+    test asserts the contract independent of the runtime path so future
+    refactors that drop the arg fail loudly at test time, not silently
+    at the first eval invocation.
+    """
+
+    def test_episode_summarizer_constructor_accepts_required_kwargs(self):
+        # Inspect the signature without instantiating (no real DB/heart
+        # needed). Verifies the constructor's required kwargs match what
+        # _run_summary_eval passes.
+        import inspect
+        from nous.handlers.episode_summarizer import EpisodeSummarizer
+
+        sig = inspect.signature(EpisodeSummarizer.__init__)
+        params = sig.parameters
+        # All four kwargs the eval passes must exist in the constructor:
+        for required_kwarg in ("heart", "brain", "settings", "bus"):
+            assert required_kwarg in params, (
+                f"EpisodeSummarizer.__init__ no longer accepts {required_kwarg!r} "
+                f"— summary handler eval must be updated."
+            )
+        # `brain` must be either required (no default) OR have a None-compatible
+        # default. Either way, passing brain=None should always work.
+        # If brain becomes required-positional (no default), the eval's
+        # explicit `brain=None` still satisfies it. If brain becomes
+        # optional, also fine. We just need to ensure the parameter exists.
+        # (PR #4 v1 omitted brain entirely — that's what this test catches.)

@@ -175,7 +175,8 @@ async def _judge_summary_faithfulness(
         f"Transcript:\n{transcript_excerpt}\n\n"
         f"Produced summary:\n{produced_summary}\n\n"
         f"Does the produced summary contain any factual claim NOT supported "
-        f"by the transcript? Reply with exactly one word: yes, no, or borderline. "
+        f"by the transcript? Reply with EXACTLY one of these three words and "
+        f"NOTHING ELSE: yes, no, or borderline. "
         f"(yes = unsupported claim found, no = fully faithful, borderline = ambiguous)"
     )
     payload = {
@@ -194,13 +195,18 @@ async def _judge_summary_faithfulness(
         if isinstance(block, dict) and block.get("type") == "text":
             text_out = block.get("text", "").strip().lower()
             break
-    first = text_out.split()[0].rstrip(".,!?") if text_out else ""
-    if first == "no":
-        return 1.0  # No unsupported claim → fully faithful
-    if first == "yes":
-        return 0.0  # Unsupported claim found
-    if first == "borderline":
-        return 0.5
+    # Scan all tokens for first verdict word — defensive against verbose
+    # Haiku replies like "I think no, the summary is faithful". Devil's PR
+    # #4 review #5: temp=0 + tightened prompt should make this rare, but
+    # the all-tokens scan eliminates the failure mode entirely.
+    tokens = [t.rstrip(".,!?") for t in text_out.split()]
+    for tok in tokens:
+        if tok == "no":
+            return 1.0  # No unsupported claim → fully faithful
+        if tok == "yes":
+            return 0.0  # Unsupported claim found
+        if tok == "borderline":
+            return 0.5
     logger.warning("summary eval: faithfulness judge returned unparseable %r", text_out)
     return 0.0
 
@@ -283,8 +289,15 @@ async def _run_summary_eval(
         )
 
         async with _build_heart_for_eval(eval_db, eval_scoped) as heart:
+            # F056 PR #4 v2 fix: brain=None is REQUIRED by the constructor
+            # (episode_summarizer.py:88 declares `brain: Brain | None` with
+            # no default). Omitting it raises TypeError on first instantiation
+            # — a runtime crash undetectable by unit tests since none
+            # instantiate the real EpisodeSummarizer. The brain attr is only
+            # used in handle()'s graph-linking side-effect path, which the
+            # eval bypasses by calling summarize_episode directly.
             summarizer = EpisodeSummarizer(
-                heart=heart, settings=eval_scoped, bus=None,
+                heart=heart, brain=None, settings=eval_scoped, bus=None,
                 llm_client=summarizer_llm,
             )
             for row in rows:
