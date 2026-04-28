@@ -25,3 +25,20 @@ class AdmissionRow(BaseModel):
     label: str = Field(pattern="^(admit|reject)$")
     rationale: str | None = None  # why this fact should be admitted/rejected
     reviewed_by: str | None = None  # "tim", "tim+ai-draft", or None for AI-only
+
+
+class DedupPair(BaseModel):
+    """One row in `tests/fixtures/handlers/dedup_paraphrases.jsonl`.
+
+    Per F056 spec §B: 30 paraphrase pairs, 20 should dedup (semantic
+    paraphrase of anchor) + 10 should be distinct (similar wording but
+    different meaning). Both content fields must be >= 30 chars per
+    Heart.learn's F038-1.2 short-content reject (`facts.py:312`).
+    """
+
+    row_id: str = Field(min_length=1, description="Stable ID for deterministic ordering.")
+    anchor: str = Field(min_length=30, description=">= 30 chars or Heart.learn rejects it")
+    paraphrase: str = Field(min_length=30, description=">= 30 chars or Heart.learn rejects it")
+    expected: str = Field(pattern="^(dedup|distinct)$")
+    rationale: str | None = None
+    reviewed_by: str | None = None
