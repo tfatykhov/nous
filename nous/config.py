@@ -81,7 +81,15 @@ class Settings(BaseSettings):
     transcript_max_chars: int = 16000
 
     # F025 P2-D: Fact extractor dedup threshold (raised from 0.85)
+    # Leg 1 (hybrid-search RRF pre-check) at fact_extractor.py:243-248
     fact_dedup_threshold: float = 0.92
+
+    # F056 #377: Leg 2 (native cosine in Heart.learn) at facts.py:683-691.
+    # Was hardcoded 0.95; now env-tunable so the dedup eval (and operators)
+    # can sweep both legs. F056 PR #2 smoke showed 0.95 misses ALL paraphrases —
+    # text-embedding-3-small cosine on semantic paraphrases sits ~0.85-0.93.
+    # Default kept 0.95 for backwards-compat.
+    fact_native_cosine_threshold: float = 0.95
 
     # Runtime
     host: str = "0.0.0.0"

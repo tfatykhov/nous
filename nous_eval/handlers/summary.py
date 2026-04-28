@@ -59,6 +59,21 @@ logger = logging.getLogger(__name__)
 _AGENT_ID = "nous-eval-handler-summary"
 _HANDLER_NAME = "summary"
 _DEFAULT_FIXTURE = Path("tests/fixtures/handlers/summary_transcripts.jsonl")
+# F056 spec §D estimates ~$0.36/run with Haiku. Using Sonnet (the default
+# main_settings.background_model) is ~5x slower per call for 240 calls
+# total — empirically observed to push the run past 60 min vs ~15 min
+# with Haiku, with minimal accuracy gain on simple "yes/no/borderline"
+# verdict tasks. Haiku 4.5 is sufficient.
+_DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
+
+
+def _add_judge_model_arg(parser) -> None:
+    """Extra CLI flag: --judge-model overrides the LLM-judge model."""
+    parser.add_argument(
+        "--judge-model", default=_DEFAULT_JUDGE_MODEL,
+        help=f"Anthropic model for LLM-judge calls (default {_DEFAULT_JUDGE_MODEL}). "
+             f"Override to claude-sonnet-4-6 for higher-fidelity judging at ~5x cost+latency.",
+    )
 
 
 def _settings_with_summary_overrides(base: Settings) -> Settings:
@@ -138,6 +153,9 @@ async def _judge_key_point_coverage(
         "model": model,
         "max_tokens": 8,
         "temperature": 0,
+        # SdkAnthropicClient at anthropic_client.py:1014 does `payload["system"]`
+        # (not .get) — KeyError if absent. Empty string satisfies both clients.
+        "system": "",
         "messages": [{"role": "user", "content": prompt}],
     }
     try:
@@ -183,6 +201,7 @@ async def _judge_summary_faithfulness(
         "model": model,
         "max_tokens": 16,
         "temperature": 0,
+        "system": "",  # SdkAnthropicClient requires this key (anthropic_client.py:1014)
         "messages": [{"role": "user", "content": prompt}],
     }
     try:
@@ -329,12 +348,13 @@ async def _run_summary_eval(
                 # Step 3: judge twice
                 produced_kp = produced.get("key_points", []) or []
                 produced_summary_text = produced.get("summary", "") or ""
+                judge_model = getattr(args, "judge_model", _DEFAULT_JUDGE_MODEL)
                 kpc = await _judge_key_point_coverage(
-                    llm_client, main_settings.background_model,
+                    llm_client, judge_model,
                     row.gold_key_points, produced_kp,
                 )
                 sf = await _judge_summary_faithfulness(
-                    llm_client, main_settings.background_model,
+                    llm_client, judge_model,
                     row.transcript, produced_summary_text,
                 )
                 coverages.append(kpc)
@@ -405,7 +425,7 @@ async def _run_summary_eval(
         primary_metric="summary_quality",
         fixture_size=len(rows),
         handler_specific_notes=(
-            f"judge_model={main_settings.background_model}, "
+            f"judge_model={getattr(args, 'judge_model', _DEFAULT_JUDGE_MODEL)}, "
             f"include_unreviewed={args.include_unreviewed}, "
             f"null_return_rate={null_returns / len(rows):.3f}"
         ),
@@ -417,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         _HANDLER_NAME,
         _run_summary_eval,
         default_threshold=0.05,  # 5pp per F056 spec §D
+        extra_args_fn=_add_judge_model_arg,
         argv=argv,
     )
 

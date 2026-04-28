@@ -228,9 +228,11 @@ async def _seed_background_facts(heart: "Heart") -> list[UUID]:
     """
     bg_uuids: list[UUID] = []
     for content in _BACKGROUND_FACTS:
+        # Note: Heart.learn does NOT expose check_contradictions (FactManager-
+        # level only). Contradiction detection at facts.py:407 only fires when
+        # input.subject is set; we leave subject=None so the check is a no-op.
         result = await heart.learn(
             FactInput(content=content, source="dedup_eval_background"),
-            check_contradictions=False,
         )
         if isinstance(result, FactRejected):
             logger.warning(
@@ -293,11 +295,12 @@ async def _run_one_leg(
     cm = {"tp": 0, "fp": 0, "tn": 0, "fn": 0}
 
     for pair in pairs:
-        # Insert anchor (check_contradictions=False — costs Haiku $ + adds
-        # non-determinism; not measured here)
+        # Insert anchor. Heart.learn doesn't expose check_contradictions
+        # (FactManager-only); contradiction detection at facts.py:407 only
+        # fires when subject is set, so leaving subject=None makes the check
+        # a no-op without needing the kwarg.
         anchor_result = await heart.learn(
             FactInput(content=pair.anchor, source="dedup_eval"),
-            check_contradictions=False,
         )
         if isinstance(anchor_result, FactRejected):
             logger.warning(
@@ -322,8 +325,13 @@ async def _run_one_leg(
 
         # Submit paraphrase via FactExtractor (short-circuits LLM extraction
         # when candidate_facts is non-empty — see fact_extractor.py:127-130).
+        # NOTE: extract_and_store at fact_extractor.py:121-122 short-circuits
+        # `if not summary: return []` BEFORE the candidate_facts branch — so
+        # an empty dict ({} is falsy) skips processing entirely. Pass any
+        # truthy dict to bypass that gate; the contents are unused when
+        # candidate_facts is provided.
         returned_uuids = await extractor.extract_and_store(
-            summary={},
+            summary={"_eval_marker": "dedup-eval"},
             episode_id=f"dedup-eval-{pair.row_id}",
             candidate_facts=[{
                 "content": pair.paraphrase,

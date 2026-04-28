@@ -216,12 +216,43 @@ class TestConfidence:
         score = ctrl._score_confidence(fact, None)
         assert score == pytest.approx(0.65, abs=0.01)  # 0.8 - 0.15
 
-    def test_no_source_text_no_penalty(self):
-        """Unknown source without source text -> use raw confidence."""
+    def test_no_source_text_unknown_source_caps_at_ungrounded_floor(self):
+        """F056 #376 fix: unknown source + no source_text caps confidence at 0.3.
+
+        Previous behavior returned `fact_input.confidence` (default 1.0)
+        unchanged, which let ungrounded vague facts slip through admission
+        with high confidence. F056 admission smoke showed 32% FP rate caused
+        by this. New behavior: cap at _UNGROUNDED_FLOOR=0.3 so undemonstrated
+        grounding can't fake confidence.
+        """
         ctrl = _controller()
+        # confidence=0.8 input but no source_text + unknown source → capped at 0.3
         fact = _fact(source="some_other_source", confidence=0.8)
         score = ctrl._score_confidence(fact, None)
-        assert score == pytest.approx(0.80, abs=0.01)
+        assert score == pytest.approx(0.30, abs=0.01)
+
+    def test_no_source_text_low_confidence_unchanged(self):
+        """Cap is min(0.3, confidence) — already-low confidence passes through."""
+        ctrl = _controller()
+        fact = _fact(source="some_other_source", confidence=0.1)
+        score = ctrl._score_confidence(fact, None)
+        assert score == pytest.approx(0.10, abs=0.01)
+
+    def test_correction_extraction_uses_known_handler_path(self):
+        """F039 correction-learning sources must apply the mild per-source penalty,
+        NOT the 0.3 ungrounded floor (PR #380 architect-review finding)."""
+        ctrl = _controller()
+        # confidence=0.7 (F039 default) → penalty 0.10 → 0.60 (NOT the 0.3 floor)
+        fact = _fact(source="correction_extraction", confidence=0.7)
+        score = ctrl._score_confidence(fact, None)
+        assert score == pytest.approx(0.60, abs=0.01)
+
+    def test_inline_correction_uses_known_handler_path(self):
+        ctrl = _controller()
+        fact = _fact(source="inline_correction", confidence=0.8)
+        score = ctrl._score_confidence(fact, None)
+        # 0.8 - 0.10 = 0.70
+        assert score == pytest.approx(0.70, abs=0.01)
 
 
 # ---------------------------------------------------------------------------

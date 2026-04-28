@@ -24,6 +24,7 @@ from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, GraphEdge
 
 if TYPE_CHECKING:
+    from nous.config import Settings
     from nous.handlers import LLMClient
     from nous.heart.actionability import ActionabilityClassifier
 
@@ -74,6 +75,7 @@ class FactManager:
         agent_id: str,
         admission_controller: AdmissionController | None = None,
         actionability_classifier: "ActionabilityClassifier | None" = None,
+        settings: "Settings | None" = None,
     ) -> None:
         self.db = db
         self.embeddings = embeddings
@@ -84,6 +86,10 @@ class FactManager:
         self._llm_model: str = "claude-haiku-4-5-20251001"
         # F047: Actionability classifier for write-time verdict
         self._actionability_classifier = actionability_classifier
+        # F056 #377: Settings injected so _find_duplicate can read
+        # fact_native_cosine_threshold (was hardcoded 0.95). Optional
+        # for backwards-compat; defaults to 0.95 when settings is None.
+        self._settings = settings
 
     # ------------------------------------------------------------------
     # Event helper
@@ -680,15 +686,24 @@ class FactManager:
         exclude_ids: list[UUID],
         session: AsyncSession,
     ) -> Fact | None:
-        """Find a near-duplicate fact by cosine similarity > 0.95."""
+        """Find a near-duplicate fact by cosine similarity > threshold.
+
+        Threshold is `Settings.fact_native_cosine_threshold` (default 0.95;
+        F056 #377 made this env-tunable via NOUS_FACT_NATIVE_COSINE_THRESHOLD
+        because the dedup eval showed 0.95 misses all semantic paraphrases).
+        """
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
         # Build exclude clause (P1-2)
         exclude_clause = ""
+        threshold = (
+            float(self._settings.fact_native_cosine_threshold)
+            if self._settings is not None else 0.95
+        )
         params: dict = {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
-            "threshold": 0.95,
+            "threshold": threshold,
         }
         if exclude_ids:
             placeholders = ", ".join(f":excl_{i}" for i in range(len(exclude_ids)))
