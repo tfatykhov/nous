@@ -84,15 +84,79 @@ def _settings_with_dedup_overrides(base: Settings) -> Settings:
     return base.model_copy(update=update)
 
 
-# F056 PR #2 v2: 50 unrelated background facts per spec §B procedure step 2.
-# Without these, Leg 1 hybrid-search runs against a near-empty corpus —
-# RRF behavior is unrepresentative of production and the PR #364 over-dedup
-# bug class (which the spec explicitly cites as motivation for measuring
-# Leg 1) cannot reproduce. Each string is >= 30 chars per F038-1.2.
-_BACKGROUND_FACTS: tuple[str, ...] = tuple(
-    f"Generic background fact #{i:02d} about a topic unrelated to any pair."
-    for i in range(50)
+# F056 PR #2 v3: 50 LEXICALLY DIVERSE background facts per spec §B step 2.
+#
+# v2 used a templated `f"Generic background fact #{i:02d}..."` pattern that
+# produced near-identical embeddings — Heart.learn's > 0.95 cosine dedup at
+# facts.py:329-334 collapsed all 50 into 1 stored row, defeating the seed.
+#
+# v3 uses 50 hand-crafted sentences across 10 unrelated domains (5 each):
+# astronomy, cooking, geography, music, animals, history, sports, plants,
+# weather, transport. Domain rotation guarantees inter-fact cosine stays
+# below 0.95. Each sentence >= 30 chars per F038-1.2.
+_BACKGROUND_FACTS: tuple[str, ...] = (
+    # astronomy
+    "Jupiter has four large Galilean moons named Io, Europa, Ganymede, and Callisto.",
+    "The Andromeda galaxy is approximately 2.5 million light-years from Earth.",
+    "A solar eclipse occurs when the moon passes between Earth and the sun.",
+    "Saturn's rings are composed mostly of water ice with traces of rocky material.",
+    "The Hubble Space Telescope was launched into low Earth orbit in 1990.",
+    # cooking
+    "Sourdough bread requires a starter culture of wild yeast and lactobacilli.",
+    "Caramelization of onions takes about 30 to 45 minutes over low heat.",
+    "Fish sauce is a fermented condiment central to many Southeast Asian cuisines.",
+    "Tempering chocolate involves heating and cooling to specific temperature ranges.",
+    "Risotto is made by gradually adding warm broth while stirring arborio rice.",
+    # geography
+    "The Mariana Trench is the deepest known oceanic trench in the Pacific Ocean.",
+    "Mount Kilimanjaro is the highest mountain in Africa, located in Tanzania.",
+    "The Amazon River discharges more water than any other river in the world.",
+    "Iceland sits on the Mid-Atlantic Ridge between two tectonic plate boundaries.",
+    "Lake Baikal in Siberia holds about twenty percent of the world's fresh water.",
+    # music
+    "A grand piano typically has eighty-eight keys spanning seven full octaves.",
+    "Bach composed the Brandenburg Concertos as a gift for the Margrave of Brandenburg.",
+    "The Stradivarius violins were crafted in Cremona, Italy during the 1700s.",
+    "Reggae music originated in Jamaica during the late nineteen sixties.",
+    "Miles Davis pioneered cool jazz with his nineteen fifty-nine album Kind of Blue.",
+    # animals
+    "Octopuses have three hearts and blue blood due to copper-based hemocyanin.",
+    "The Arctic tern migrates from polar region to polar region annually.",
+    "Honey bees communicate the location of nectar sources via the waggle dance.",
+    "Cheetahs are the fastest land animals, capable of brief bursts above seventy mph.",
+    "Komodo dragons can grow over three meters long on the islands of Indonesia.",
+    # history
+    "The Rosetta Stone enabled scholars to decipher Egyptian hieroglyphic writing.",
+    "Marco Polo traveled along the Silk Road to the court of Kublai Khan.",
+    "The Treaty of Westphalia in sixteen forty-eight ended the Thirty Years' War.",
+    "Cleopatra was the last active ruler of the Ptolemaic Kingdom of ancient Egypt.",
+    "The printing press was invented by Johannes Gutenberg around fourteen forty.",
+    # sports
+    "A regulation soccer match consists of two halves of forty-five minutes each.",
+    "The Tour de France bicycle race spans approximately three thousand five hundred kilometers.",
+    "Wimbledon is the oldest tennis tournament in the world, founded in eighteen seventy-seven.",
+    "Sumo wrestling matches are held in a circular ring called a dohyo.",
+    "The Stanley Cup is awarded annually to the National Hockey League playoff champion.",
+    # plants
+    "Photosynthesis converts carbon dioxide and water into glucose using sunlight.",
+    "Bamboo is one of the fastest-growing plants in the world, some species growing meters per day.",
+    "The giant sequoia is the largest tree by volume on Earth, native to California.",
+    "Carnivorous plants like the Venus flytrap evolved in nutrient-poor soil environments.",
+    "Tulip mania in seventeenth-century Netherlands was one of history's first speculative bubbles.",
+    # weather
+    "A rainbow forms when sunlight is refracted through suspended water droplets in the air.",
+    "Hurricanes are classified on the Saffir-Simpson scale based on sustained wind speed.",
+    "Lightning strikes the Earth roughly one hundred times every second on average.",
+    "The polar vortex is a persistent low-pressure system over the polar regions.",
+    "Snowflakes are six-sided crystals formed by water vapor freezing in the atmosphere.",
+    # transport
+    "The Trans-Siberian Railway connects Moscow to Vladivostok over nine thousand kilometers.",
+    "Diesel engines were patented by Rudolf Diesel in eighteen ninety-two.",
+    "The Suez Canal connects the Mediterranean Sea with the Red Sea via Egypt.",
+    "Concorde was a supersonic passenger jet that operated commercially until two thousand three.",
+    "Container shipping standardized cargo through twenty and forty foot ISO containers.",
 )
+assert len(_BACKGROUND_FACTS) == 50, f"expected 50 background facts, got {len(_BACKGROUND_FACTS)}"
 
 
 def filter_pairs(pairs: list[DedupPair], *, include_unreviewed: bool) -> list[DedupPair]:
@@ -184,14 +248,18 @@ async def _delete_facts_by_ids(heart: "Heart", fact_ids: list[UUID]) -> None:
     Replaces v1's blanket `DELETE WHERE agent_id` which would have wiped
     the background seed too. Targeted deletion preserves the 50-row
     background corpus across all pair iterations.
+
+    Uses the `text(...), {"ids": list_value}` execute pattern (matches
+    production at `nous/api/dashboard_queries.py:206-209`). The
+    `text(...).bindparams(ids=[...])` form does NOT work for `ANY(:ids)`
+    array bindings — it only handles scalar parameters.
     """
     if not fact_ids:
         return
     async with heart.db.session() as session:
         await session.execute(
-            text("DELETE FROM heart.facts WHERE id = ANY(:ids)").bindparams(
-                ids=[str(fid) for fid in fact_ids],
-            )
+            text("DELETE FROM heart.facts WHERE id = ANY(:ids)"),
+            {"ids": [str(fid) for fid in fact_ids]},
         )
         await session.commit()
 
@@ -239,6 +307,19 @@ async def _run_one_leg(
             continue
         anchor_uuid = anchor_result.id
 
+        # Defensive: if Heart.learn dedup'd the anchor against an existing
+        # background fact (cosine > 0.95), `anchor_uuid` IS the background
+        # UUID. Skipping the pair is safer than measuring against a UUID
+        # we'll then refuse to delete (would leave stale state) or DO
+        # delete (would wipe our background corpus mid-run).
+        if anchor_uuid in background_uuids:
+            logger.warning(
+                "dedup eval: anchor %s collided with background fact (cosine "
+                "> 0.95). Skipping pair to preserve background corpus integrity.",
+                pair.row_id,
+            )
+            continue
+
         # Submit paraphrase via FactExtractor (short-circuits LLM extraction
         # when candidate_facts is non-empty — see fact_extractor.py:127-130).
         returned_uuids = await extractor.extract_and_store(
@@ -254,6 +335,7 @@ async def _run_one_leg(
         _confusion_increment(cm, pair.expected, outcome)
 
         # Targeted cleanup: anchor + any new (non-background) UUID returned.
+        # We already verified anchor_uuid not in background_uuids above.
         to_delete = [anchor_uuid]
         for ruid in returned_uuids:
             if ruid != anchor_uuid and ruid not in background_uuids:
