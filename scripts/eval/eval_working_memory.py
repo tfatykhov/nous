@@ -35,6 +35,9 @@ from sqlalchemy import text
 from nous.api.anthropic_client import create_client
 from nous.config import Settings
 from nous.storage.database import Database
+from nous_eval._oat_preamble import (
+    RateLimiter, call_with_retries, with_oat_preamble,
+)
 
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -120,6 +123,7 @@ Respond with strict JSON:
 
 async def _judge_relevance(
     api_client, model: str, current_message: str, items: list[dict],
+    rate_limiter: RateLimiter,
 ) -> list[dict]:
     candidates_block = "\n".join(
         f"{i}. score={it['score']:.2f} content=\"{it['content']}\""
@@ -132,10 +136,10 @@ async def _judge_relevance(
         "model": model,
         "max_tokens": 800,
         "temperature": 0,
-        "system": "",
+        "system": with_oat_preamble(),
         "messages": [{"role": "user", "content": prompt}],
     }
-    response = await api_client.call(payload)
+    response = await call_with_retries(api_client, payload, rate_limiter=rate_limiter)
     text_out = ""
     for block in response.content:
         if isinstance(block, dict) and block.get("type") == "text":
@@ -246,6 +250,7 @@ async def main() -> int:
 
     api_client = create_client(settings)
     await api_client.start()
+    rate_limiter = RateLimiter(min_interval_s=2.5)
 
     results = []
     try:
@@ -254,10 +259,10 @@ async def main() -> int:
             loaded = await _load_wm(db, session_id, args.threshold)
             loaded_contents = {it["content"] for it in loaded}
 
-            await asyncio.sleep(2.0)
             verdicts = await _judge_relevance(
                 api_client, args.judge_model,
                 sc.current_message, sc.seeded_items,
+                rate_limiter,
             )
             relevant_set = {
                 sc.seeded_items[v["index"]]["content"]

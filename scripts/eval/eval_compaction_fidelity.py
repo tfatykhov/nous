@@ -36,6 +36,9 @@ from nous.api.anthropic_client import create_client
 from nous.api.compaction import ConversationCompactor
 from nous.api.models import Conversation, Message
 from nous.config import Settings
+from nous_eval._oat_preamble import (
+    RateLimiter, call_with_retries, with_oat_preamble,
+)
 
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -265,7 +268,8 @@ Mark `preserved: false` if the fact is missing, distorted, contradicted, or so v
 
 
 async def _judge(api_client, model: str, conversation: str,
-                 summary: str, facts: list[str]) -> list[dict]:
+                 summary: str, facts: list[str],
+                 rate_limiter: RateLimiter) -> list[dict]:
     """Have Sonnet judge fact preservation. Returns list of {fact, preserved, reason}."""
     facts_block = "\n".join(f"{i+1}. {f}" for i, f in enumerate(facts))
     prompt = _JUDGE_PROMPT.format(
@@ -277,10 +281,10 @@ async def _judge(api_client, model: str, conversation: str,
         "model": model,
         "max_tokens": 1500,
         "temperature": 0,
-        "system": "",
+        "system": with_oat_preamble(),
         "messages": [{"role": "user", "content": prompt}],
     }
-    response = await api_client.call(payload)
+    response = await call_with_retries(api_client, payload, rate_limiter=rate_limiter)
     text = ""
     for block in response.content:
         if isinstance(block, dict) and block.get("type") == "text":
@@ -321,6 +325,9 @@ async def main() -> int:
     api_client = create_client(settings)
     await api_client.start()
 
+    # Shared rate limiter for both compactor + judge calls.
+    rate_limiter = RateLimiter(min_interval_s=2.5)
+
     # ApiCaller protocol: (system_prompt, messages, tools=None,
     # skip_thinking=False, model_override=None) -> ApiResponse
     async def _api_call(
@@ -335,12 +342,12 @@ async def main() -> int:
             "model": model_override or settings.background_model,
             "max_tokens": 4000,
             "temperature": 0,
-            "system": system_prompt,
+            "system": with_oat_preamble(system_prompt),
             "messages": messages,
         }
         if tools:
             payload["tools"] = tools
-        response = await api_client.call(payload)
+        response = await call_with_retries(api_client, payload, rate_limiter=rate_limiter)
         # Wrap in ApiResponse-shaped object that compactor expects
         return ApiResponse(
             content=response.content,
@@ -367,7 +374,6 @@ async def main() -> int:
             )
 
             try:
-                await asyncio.sleep(2.0)  # rate limit pause
                 await compactor.compact(conv, [
                     {"role": m.role, "content": m.content} for m in messages
                 ], _api_call, cut_point)
@@ -388,10 +394,10 @@ async def main() -> int:
                     break
 
             # Judge fact preservation
-            await asyncio.sleep(1.5)
             verdicts = await _judge(
                 api_client, args.judge_model, convo_text,
                 summary_text, sc.load_bearing_facts,
+                rate_limiter,
             )
 
             preserved = sum(1 for v in verdicts if v.get("preserved"))

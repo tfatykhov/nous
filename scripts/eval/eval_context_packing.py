@@ -29,6 +29,9 @@ from pathlib import Path
 
 from nous.api.anthropic_client import create_client
 from nous.api.retrieval_pipeline import run_recall_pipeline
+from nous_eval._oat_preamble import (
+    RateLimiter, call_with_retries, with_oat_preamble,
+)
 from nous.brain.brain import Brain
 from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
@@ -109,7 +112,7 @@ Verdict: based ONLY on the assembled context, could the LLM answer the question 
 
 
 async def _judge(api_client, model: str, question: str, gold_hint: str,
-                 context: str) -> dict:
+                 context: str, rate_limiter: RateLimiter) -> dict:
     prompt = _JUDGE_PROMPT.format(
         question=question, gold_hint=gold_hint,
         context=context[:6000],
@@ -118,10 +121,10 @@ async def _judge(api_client, model: str, question: str, gold_hint: str,
         "model": model,
         "max_tokens": 200,
         "temperature": 0,
-        "system": "",
+        "system": with_oat_preamble(),
         "messages": [{"role": "user", "content": prompt}],
     }
-    resp = await api_client.call(payload)
+    resp = await call_with_retries(api_client, payload, rate_limiter=rate_limiter)
     text = ""
     for block in resp.content:
         if isinstance(block, dict) and block.get("type") == "text":
@@ -175,6 +178,7 @@ async def main() -> int:
 
     api_client = create_client(main_settings)
     await api_client.start()
+    rate_limiter = RateLimiter(min_interval_s=2.5)
 
     heart = Heart(database=db, settings=settings,
                   embedding_provider=embedder, owns_embeddings=False)
@@ -187,31 +191,29 @@ async def main() -> int:
             for sc in SCENARIOS[:args.max_scenarios]:
                 await asyncio.sleep(1.5)
                 # Run the production recall pipeline (extracted in F051)
-                pipeline = await run_recall_pipeline(
+                results_list, stats = await run_recall_pipeline(
                     query=sc.user_message,
                     heart=heart, brain=brain, settings=settings,
-                    top_k=args.top_k,
+                    limit=args.top_k,
                 )
-                # Assemble the LLM-facing context string the same way
-                # `recall_deep` does for the agent.
+                # Assemble the LLM-facing context string.
                 context_lines = []
-                for r in pipeline.results[:args.top_k]:
-                    label = f"[{r.memory_type}] " if r.memory_type else ""
-                    summary = r.summary or ""
+                for r in results_list[:args.top_k]:
+                    label = f"[{r.type}] "
+                    summary = r.description or ""
                     context_lines.append(f"{label}{summary}")
                 context_text = "\n\n".join(context_lines) or "(empty)"
 
-                await asyncio.sleep(1.5)
                 verdict = await _judge(
                     api_client, args.judge_model,
                     sc.user_message, sc.gold_answer_hint,
-                    context_text,
+                    context_text, rate_limiter,
                 )
                 results.append({
                     "name": sc.name,
                     "question": sc.user_message,
                     "gold_hint": sc.gold_answer_hint,
-                    "n_results": len(pipeline.results),
+                    "n_results": len(results_list),
                     "sufficient": bool(verdict.get("sufficient")),
                     "reason": verdict.get("reason", ""),
                     "context_preview": context_text[:600],

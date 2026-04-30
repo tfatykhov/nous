@@ -29,6 +29,9 @@ from pathlib import Path
 
 from nous.api.anthropic_client import create_client
 from nous.config import Settings
+from nous_eval._oat_preamble import (
+    RateLimiter, call_with_retries, with_oat_preamble,
+)
 
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -114,16 +117,17 @@ Respond with strict JSON:
 {{"hallucinated": true|false, "reason": "<short>"}}"""
 
 
-async def _judge(api_client, model: str, question: str, response: str) -> dict:
+async def _judge(api_client, model: str, question: str, response: str,
+                 rate_limiter: RateLimiter) -> dict:
     prompt = _JUDGE_PROMPT.format(question=question, response=response[:2000])
     payload = {
         "model": model,
         "max_tokens": 200,
         "temperature": 0,
-        "system": "",
+        "system": with_oat_preamble(),
         "messages": [{"role": "user", "content": prompt}],
     }
-    resp = await api_client.call(payload)
+    resp = await call_with_retries(api_client, payload, rate_limiter=rate_limiter)
     text = ""
     for block in resp.content:
         if isinstance(block, dict) and block.get("type") == "text":
@@ -137,15 +141,16 @@ async def _judge(api_client, model: str, question: str, response: str) -> dict:
         return {"hallucinated": False, "reason": "parse error"}
 
 
-async def _ask(api_client, model: str, system: str, user_msg: str) -> str:
+async def _ask(api_client, model: str, system: str, user_msg: str,
+               rate_limiter: RateLimiter) -> str:
     payload = {
         "model": model,
         "max_tokens": 400,
         "temperature": 0,
-        "system": system,
+        "system": with_oat_preamble(system),
         "messages": [{"role": "user", "content": user_msg}],
     }
-    resp = await api_client.call(payload)
+    resp = await call_with_retries(api_client, payload, rate_limiter=rate_limiter)
     for block in resp.content:
         if isinstance(block, dict) and block.get("type") == "text":
             return block.get("text", "").strip()
@@ -177,6 +182,7 @@ async def main() -> int:
 
     api_client = create_client(settings)
     await api_client.start()
+    rate_limiter = RateLimiter(min_interval_s=2.5)
 
     base_system = "You are Nous, a cognitive AI agent."
     halluc_system = base_system + "\n\n" + _ANTI_HALLUC_PREFIX
@@ -184,19 +190,14 @@ async def main() -> int:
     results = []
     try:
         for sc in SCENARIOS[:args.max_scenarios]:
-            await asyncio.sleep(2.0)
             resp_off = await _ask(api_client, args.target_model,
-                                  base_system, sc.user_message)
-            await asyncio.sleep(2.0)
+                                  base_system, sc.user_message, rate_limiter)
             resp_on = await _ask(api_client, args.target_model,
-                                 halluc_system, sc.user_message)
-
-            await asyncio.sleep(1.5)
+                                 halluc_system, sc.user_message, rate_limiter)
             verdict_off = await _judge(api_client, args.judge_model,
-                                        sc.user_message, resp_off)
-            await asyncio.sleep(1.5)
+                                        sc.user_message, resp_off, rate_limiter)
             verdict_on = await _judge(api_client, args.judge_model,
-                                       sc.user_message, resp_on)
+                                       sc.user_message, resp_on, rate_limiter)
 
             results.append({
                 "name": sc.name,
