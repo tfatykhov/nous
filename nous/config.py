@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     # derived empirically; set 1.0 to disable scaling (legacy behavior).
     confidence_calibration_factor: float = 0.7627
 
+    # F022 live-linker content guard (post-F058 audit, edge precision
+    # report 2026-04-30): empty/short source or target content drove ~30%
+    # of NO/WEAK verdicts on `informed_by` and `evidence_for`. Mirrors
+    # F054's NOUS_CE_BACKFILL_MIN_DECISION_CHARS=40 but for the live
+    # event-bus linker (graph_linker.link_fact_to_decisions /
+    # link_fact_to_facts). Set to 0 to disable.
+    cross_type_link_min_content_chars: int = 40
+
     # Anti-hallucination (F016 Phase 0)
     anti_hallucination_prompt: bool = True
 
