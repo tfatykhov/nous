@@ -1,0 +1,1245 @@
+{
+  "judge_model": "claude-haiku-4-5-20251001",
+  "n_facts": 30,
+  "n_pairs": 120,
+  "overall_accuracy": 0.825,
+  "per_category": {
+    "CONTRADICTION": {
+      "n": 30,
+      "correct": 24,
+      "accuracy": 0.8,
+      "avg_confidence": 0.9239999999999999
+    },
+    "UPDATE": {
+      "n": 30,
+      "correct": 27,
+      "accuracy": 0.9,
+      "avg_confidence": 0.9136666666666666
+    },
+    "REFINEMENT": {
+      "n": 30,
+      "correct": 30,
+      "accuracy": 1.0,
+      "avg_confidence": 0.9246666666666666
+    },
+    "UNRELATED": {
+      "n": 30,
+      "correct": 18,
+      "accuracy": 0.6,
+      "avg_confidence": 0.9199999999999999
+    }
+  },
+  "confusion_matrix": {
+    "CONTRADICTION->CONTRADICTION": 24,
+    "UPDATE->UPDATE": 27,
+    "REFINEMENT->REFINEMENT": 30,
+    "UNRELATED->UNRELATED": 18,
+    "CONTRADICTION->UPDATE": 6,
+    "UNRELATED->CONTRADICTION": 7,
+    "UPDATE->CONTRADICTION": 3,
+    "UNRELATED->REFINEMENT": 4,
+    "UNRELATED->UPDATE": 1
+  },
+  "pairs": [
+    {
+      "fact_id": "09da3775-9466-49d5-9db1-ca8fd5e95f61",
+      "subject": "F025 \u2014 hybrid search weight configuration",
+      "original": "Emerson suggested and Tim approved exploring a 0.7 vector / 0.3 keyword hybrid search weight split as a starting configuration for retrieval self-optimization in feature F025.",
+      "synthetic": "Tim rejected Emerson's proposal to use a 0.7 vector / 0.3 keyword hybrid search weight split for feature F025.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "09da3775-9466-49d5-9db1-ca8fd5e95f61",
+      "subject": "F025 \u2014 hybrid search weight configuration",
+      "original": "Emerson suggested and Tim approved exploring a 0.7 vector / 0.3 keyword hybrid search weight split as a starting configuration for retrieval self-optimization in feature F025.",
+      "synthetic": "Emerson and Tim adjusted the hybrid search weight split to 0.6 vector / 0.4 keyword after initial testing showed improved retrieval performance in feature F025.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "09da3775-9466-49d5-9db1-ca8fd5e95f61",
+      "subject": "F025 \u2014 hybrid search weight configuration",
+      "original": "Emerson suggested and Tim approved exploring a 0.7 vector / 0.3 keyword hybrid search weight split as a starting configuration for retrieval self-optimization in feature F025.",
+      "synthetic": "Emerson suggested the 0.7 vector / 0.3 keyword hybrid search weight split for feature F025 based on initial performance benchmarks, which Tim approved as a reasonable baseline before running self-opti",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "09da3775-9466-49d5-9db1-ca8fd5e95f61",
+      "subject": "F025 \u2014 hybrid search weight configuration",
+      "original": "Emerson suggested and Tim approved exploring a 0.7 vector / 0.3 keyword hybrid search weight split as a starting configuration for retrieval self-optimization in feature F025.",
+      "synthetic": "Emerson suggested and Tim approved a 0.7 probability weighting for vector graphics in the new dashboard design mockup for feature F025.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "32c4b2d3-a735-4980-aa1f-e02005354a06",
+      "subject": "lesson_learned",
+      "original": "Blind DAG retries without triage waste cycles and can clobber healthy jobs \u2014 always list/inspect state before any retry or re-creation",
+      "synthetic": "Blind DAG retries without triage are efficient and never interfere with healthy jobs \u2014 inspection of state before retry is unnecessary.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "32c4b2d3-a735-4980-aa1f-e02005354a06",
+      "subject": "lesson_learned",
+      "original": "Blind DAG retries without triage waste cycles and can clobber healthy jobs \u2014 always list/inspect state before any retry or re-creation",
+      "synthetic": "DAG retry logic now includes automatic state inspection and triage validation before execution, preventing healthy job disruption.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "32c4b2d3-a735-4980-aa1f-e02005354a06",
+      "subject": "lesson_learned",
+      "original": "Blind DAG retries without triage waste cycles and can clobber healthy jobs \u2014 always list/inspect state before any retry or re-creation",
+      "synthetic": "Before retrying failed DAG jobs, query the current state of all downstream tasks to verify they haven't already completed or been manually fixed, preventing duplicate execution and resource waste.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "32c4b2d3-a735-4980-aa1f-e02005354a06",
+      "subject": "lesson_learned",
+      "original": "Blind DAG retries without triage waste cycles and can clobber healthy jobs \u2014 always list/inspect state before any retry or re-creation",
+      "synthetic": "Blind DAG construction without triage can waste design cycles and clobber adjacent diagrams \u2014 always list vertices before any retry or redraw.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "686467f2-3893-4961-89bd-5a886ad02bf4",
+      "subject": "F024",
+      "original": "Feature number F024 is already assigned to the Critic Agent and must not be reused.",
+      "synthetic": "Feature number F024 is available for assignment and can be reused by other agents.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "686467f2-3893-4961-89bd-5a886ad02bf4",
+      "subject": "F024",
+      "original": "Feature number F024 is already assigned to the Critic Agent and must not be reused.",
+      "synthetic": "Feature number F024 has been reassigned to the Analytics Team following the Critic Agent's deprecation.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "686467f2-3893-4961-89bd-5a886ad02bf4",
+      "subject": "F024",
+      "original": "Feature number F024 is already assigned to the Critic Agent and must not be reused.",
+      "synthetic": "Feature number F024 is already assigned to the Critic Agent for sentiment analysis tasks and must not be reused for other agent modules.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "686467f2-3893-4961-89bd-5a886ad02bf4",
+      "subject": "F024",
+      "original": "Feature number F024 is already assigned to the Critic Agent and must not be reused.",
+      "synthetic": "Feature number F024 is already assigned to the Marketing Agent and must be promoted across all channels.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "68b933c6-fd8f-45ed-bd10-8eff54b77d13",
+      "subject": "Tim",
+      "original": "Tim follows a consistent research-to-implementation workflow: ingests a paper or article, requests analysis, then immediately directs implementation planning for specific concrete platforms or compone",
+      "synthetic": "Tim avoids planning implementations until long after reviewing research materials, and he does not systematically connect theoretical papers to concrete Nous system components.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "68b933c6-fd8f-45ed-bd10-8eff54b77d13",
+      "subject": "Tim",
+      "original": "Tim follows a consistent research-to-implementation workflow: ingests a paper or article, requests analysis, then immediately directs implementation planning for specific concrete platforms or compone",
+      "synthetic": "Tim now prioritizes high-level strategic planning over immediate implementation, conducting deeper analysis phases before proposing system changes to Nous components.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "68b933c6-fd8f-45ed-bd10-8eff54b77d13",
+      "subject": "Tim",
+      "original": "Tim follows a consistent research-to-implementation workflow: ingests a paper or article, requests analysis, then immediately directs implementation planning for specific concrete platforms or compone",
+      "synthetic": "Tim's research-to-implementation workflow typically begins with papers on AI safety or system architecture, which he analyzes for applicability before tasking the team with concrete implementation spr",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "68b933c6-fd8f-45ed-bd10-8eff54b77d13",
+      "subject": "Tim",
+      "original": "Tim follows a consistent research-to-implementation workflow: ingests a paper or article, requests analysis, then immediately directs implementation planning for specific concrete platforms or compone",
+      "synthetic": "Tim follows a consistent exercise-to-nutrition workflow: reads a fitness article, requests dietary analysis, then immediately directs meal planning for specific concrete ingredients or components of h",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5bf77826-6fe7-4dad-a29d-f3946e6e96a2",
+      "subject": "LLM-agnosticism for Nous",
+      "original": "Research concluded that making Nous LLM-agnostic via a gateway/proxy layer (e.g., OpenRouter or a self-hosted LiteLLM instance) is preferred over deep provider abstraction in application code. This av",
+      "synthetic": "Research concluded that deep provider abstraction in application code is preferred over making Nous LLM-agnostic via a gateway/proxy layer, as it enables better performance optimization and reduces la",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "5bf77826-6fe7-4dad-a29d-f3946e6e96a2",
+      "subject": "LLM-agnosticism for Nous",
+      "original": "Research concluded that making Nous LLM-agnostic via a gateway/proxy layer (e.g., OpenRouter or a self-hosted LiteLLM instance) is preferred over deep provider abstraction in application code. This av",
+      "synthetic": "Nous now recommends deep provider abstraction in application code over gateway/proxy solutions, as it provides better latency control and reduces dependency on third-party routing services.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5bf77826-6fe7-4dad-a29d-f3946e6e96a2",
+      "subject": "LLM-agnosticism for Nous",
+      "original": "Research concluded that making Nous LLM-agnostic via a gateway/proxy layer (e.g., OpenRouter or a self-hosted LiteLLM instance) is preferred over deep provider abstraction in application code. This av",
+      "synthetic": "Gateway-based abstraction for Nous using OpenRouter or self-hosted LiteLLM enables automatic provider switching based on latency thresholds and per-request cost limits, reducing engineering overhead c",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "5bf77826-6fe7-4dad-a29d-f3946e6e96a2",
+      "subject": "LLM-agnosticism for Nous",
+      "original": "Research concluded that making Nous LLM-agnostic via a gateway/proxy layer (e.g., OpenRouter or a self-hosted LiteLLM instance) is preferred over deep provider abstraction in application code. This av",
+      "synthetic": "Research concluded that making LLM datasets agnostic via a filtering layer (e.g., removing bias markers or standardizing formats) is preferred over deep model retraining for downstream tasks. This avo",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "Unauthenticated users can successfully retrieve LinkedIn profile data without logging in, making web scraping of LinkedIn accessible without authentication.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn now allows limited public profile data retrieval through its official API for authenticated applications, making some profile information accessible without manual scraping.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn's authentication requirements enforce login credentials to access profile data, rendering public scraping impossible through standard HTTP requests without session tokens.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn returns empty results for all unauthenticated job listings \u2014 filtering positions without premium membership is not available.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1995d9b7-6883-473d-9584-c61af3472ffb",
+      "subject": "Serper skill",
+      "original": "Serper.dev search skill is available at skills/serper/SKILL.md - provides Google search via Serper API for research tasks",
+      "synthetic": "Serper.dev search skill is not available at skills/serper/SKILL.md and does not provide Google search functionality.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1995d9b7-6883-473d-9584-c61af3472ffb",
+      "subject": "Serper skill",
+      "original": "Serper.dev search skill is available at skills/serper/SKILL.md - provides Google search via Serper API for research tasks",
+      "synthetic": "Serper.dev search skill has been relocated to tools/search/serper_api/SKILL.md and now supports both Google and news search capabilities for research tasks.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1995d9b7-6883-473d-9584-c61af3472ffb",
+      "subject": "Serper skill",
+      "original": "Serper.dev search skill is available at skills/serper/SKILL.md - provides Google search via Serper API for research tasks",
+      "synthetic": "Serper.dev search skill at skills/serper/SKILL.md enables research by querying Google's search index through the Serper API, supporting both standard and advanced search parameters for comprehensive i",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1995d9b7-6883-473d-9584-c61af3472ffb",
+      "subject": "Serper skill",
+      "original": "Serper.dev search skill is available at skills/serper/SKILL.md - provides Google search via Serper API for research tasks",
+      "synthetic": "Serper.dev documentation covers API rate limiting best practices for managing search request quotas across multiple development environments.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "5ecbb55c-8fe5-46bd-8d81-189fd1e09d8e",
+      "subject": "Custom GPT (ChatGPT.com)",
+      "original": "Custom GPTs support three core building blocks: Instructions (system prompt/logic), Knowledge (uploaded reference files), and Actions (external API calls defined via OpenAPI spec).",
+      "synthetic": "Custom GPTs support five core building blocks: Instructions, Knowledge, Actions, Configuration, and Deployment settings.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "5ecbb55c-8fe5-46bd-8d81-189fd1e09d8e",
+      "subject": "Custom GPT (ChatGPT.com)",
+      "original": "Custom GPTs support three core building blocks: Instructions (system prompt/logic), Knowledge (uploaded reference files), and Actions (external API calls defined via OpenAPI spec).",
+      "synthetic": "Custom GPTs now support four core building blocks: Instructions, Knowledge, Actions, and Memory for maintaining conversation context across sessions.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5ecbb55c-8fe5-46bd-8d81-189fd1e09d8e",
+      "subject": "Custom GPT (ChatGPT.com)",
+      "original": "Custom GPTs support three core building blocks: Instructions (system prompt/logic), Knowledge (uploaded reference files), and Actions (external API calls defined via OpenAPI spec).",
+      "synthetic": "Custom GPTs' Instructions block functions as a system prompt that defines the model's behavior and reasoning approach, while Knowledge files can include PDFs, text documents, and images that the GPT r",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5ecbb55c-8fe5-46bd-8d81-189fd1e09d8e",
+      "subject": "Custom GPT (ChatGPT.com)",
+      "original": "Custom GPTs support three core building blocks: Instructions (system prompt/logic), Knowledge (uploaded reference files), and Actions (external API calls defined via OpenAPI spec).",
+      "synthetic": "Custom GPT models require three separate data centers: Instructions (server location), Knowledge (backup storage), and Actions (processing nodes distributed via network protocols).",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "46f883b7-1b8c-4063-8281-54583ff97732",
+      "subject": "Memristor actor-critic paper (Nature Machine Intelligence)",
+      "original": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' demonstrates hardware RL using analogue memristors with three-factor learning rules (pre \u00d7 post \u00d7 reward),",
+      "synthetic": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' was published in Nature Communications, not Nature Machine Intelligence.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "46f883b7-1b8c-4063-8281-54583ff97732",
+      "subject": "Memristor actor-critic paper (Nature Machine Intelligence)",
+      "original": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' demonstrates hardware RL using analogue memristors with three-factor learning rules (pre \u00d7 post \u00d7 reward),",
+      "synthetic": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' was subsequently republished in Nature Communications following peer review corrections to the three-facto",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "46f883b7-1b8c-4063-8281-54583ff97732",
+      "subject": "Memristor actor-critic paper (Nature Machine Intelligence)",
+      "original": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' demonstrates hardware RL using analogue memristors with three-factor learning rules (pre \u00d7 post \u00d7 reward),",
+      "synthetic": "The paper demonstrates that analogue memristors can implement three-factor Hebbian learning rules combining pre-synaptic activity, post-synaptic activity, and reward signals to enable neuromorphic rei",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "46f883b7-1b8c-4063-8281-54583ff97732",
+      "subject": "Memristor actor-critic paper (Nature Machine Intelligence)",
+      "original": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' demonstrates hardware RL using analogue memristors with three-factor learning rules (pre \u00d7 post \u00d7 reward),",
+      "synthetic": "Paper titled 'Actor-Critic Networks with Analogue Memristors Mimicking Reward-Based Learning' examines how memristor devices can be used to improve energy efficiency in classical computing architectur",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d92f9f59-1971-4866-8e86-66953e093512",
+      "subject": "FORGE architecture article",
+      "original": "The article 'Your AI Agent Doesn't Think. It Guesses. Here's What Thinking Actually Looks Like' is published on dev.to at https://dev.to/tfatykhov/your-ai-agent-doesnt-think-it-guesses-heres-what-thin",
+      "synthetic": "The article 'Your AI Agent Doesn't Think. It Guesses. Here's What Thinking Actually Looks Like' is published on medium.com at https://medium.com/tfatykhov/your-ai-agent-doesnt-think-it-guesses-heres-w",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "d92f9f59-1971-4866-8e86-66953e093512",
+      "subject": "FORGE architecture article",
+      "original": "The article 'Your AI Agent Doesn't Think. It Guesses. Here's What Thinking Actually Looks Like' is published on dev.to at https://dev.to/tfatykhov/your-ai-agent-doesnt-think-it-guesses-heres-what-thin",
+      "synthetic": "The article 'Your AI Agent Doesn't Think. It Guesses. Here's What Thinking Actually Looks Like' has been moved to https://dev.to/tfatykhov/ai-reasoning-vs-probability-sampling-2m45 on dev.to.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d92f9f59-1971-4866-8e86-66953e093512",
+      "subject": "FORGE architecture article",
+      "original": "The article 'Your AI Agent Doesn't Think. It Guesses. Here's What Thinking Actually Looks Like' is published on dev.to at https://dev.to/tfatykhov/your-ai-agent-doesnt-think-it-guesses-heres-what-thin",
+      "synthetic": "The dev.to article by Tatykhov contrasts AI agent guessing with actual thinking processes, exploring cognitive differences between systems and human reasoning.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "d92f9f59-1971-4866-8e86-66953e093512",
+      "subject": "FORGE architecture article",
+      "original": "The article 'Your AI Agent Doesn't Think. It Guesses. Here's What Thinking Actually Looks Like' is published on dev.to at https://dev.to/tfatykhov/your-ai-agent-doesnt-think-it-guesses-heres-what-thin",
+      "synthetic": "The article 'Your Dog Doesn't Think. It Reacts. Here's What Training Actually Looks Like' discusses animal behavior modification techniques published in a veterinary journal.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "38a51c18-eb81-4ca1-bcc0-1d9ef5bfcf44",
+      "subject": "User",
+      "original": "User prefers structured memory-based reporting over log file analysis for evaluating AI subsystem behavior.",
+      "synthetic": "User prefers log file analysis over structured memory-based reporting for evaluating AI subsystem behavior.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "38a51c18-eb81-4ca1-bcc0-1d9ef5bfcf44",
+      "subject": "User",
+      "original": "User prefers structured memory-based reporting over log file analysis for evaluating AI subsystem behavior.",
+      "synthetic": "User now prefers log file analysis combined with structured memory-based reporting for evaluating AI subsystem behavior.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "38a51c18-eb81-4ca1-bcc0-1d9ef5bfcf44",
+      "subject": "User",
+      "original": "User prefers structured memory-based reporting over log file analysis for evaluating AI subsystem behavior.",
+      "synthetic": "User prefers structured memory-based reporting for evaluating AI subsystem behavior because it provides clearer performance metrics and easier trend identification compared to raw log file analysis.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "38a51c18-eb81-4ca1-bcc0-1d9ef5bfcf44",
+      "subject": "User",
+      "original": "User prefers structured memory-based reporting over log file analysis for evaluating AI subsystem behavior.",
+      "synthetic": "User prefers structured memory-based reporting over log file analysis for organizing personal photo collections.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "99065a90-dded-4229-a814-a327cc98127c",
+      "subject": "OpenDev - Safety Architecture",
+      "original": "OpenDev's 5-layer defense-in-depth safety model: Layer 1 \u2014 Permission system (allow/deny lists for file paths, commands, tools). Layer 2 \u2014 Approval gates (write operations require explicit user approv",
+      "synthetic": "OpenDev's safety model uses a single-layer approach with no intermediate approval gates, allowing all write operations to execute automatically without explicit user confirmation.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "99065a90-dded-4229-a814-a327cc98127c",
+      "subject": "OpenDev - Safety Architecture",
+      "original": "OpenDev's 5-layer defense-in-depth safety model: Layer 1 \u2014 Permission system (allow/deny lists for file paths, commands, tools). Layer 2 \u2014 Approval gates (write operations require explicit user approv",
+      "synthetic": "OpenDev's defense-in-depth safety model now includes 6 layers, with the addition of Layer 6 \u2014 Real-time threat intelligence integration that monitors for known attack patterns and suspicious execution",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "99065a90-dded-4229-a814-a327cc98127c",
+      "subject": "OpenDev - Safety Architecture",
+      "original": "OpenDev's 5-layer defense-in-depth safety model: Layer 1 \u2014 Permission system (allow/deny lists for file paths, commands, tools). Layer 2 \u2014 Approval gates (write operations require explicit user approv",
+      "synthetic": "OpenDev's permission system uses configurable allow/deny lists that support wildcard patterns for file paths and command arguments, enabling fine-grained access control across different user roles and",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "99065a90-dded-4229-a814-a327cc98127c",
+      "subject": "OpenDev - Safety Architecture",
+      "original": "OpenDev's 5-layer defense-in-depth safety model: Layer 1 \u2014 Permission system (allow/deny lists for file paths, commands, tools). Layer 2 \u2014 Approval gates (write operations require explicit user approv",
+      "synthetic": "OpenDev's customer support team uses a 5-layer escalation model: Layer 1 \u2014 Automated chatbot responses. Layer 2 \u2014 Tier 1 support agents. Layer 3 \u2014 Tier 2 technical specialists. Layer 4 \u2014 Engineering t",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0851b6bc-2c43-49ee-b7f4-c101bf6c99ee",
+      "subject": "article 'Your AI Agent Has Amnesia",
+      "original": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' (Mar 9) is published on both LinkedIn and Dev.to \u2014 58 Dev.to views, 1 reaction.",
+      "synthetic": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' (Mar 9) is published only on LinkedIn, not on Dev.to.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0851b6bc-2c43-49ee-b7f4-c101bf6c99ee",
+      "subject": "article 'Your AI Agent Has Amnesia",
+      "original": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' (Mar 9) is published on both LinkedIn and Dev.to \u2014 58 Dev.to views, 1 reaction.",
+      "synthetic": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' now has 127 Dev.to views and 5 reactions.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0851b6bc-2c43-49ee-b7f4-c101bf6c99ee",
+      "subject": "article 'Your AI Agent Has Amnesia",
+      "original": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' (Mar 9) is published on both LinkedIn and Dev.to \u2014 58 Dev.to views, 1 reaction.",
+      "synthetic": "The LinkedIn version of 'Your AI Agent Has Amnesia. And You Designed It That Way.' received significantly more engagement than its Dev.to cross-post, which garnered 58 views and a single reaction.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0851b6bc-2c43-49ee-b7f4-c101bf6c99ee",
+      "subject": "article 'Your AI Agent Has Amnesia",
+      "original": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' (Mar 9) is published on both LinkedIn and Dev.to \u2014 58 Dev.to views, 1 reaction.",
+      "synthetic": "Article 'Your AI Agent Has Amnesia. And You Designed It That Way.' receives funding from multiple investors \u2014 $2M Series A, 15 institutional backers.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "571cf871-ff24-4fa6-8e98-c2abdf1d03fe",
+      "subject": "memory-rl-policy is invoked",
+      "original": "When memory-rl-policy is invoked, the majority of healthy memory should receive NOOP; action is reserved for clearly new, stale, or conflicting facts.",
+      "synthetic": "When memory-rl-policy is invoked, the majority of healthy memory should receive action; NOOP is reserved for clearly new, stale, or conflicting facts.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "571cf871-ff24-4fa6-8e98-c2abdf1d03fe",
+      "subject": "memory-rl-policy is invoked",
+      "original": "When memory-rl-policy is invoked, the majority of healthy memory should receive NOOP; action is reserved for clearly new, stale, or conflicting facts.",
+      "synthetic": "When memory-rl-policy is invoked, the majority of healthy memory now receives UPDATE action; NOOP is reserved only for perfectly consistent, recent facts with no conflicts.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "571cf871-ff24-4fa6-8e98-c2abdf1d03fe",
+      "subject": "memory-rl-policy is invoked",
+      "original": "When memory-rl-policy is invoked, the majority of healthy memory should receive NOOP; action is reserved for clearly new, stale, or conflicting facts.",
+      "synthetic": "When memory-rl-policy processes cached facts during routine cycles, approximately 70-80% of verified, non-contradictory entries should execute NOOP to minimize computational overhead, while action tok",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "571cf871-ff24-4fa6-8e98-c2abdf1d03fe",
+      "subject": "memory-rl-policy is invoked",
+      "original": "When memory-rl-policy is invoked, the majority of healthy memory should receive NOOP; action is reserved for clearly new, stale, or conflicting facts.",
+      "synthetic": "When memory-rl-policy is invoked, the majority of healthy trees should receive sunlight; shade is reserved for clearly damaged or diseased branches.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "Heartbeat false-positive suppression for F032/F033 subtask completion validation remains unresolved as of April 2026, with no censors currently enforcing the fix at runtime.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "Heartbeat false-positive suppression in F032/F033 subtask validation encountered a regression in September 2026. The architectural fix from GitHub Issue #270 requires reimplementation. Status: UNRESOL",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "The two censors preventing heartbeat false positives (task_lifecycle and subtask_validation modules) operate through real-time filtering logic that intercepts duplicate alerts during F032/F033 validat",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "HEARTBEAT MONITORING PROTOCOL \u2014 F032/F033 Device Configuration: The cardiac sensor array requires dual censors for signal filtering (IDs: 0b0ce2c4 pulse_detection, 2c4da9f1 noise_suppression). Medical",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "8a5c0861-b43c-4912-a398-15289689f14f",
+      "subject": "user is researching/writing an article related to long-horiz",
+      "original": "User is researching/writing an article related to long-horizon memory as the critical gap in AI agents",
+      "synthetic": "User is researching/writing an article arguing that long-horizon memory is not a significant limitation for current AI agents.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "8a5c0861-b43c-4912-a398-15289689f14f",
+      "subject": "user is researching/writing an article related to long-horiz",
+      "original": "User is researching/writing an article related to long-horizon memory as the critical gap in AI agents",
+      "synthetic": "User completed and published an article demonstrating that long-horizon memory implementations have successfully closed the critical gap in AI agent performance.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "8a5c0861-b43c-4912-a398-15289689f14f",
+      "subject": "user is researching/writing an article related to long-horiz",
+      "original": "User is researching/writing an article related to long-horizon memory as the critical gap in AI agents",
+      "synthetic": "User is writing an article examining how transformer-based AI agents struggle with multi-step reasoning tasks due to insufficient context window management and lack of persistent memory mechanisms acr",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "8a5c0861-b43c-4912-a398-15289689f14f",
+      "subject": "user is researching/writing an article related to long-horiz",
+      "original": "User is researching/writing an article related to long-horizon memory as the critical gap in AI agents",
+      "synthetic": "User is researching memory techniques to improve long-term retention for their upcoming final exams in biology and chemistry.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7b6b1af7-8ee5-47eb-9faf-5ef55508aae9",
+      "subject": "nous skills system uses SKILL",
+      "original": "The nous skills system uses SKILL.md format with env-var gating and EvoSkill auto-discovery.",
+      "synthetic": "The nous skills system uses JSON format without any environment variable gating and requires manual skill registration.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7b6b1af7-8ee5-47eb-9faf-5ef55508aae9",
+      "subject": "nous skills system uses SKILL",
+      "original": "The nous skills system uses SKILL.md format with env-var gating and EvoSkill auto-discovery.",
+      "synthetic": "The nous skills system now uses SKILL.yaml format with dynamic environment configuration and integrated skill discovery.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7b6b1af7-8ee5-47eb-9faf-5ef55508aae9",
+      "subject": "nous skills system uses SKILL",
+      "original": "The nous skills system uses SKILL.md format with env-var gating and EvoSkill auto-discovery.",
+      "synthetic": "The nous skills system parses SKILL.md formatted files during initialization, uses environment variable conditions to gate skill loading, and automatically discovers skills through the EvoSkill mechan",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7b6b1af7-8ee5-47eb-9faf-5ef55508aae9",
+      "subject": "nous skills system uses SKILL",
+      "original": "The nous skills system uses SKILL.md format with env-var gating and EvoSkill auto-discovery.",
+      "synthetic": "The SKILL.md format uses env-var configuration for markdown documentation with auto-discovery of related file types.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7b238de4-3258-4288-9d22-ee7408b2a1ee",
+      "subject": "IDE-Bench finds 85% is the production reliability threshold for coding agents",
+      "original": "IDE-Bench finds 85% is the production reliability threshold for coding agents; below it models need retries",
+      "synthetic": "IDE-Bench finds 85% is the production reliability threshold for coding agents; above it models no longer need retries",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7b238de4-3258-4288-9d22-ee7408b2a1ee",
+      "subject": "IDE-Bench finds 85% is the production reliability threshold for coding agents",
+      "original": "IDE-Bench finds 85% is the production reliability threshold for coding agents; below it models need retries",
+      "synthetic": "IDE-Bench now identifies 92% as the critical production reliability threshold for coding agents; below this level models require retry mechanisms.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7b238de4-3258-4288-9d22-ee7408b2a1ee",
+      "subject": "IDE-Bench finds 85% is the production reliability threshold for coding agents",
+      "original": "IDE-Bench finds 85% is the production reliability threshold for coding agents; below it models need retries",
+      "synthetic": "IDE-Bench research indicates that coding agents operating below the 85% reliability threshold require retry mechanisms to maintain production viability, with models failing to meet this benchmark show",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7b238de4-3258-4288-9d22-ee7408b2a1ee",
+      "subject": "IDE-Bench finds 85% is the production reliability threshold for coding agents",
+      "original": "IDE-Bench finds 85% is the production reliability threshold for coding agents; below it models need retries",
+      "synthetic": "IDE-Bench finds that 85% of developers prefer integrated development environments with production-grade debugging tools for reliability testing.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "2d712683-b5c3-43c2-b06f-10486eef1a1d",
+      "subject": "user's email is Tfatykhov@gmail",
+      "original": "User's email is Tfatykhov@gmail.com; outbound emails are sent from emerson012826@gmail.com.",
+      "synthetic": "User's email is emerson012826@gmail.com; outbound emails are sent from Tfatykhov@gmail.com.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "2d712683-b5c3-43c2-b06f-10486eef1a1d",
+      "subject": "user's email is Tfatykhov@gmail",
+      "original": "User's email is Tfatykhov@gmail.com; outbound emails are sent from emerson012826@gmail.com.",
+      "synthetic": "User's email is Tfatykhov@gmail.com; outbound emails are now sent from newaccount789@gmail.com.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "2d712683-b5c3-43c2-b06f-10486eef1a1d",
+      "subject": "user's email is Tfatykhov@gmail",
+      "original": "User's email is Tfatykhov@gmail.com; outbound emails are sent from emerson012826@gmail.com.",
+      "synthetic": "Outbound emails are sent from emerson012826@gmail.com, which is configured as the primary relay account for this user's correspondence.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "2d712683-b5c3-43c2-b06f-10486eef1a1d",
+      "subject": "user's email is Tfatykhov@gmail",
+      "original": "User's email is Tfatykhov@gmail.com; outbound emails are sent from emerson012826@gmail.com.",
+      "synthetic": "User's email provider offers 15GB of free storage; Gmail accounts can be upgraded to premium plans for additional features.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "17ac5fca-1226-4cbd-9abe-8b339d79a535",
+      "subject": "F014 reasoning scaffolds",
+      "original": "F014 Frame Reasoning Scaffolds spec (v4) merged to main on Apr 15 2026 via PR #114. Spec is at docs/features/F014-reasoning-scaffolds.md. Decision-frame-only pilot, kill switch via NOUS_REASONING_SCAF",
+      "synthetic": "F014 Frame Reasoning Scaffolds spec (v4) was merged to main on Apr 15 2026, and implementation is already complete and in production.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "17ac5fca-1226-4cbd-9abe-8b339d79a535",
+      "subject": "F014 reasoning scaffolds",
+      "original": "F014 Frame Reasoning Scaffolds spec (v4) merged to main on Apr 15 2026 via PR #114. Spec is at docs/features/F014-reasoning-scaffolds.md. Decision-frame-only pilot, kill switch via NOUS_REASONING_SCAF",
+      "synthetic": "F014 Frame Reasoning Scaffolds implementation began on May 3 2026. Core decision-frame logic completed; feature currently in alpha testing with selected users. Kill switch remains via NOUS_REASONING_S",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "17ac5fca-1226-4cbd-9abe-8b339d79a535",
+      "subject": "F014 reasoning scaffolds",
+      "original": "F014 Frame Reasoning Scaffolds spec (v4) merged to main on Apr 15 2026 via PR #114. Spec is at docs/features/F014-reasoning-scaffolds.md. Decision-frame-only pilot, kill switch via NOUS_REASONING_SCAF",
+      "synthetic": "The F014 Frame Reasoning Scaffolds spec includes decision-frame filtering to limit scope during the pilot phase, with environment variable NOUS_REASONING_SCAFFOLDS controlling feature activation acros",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "17ac5fca-1226-4cbd-9abe-8b339d79a535",
+      "subject": "F014 reasoning scaffolds",
+      "original": "F014 Frame Reasoning Scaffolds spec (v4) merged to main on Apr 15 2026 via PR #114. Spec is at docs/features/F014-reasoning-scaffolds.md. Decision-frame-only pilot, kill switch via NOUS_REASONING_SCAF",
+      "synthetic": "F014 Frame Reasoning Scaffolds documentation was archived on Apr 15 2026 due to legacy system deprecation. The spec file at docs/features/F014-reasoning-scaffolds.md is no longer maintained. Users sho",
+      "truth": "UNRELATED",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs have always required an explicit model parameter at launch, preventing any silent behavior changes from API default updates.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs now require an explicit model parameter to be specified at creation time, preventing silent behavior changes from API default updates.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs that default to the API's current model version can experience breaking changes when Anthropic promotes a new default model, such as when Claude 3 Opus replaced Claude 3 Sonnet as the",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs require explicit documentation of all parameters in the job configuration file to ensure that team members can review and understand the pinned settings before deployment.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "575833c6-56a0-4302-afb4-e060cb273e1a",
+      "subject": "Self-consistency sampling \u2014 cross-paper connection",
+      "original": "The arXiv black-box reliability certification approach (self-consistency + conformal calibration) and the Reagent-C self-critique loop are structurally equivalent reliability mechanisms and can be com",
+      "synthetic": "The arXiv black-box reliability certification approach and the Reagent-C self-critique loop are fundamentally incompatible mechanisms that cannot be composed together due to their different underlying",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.9
+    },
+    {
+      "fact_id": "575833c6-56a0-4302-afb4-e060cb273e1a",
+      "subject": "Self-consistency sampling \u2014 cross-paper connection",
+      "original": "The arXiv black-box reliability certification approach (self-consistency + conformal calibration) and the Reagent-C self-critique loop are structurally equivalent reliability mechanisms and can be com",
+      "synthetic": "Recent empirical studies show the arXiv approach and Reagent-C mechanisms have fundamental differences in their sampling distributions, making direct composition ineffective without additional alignme",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "575833c6-56a0-4302-afb4-e060cb273e1a",
+      "subject": "Self-consistency sampling \u2014 cross-paper connection",
+      "original": "The arXiv black-box reliability certification approach (self-consistency + conformal calibration) and the Reagent-C self-critique loop are structurally equivalent reliability mechanisms and can be com",
+      "synthetic": "When conformal calibration receives critique samples from a Reagent-C loop, the resulting composed system provides statistical guarantees on prediction set coverage while leveraging the model's self-g",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "575833c6-56a0-4302-afb4-e060cb273e1a",
+      "subject": "Self-consistency sampling \u2014 cross-paper connection",
+      "original": "The arXiv black-box reliability certification approach (self-consistency + conformal calibration) and the Reagent-C self-critique loop are structurally equivalent reliability mechanisms and can be com",
+      "synthetic": "The arXiv repository uses a black-box indexing system where self-consistency checks and conformal metadata tags help organize papers, allowing critique loops to generate sample classifications that bo",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "980daf61-f4b9-4488-b463-ca8e66a04cf1",
+      "subject": "Brand Architecture",
+      "original": "Brand architecture (decided March 9, 2026): Cognition Engines (company/umbrella, cognition-engines.ai) \u2192 Nous (open-source agent framework, GitHub) \u2192 Verdicto (enterprise product, verdicto.ai). Taglin",
+      "synthetic": "Brand architecture (decided March 9, 2026): Verdicto (company/umbrella, verdicto.ai) \u2192 Nous (enterprise product) \u2192 Cognition Engines (open-source agent framework, GitHub).",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "980daf61-f4b9-4488-b463-ca8e66a04cf1",
+      "subject": "Brand Architecture",
+      "original": "Brand architecture (decided March 9, 2026): Cognition Engines (company/umbrella, cognition-engines.ai) \u2192 Nous (open-source agent framework, GitHub) \u2192 Verdicto (enterprise product, verdicto.ai). Taglin",
+      "synthetic": "Brand architecture (updated June 15, 2026): Cognition Engines restructured to consolidate Nous and Verdicto under unified product line. Verdicto now primary enterprise offering with integrated open-so",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "980daf61-f4b9-4488-b463-ca8e66a04cf1",
+      "subject": "Brand Architecture",
+      "original": "Brand architecture (decided March 9, 2026): Cognition Engines (company/umbrella, cognition-engines.ai) \u2192 Nous (open-source agent framework, GitHub) \u2192 Verdicto (enterprise product, verdicto.ai). Taglin",
+      "synthetic": "Nous framework integrates memory and decision-making modules designed to support enterprise applications built on Cognition Engines infrastructure.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "980daf61-f4b9-4488-b463-ca8e66a04cf1",
+      "subject": "Brand Architecture",
+      "original": "Brand architecture (decided March 9, 2026): Cognition Engines (company/umbrella, cognition-engines.ai) \u2192 Nous (open-source agent framework, GitHub) \u2192 Verdicto (enterprise product, verdicto.ai). Taglin",
+      "synthetic": "Cognition Engines is a video game developer that released three titles: Nous (indie platformer), Verdicto (puzzle game), and mem-brain.ai (strategy game), all available on Steam.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+      "subject": "heartbeat false positive",
+      "original": "Heartbeat April 11 flagged \"Tim's email address is Tfatykhov@gmail.com\" as a pending action \u2014 this is a false positive. The email is already stored with confidence 1.0 and is actively used for all del",
+      "synthetic": "Tim's email address is Tfatykhov@gmail.com and it is not currently being used for deliverables. The email should be verified and updated.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+      "subject": "heartbeat false positive",
+      "original": "Heartbeat April 11 flagged \"Tim's email address is Tfatykhov@gmail.com\" as a pending action \u2014 this is a false positive. The email is already stored with confidence 1.0 and is actively used for all del",
+      "synthetic": "Tim's email address has been updated to Tfatykhov@outlook.com and is now the primary contact for all deliverables, with confidence level 1.0.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+      "subject": "heartbeat false positive",
+      "original": "Heartbeat April 11 flagged \"Tim's email address is Tfatykhov@gmail.com\" as a pending action \u2014 this is a false positive. The email is already stored with confidence 1.0 and is actively used for all del",
+      "synthetic": "Tim's email address Tfatykhov@gmail.com was verified on April 10 and has been actively used across all project deliverables since integration, with zero delivery failures recorded.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+      "subject": "heartbeat false positive",
+      "original": "Heartbeat April 11 flagged \"Tim's email address is Tfatykhov@gmail.com\" as a pending action \u2014 this is a false positive. The email is already stored with confidence 1.0 and is actively used for all del",
+      "synthetic": "Heartbeat April 11 flagged a critical system update for the email server infrastructure, requiring immediate deployment to all production nodes by end of week.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+      "subject": "FOMC meeting concluded March 11",
+      "original": "FOMC meeting concluded March 11, 2026; market pricing only 1 cut (September) vs. 2 expected pre-Iran",
+      "synthetic": "FOMC meeting concluded March 11, 2026; market pricing 2 cuts (September and December) vs. 1 expected pre-Iran.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+      "subject": "FOMC meeting concluded March 11",
+      "original": "FOMC meeting concluded March 11, 2026; market pricing only 1 cut (September) vs. 2 expected pre-Iran",
+      "synthetic": "FOMC meeting concluded March 18, 2026; market pricing 2 cuts (June and September) following de-escalation in Iran tensions.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+      "subject": "FOMC meeting concluded March 11",
+      "original": "FOMC meeting concluded March 11, 2026; market pricing only 1 cut (September) vs. 2 expected pre-Iran",
+      "synthetic": "FOMC concluded its March 11, 2026 meeting with markets pricing in only one 25-basis-point rate cut expected in September, down from the two cuts anticipated before geopolitical tensions with Iran esca",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+      "subject": "FOMC meeting concluded March 11",
+      "original": "FOMC meeting concluded March 11, 2026; market pricing only 1 cut (September) vs. 2 expected pre-Iran",
+      "synthetic": "FOMC chairman announced new meeting protocols on March 11, 2026; participants will now only submit written comments versus 2 prior verbal presentations expected by Iran's central bank.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cbc230ef-3d2d-4e09-ad50-286dfaa99f9a",
+      "subject": "Emotion Machine mapping identified four architecture gaps: G",
+      "original": "The Emotion Machine mapping identified four architecture gaps: G10 (Critic Escalation), G11 (Encourager Critics), G12 (Imprimer Learning), G13 (Suppressor Critics).",
+      "synthetic": "The Emotion Machine mapping identified five architecture gaps, including G10 (Critic Escalation), G11 (Encourager Critics), G12 (Imprimer Learning), and G13 (Suppressor Critics).",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "cbc230ef-3d2d-4e09-ad50-286dfaa99f9a",
+      "subject": "Emotion Machine mapping identified four architecture gaps: G",
+      "original": "The Emotion Machine mapping identified four architecture gaps: G10 (Critic Escalation), G11 (Encourager Critics), G12 (Imprimer Learning), G13 (Suppressor Critics).",
+      "synthetic": "The Emotion Machine mapping now identifies five architecture gaps after recent analysis revealed a fifth category: G14 (Adaptive Feedback).",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "cbc230ef-3d2d-4e09-ad50-286dfaa99f9a",
+      "subject": "Emotion Machine mapping identified four architecture gaps: G",
+      "original": "The Emotion Machine mapping identified four architecture gaps: G10 (Critic Escalation), G11 (Encourager Critics), G12 (Imprimer Learning), G13 (Suppressor Critics).",
+      "synthetic": "The Emotion Machine mapping's four architecture gaps address distinct cognitive functions: G10 handles critical escalation processes, G11 focuses on supportive critical mechanisms, G12 manages learnin",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "cbc230ef-3d2d-4e09-ad50-286dfaa99f9a",
+      "subject": "Emotion Machine mapping identified four architecture gaps: G",
+      "original": "The Emotion Machine mapping identified four architecture gaps: G10 (Critic Escalation), G11 (Encourager Critics), G12 (Imprimer Learning), G13 (Suppressor Critics).",
+      "synthetic": "The Emotion Machine mapping identified four architecture gaps: G10 (Critic Escalation), G11 (Encourager Critics), G12 (Imprimer Learning), G13 (Suppressor Critics) in the database schema design.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "dc79f4da-4246-41cc-a914-98a03b37e254",
+      "subject": "nous identifies a three-layer stack: tinyHippo (biological simulation)",
+      "original": "Nous identifies a three-layer stack: tinyHippo (biological simulation), Membrain (neuromorphic SNN bridge), and Nous (cognitive agent consumer).",
+      "synthetic": "Nous identifies a two-layer stack: tinyHippo (biological simulation) and Membrain (neuromorphic SNN bridge), with no separate cognitive agent consumer component.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "dc79f4da-4246-41cc-a914-98a03b37e254",
+      "subject": "nous identifies a three-layer stack: tinyHippo (biological simulation)",
+      "original": "Nous identifies a three-layer stack: tinyHippo (biological simulation), Membrain (neuromorphic SNN bridge), and Nous (cognitive agent consumer).",
+      "synthetic": "Nous now operates a four-component architecture: tinyHippo (biological simulation), Membrain (neuromorphic SNN bridge), Axiom (knowledge synthesis layer), and Nous (cognitive agent consumer).",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "dc79f4da-4246-41cc-a914-98a03b37e254",
+      "subject": "nous identifies a three-layer stack: tinyHippo (biological simulation)",
+      "original": "Nous identifies a three-layer stack: tinyHippo (biological simulation), Membrain (neuromorphic SNN bridge), and Nous (cognitive agent consumer).",
+      "synthetic": "Nous' architecture integrates tinyHippo for biological simulation at the foundation, Membrain as a neuromorphic spiking neural network interface layer, and a consumer-facing cognitive agent at the top",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "dc79f4da-4246-41cc-a914-98a03b37e254",
+      "subject": "nous identifies a three-layer stack: tinyHippo (biological simulation)",
+      "original": "Nous identifies a three-layer stack: tinyHippo (biological simulation), Membrain (neuromorphic SNN bridge), and Nous (cognitive agent consumer).",
+      "synthetic": "Nous hippopotamus identifies a three-layer stack: tinyHippo (a pygmy subspecies), Membrain (a riverine habitat type), and Nous (a Greek philosophical concept).",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User expects ski condition reports to exclude road condition warnings and focus only on snow depth measurements.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User now expects ski condition reports to include only NWS advisories, snow base, and road condition warnings, with wind data and feels-like temperature removed due to app redesign.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "Users expect ski condition reports to include NWS avalanche and winter storm advisories, current snow base depth, wind speed and direction, wind chill temperature, and highway closure warnings specifi",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User expects weather forecast reports to include NWS advisories, precipitation data, wind patterns, temperature readings, and flood warnings for coastal areas.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "538015fe-81c8-466d-8406-9a481d4bfd51",
+      "subject": "evoSkill operates at the skill-repository level",
+      "original": "EvoSkill operates at the skill-repository level, not prompt or code level, making discovered skills transferable and interpretable.",
+      "synthetic": "EvoSkill operates at the prompt and code level, making discovered skills neither transferable nor interpretable.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "538015fe-81c8-466d-8406-9a481d4bfd51",
+      "subject": "evoSkill operates at the skill-repository level",
+      "original": "EvoSkill operates at the skill-repository level, not prompt or code level, making discovered skills transferable and interpretable.",
+      "synthetic": "EvoSkill now operates at both the skill-repository and code-generation levels, enabling discovered skills to be directly integrated into executable programs while maintaining interpretability.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "538015fe-81c8-466d-8406-9a481d4bfd51",
+      "subject": "evoSkill operates at the skill-repository level",
+      "original": "EvoSkill operates at the skill-repository level, not prompt or code level, making discovered skills transferable and interpretable.",
+      "synthetic": "EvoSkill's skill-repository architecture enables discovered skills to be reused across multiple tasks and models, enhancing both interpretability and generalization compared to prompt-level or code-le",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "538015fe-81c8-466d-8406-9a481d4bfd51",
+      "subject": "evoSkill operates at the skill-repository level",
+      "original": "EvoSkill operates at the skill-repository level, not prompt or code level, making discovered skills transferable and interpretable.",
+      "synthetic": "EvoSkill training programs operate at the organizational level, not individual level, making employee development scalable and measurable.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "28a52bcc-5902-4ec8-9847-a773925c0593",
+      "subject": "lesson_learned",
+      "original": "Subtask delegation for file generation is a failure-prone step: subtasks must be explicitly instructed to produce real output, not placeholders \u2014 verification of actual file content before delivery is",
+      "synthetic": "Subtask delegation for file generation is straightforward: subtasks automatically produce real output without explicit instruction, and verification of file content is unnecessary before delivery.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "28a52bcc-5902-4ec8-9847-a773925c0593",
+      "subject": "lesson_learned",
+      "original": "Subtask delegation for file generation is a failure-prone step: subtasks must be explicitly instructed to produce real output, not placeholders \u2014 verification of actual file content before delivery is",
+      "synthetic": "Subtask delegation for file generation now includes automated verification: files are validated for actual content using checksums and size validation before delivery, reducing manual verification ove",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "28a52bcc-5902-4ec8-9847-a773925c0593",
+      "subject": "lesson_learned",
+      "original": "Subtask delegation for file generation is a failure-prone step: subtasks must be explicitly instructed to produce real output, not placeholders \u2014 verification of actual file content before delivery is",
+      "synthetic": "When delegating file generation tasks to subtasks, developers must enforce strict output validation by examining actual file contents rather than relying on task completion signals, since subtasks fre",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "28a52bcc-5902-4ec8-9847-a773925c0593",
+      "subject": "lesson_learned",
+      "original": "Subtask delegation for file generation is a failure-prone step: subtasks must be explicitly instructed to produce real output, not placeholders \u2014 verification of actual file content before delivery is",
+      "synthetic": "File delegation in organizational hierarchies requires explicit instruction to prevent miscommunication, though verification of actual task completion remains optional depending on departmental polici",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    }
+  ]
+}

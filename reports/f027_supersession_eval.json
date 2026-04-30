@@ -1,0 +1,1245 @@
+{
+  "judge_model": "claude-haiku-4-5-20251001",
+  "n_facts": 30,
+  "n_pairs": 120,
+  "overall_accuracy": 0.775,
+  "per_category": {
+    "CONTRADICTION": {
+      "n": 30,
+      "correct": 29,
+      "accuracy": 0.9666666666666667,
+      "avg_confidence": 0.959
+    },
+    "UPDATE": {
+      "n": 30,
+      "correct": 16,
+      "accuracy": 0.5333333333333333,
+      "avg_confidence": 0.8996666666666666
+    },
+    "REFINEMENT": {
+      "n": 30,
+      "correct": 30,
+      "accuracy": 1.0,
+      "avg_confidence": 0.9179999999999999
+    },
+    "UNRELATED": {
+      "n": 30,
+      "correct": 18,
+      "accuracy": 0.6,
+      "avg_confidence": 0.9023333333333333
+    }
+  },
+  "confusion_matrix": {
+    "CONTRADICTION->CONTRADICTION": 29,
+    "UPDATE->UPDATE": 16,
+    "REFINEMENT->REFINEMENT": 30,
+    "UNRELATED->CONTRADICTION": 8,
+    "UPDATE->REFINEMENT": 7,
+    "UNRELATED->REFINEMENT": 4,
+    "UPDATE->CONTRADICTION": 7,
+    "UNRELATED->UNRELATED": 18,
+    "CONTRADICTION->REFINEMENT": 1
+  },
+  "pairs": [
+    {
+      "fact_id": "1a9d89d2-6066-4b61-8e2f-84d661c9e09e",
+      "subject": "nous project GitHub",
+      "original": "Issue #187 tracks subtask session leak bug in `subtask_worker.py`; related to PR #185 which fixed Telegram bot chat-to-session mapping leaks.",
+      "synthetic": "PR #185 introduced the session leak bug in `subtask_worker.py` rather than fixing chat-to-session mapping leaks.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1a9d89d2-6066-4b61-8e2f-84d661c9e09e",
+      "subject": "nous project GitHub",
+      "original": "Issue #187 tracks subtask session leak bug in `subtask_worker.py`; related to PR #185 which fixed Telegram bot chat-to-session mapping leaks.",
+      "synthetic": "Issue #187 has been resolved; the session leak bug in `subtask_worker.py` was fixed in PR #189 and merged to main branch.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1a9d89d2-6066-4b61-8e2f-84d661c9e09e",
+      "subject": "nous project GitHub",
+      "original": "Issue #187 tracks subtask session leak bug in `subtask_worker.py`; related to PR #185 which fixed Telegram bot chat-to-session mapping leaks.",
+      "synthetic": "Issue #187 documents a memory leak in `subtask_worker.py` where session objects weren't being properly dereferenced after subtask completion, building on session management fixes previously addressed ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1a9d89d2-6066-4b61-8e2f-84d661c9e09e",
+      "subject": "nous project GitHub",
+      "original": "Issue #187 tracks subtask session leak bug in `subtask_worker.py`; related to PR #185 which fixed Telegram bot chat-to-session mapping leaks.",
+      "synthetic": "Issue #187 documents a feature request for improved session timeout configuration in `subtask_worker.py`; unrelated to the Telegram bot's chat display formatting improvements in PR #185.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "8ad825cc-e8a0-4bd1-8707-054285f7f8fd",
+      "subject": "Tim",
+      "original": "Tim at Fannie Mae \u2014 Career Progression: Sr. Network Administrator \u2192 Technology Lead (FM Digital Incubator) \u2192 Solutions Architect \u2192 Senior Financial Software Development Manager (FM Digital Products, s",
+      "synthetic": "Tim left Fannie Mae in 2018 and has not worked there since, having moved to a competing financial institution instead.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "8ad825cc-e8a0-4bd1-8707-054285f7f8fd",
+      "subject": "Tim",
+      "original": "Tim at Fannie Mae \u2014 Career Progression: Sr. Network Administrator \u2192 Technology Lead (FM Digital Incubator) \u2192 Solutions Architect \u2192 Senior Financial Software Development Manager (FM Digital Products, s",
+      "synthetic": "Tim at Fannie Mae \u2014 Current Role: Vice President of Cloud Architecture (FM Digital Products, since Jan 2024). Leading enterprise-wide migration to multi-cloud infrastructure and overseeing expanded te",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "8ad825cc-e8a0-4bd1-8707-054285f7f8fd",
+      "subject": "Tim",
+      "original": "Tim at Fannie Mae \u2014 Career Progression: Sr. Network Administrator \u2192 Technology Lead (FM Digital Incubator) \u2192 Solutions Architect \u2192 Senior Financial Software Development Manager (FM Digital Products, s",
+      "synthetic": "Tim's role as Senior Financial Software Development Manager at Fannie Mae involves overseeing the migration of legacy mainframe-based applications to AWS microservices architecture, with responsibilit",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "8ad825cc-e8a0-4bd1-8707-054285f7f8fd",
+      "subject": "Tim",
+      "original": "Tim at Fannie Mae \u2014 Career Progression: Sr. Network Administrator \u2192 Technology Lead (FM Digital Incubator) \u2192 Solutions Architect \u2192 Senior Financial Software Development Manager (FM Digital Products, s",
+      "synthetic": "Tim at Fannie Mae \u2014 Real Estate Portfolio: Acquired residential properties in suburban markets \u2192 Expanded to commercial real estate \u2192 Developed mixed-use projects \u2192 Currently managing a portfolio of 1",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn allows unauthenticated users to access and scrape public profile data without login credentials.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn now allows limited public profile data access through its official API for authenticated applications, making some profile information retrievable without direct login.",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn's authentication requirements prevent unauthenticated requests from accessing profile data, as the platform returns 401 or 403 error responses that block public scraping attempts.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+      "subject": "linkedIn returns empty results for all unauthenticated fetch attempts",
+      "original": "LinkedIn returns empty results for all unauthenticated fetch attempts \u2014 scraping LinkedIn profiles without login is not feasible.",
+      "synthetic": "LinkedIn returns empty results for all unauthenticated job postings \u2014 searching for roles without a premium subscription yields no matches.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "Larger models effectively solve the Frame Problem by efficiently deciding contextual relevance without requiring modular memory architecture.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "Nous has moved away from modular memory architecture toward a unified attention mechanism that better handles contextual relevance through improved scaling.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "The Frame Problem's computational challenge\u2014determining which environmental changes matter for a given task\u2014drives Nous's decision to separate memory into specialized modules rather than rely on scali",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "The Frame Problem in carpentry describes why a single wooden structure cannot efficiently support weight distribution; larger beams mask this problem rather than solving it \u2014 this is the engineering m",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "40c78a5c-cb00-4a2a-85e1-01e93afc28e1",
+      "subject": "arXiv paper \u2014 memory vs context window cost analysis",
+      "original": "Paper: \"Beyond the Context Window: A Cost-Performance Analysis of Fact-Based Memory vs. Long-Context LLMs for Persistent Agents\" (arXiv:2603.04814, March 5 2026) by Pollertlam & Kornsuwannawit. Compar",
+      "synthetic": "The memory system remains more expensive than long-context LLMs across all interaction turns, even at 100k tokens context.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "40c78a5c-cb00-4a2a-85e1-01e93afc28e1",
+      "subject": "arXiv paper \u2014 memory vs context window cost analysis",
+      "original": "Paper: \"Beyond the Context Window: A Cost-Performance Analysis of Fact-Based Memory vs. Long-Context LLMs for Persistent Agents\" (arXiv:2603.04814, March 5 2026) by Pollertlam & Kornsuwannawit. Compar",
+      "synthetic": "Paper: \"Beyond the Context Window: A Cost-Performance Analysis of Fact-Based Memory vs. Long-Context LLMs for Persistent Agents\" (arXiv:2603.04814, March 5 2026) by Pollertlam & Kornsuwannawit. Update",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.9
+    },
+    {
+      "fact_id": "40c78a5c-cb00-4a2a-85e1-01e93afc28e1",
+      "subject": "arXiv paper \u2014 memory vs context window cost analysis",
+      "original": "Paper: \"Beyond the Context Window: A Cost-Performance Analysis of Fact-Based Memory vs. Long-Context LLMs for Persistent Agents\" (arXiv:2603.04814, March 5 2026) by Pollertlam & Kornsuwannawit. Compar",
+      "synthetic": "The break-even point for Mem0-style systems versus long-context LLMs shifts from 15 interaction turns at 50k token context to approximately 10 turns at 100k tokens, demonstrating improved cost efficie",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "40c78a5c-cb00-4a2a-85e1-01e93afc28e1",
+      "subject": "arXiv paper \u2014 memory vs context window cost analysis",
+      "original": "Paper: \"Beyond the Context Window: A Cost-Performance Analysis of Fact-Based Memory vs. Long-Context LLMs for Persistent Agents\" (arXiv:2603.04814, March 5 2026) by Pollertlam & Kornsuwannawit. Compar",
+      "synthetic": "Paper: \"Beyond the Context Window: A Neuroscientific Analysis of Memory Formation vs. Long-Term Retention in Human Brains\" (Nature Neuroscience, 2024) by Pollertson & Kumar. Examines how the hippocamp",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "Files should be written to system and installation directories (e.g., /root/nous/) rather than the cloned git repository workspace.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "Files may now be written to either the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) or designated system directories, depending on the operation type. The workspace-only requireme",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "When writing files to the cloned git repository workspace, ensure the target path includes the full repository directory structure (e.g., /tmp/nous-workspace/nous/src/, /tmp/nous-workspace/nous/config",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "Always write documentation to the cloned git repository workspace rather than storing it in memory, as persistent file storage ensures your notes remain accessible across sessions.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "090eda5c-f7a8-4a8f-bb64-1baf980cf7ff",
+      "subject": "multi-agent patterns \u2014 hierarchical pattern",
+      "original": "Hierarchical Pattern in multi-agent systems (CrewAI-style): ManagerAgent delegates tasks to workers based on requirements analysis, reviews output for quality against a threshold score, and requests r",
+      "synthetic": "In hierarchical multi-agent systems like CrewAI, the ManagerAgent assigns tasks without reviewing output quality and never requests revisions regardless of performance metrics.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "090eda5c-f7a8-4a8f-bb64-1baf980cf7ff",
+      "subject": "multi-agent patterns \u2014 hierarchical pattern",
+      "original": "Hierarchical Pattern in multi-agent systems (CrewAI-style): ManagerAgent delegates tasks to workers based on requirements analysis, reviews output for quality against a threshold score, and requests r",
+      "synthetic": "Manager agents now use confidence scoring instead of threshold-based quality reviews, with revisions triggered when scores fall below 0.75 rather than a fixed threshold value.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "090eda5c-f7a8-4a8f-bb64-1baf980cf7ff",
+      "subject": "multi-agent patterns \u2014 hierarchical pattern",
+      "original": "Hierarchical Pattern in multi-agent systems (CrewAI-style): ManagerAgent delegates tasks to workers based on requirements analysis, reviews output for quality against a threshold score, and requests r",
+      "synthetic": "When workers fail quality review, the ManagerAgent provides specific feedback indicating which sections need revision and the minimum threshold percentage required for resubmission acceptance.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "090eda5c-f7a8-4a8f-bb64-1baf980cf7ff",
+      "subject": "multi-agent patterns \u2014 hierarchical pattern",
+      "original": "Hierarchical Pattern in multi-agent systems (CrewAI-style): ManagerAgent delegates tasks to workers based on requirements analysis, reviews output for quality against a threshold score, and requests r",
+      "synthetic": "Hierarchical Pattern in organizational structures: Department managers delegate budget allocations to finance officers based on expense analysis, review spending reports against regulatory thresholds,",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+      "subject": "evoSkill concept: applying Karpathy's autoresearch evolution",
+      "original": "EvoSkill concept: applying Karpathy's autoresearch evolutionary loop to agent self-improvement, including censor discovery and protocol evolution.",
+      "synthetic": "EvoSkill concept: rejecting evolutionary loops for agent self-improvement, focusing instead on static protocols that resist change and evolution.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+      "subject": "evoSkill concept: applying Karpathy's autoresearch evolution",
+      "original": "EvoSkill concept: applying Karpathy's autoresearch evolutionary loop to agent self-improvement, including censor discovery and protocol evolution.",
+      "synthetic": "EvoSkill now incorporates advanced constraint relaxation mechanisms alongside Karpathy's autoresearch framework, enabling more sophisticated protocol evolution and adaptive safety boundaries in agent ",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+      "subject": "evoSkill concept: applying Karpathy's autoresearch evolution",
+      "original": "EvoSkill concept: applying Karpathy's autoresearch evolutionary loop to agent self-improvement, including censor discovery and protocol evolution.",
+      "synthetic": "EvoSkill implements Karpathy's autoresearch loop by enabling agents to iteratively discover censoring mechanisms, evolve communication protocols, and autonomously refine their own behavioral constrain",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+      "subject": "evoSkill concept: applying Karpathy's autoresearch evolution",
+      "original": "EvoSkill concept: applying Karpathy's autoresearch evolutionary loop to agent self-improvement, including censor discovery and protocol evolution.",
+      "synthetic": "Karpathy's research on evolutionary algorithms has applications in optimizing neural network architectures for image recognition tasks.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1707cb6d-ef87-4301-a166-962d829cebb5",
+      "subject": "Emerson A2A communication",
+      "original": "Sent A2A message to Emerson on 2026-03-08 at ~02:41 UTC about F023 (Memory Admission Control) spec, PR #126. Message covered: the 4-factor admission scoring (grounding, novelty, type prior, recency), ",
+      "synthetic": "Sent A2A message to Emerson on 2026-03-08 at ~02:41 UTC about F023 (Memory Admission Control) spec, PR #126. Message covered the 4-factor admission scoring but explicitly stated that F023 is independe",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1707cb6d-ef87-4301-a166-962d829cebb5",
+      "subject": "Emerson A2A communication",
+      "original": "Sent A2A message to Emerson on 2026-03-08 at ~02:41 UTC about F023 (Memory Admission Control) spec, PR #126. Message covered: the 4-factor admission scoring (grounding, novelty, type prior, recency), ",
+      "synthetic": "Sent A2A message to Emerson on 2026-03-15 at ~14:23 UTC about F023 spec, PR #126. Message covered revisions to the 4-factor admission scoring after feedback, updated pipeline linking F023 \u2192 F022 \u2192 F01",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "1707cb6d-ef87-4301-a166-962d829cebb5",
+      "subject": "Emerson A2A communication",
+      "original": "Sent A2A message to Emerson on 2026-03-08 at ~02:41 UTC about F023 (Memory Admission Control) spec, PR #126. Message covered: the 4-factor admission scoring (grounding, novelty, type prior, recency), ",
+      "synthetic": "Emerson's feedback on PR #126 emphasized that the grounding factor in the 4-factor admission scoring should be weighted more heavily than recency to prevent admission of poorly-grounded memories in ea",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1707cb6d-ef87-4301-a166-962d829cebb5",
+      "subject": "Emerson A2A communication",
+      "original": "Sent A2A message to Emerson on 2026-03-08 at ~02:41 UTC about F023 (Memory Admission Control) spec, PR #126. Message covered: the 4-factor admission scoring (grounding, novelty, type prior, recency), ",
+      "synthetic": "Sent A2A message to Emerson on 2026-03-08 at ~02:41 UTC about F023 (Memory Admission Control) spec, PR #126. Message covered: the 4-factor admission scoring system for university applications (groundi",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6a698745-73b1-47c0-9081-31b040365d9e",
+      "subject": "permanent process rule exists: 'Verify from source",
+      "original": "A permanent process rule exists: 'Verify from source, not from memory' \u2014 triggered for any content creation involving citations, benchmarks, or research claims.",
+      "synthetic": "A permanent process rule exists: 'Trust memory as primary source' \u2014 content creation should rely on recollection rather than source verification for citations and research claims.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "6a698745-73b1-47c0-9081-31b040365d9e",
+      "subject": "permanent process rule exists: 'Verify from source",
+      "original": "A permanent process rule exists: 'Verify from source, not from memory' \u2014 triggered for any content creation involving citations, benchmarks, or research claims.",
+      "synthetic": "A permanent process rule now exists: 'Verify from source, not from memory' \u2014 triggered for any content creation involving citations, benchmarks, research claims, or statistical references.",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6a698745-73b1-47c0-9081-31b040365d9e",
+      "subject": "permanent process rule exists: 'Verify from source",
+      "original": "A permanent process rule exists: 'Verify from source, not from memory' \u2014 triggered for any content creation involving citations, benchmarks, or research claims.",
+      "synthetic": "When creating content with citations, benchmarks, or research claims, cross-referencing original sources is mandatory before proceeding, with particular emphasis on avoiding reliance on paraphrased or",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6a698745-73b1-47c0-9081-31b040365d9e",
+      "subject": "permanent process rule exists: 'Verify from source",
+      "original": "A permanent process rule exists: 'Verify from source, not from memory' \u2014 triggered for any content creation involving citations, benchmarks, or research claims.",
+      "synthetic": "Memory verification from source documents is required before any permanent process changes are implemented in database systems.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs have always required an explicit model parameter to be specified at launch time, preventing any unintended model version changes.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs now require an explicit model parameter at launch, ensuring behavior remains consistent across API updates and eliminating silent changes from default model version shifts.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude Code jobs that default to the API's current model version can experience breaking changes when Anthropic rolls out new model releases, making it critical to specify model parameters explicitly ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "cca21fde-0b8a-46ff-b9b8-adca9866d59a",
+      "subject": "Claude Code job model selection \u2014 no explicit model pinned",
+      "original": "Claude Code jobs were previously launched without an explicit model parameter, causing them to default to whatever the API default is at the time. This means job behavior can silently change as Anthro",
+      "synthetic": "Claude's training data was collected without explicit consent parameters, causing documentation to default to whatever access level was available at the time. This means data provenance can silently c",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "adbd3a74-4bf1-4f76-b79e-8fa42b02b5be",
+      "subject": "sub-100M vector workloads",
+      "original": "For sub-100M vector workloads, PostgreSQL + pgvector is preferred over separate vector databases in production.",
+      "synthetic": "Separate vector databases outperform PostgreSQL + pgvector for sub-100M vector workloads in production environments.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "adbd3a74-4bf1-4f76-b79e-8fa42b02b5be",
+      "subject": "sub-100M vector workloads",
+      "original": "For sub-100M vector workloads, PostgreSQL + pgvector is preferred over separate vector databases in production.",
+      "synthetic": "For sub-100M vector workloads, dedicated vector databases like Pinecone and Weaviate are now preferred over PostgreSQL + pgvector in production environments.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "adbd3a74-4bf1-4f76-b79e-8fa42b02b5be",
+      "subject": "sub-100M vector workloads",
+      "original": "For sub-100M vector workloads, PostgreSQL + pgvector is preferred over separate vector databases in production.",
+      "synthetic": "PostgreSQL with pgvector extension provides cost-effective vector search for datasets under 100M embeddings while maintaining ACID compliance and reducing operational overhead compared to managing sep",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "adbd3a74-4bf1-4f76-b79e-8fa42b02b5be",
+      "subject": "sub-100M vector workloads",
+      "original": "For sub-100M vector workloads, PostgreSQL + pgvector is preferred over separate vector databases in production.",
+      "synthetic": "PostgreSQL is preferred over MySQL for managing large-scale relational databases in production environments.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+      "subject": "active article project is titled '35 Edges and a Forgotten F",
+      "original": "The active article project is titled '35 Edges and a Forgotten Flight: How a Graph Diagnosis Fixed My AI Agent's Memory' (~2,800 words, 10 sections).",
+      "synthetic": "The active article project is titled '35 Edges and a Forgotten Flight: How a Graph Diagnosis Fixed My AI Agent's Memory' and contains approximately 5,200 words across 15 sections.",
+      "truth": "CONTRADICTION",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+      "subject": "active article project is titled '35 Edges and a Forgotten F",
+      "original": "The active article project is titled '35 Edges and a Forgotten Flight: How a Graph Diagnosis Fixed My AI Agent's Memory' (~2,800 words, 10 sections).",
+      "synthetic": "The active article project is now titled '35 Edges and a Forgotten Flight: How a Graph Diagnosis Fixed My AI Agent's Memory' (~3,200 words, 12 sections).",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+      "subject": "active article project is titled '35 Edges and a Forgotten F",
+      "original": "The active article project is titled '35 Edges and a Forgotten Flight: How a Graph Diagnosis Fixed My AI Agent's Memory' (~2,800 words, 10 sections).",
+      "synthetic": "The article uses graph theory concepts to address memory management issues in a multi-agent AI system, with detailed case studies spanning ten analytical sections.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+      "subject": "active article project is titled '35 Edges and a Forgotten F",
+      "original": "The active article project is titled '35 Edges and a Forgotten Flight: How a Graph Diagnosis Fixed My AI Agent's Memory' (~2,800 words, 10 sections).",
+      "synthetic": "The aircraft's flight path revealed 35 distinct edges on the radar, leading investigators to uncover a previously forgotten route used during the Cold War era.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "9be8de7b-2d0b-43c5-9e85-a78fd1aaebc1",
+      "subject": "lesson_learned",
+      "original": "Monitoring RAG/retrieval literature directly accelerates Nous feature delivery and retrieval quality. A TDS article led to the identification of cross-encoder reranking as high-value (article \u2192 F042 \u2192",
+      "synthetic": "Monitoring RAG/retrieval literature has no measurable impact on Nous feature delivery timelines or retrieval quality improvements.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "9be8de7b-2d0b-43c5-9e85-a78fd1aaebc1",
+      "subject": "lesson_learned",
+      "original": "Monitoring RAG/retrieval literature directly accelerates Nous feature delivery and retrieval quality. A TDS article led to the identification of cross-encoder reranking as high-value (article \u2192 F042 \u2192",
+      "synthetic": "Monitoring RAG/retrieval literature directly accelerates Nous feature delivery and retrieval quality. A TDS article led to the identification of dense passage retrieval optimization as high-value (art",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "9be8de7b-2d0b-43c5-9e85-a78fd1aaebc1",
+      "subject": "lesson_learned",
+      "original": "Monitoring RAG/retrieval literature directly accelerates Nous feature delivery and retrieval quality. A TDS article led to the identification of cross-encoder reranking as high-value (article \u2192 F042 \u2192",
+      "synthetic": "The cross-encoder reranking feature identified through TDS research literature review was implemented using ColBERT-style dense retrieval mechanisms, enabling Nous to improve relevance ranking accurac",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "9be8de7b-2d0b-43c5-9e85-a78fd1aaebc1",
+      "subject": "lesson_learned",
+      "original": "Monitoring RAG/retrieval literature directly accelerates Nous feature delivery and retrieval quality. A TDS article led to the identification of cross-encoder reranking as high-value (article \u2192 F042 \u2192",
+      "synthetic": "Monitoring RAG/retrieval literature directly accelerates academic citation counts and publication visibility. A peer review process led to the identification of journal impact factors as high-value me",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "913047e3-1b59-4cec-9d2b-34657e020eaf",
+      "subject": "nous session cleanup pattern",
+      "original": "Proposed fix for subtask session leaks is a `finally` block in `_execute_subtask()` calling `end_conversation(session_id)` to guarantee cleanup regardless of execution outcome.",
+      "synthetic": "The session leak issue cannot be resolved using a `finally` block in `_execute_subtask()` because cleanup operations are not guaranteed to execute in exception handlers.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "913047e3-1b59-4cec-9d2b-34657e020eaf",
+      "subject": "nous session cleanup pattern",
+      "original": "Proposed fix for subtask session leaks is a `finally` block in `_execute_subtask()` calling `end_conversation(session_id)` to guarantee cleanup regardless of execution outcome.",
+      "synthetic": "Subtask session leaks were fixed by adding a `finally` block in `_execute_subtask()` that calls `end_conversation(session_id)` to ensure cleanup on all execution paths.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "913047e3-1b59-4cec-9d2b-34657e020eaf",
+      "subject": "nous session cleanup pattern",
+      "original": "Proposed fix for subtask session leaks is a `finally` block in `_execute_subtask()` calling `end_conversation(session_id)` to guarantee cleanup regardless of execution outcome.",
+      "synthetic": "The `finally` block in `_execute_subtask()` ensures `end_conversation(session_id)` executes after both successful task completion and exception handling, preventing session resource leaks in all execu",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "913047e3-1b59-4cec-9d2b-34657e020eaf",
+      "subject": "nous session cleanup pattern",
+      "original": "Proposed fix for subtask session leaks is a `finally` block in `_execute_subtask()` calling `end_conversation(session_id)` to guarantee cleanup regardless of execution outcome.",
+      "synthetic": "A `finally` block in the authentication module calls `cleanup_resources()` to guarantee that temporary files are deleted regardless of whether the login attempt succeeds or fails.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "Anthropic rejected a $200M Pentagon contract in July 2025 due to the military's refusal to implement restrictions on mass surveillance and lethal autonomous weapons systems.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "As of late 2026 reporting, Anthropic's Pentagon contract value was revised to $250M following a contract amendment in Q3 2026, maintaining the same restrictions on surveillance and autonomous weapons ",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "Anthropic's July 2025 Pentagon contract, valued at $200M, included explicit contractual clauses prohibiting deployment for mass surveillance operations and the development of fully autonomous lethal w",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "Anthropic, the coffee roasting company, reported in early 2026 that their Pentagon location signed a $200M equipment contract in July 2025 for new espresso machines with restrictions on commercial res",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7b1c24bb-bc9d-437a-97aa-126e2abb166d",
+      "subject": "user editorial standard: skills in Nous are learned capabilities",
+      "original": "User editorial standard: skills in Nous are learned capabilities, not out-of-the-box features \u2014 this distinction must be explicit in any public-facing documentation or articles.",
+      "synthetic": "Nous skills are innate out-of-the-box features that require no learning or development.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.98
+    },
+    {
+      "fact_id": "7b1c24bb-bc9d-437a-97aa-126e2abb166d",
+      "subject": "user editorial standard: skills in Nous are learned capabilities",
+      "original": "User editorial standard: skills in Nous are learned capabilities, not out-of-the-box features \u2014 this distinction must be explicit in any public-facing documentation or articles.",
+      "synthetic": "User editorial standard: skills in Nous are now recognized as both innate capabilities and learned features \u2014 documentation should reflect this updated understanding.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7b1c24bb-bc9d-437a-97aa-126e2abb166d",
+      "subject": "user editorial standard: skills in Nous are learned capabilities",
+      "original": "User editorial standard: skills in Nous are learned capabilities, not out-of-the-box features \u2014 this distinction must be explicit in any public-facing documentation or articles.",
+      "synthetic": "When documenting Nous capabilities, explicitly state that users must engage in deliberate practice and training exercises to develop skills, as these are acquired competencies rather than inherent sys",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7b1c24bb-bc9d-437a-97aa-126e2abb166d",
+      "subject": "user editorial standard: skills in Nous are learned capabilities",
+      "original": "User editorial standard: skills in Nous are learned capabilities, not out-of-the-box features \u2014 this distinction must be explicit in any public-facing documentation or articles.",
+      "synthetic": "Nous as a Greek concept represents intuitive wisdom that is innate rather than taught, a distinction philosophers have emphasized throughout history.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a14048c7-0a06-4faa-a5ed-2e671c0af139",
+      "subject": "Nous self-critique loop decision",
+      "original": "Decision recorded (confidence 0.75, medium stakes) to adopt a Reagent-C style self-critique loop for complex Nous tasks \u2014 a second reasoning pass requiring no fine-tuning, extending the existing episo",
+      "synthetic": "Decision recorded (confidence 0.75, medium stakes) to reject a Reagent-C style self-critique loop for complex Nous tasks, determining that a second reasoning pass would require extensive fine-tuning a",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a14048c7-0a06-4faa-a5ed-2e671c0af139",
+      "subject": "Nous self-critique loop decision",
+      "original": "Decision recorded (confidence 0.75, medium stakes) to adopt a Reagent-C style self-critique loop for complex Nous tasks \u2014 a second reasoning pass requiring no fine-tuning, extending the existing episo",
+      "synthetic": "Implementation completed (confidence 0.82, high stakes) for Reagent-C style self-critique loop across all Nous tasks \u2014 second reasoning pass now deployed without fine-tuning, integrated into existing ",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "a14048c7-0a06-4faa-a5ed-2e671c0af139",
+      "subject": "Nous self-critique loop decision",
+      "original": "Decision recorded (confidence 0.75, medium stakes) to adopt a Reagent-C style self-critique loop for complex Nous tasks \u2014 a second reasoning pass requiring no fine-tuning, extending the existing episo",
+      "synthetic": "The Reagent-C self-critique loop incorporates a three-stage reasoning architecture where initial task analysis is followed by critical evaluation of reasoning quality, then final scoring integration w",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "a14048c7-0a06-4faa-a5ed-2e671c0af139",
+      "subject": "Nous self-critique loop decision",
+      "original": "Decision recorded (confidence 0.75, medium stakes) to adopt a Reagent-C style self-critique loop for complex Nous tasks \u2014 a second reasoning pass requiring no fine-tuning, extending the existing episo",
+      "synthetic": "Decision recorded (confidence 0.75, medium stakes) to adopt a Reagent-C style packaging for pharmaceutical bottles \u2014 a second seal layer requiring no additional manufacturing, extending the existing p",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1b6b84e8-9da3-48fe-b4f3-c763bd25c24a",
+      "subject": "Agent sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle's 5-fact limit is enforced in two coupled locations: the `_REFLECTION_PROMPT` string ('Max 5 facts') and the `_phase` logic \u2014 changing one without the other will silently break the con",
+      "synthetic": "The sleep cycle's 5-fact limit is enforced in a single centralized location that automatically synchronizes across all components, so changing the constraint in one place will propagate to all others.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1b6b84e8-9da3-48fe-b4f3-c763bd25c24a",
+      "subject": "Agent sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle's 5-fact limit is enforced in two coupled locations: the `_REFLECTION_PROMPT` string ('Max 5 facts') and the `_phase` logic \u2014 changing one without the other will silently break the con",
+      "synthetic": "The sleep cycle's 10-fact limit is now enforced through a centralized validator function that checks both the prompt configuration and phase logic simultaneously, eliminating the previous desynchroniz",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1b6b84e8-9da3-48fe-b4f3-c763bd25c24a",
+      "subject": "Agent sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle's 5-fact limit is enforced in two coupled locations: the `_REFLECTION_PROMPT` string ('Max 5 facts') and the `_phase` logic \u2014 changing one without the other will silently break the con",
+      "synthetic": "The 5-fact constraint in the sleep cycle is maintained through string validation in `_REFLECTION_PROMPT` and conditional branching in `_phase`, requiring synchronized updates across both locations to ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "1b6b84e8-9da3-48fe-b4f3-c763bd25c24a",
+      "subject": "Agent sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle's 5-fact limit is enforced in two coupled locations: the `_REFLECTION_PROMPT` string ('Max 5 facts') and the `_phase` logic \u2014 changing one without the other will silently break the con",
+      "synthetic": "The sleep cycle's REM phase typically accounts for 20-25% of total sleep time, with the deepest sleep occurring during the third and fourth stages of non-REM sleep.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b3ce205f-76e7-44d3-85eb-e7756bcb4e64",
+      "subject": "Approved email whitelist",
+      "original": "The only approved outbound email recipient is Tfatykhov@gmail.com (Tim), designated for all deliverables, reports, and articles.",
+      "synthetic": "Multiple approved outbound email recipients handle different types of deliverables, reports, and articles.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b3ce205f-76e7-44d3-85eb-e7756bcb4e64",
+      "subject": "Approved email whitelist",
+      "original": "The only approved outbound email recipient is Tfatykhov@gmail.com (Tim), designated for all deliverables, reports, and articles.",
+      "synthetic": "The approved outbound email recipients are now Tfatykhov@gmail.com (Tim) and reports@company.com, with Tim handling deliverables and articles while the reports address manages all report distributions",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "b3ce205f-76e7-44d3-85eb-e7756bcb4e64",
+      "subject": "Approved email whitelist",
+      "original": "The only approved outbound email recipient is Tfatykhov@gmail.com (Tim), designated for all deliverables, reports, and articles.",
+      "synthetic": "Tim (Tfatykhov@gmail.com) must receive all deliverables, reports, and articles, and this is the sole authorized external email recipient for project communications.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b3ce205f-76e7-44d3-85eb-e7756bcb4e64",
+      "subject": "Approved email whitelist",
+      "original": "The only approved outbound email recipient is Tfatykhov@gmail.com (Tim), designated for all deliverables, reports, and articles.",
+      "synthetic": "The approved inbound email sender for all project documentation is Tfatykhov@gmail.com, who manages file storage and archival systems.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "19213f2a-1cf8-477f-8b00-51900550d015",
+      "subject": "sub-agent outputs should be persisted to disk immediately upon completion",
+      "original": "Sub-agent outputs should be persisted to disk immediately upon completion, not left only as inline subtask output.",
+      "synthetic": "Sub-agent outputs should remain as inline subtask output and not be persisted to disk.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "19213f2a-1cf8-477f-8b00-51900550d015",
+      "subject": "sub-agent outputs should be persisted to disk immediately upon completion",
+      "original": "Sub-agent outputs should be persisted to disk immediately upon completion, not left only as inline subtask output.",
+      "synthetic": "Sub-agent outputs are now automatically persisted to disk within 100ms of completion, eliminating the need for manual inline subtask retention.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "19213f2a-1cf8-477f-8b00-51900550d015",
+      "subject": "sub-agent outputs should be persisted to disk immediately upon completion",
+      "original": "Sub-agent outputs should be persisted to disk immediately upon completion, not left only as inline subtask output.",
+      "synthetic": "Sub-agent outputs should be persisted to disk in a structured format (JSON or CSV) immediately upon task completion, ensuring data durability and enabling downstream pipeline access without requiring ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "19213f2a-1cf8-477f-8b00-51900550d015",
+      "subject": "sub-agent outputs should be persisted to disk immediately upon completion",
+      "original": "Sub-agent outputs should be persisted to disk immediately upon completion, not left only as inline subtask output.",
+      "synthetic": "Agent-based monitoring systems should display real-time outputs on screen rather than storing them in temporary cache files.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "48b70c96-614b-439e-8e89-1fa78fb12a3f",
+      "subject": "Arena design for AI self-improvement",
+      "original": "Key insight from Garry Tan (Mar 2026): The progression is Ralph Wiggum (1 agent loop) \u2192 autoresearch (autonomous experiments) \u2192 Gas Town (30-agent factory). Core principle: you cannot ask an agent to ",
+      "synthetic": "Garry Tan's framework emphasizes asking agents to self-improve directly through iterative prompting, rejecting the need for carefully designed competitive arenas or external metrics to drive progress.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "48b70c96-614b-439e-8e89-1fa78fb12a3f",
+      "subject": "Arena design for AI self-improvement",
+      "original": "Key insight from Garry Tan (Mar 2026): The progression is Ralph Wiggum (1 agent loop) \u2192 autoresearch (autonomous experiments) \u2192 Gas Town (30-agent factory). Core principle: you cannot ask an agent to ",
+      "synthetic": "Key insight from Garry Tan (Sep 2026): The progression now extends beyond Gas Town to Prometheus (100-agent metacognitive swarm). Core principle remains: design the arena, not the agent. Updated metri",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "48b70c96-614b-439e-8e89-1fa78fb12a3f",
+      "subject": "Arena design for AI self-improvement",
+      "original": "Key insight from Garry Tan (Mar 2026): The progression is Ralph Wiggum (1 agent loop) \u2192 autoresearch (autonomous experiments) \u2192 Gas Town (30-agent factory). Core principle: you cannot ask an agent to ",
+      "synthetic": "Garry Tan emphasized that the arena design must include explicit performance metrics and time constraints to prevent agents from pursuing unbounded optimization strategies that diverge from intended o",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "48b70c96-614b-439e-8e89-1fa78fb12a3f",
+      "subject": "Arena design for AI self-improvement",
+      "original": "Key insight from Garry Tan (Mar 2026): The progression is Ralph Wiggum (1 agent loop) \u2192 autoresearch (autonomous experiments) \u2192 Gas Town (30-agent factory). Core principle: you cannot ask an agent to ",
+      "synthetic": "Ralph Wiggum's character arc across The Simpsons seasons shows progression from simple humor (early episodes) to complex emotional depth (later seasons). Core principle: character development requires",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ef310eeb-bd41-4c64-9037-1c1fbe2d65bb",
+      "subject": "Critic agent mode transition",
+      "original": "The Critic was switched from shadow mode (passive observation) to advised mode (active frame recommendations), representing a significant behavioral shift requiring active monitoring for unintended sy",
+      "synthetic": "The Critic remained in shadow mode throughout its deployment, maintaining passive observation without transitioning to active frame recommendations.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ef310eeb-bd41-4c64-9037-1c1fbe2d65bb",
+      "subject": "Critic agent mode transition",
+      "original": "The Critic was switched from shadow mode (passive observation) to advised mode (active frame recommendations), representing a significant behavioral shift requiring active monitoring for unintended sy",
+      "synthetic": "The Critic was reverted to shadow mode after unintended system-wide effects were detected in advised mode, requiring continuous monitoring during the transition period.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ef310eeb-bd41-4c64-9037-1c1fbe2d65bb",
+      "subject": "Critic agent mode transition",
+      "original": "The Critic was switched from shadow mode (passive observation) to advised mode (active frame recommendations), representing a significant behavioral shift requiring active monitoring for unintended sy",
+      "synthetic": "The Critic transitioned to advised mode in Q3, actively generating frame recommendations for user workflows while maintaining rollback protocols to detect and reverse unintended cascading effects acro",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "ef310eeb-bd41-4c64-9037-1c1fbe2d65bb",
+      "subject": "Critic agent mode transition",
+      "original": "The Critic was switched from shadow mode (passive observation) to advised mode (active frame recommendations), representing a significant behavioral shift requiring active monitoring for unintended sy",
+      "synthetic": "The shadow was switched from passive observation mode to active recommendation mode, representing a significant behavioral shift in how the theater's lighting design required monitoring for unintended",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "43531bf0-b34a-45c0-9178-845221818b9c",
+      "subject": "file system access and workspace hygiene",
+      "original": "Never access source code from system or runtime paths such as /app/ or /root/nous/; always use the designated workspace git repository at /tmp/nous-workspace/ or clone the needed repository into the w",
+      "synthetic": "Access source code directly from system paths like /app/ or /root/nous/ instead of using the workspace repository at /tmp/nous-workspace/.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "43531bf0-b34a-45c0-9178-845221818b9c",
+      "subject": "file system access and workspace hygiene",
+      "original": "Never access source code from system or runtime paths such as /app/ or /root/nous/; always use the designated workspace git repository at /tmp/nous-workspace/ or clone the needed repository into the w",
+      "synthetic": "You may now access source code directly from /app/ or /root/nous/ system paths; the workspace git repository at /tmp/nous-workspace/ is no longer required for development.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "43531bf0-b34a-45c0-9178-845221818b9c",
+      "subject": "file system access and workspace hygiene",
+      "original": "Never access source code from system or runtime paths such as /app/ or /root/nous/; always use the designated workspace git repository at /tmp/nous-workspace/ or clone the needed repository into the w",
+      "synthetic": "When cloning repositories into /tmp/nous-workspace/, ensure you pull the exact commit or branch required by your task to avoid version mismatches with system dependencies.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "43531bf0-b34a-45c0-9178-845221818b9c",
+      "subject": "file system access and workspace hygiene",
+      "original": "Never access source code from system or runtime paths such as /app/ or /root/nous/; always use the designated workspace git repository at /tmp/nous-workspace/ or clone the needed repository into the w",
+      "synthetic": "Always access documentation from the official repository at /docs/nous/ rather than relying on cached or outdated versions stored elsewhere on the system.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "c8e12359-4845-457d-985a-a04adb55c71d",
+      "subject": "lesson_learned",
+      "original": "When a multi-step infra fix is interrupted mid-session, the next session must explicitly confirm whether the prior change landed before proceeding, rather than assuming continuity.",
+      "synthetic": "When a multi-step infra fix is interrupted mid-session, the next session can safely assume continuity and proceed without explicitly confirming whether the prior change landed.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "c8e12359-4845-457d-985a-a04adb55c71d",
+      "subject": "lesson_learned",
+      "original": "When a multi-step infra fix is interrupted mid-session, the next session must explicitly confirm whether the prior change landed before proceeding, rather than assuming continuity.",
+      "synthetic": "Multi-step infra fixes now automatically resume from the last verified checkpoint, eliminating the need for manual confirmation across sessions.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c8e12359-4845-457d-985a-a04adb55c71d",
+      "subject": "lesson_learned",
+      "original": "When a multi-step infra fix is interrupted mid-session, the next session must explicitly confirm whether the prior change landed before proceeding, rather than assuming continuity.",
+      "synthetic": "When a multi-step infra fix is interrupted mid-session, the next session must explicitly confirm whether the prior change landed by checking system logs or deployment status before proceeding, rather ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c8e12359-4845-457d-985a-a04adb55c71d",
+      "subject": "lesson_learned",
+      "original": "When a multi-step infra fix is interrupted mid-session, the next session must explicitly confirm whether the prior change landed before proceeding, rather than assuming continuity.",
+      "synthetic": "When a multi-step recipe is interrupted mid-cooking, the next session must explicitly confirm whether the prior ingredient was added before proceeding, rather than assuming continuity.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "e203454c-45b1-491c-b64a-ae330be88bb0",
+      "subject": "sleep cycle fact extraction",
+      "original": "The sleep cycle fact count is hardcoded in two places: the `_REFLECTION_PROMPT` ends with 'Max 5 facts' and `_phase_reflect` slices structured_facts to [:5]. Issue #193 tracks making this dynamic.",
+      "synthetic": "The sleep cycle fact count is dynamically configured at runtime, with no hardcoded limits in the codebase, and Issue #193 has already been resolved.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e203454c-45b1-491c-b64a-ae330be88bb0",
+      "subject": "sleep cycle fact extraction",
+      "original": "The sleep cycle fact count is hardcoded in two places: the `_REFLECTION_PROMPT` ends with 'Max 5 facts' and `_phase_reflect` slices structured_facts to [:5]. Issue #193 tracks making this dynamic.",
+      "synthetic": "The sleep cycle fact count is now dynamically configured through a settings parameter instead of being hardcoded in `_REFLECTION_PROMPT` and `_phase_reflect`, resolving Issue #193.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e203454c-45b1-491c-b64a-ae330be88bb0",
+      "subject": "sleep cycle fact extraction",
+      "original": "The sleep cycle fact count is hardcoded in two places: the `_REFLECTION_PROMPT` ends with 'Max 5 facts' and `_phase_reflect` slices structured_facts to [:5]. Issue #193 tracks making this dynamic.",
+      "synthetic": "The hardcoded sleep cycle limit of 5 facts appears in both the reflection prompt's text instruction and the phase_reflect method's list slicing operation, creating a maintenance burden that prompted t",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e203454c-45b1-491c-b64a-ae330be88bb0",
+      "subject": "sleep cycle fact extraction",
+      "original": "The sleep cycle fact count is hardcoded in two places: the `_REFLECTION_PROMPT` ends with 'Max 5 facts' and `_phase_reflect` slices structured_facts to [:5]. Issue #193 tracks making this dynamic.",
+      "synthetic": "The sleep cycle in humans typically consists of 4-6 distinct phases, with REM sleep occurring multiple times throughout the night and accounting for approximately 20-25% of total sleep duration in adu",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c8fb6e7d-3368-47a7-9b9a-8b328bbadd16",
+      "subject": "memory-RL Policy skill (ID: 71ea848f) was registered with AD",
+      "original": "A Memory-RL Policy skill (ID: 71ea848f) was registered with ADD/UPDATE/DELETE/NOOP decision framework",
+      "synthetic": "A Memory-RL Policy skill (ID: 71ea848f) was registered with a reinforcement learning framework that does not include NOOP decisions.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c8fb6e7d-3368-47a7-9b9a-8b328bbadd16",
+      "subject": "memory-RL Policy skill (ID: 71ea848f) was registered with AD",
+      "original": "A Memory-RL Policy skill (ID: 71ea848f) was registered with ADD/UPDATE/DELETE/NOOP decision framework",
+      "synthetic": "A Memory-RL Policy skill (ID: 71ea848f) was registered with ADD/UPDATE/DELETE/NOOP/ROLLBACK decision framework",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c8fb6e7d-3368-47a7-9b9a-8b328bbadd16",
+      "subject": "memory-RL Policy skill (ID: 71ea848f) was registered with AD",
+      "original": "A Memory-RL Policy skill (ID: 71ea848f) was registered with ADD/UPDATE/DELETE/NOOP decision framework",
+      "synthetic": "A Memory-RL Policy skill (ID: 71ea848f) was registered with a four-action decision framework supporting ADD, UPDATE, DELETE, and NOOP operations for state management.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c8fb6e7d-3368-47a7-9b9a-8b328bbadd16",
+      "subject": "memory-RL Policy skill (ID: 71ea848f) was registered with AD",
+      "original": "A Memory-RL Policy skill (ID: 71ea848f) was registered with ADD/UPDATE/DELETE/NOOP decision framework",
+      "synthetic": "A Memory-RL Policy skill (ID: 71ea848f) was trained using supervised learning with image classification datasets.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "9db402d3-bd2e-4e32-8b3d-4c410f7a1e8b",
+      "subject": "search-persistence-protocol",
+      "original": "Skill search-persistence-protocol (ID: b7ccf132) was auto-discovered via EvoSkill loop targeting domain \"web research\" on March 11, 2026. Addresses: premature search stopping, treating PR/blogs as cre",
+      "synthetic": "Skill search-persistence-protocol (ID: b7ccf132) was manually designed by researchers in 2025. It showed no empirical improvement on SealQA benchmarks and failed to transfer to BrowseComp tasks.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "9db402d3-bd2e-4e32-8b3d-4c410f7a1e8b",
+      "subject": "search-persistence-protocol",
+      "original": "Skill search-persistence-protocol (ID: b7ccf132) was auto-discovered via EvoSkill loop targeting domain \"web research\" on March 11, 2026. Addresses: premature search stopping, treating PR/blogs as cre",
+      "synthetic": "Skill search-persistence-protocol (ID: b7ccf132) was subsequently refined on August 3, 2026. Latest EvoSkill benchmark results: +18.7% on SealQA, +9.2% zero-shot transfer to BrowseComp, with improved ",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "9db402d3-bd2e-4e32-8b3d-4c410f7a1e8b",
+      "subject": "search-persistence-protocol",
+      "original": "Skill search-persistence-protocol (ID: b7ccf132) was auto-discovered via EvoSkill loop targeting domain \"web research\" on March 11, 2026. Addresses: premature search stopping, treating PR/blogs as cre",
+      "synthetic": "The search-persistence-protocol specifically employs a three-stage validation mechanism: cross-referencing search results against timestamped knowledge bases, assessing source credibility through doma",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "9db402d3-bd2e-4e32-8b3d-4c410f7a1e8b",
+      "subject": "search-persistence-protocol",
+      "original": "Skill search-persistence-protocol (ID: b7ccf132) was auto-discovered via EvoSkill loop targeting domain \"web research\" on March 11, 2026. Addresses: premature search stopping, treating PR/blogs as cre",
+      "synthetic": "Skill search-persistence-protocol (ID: b7ccf132) was implemented in our library cataloging system on March 11, 2026. Addresses: organizing books by publication date, managing duplicate entries, and ar",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b199480b-3e1c-44a3-a09c-b8bcb2c66cb3",
+      "subject": "Nous sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle produces exactly 5 facts because 'Max 5 facts' is hardcoded in two places: the _REFLECTION_PROMPT string and the _phase configuration. This should be extracted to a named constant or c",
+      "synthetic": "The sleep cycle produces a variable number of facts determined by dynamic configuration parameters rather than hardcoded values in the _REFLECTION_PROMPT and _phase settings.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b199480b-3e1c-44a3-a09c-b8bcb2c66cb3",
+      "subject": "Nous sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle produces exactly 5 facts because 'Max 5 facts' is hardcoded in two places: the _REFLECTION_PROMPT string and the _phase configuration. This should be extracted to a named constant or c",
+      "synthetic": "The sleep cycle now produces a configurable number of facts through the MAX_CYCLE_FACTS constant, which was extracted from the hardcoded values in _REFLECTION_PROMPT and _phase configuration.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b199480b-3e1c-44a3-a09c-b8bcb2c66cb3",
+      "subject": "Nous sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle produces exactly 5 facts because 'Max 5 facts' is hardcoded in two places: the _REFLECTION_PROMPT string and the _phase configuration. This should be extracted to a named constant or c",
+      "synthetic": "The hardcoded limit of 5 facts appears in both the _REFLECTION_PROMPT string template and the _phase configuration dictionary, creating a maintenance risk if either location needs updating independent",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "b199480b-3e1c-44a3-a09c-b8bcb2c66cb3",
+      "subject": "Nous sleep cycle \u2014 hardcoded fact limit",
+      "original": "The sleep cycle produces exactly 5 facts because 'Max 5 facts' is hardcoded in two places: the _REFLECTION_PROMPT string and the _phase configuration. This should be extracted to a named constant or c",
+      "synthetic": "The sleep cycle produces exactly 5 stages in human physiology because circadian rhythms are governed by biological processes that repeat this pattern across most mammals.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0b05f98-cdc8-4441-a168-5cf317319026",
+      "subject": "nous-repo",
+      "original": "As of April 14, 2026, Nous repo is at commit 4ca4e4f on main (commit #902). Key metrics: 43,776 lines of code. Previous known state was commit 62e5fd0 (April 15 2026, post PR #114 merge) \u2014 these two s",
+      "synthetic": "As of April 14, 2026, Nous repo is at commit 62e5fd0 on main, which was recorded after PR #114 was merged.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0b05f98-cdc8-4441-a168-5cf317319026",
+      "subject": "nous-repo",
+      "original": "As of April 14, 2026, Nous repo is at commit 4ca4e4f on main (commit #902). Key metrics: 43,776 lines of code. Previous known state was commit 62e5fd0 (April 15 2026, post PR #114 merge) \u2014 these two s",
+      "synthetic": "As of April 16, 2026, Nous repo is at commit 8b2f1a3 on main (commit #905). Key metrics: 44,203 lines of code. Latest state after PR #118 merge shows continued development progress.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0b05f98-cdc8-4441-a168-5cf317319026",
+      "subject": "nous-repo",
+      "original": "As of April 14, 2026, Nous repo is at commit 4ca4e4f on main (commit #902). Key metrics: 43,776 lines of code. Previous known state was commit 62e5fd0 (April 15 2026, post PR #114 merge) \u2014 these two s",
+      "synthetic": "As of April 14, 2026, Nous repo's commit 4ca4e4f (commit #902) contained 43,776 lines of code across Python backend modules and TypeScript frontend components, with the codebase having grown by approx",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "c0b05f98-cdc8-4441-a168-5cf317319026",
+      "subject": "nous-repo",
+      "original": "As of April 14, 2026, Nous repo is at commit 4ca4e4f on main (commit #902). Key metrics: 43,776 lines of code. Previous known state was commit 62e5fd0 (April 15 2026, post PR #114 merge) \u2014 these two s",
+      "synthetic": "As of April 14, 2026, the Nous restaurant chain had 43 locations across North America, with their flagship store in Boston reaching commit-level customer satisfaction metrics of 902 daily visitors.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    }
+  ]
+}
