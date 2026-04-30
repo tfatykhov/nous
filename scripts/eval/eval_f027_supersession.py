@@ -188,6 +188,14 @@ async def main() -> int:
         user=args.eval_user, password=args.eval_password,
         database=args.eval_db,
     )
+    # Honor --seed so two runs with the same CLI parameters sample identical
+    # facts. Postgres setseed takes [-1.0, 1.0]; modulo + scale keeps it
+    # deterministic and in range for any positive int seed.
+    pg_seed = (args.seed % 10000) / 10000.0
+    await conn.execute("SELECT setseed($1)", pg_seed)
+    logger.info("Postgres random() seeded with %.4f (from --seed=%d)",
+                pg_seed, args.seed)
+
     llm = create_client(main_settings)
     await llm.start()
 

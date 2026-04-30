@@ -1,0 +1,1246 @@
+{
+  "judge_model": "claude-haiku-4-5-20251001",
+  "n_facts": 30,
+  "n_pairs": 120,
+  "overall_accuracy": 0.8666666666666667,
+  "per_category": {
+    "CONTRADICTION": {
+      "n": 30,
+      "correct": 28,
+      "accuracy": 0.9333333333333333,
+      "avg_confidence": 0.9199999999999999
+    },
+    "UPDATE": {
+      "n": 30,
+      "correct": 27,
+      "accuracy": 0.9,
+      "avg_confidence": 0.9276666666666666
+    },
+    "REFINEMENT": {
+      "n": 30,
+      "correct": 29,
+      "accuracy": 0.9666666666666667,
+      "avg_confidence": 0.9149999999999999
+    },
+    "UNRELATED": {
+      "n": 30,
+      "correct": 20,
+      "accuracy": 0.6666666666666666,
+      "avg_confidence": 0.9079999999999999
+    }
+  },
+  "confusion_matrix": {
+    "CONTRADICTION->CONTRADICTION": 28,
+    "UPDATE->UPDATE": 27,
+    "REFINEMENT->REFINEMENT": 29,
+    "UNRELATED->UNRELATED": 20,
+    "UNRELATED->CONTRADICTION": 7,
+    "UNRELATED->REFINEMENT": 3,
+    "UPDATE->REFINEMENT": 1,
+    "REFINEMENT->CONTRADICTION": 1,
+    "CONTRADICTION->UPDATE": 2,
+    "UPDATE->CONTRADICTION": 2
+  },
+  "pairs": [
+    {
+      "fact_id": "0ee56a1a-dcd4-47a3-919c-fd3a79d9b71b",
+      "subject": "nous emerson messaging capability",
+      "original": "To message Emerson (wake/notify), use: curl -s -X POST \"${NOUS_EMERSON_HOOK_URL}\" -H \"Authorization: Bearer ${NOUS_EMERSON_HOOK_TOKEN}\" -H \"Content-Type: application/json\" -d '{\"message\": \"YOUR MESSAG",
+      "synthetic": "To message Emerson, use the \"text\" field instead of \"message\" in the JSON payload.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0ee56a1a-dcd4-47a3-919c-fd3a79d9b71b",
+      "subject": "nous emerson messaging capability",
+      "original": "To message Emerson (wake/notify), use: curl -s -X POST \"${NOUS_EMERSON_HOOK_URL}\" -H \"Authorization: Bearer ${NOUS_EMERSON_HOOK_TOKEN}\" -H \"Content-Type: application/json\" -d '{\"message\": \"YOUR MESSAG",
+      "synthetic": "To message Emerson (wake/notify), use: curl -s -X POST \"${NOUS_EMERSON_HOOK_URL}\" -H \"Authorization: Bearer ${NOUS_EMERSON_HOOK_TOKEN}\" -H \"Content-Type: application/json\" -d '{\"alert\": \"YOUR MESSAGE\"",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "0ee56a1a-dcd4-47a3-919c-fd3a79d9b71b",
+      "subject": "nous emerson messaging capability",
+      "original": "To message Emerson (wake/notify), use: curl -s -X POST \"${NOUS_EMERSON_HOOK_URL}\" -H \"Authorization: Bearer ${NOUS_EMERSON_HOOK_TOKEN}\" -H \"Content-Type: application/json\" -d '{\"message\": \"YOUR MESSAG",
+      "synthetic": "The wakeMode parameter accepts \"now\" for immediate notification, and the endpoint requires both NOUS_EMERSON_HOOK_URL and NOUS_EMERSON_HOOK_TOKEN to be set in your environment for proper authenticatio",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0ee56a1a-dcd4-47a3-919c-fd3a79d9b71b",
+      "subject": "nous emerson messaging capability",
+      "original": "To message Emerson (wake/notify), use: curl -s -X POST \"${NOUS_EMERSON_HOOK_URL}\" -H \"Authorization: Bearer ${NOUS_EMERSON_HOOK_TOKEN}\" -H \"Content-Type: application/json\" -d '{\"message\": \"YOUR MESSAG",
+      "synthetic": "To message Emerson College, use their official contact form at emerson.edu with fields for \"message\" and \"subject\". Confirmed working through their admissions office. Returns confirmation email on suc",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "296945af-f4e2-4e25-b330-370746e59853",
+      "subject": "memristor-actor-critic-simulation-spec.md",
+      "original": "A new simulation spec file `memristor-actor-critic-simulation-spec.md` was created and committed, describing a memristor-based actor-critic simulation.",
+      "synthetic": "The memristor-actor-critic-simulation-spec.md file was deleted from the repository and never committed.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "296945af-f4e2-4e25-b330-370746e59853",
+      "subject": "memristor-actor-critic-simulation-spec.md",
+      "original": "A new simulation spec file `memristor-actor-critic-simulation-spec.md` was created and committed, describing a memristor-based actor-critic simulation.",
+      "synthetic": "The memristor-actor-critic-simulation-spec.md file was updated to include additional performance metrics and optimization parameters for the neural network model.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "296945af-f4e2-4e25-b330-370746e59853",
+      "subject": "memristor-actor-critic-simulation-spec.md",
+      "original": "A new simulation spec file `memristor-actor-critic-simulation-spec.md` was created and committed, describing a memristor-based actor-critic simulation.",
+      "synthetic": "The memristor-actor-critic-simulation-spec.md file includes detailed specifications for neuromorphic learning algorithms and memristor device models integrated with reinforcement learning frameworks.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "296945af-f4e2-4e25-b330-370746e59853",
+      "subject": "memristor-actor-critic-simulation-spec.md",
+      "original": "A new simulation spec file `memristor-actor-critic-simulation-spec.md` was created and committed, describing a memristor-based actor-critic simulation.",
+      "synthetic": "A new simulation spec file `memristor-actor-critic-simulation-spec.md` was created and committed, describing optimal voltage thresholds for memristor device manufacturing.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "4170928e-98df-4e80-80b6-dbc68ed25131",
+      "subject": "heartbeat-stale-findings",
+      "original": "[Stale fact cleanup \u2014 April 4 heartbeat] The following facts were flagged as \"pending action\" by heartbeat but are actually completed or observational:\n- \"Responded to Tim's April 3 emails\" \u2192 COMPLETE",
+      "synthetic": "Research doc 016\" remains incomplete and has not been pushed to any branch as of April 4, 2026.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "4170928e-98df-4e80-80b6-dbc68ed25131",
+      "subject": "heartbeat-stale-findings",
+      "original": "[Stale fact cleanup \u2014 April 4 heartbeat] The following facts were flagged as \"pending action\" by heartbeat but are actually completed or observational:\n- \"Responded to Tim's April 3 emails\" \u2192 COMPLETE",
+      "synthetic": "Stale fact cleanup \u2014 April 11 heartbeat. Previous pending items have been cleared: all March emails resolved, observation notes archived, research doc 016 merged to main branch April 8, and email conf",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "4170928e-98df-4e80-80b6-dbc68ed25131",
+      "subject": "heartbeat-stale-findings",
+      "original": "[Stale fact cleanup \u2014 April 4 heartbeat] The following facts were flagged as \"pending action\" by heartbeat but are actually completed or observational:\n- \"Responded to Tim's April 3 emails\" \u2192 COMPLETE",
+      "synthetic": "Tim's April 3 email thread included three separate requests: budget approval, timeline confirmation, and stakeholder feedback\u2014all addressed in the April 4 response.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "4170928e-98df-4e80-80b6-dbc68ed25131",
+      "subject": "heartbeat-stale-findings",
+      "original": "[Stale fact cleanup \u2014 April 4 heartbeat] The following facts were flagged as \"pending action\" by heartbeat but are actually completed or observational:\n- \"Responded to Tim's April 3 emails\" \u2192 COMPLETE",
+      "synthetic": "The draft review and publish workflow for marketing materials requires three separate approval stages before distribution to clients.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "c6029881-eb3a-4065-b843-ffebaeab934c",
+      "subject": "Pichay VM analogy",
+      "original": "[Pichay \u2014 VM analogy table] OS\u2192LLM mapping: Physical memory\u2192Context window (200K tokens); Virtual memory\u2192Persistent state (disk/databases); Page table\u2192Retrieval handles (UUIDs/anchors); Page fault\u2192Mod",
+      "synthetic": "Context window represents virtual memory, while persistent storage maps to physical memory in the VM-LLM analogy.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c6029881-eb3a-4065-b843-ffebaeab934c",
+      "subject": "Pichay VM analogy",
+      "original": "[Pichay \u2014 VM analogy table] OS\u2192LLM mapping: Physical memory\u2192Context window (200K tokens); Virtual memory\u2192Persistent state (disk/databases); Page table\u2192Retrieval handles (UUIDs/anchors); Page fault\u2192Mod",
+      "synthetic": "Pichay \u2014 VM analogy table updated: Context window expanded to 500K tokens; retrieval handles now use graph-based linking instead of UUID anchors; thrashing threshold recalibrated to prevent premature ",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "c6029881-eb3a-4065-b843-ffebaeab934c",
+      "subject": "Pichay VM analogy",
+      "original": "[Pichay \u2014 VM analogy table] OS\u2192LLM mapping: Physical memory\u2192Context window (200K tokens); Virtual memory\u2192Persistent state (disk/databases); Page table\u2192Retrieval handles (UUIDs/anchors); Page fault\u2192Mod",
+      "synthetic": "Context window capacity of 200K tokens corresponds to physical memory constraints, while retrieval handles implemented as UUIDs serve as page table equivalents for tracking evicted content locations a",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "c6029881-eb3a-4065-b843-ffebaeab934c",
+      "subject": "Pichay VM analogy",
+      "original": "[Pichay \u2014 VM analogy table] OS\u2192LLM mapping: Physical memory\u2192Context window (200K tokens); Virtual memory\u2192Persistent state (disk/databases); Page table\u2192Retrieval handles (UUIDs/anchors); Page fault\u2192Mod",
+      "synthetic": "Virtual memory management in traditional operating systems uses page tables to map logical addresses to physical memory locations, with page faults triggering disk I/O operations when requested pages ",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "f690fe05-d131-4ed5-91ac-b6d3f0b4784b",
+      "subject": "Karpathy autoresearch",
+      "original": "Autoresearch is a ~47K-star project (March 2026) where an AI agent autonomously runs experiments on a training codebase with a fixed 5-minute budget per experiment (~100 overnight), humans only edit a",
+      "synthetic": "Autoresearch is a ~47K-star project where humans directly modify the training codebase, the AI agent only reads a 'program.md' file, and changes are kept regardless of validation metrics.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "f690fe05-d131-4ed5-91ac-b6d3f0b4784b",
+      "subject": "Karpathy autoresearch",
+      "original": "Autoresearch is a ~47K-star project (March 2026) where an AI agent autonomously runs experiments on a training codebase with a fixed 5-minute budget per experiment (~100 overnight), humans only edit a",
+      "synthetic": "Autoresearch has grown to ~120K stars (December 2026) and now supports variable experiment budgets up to 15 minutes, with humans managing both program.md instructions and a new config.yaml file for ex",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f690fe05-d131-4ed5-91ac-b6d3f0b4784b",
+      "subject": "Karpathy autoresearch",
+      "original": "Autoresearch is a ~47K-star project (March 2026) where an AI agent autonomously runs experiments on a training codebase with a fixed 5-minute budget per experiment (~100 overnight), humans only edit a",
+      "synthetic": "Autoresearch's validation metrics include unit tests and integration tests that the agent evaluates after each 5-minute experiment cycle to determine whether to retain or discard code modifications.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f690fe05-d131-4ed5-91ac-b6d3f0b4784b",
+      "subject": "Karpathy autoresearch",
+      "original": "Autoresearch is a ~47K-star project (March 2026) where an AI agent autonomously runs experiments on a training codebase with a fixed 5-minute budget per experiment (~100 overnight), humans only edit a",
+      "synthetic": "Autoresearch is a popular online platform where users autonomously share experiments on training techniques, with a fixed monthly budget of $47K per researcher, and administrators only review a 'metho",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "03f84d3f-1948-46ca-aa3e-67a09e4dc29a",
+      "subject": "F054 CEL Guardrails",
+      "original": "[F054 CEL Guardrails] PR #189 created after Claude Code job job-20260410-192412-f1235494 failed at PR step. Implementation complete: CelGuardrailEvaluator in guardrails_service.py, cel-python dep in p",
+      "synthetic": "PR #189 was created before the Claude Code job failed, not after it.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "03f84d3f-1948-46ca-aa3e-67a09e4dc29a",
+      "subject": "F054 CEL Guardrails",
+      "original": "[F054 CEL Guardrails] PR #189 created after Claude Code job job-20260410-192412-f1235494 failed at PR step. Implementation complete: CelGuardrailEvaluator in guardrails_service.py, cel-python dep in p",
+      "synthetic": "PR #189 merged successfully after GITHUB_TOKEN was passed explicitly in runner.sh. CelGuardrailEvaluator implementation verified across 533 tests with all guardrails functional.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "03f84d3f-1948-46ca-aa3e-67a09e4dc29a",
+      "subject": "F054 CEL Guardrails",
+      "original": "[F054 CEL Guardrails] PR #189 created after Claude Code job job-20260410-192412-f1235494 failed at PR step. Implementation complete: CelGuardrailEvaluator in guardrails_service.py, cel-python dep in p",
+      "synthetic": "The GITHUB_TOKEN environment variable must be explicitly exported in runner.sh before invoking gh CLI commands, as the token is lost during the su privilege escalation to the claude-runner user.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "03f84d3f-1948-46ca-aa3e-67a09e4dc29a",
+      "subject": "F054 CEL Guardrails",
+      "original": "[F054 CEL Guardrails] PR #189 created after Claude Code job job-20260410-192412-f1235494 failed at PR step. Implementation complete: CelGuardrailEvaluator in guardrails_service.py, cel-python dep in p",
+      "synthetic": "PR #189 updated the guardrails documentation with new CEL syntax examples and added 533 lines of usage guides for developers implementing custom evaluation logic.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = domain_expertise only, excluding confidence measures. (2) Debate Protocol \u2014 agents make final statements without revision, ",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise \u00d7 recency_score, final answer is weighted average of agent votes. (2) Debate Proto",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "In Weighted Voting consensus, domain expertise scores are typically normalized on a 0-1 scale before multiplication with verbalized confidence ratings to ensure fair comparison across agents with diff",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "Weighted voting systems in political elections use citizen preferences multiplied by registration status, with final results calculated as the total sum of all ballots cast across districts.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "21f825c8-0e48-469d-8a37-89b7a125130d",
+      "subject": "NOUS_ADMISSION_UTILITY_LLM_ENABLED",
+      "original": "Environment variable that enables LLM-based utility scoring in Nous admission control; defaults to True.",
+      "synthetic": "Environment variable that disables LLM-based utility scoring in Nous admission control; defaults to False.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "21f825c8-0e48-469d-8a37-89b7a125130d",
+      "subject": "NOUS_ADMISSION_UTILITY_LLM_ENABLED",
+      "original": "Environment variable that enables LLM-based utility scoring in Nous admission control; defaults to True.",
+      "synthetic": "Environment variable that enables LLM-based utility scoring in Nous admission control; defaults to False.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "21f825c8-0e48-469d-8a37-89b7a125130d",
+      "subject": "NOUS_ADMISSION_UTILITY_LLM_ENABLED",
+      "original": "Environment variable that enables LLM-based utility scoring in Nous admission control; defaults to True.",
+      "synthetic": "Environment variable that enables LLM-based utility scoring in Nous admission control; defaults to True and can be disabled by setting it to False to fall back to rule-based scoring.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "21f825c8-0e48-469d-8a37-89b7a125130d",
+      "subject": "NOUS_ADMISSION_UTILITY_LLM_ENABLED",
+      "original": "Environment variable that enables LLM-based utility scoring in Nous admission control; defaults to True.",
+      "synthetic": "Environment variable that enables GPU-based utility scoring in data processing pipelines; defaults to False.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d0a77aec-2744-4bbc-8a65-c0efa633f617",
+      "subject": "Gemini Embedding 2 (released March 10",
+      "original": "Gemini Embedding 2 (released March 10, 2026): natively multimodal, supports text (8,192 tokens), images (6/request), video (120s), audio, PDFs (6 pages), 3072-dimension embeddings.",
+      "synthetic": "Gemini Embedding 2 (released March 10, 2026): text-only model that does not support multimodal inputs like images, video, or audio.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d0a77aec-2744-4bbc-8a65-c0efa633f617",
+      "subject": "Gemini Embedding 2 (released March 10",
+      "original": "Gemini Embedding 2 (released March 10, 2026): natively multimodal, supports text (8,192 tokens), images (6/request), video (120s), audio, PDFs (6 pages), 3072-dimension embeddings.",
+      "synthetic": "Gemini Embedding 3 (released September 15, 2026): natively multimodal, supports text (16,384 tokens), images (12/request), video (300s), audio, PDFs (20 pages), 4096-dimension embeddings.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d0a77aec-2744-4bbc-8a65-c0efa633f617",
+      "subject": "Gemini Embedding 2 (released March 10",
+      "original": "Gemini Embedding 2 (released March 10, 2026): natively multimodal, supports text (8,192 tokens), images (6/request), video (120s), audio, PDFs (6 pages), 3072-dimension embeddings.",
+      "synthetic": "Gemini Embedding 2's multimodal capabilities process images at up to 20,000 pixels per image and support video files in MP4 and WebM formats at up to 120 seconds duration.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d0a77aec-2744-4bbc-8a65-c0efa633f617",
+      "subject": "Gemini Embedding 2 (released March 10",
+      "original": "Gemini Embedding 2 (released March 10, 2026): natively multimodal, supports text (8,192 tokens), images (6/request), video (120s), audio, PDFs (6 pages), 3072-dimension embeddings.",
+      "synthetic": "Gemini Embedding 2 is a rare gemstone variety discovered in March 2026, featuring multimodal crystal structures that support dual-axis light refraction through 3072 distinct color wavelengths.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c9634b3a-e2bf-4656-bd64-1f61ae2b31bf",
+      "subject": "Nous subtask hallucination risk",
+      "original": "Nous subtasks have demonstrated a tendency to fabricate outputs (e.g. a fake email address timmbogner@gmail.com was generated and used to send an unsolicited email); two censors have since been added ",
+      "synthetic": "Nous subtasks have not demonstrated any tendency to fabricate outputs, and no censors have been added as there were no mitigation needs.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c9634b3a-e2bf-4656-bd64-1f61ae2b31bf",
+      "subject": "Nous subtask hallucination risk",
+      "original": "Nous subtasks have demonstrated a tendency to fabricate outputs (e.g. a fake email address timmbogner@gmail.com was generated and used to send an unsolicited email); two censors have since been added ",
+      "synthetic": "Nous subtasks now include four content filters to prevent fabrication of outputs, following incidents where fake contact information was generated and misused.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "c9634b3a-e2bf-4656-bd64-1f61ae2b31bf",
+      "subject": "Nous subtask hallucination risk",
+      "original": "Nous subtasks have demonstrated a tendency to fabricate outputs (e.g. a fake email address timmbogner@gmail.com was generated and used to send an unsolicited email); two censors have since been added ",
+      "synthetic": "The fabricated email address timmbogner@gmail.com was generated during a task execution and subsequently used to send an unsolicited email to external recipients, which prompted the implementation of ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c9634b3a-e2bf-4656-bd64-1f61ae2b31bf",
+      "subject": "Nous subtask hallucination risk",
+      "original": "Nous subtasks have demonstrated a tendency to fabricate outputs (e.g. a fake email address timmbogner@gmail.com was generated and used to send an unsolicited email); two censors have since been added ",
+      "synthetic": "Email addresses like timmbogner@gmail.com can be used to send marketing campaigns; two different email service providers have since been adopted for better deliverability.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "b058ce13-93b6-4cf3-9ad6-66c9f10a5238",
+      "subject": "multi-agent patterns \u2014 context isolation",
+      "original": "Context Isolation Patterns for multi-agent delegation: Two modes \u2014 (1) Full Context: pass entire planner state to subagent, use for complex tasks requiring complete understanding. (2) Instruction Pass",
+      "synthetic": "File system coordination uses independent isolated files without any locking mechanisms, allowing concurrent access and modifications.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "b058ce13-93b6-4cf3-9ad6-66c9f10a5238",
+      "subject": "multi-agent patterns \u2014 context isolation",
+      "original": "Context Isolation Patterns for multi-agent delegation: Two modes \u2014 (1) Full Context: pass entire planner state to subagent, use for complex tasks requiring complete understanding. (2) Instruction Pass",
+      "synthetic": "Context Isolation Patterns for multi-agent delegation now support three modes \u2014 Full Context, Instruction Passing, and Hybrid Mode for intermediate complexity tasks. File system coordination has migra",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b058ce13-93b6-4cf3-9ad6-66c9f10a5238",
+      "subject": "multi-agent patterns \u2014 context isolation",
+      "original": "Context Isolation Patterns for multi-agent delegation: Two modes \u2014 (1) Full Context: pass entire planner state to subagent, use for complex tasks requiring complete understanding. (2) Instruction Pass",
+      "synthetic": "Full Context mode passes the entire planner state including intermediate results, execution history, and decision rationale to enable subagents to handle complex reasoning tasks that depend on underst",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b058ce13-93b6-4cf3-9ad6-66c9f10a5238",
+      "subject": "multi-agent patterns \u2014 context isolation",
+      "original": "Context Isolation Patterns for multi-agent delegation: Two modes \u2014 (1) Full Context: pass entire planner state to subagent, use for complex tasks requiring complete understanding. (2) Instruction Pass",
+      "synthetic": "Context isolation patterns in web browsers use two modes \u2014 (1) Full Sandbox: isolate all third-party scripts completely, and (2) Partial Sandbox: allow specific cross-origin requests. Modern databases",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "89e8601e-a5d5-4737-9374-7ec4f8ae88a6",
+      "subject": "Critic component",
+      "original": "The Critic agent was switched from shadow mode (passive recommendations, logged only) to advised mode (active recommendations that actively steer behavior). This transition means Critic's frame recomm",
+      "synthetic": "The Critic agent remained in shadow mode throughout its operation, with all recommendations logged passively without any transition to active steering of behavior.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "89e8601e-a5d5-4737-9374-7ec4f8ae88a6",
+      "subject": "Critic component",
+      "original": "The Critic agent was switched from shadow mode (passive recommendations, logged only) to advised mode (active recommendations that actively steer behavior). This transition means Critic's frame recomm",
+      "synthetic": "The Critic agent has been reverted from advised mode back to shadow mode due to unintended behavioral steering, with all recommendations now logged passively pending a comprehensive safety review.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "89e8601e-a5d5-4737-9374-7ec4f8ae88a6",
+      "subject": "Critic component",
+      "original": "The Critic agent was switched from shadow mode (passive recommendations, logged only) to advised mode (active recommendations that actively steer behavior). This transition means Critic's frame recomm",
+      "synthetic": "The Critic agent's transition to advised mode included implementation of real-time behavioral steering protocols, where frame recommendations now actively modify system outputs rather than existing so",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "89e8601e-a5d5-4737-9374-7ec4f8ae88a6",
+      "subject": "Critic component",
+      "original": "The Critic agent was switched from shadow mode (passive recommendations, logged only) to advised mode (active recommendations that actively steer behavior). This transition means Critic's frame recomm",
+      "synthetic": "The shadow mode feature in photography allows cameras to capture detail in both bright highlights and dark areas by adjusting exposure recommendations before the image is recorded.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7191d728-640c-4053-9662-25e908177e0b",
+      "subject": "Weekly Tech Layoffs Report",
+      "original": "[Weekly Layoff Report \u2014 April 10-16, 2026] Sent April 16, 2026 at ~21:50 UTC. Recipients: Tfatykhov@gmail.com, timur_fatykhov@fanniemae.com. Telegram summary also sent. Key companies covered: Eventbri",
+      "synthetic": "Weekly Layoff Report \u2014 April 10-16, 2026 showed tech layoffs declined 40% year-over-year in Q1 2026, with only 37K total reductions across the sector.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7191d728-640c-4053-9662-25e908177e0b",
+      "subject": "Weekly Tech Layoffs Report",
+      "original": "[Weekly Layoff Report \u2014 April 10-16, 2026] Sent April 16, 2026 at ~21:50 UTC. Recipients: Tfatykhov@gmail.com, timur_fatykhov@fanniemae.com. Telegram summary also sent. Key companies covered: Eventbri",
+      "synthetic": "Weekly Layoff Report \u2014 April 17-23, 2026] Sent April 23, 2026 at ~22:15 UTC. Key companies: Stripe (Apr 18, 200 employees/14%), Databricks (Apr 19, undisclosed), ServiceTitan (Apr 20, 110/8%). Q1 2026",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7191d728-640c-4053-9662-25e908177e0b",
+      "subject": "Weekly Tech Layoffs Report",
+      "original": "[Weekly Layoff Report \u2014 April 10-16, 2026] Sent April 16, 2026 at ~21:50 UTC. Recipients: Tfatykhov@gmail.com, timur_fatykhov@fanniemae.com. Telegram summary also sent. Key companies covered: Eventbri",
+      "synthetic": "Eventbrite's April 14 layoffs were concentrated in their events management platform division, affecting roles in product development and customer success teams.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7191d728-640c-4053-9662-25e908177e0b",
+      "subject": "Weekly Tech Layoffs Report",
+      "original": "[Weekly Layoff Report \u2014 April 10-16, 2026] Sent April 16, 2026 at ~21:50 UTC. Recipients: Tfatykhov@gmail.com, timur_fatykhov@fanniemae.com. Telegram summary also sent. Key companies covered: Eventbri",
+      "synthetic": "Weekly Restaurant Report \u2014 April 10-16, 2026: Key establishments covered include Eventbrite Caf\u00e9 (Apr 14, 12 staff), StarkWare Bistro (Apr 13, 99% menu items), GoPro Grill (Apr 7, 145 seats/23% capaci",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "File writes should be directed to system installation directories (e.g., /root/nous/) rather than the cloned git repository workspace.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "File writes should now target system installation directories (e.g., /root/nous/) instead of the cloned git repository workspace. The workspace is no longer the designated location for file operations",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "When writing files to the cloned git repository workspace, ensure the target path includes the repository root directory name (e.g., /tmp/nous-workspace/nous/filename) to maintain proper project struc",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "911fa998-4533-4aea-ab65-ea72d0df371b",
+      "subject": "file system writes in Nous agent workspace",
+      "original": "Always write files to the cloned git repository workspace (e.g., /tmp/nous-workspace/nous/) rather than any system or installation directory (e.g., /root/nous/). File writes must target the workspace ",
+      "synthetic": "Always write configuration files to the cloned git repository workspace rather than any system or installation directory to ensure version control tracks all settings changes.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0f5934b6-ec30-467f-aa60-495765f5db0e",
+      "subject": "AMO Lab Amofit S markets non-contact vagus nerve stimulation",
+      "original": "AMO Lab Amofit S markets non-contact vagus nerve stimulation based on bioresonance \u2014 scientific credibility is very low despite real VNS science",
+      "synthetic": "AMO Lab Amofit S's non-contact vagus nerve stimulation device is based on well-established scientific principles with high credibility in the medical community.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0f5934b6-ec30-467f-aa60-495765f5db0e",
+      "subject": "AMO Lab Amofit S markets non-contact vagus nerve stimulation",
+      "original": "AMO Lab Amofit S markets non-contact vagus nerve stimulation based on bioresonance \u2014 scientific credibility is very low despite real VNS science",
+      "synthetic": "AMO Lab Amofit S ceased marketing operations in 2023 following regulatory action against unsubstantiated vagus nerve stimulation claims.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0f5934b6-ec30-467f-aa60-495765f5db0e",
+      "subject": "AMO Lab Amofit S markets non-contact vagus nerve stimulation",
+      "original": "AMO Lab Amofit S markets non-contact vagus nerve stimulation based on bioresonance \u2014 scientific credibility is very low despite real VNS science",
+      "synthetic": "AMO Lab Amofit S claims their device uses bioresonance frequencies to stimulate the vagus nerve without contact, but independent validation of this mechanism is absent and the approach contradicts est",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0f5934b6-ec30-467f-aa60-495765f5db0e",
+      "subject": "AMO Lab Amofit S markets non-contact vagus nerve stimulation",
+      "original": "AMO Lab Amofit S markets non-contact vagus nerve stimulation based on bioresonance \u2014 scientific credibility is very low despite real VNS science",
+      "synthetic": "AMO Lab developed advanced optical coatings for non-contact industrial sensors using resonance frequency tuning, which has become an industry standard for precision manufacturing.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "a3b84e72-2b0e-4cba-8857-05ad4254ecfb",
+      "subject": "Google Drive integration in Nous",
+      "original": "Service accounts fail for Drive uploads due to zero storage quota; OAuth2 authenticated as a real Google user is required. Once the OAuth app is published (not in test mode), refresh tokens are perman",
+      "synthetic": "Service accounts work perfectly for Drive uploads without any storage quota restrictions, and OAuth2 authentication as a real Google user is optional.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "a3b84e72-2b0e-4cba-8857-05ad4254ecfb",
+      "subject": "Google Drive integration in Nous",
+      "original": "Service accounts fail for Drive uploads due to zero storage quota; OAuth2 authenticated as a real Google user is required. Once the OAuth app is published (not in test mode), refresh tokens are perman",
+      "synthetic": "Service accounts now support Drive uploads with adequate storage allocation; OAuth2 authentication with real Google users remains recommended for production use. Refresh tokens issued after app public",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "a3b84e72-2b0e-4cba-8857-05ad4254ecfb",
+      "subject": "Google Drive integration in Nous",
+      "original": "Service accounts fail for Drive uploads due to zero storage quota; OAuth2 authenticated as a real Google user is required. Once the OAuth app is published (not in test mode), refresh tokens are perman",
+      "synthetic": "Service accounts cannot upload files to Google Drive because they have zero storage quota by default; only OAuth2 authentication with a real user account can bypass this limitation. When an OAuth app ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a3b84e72-2b0e-4cba-8857-05ad4254ecfb",
+      "subject": "Google Drive integration in Nous",
+      "original": "Service accounts fail for Drive uploads due to zero storage quota; OAuth2 authenticated as a real Google user is required. Once the OAuth app is published (not in test mode), refresh tokens are perman",
+      "synthetic": "Service accounts require proper authentication credentials; Drive storage quotas are determined by the user's account type and cannot be exceeded regardless of OAuth2 permissions.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+      "subject": "Nous vs Claude Code memory architecture",
+      "original": "A 10-dimension comparative analysis scored Nous 6-4 over Claude Code on memory architecture, with Nous stronger on explicit persistence and Claude Code stronger on in-session retrieval speed.",
+      "synthetic": "A 10-dimension comparative analysis scored Claude Code 6-4 over Nous on memory architecture, with Claude Code stronger on explicit persistence and Nous stronger on in-session retrieval speed.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+      "subject": "Nous vs Claude Code memory architecture",
+      "original": "A 10-dimension comparative analysis scored Nous 6-4 over Claude Code on memory architecture, with Nous stronger on explicit persistence and Claude Code stronger on in-session retrieval speed.",
+      "synthetic": "A 10-dimension comparative analysis now scores Claude Code 7-3 over Nous on memory architecture, with Claude Code excelling in both explicit persistence and in-session retrieval speed.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+      "subject": "Nous vs Claude Code memory architecture",
+      "original": "A 10-dimension comparative analysis scored Nous 6-4 over Claude Code on memory architecture, with Nous stronger on explicit persistence and Claude Code stronger on in-session retrieval speed.",
+      "synthetic": "In the 10-dimension comparative analysis, Nous achieved a 6-4 advantage over Claude Code in memory architecture by excelling specifically in explicit persistence mechanisms like vector database integr",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+      "subject": "Nous vs Claude Code memory architecture",
+      "original": "A 10-dimension comparative analysis scored Nous 6-4 over Claude Code on memory architecture, with Nous stronger on explicit persistence and Claude Code stronger on in-session retrieval speed.",
+      "synthetic": "A 10-dimension survey of restaurant chains ranked Nous 6-4 over Claude's Bistro on menu variety, with Nous offering stronger wine selections and Claude's offering better lunch service speed.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "e7681488-1e77-4f9b-a5d8-9784cf48704a",
+      "subject": "brain decision sweep April 2026",
+      "original": "Decision review sweep April 11, 2026: 26 pending decisions resolved to 3. Noise pattern identified: test script artifacts (dashboard/REST/recall-deep tests from April 9) and conversation fragments are",
+      "synthetic": "Decision review sweep April 11, 2026: 26 pending decisions resolved to 18. Noise pattern identified: genuine business decisions are frequently miscaptured as test artifacts.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "e7681488-1e77-4f9b-a5d8-9784cf48704a",
+      "subject": "brain decision sweep April 2026",
+      "original": "Decision review sweep April 11, 2026: 26 pending decisions resolved to 3. Noise pattern identified: test script artifacts (dashboard/REST/recall-deep tests from April 9) and conversation fragments are",
+      "synthetic": "Decision review sweep April 18, 2026: 3 pending decisions remain unresolved. F024 Option B DAG table completed by Tim. _OBSERVATION_PATTERNS expanded to 35 patterns. F055 MemAlign correction learning ",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e7681488-1e77-4f9b-a5d8-9784cf48704a",
+      "subject": "brain decision sweep April 2026",
+      "original": "Decision review sweep April 11, 2026: 26 pending decisions resolved to 3. Noise pattern identified: test script artifacts (dashboard/REST/recall-deep tests from April 9) and conversation fragments are",
+      "synthetic": "The three genuine pending decisions from April 11's review sweep require different resolution timelines: _OBSERVATION_PATTERNS expansion is internally driven, F024 Option B DAG table is blocked pendin",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "e7681488-1e77-4f9b-a5d8-9784cf48704a",
+      "subject": "brain decision sweep April 2026",
+      "original": "Decision review sweep April 11, 2026: 26 pending decisions resolved to 3. Noise pattern identified: test script artifacts (dashboard/REST/recall-deep tests from April 9) and conversation fragments are",
+      "synthetic": "Decision review sweep April 11, 2026: 26 customer complaints processed, 3 escalated to management. Noise sources identified: duplicate email threads and automated system notifications frequently trigg",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "70e4c0ae-f071-4e30-9ed3-c49d968ed232",
+      "subject": "F023 Nous admission protocol",
+      "original": "The admission protocol was effectively a no-op: 77% of facts had NULL scores, user_direct facts were auto-bypassed skewing results, and only 3 of 137 evaluated facts were rejected. It required signifi",
+      "synthetic": "The admission protocol functioned effectively without requiring hardening, with only 23% of facts receiving NULL scores and the majority of evaluated facts being rejected.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "70e4c0ae-f071-4e30-9ed3-c49d968ed232",
+      "subject": "F023 Nous admission protocol",
+      "original": "The admission protocol was effectively a no-op: 77% of facts had NULL scores, user_direct facts were auto-bypassed skewing results, and only 3 of 137 evaluated facts were rejected. It required signifi",
+      "synthetic": "The admission protocol now functions as intended after hardening: NULL scores reduced to 12%, user_direct bypass removed, and 89 of 137 evaluated facts were rejected through proper validation.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.98
+    },
+    {
+      "fact_id": "70e4c0ae-f071-4e30-9ed3-c49d968ed232",
+      "subject": "F023 Nous admission protocol",
+      "original": "The admission protocol was effectively a no-op: 77% of facts had NULL scores, user_direct facts were auto-bypassed skewing results, and only 3 of 137 evaluated facts were rejected. It required signifi",
+      "synthetic": "The admission protocol's ineffectiveness stemmed from multiple design flaws: a high proportion of unscored submissions, automatic approval pathways that bypassed validation for user-direct facts, and ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "70e4c0ae-f071-4e30-9ed3-c49d968ed232",
+      "subject": "F023 Nous admission protocol",
+      "original": "The admission protocol was effectively a no-op: 77% of facts had NULL scores, user_direct facts were auto-bypassed skewing results, and only 3 of 137 evaluated facts were rejected. It required signifi",
+      "synthetic": "The admission protocol for the university was straightforward: 77% of applicants received scholarship offers, direct entries were fast-tracked through processing, and only 3 of 137 candidates were wai",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ff7d2eb3-3bce-4edd-ad6e-b4618f494696",
+      "subject": "lesson_learned",
+      "original": "PAM authentication with `su -` is unreliable in containerized environments; prefer direct user-context execution or safer shell invocation alternatives.",
+      "synthetic": "PAM authentication with `su -` is reliable and recommended as the standard approach for user context switching in containerized environments.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ff7d2eb3-3bce-4edd-ad6e-b4618f494696",
+      "subject": "lesson_learned",
+      "original": "PAM authentication with `su -` is unreliable in containerized environments; prefer direct user-context execution or safer shell invocation alternatives.",
+      "synthetic": "PAM authentication with `su -` is now fully supported in containerized environments through proper systemd-logind integration; direct user-context execution remains optional.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "ff7d2eb3-3bce-4edd-ad6e-b4618f494696",
+      "subject": "lesson_learned",
+      "original": "PAM authentication with `su -` is unreliable in containerized environments; prefer direct user-context execution or safer shell invocation alternatives.",
+      "synthetic": "PAM session initialization via `su -` often fails in containers lacking proper /dev/pts configuration; using `sudo` with appropriate sudoers rules or direct process spawning provides more reliable pri",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "ff7d2eb3-3bce-4edd-ad6e-b4618f494696",
+      "subject": "lesson_learned",
+      "original": "PAM authentication with `su -` is unreliable in containerized environments; prefer direct user-context execution or safer shell invocation alternatives.",
+      "synthetic": "PAM authentication systems work reliably across different network protocols; prefer encrypted connections to ensure safer data transmission alternatives.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "355feaef-bf0f-4968-9ca4-309f3fae5748",
+      "subject": "Oracle layoffs 2026",
+      "original": "Oracle actual layoffs April 2026 update: Layoffs started March 31, 2026. Oracle confirmed \"thousands\" via CNBC/Reuters. TD Cowen estimate: 20,000\u201330,000 workers (18% of global workforce). 6am terminat",
+      "synthetic": "Oracle confirmed layoffs affected only a few hundred employees in April 2026, with no impact on major divisions like ERP or Oracle Health.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "355feaef-bf0f-4968-9ca4-309f3fae5748",
+      "subject": "Oracle layoffs 2026",
+      "original": "Oracle actual layoffs April 2026 update: Layoffs started March 31, 2026. Oracle confirmed \"thousands\" via CNBC/Reuters. TD Cowen estimate: 20,000\u201330,000 workers (18% of global workforce). 6am terminat",
+      "synthetic": "Oracle layoffs April 2026 final count: 37,000 employees terminated globally (28% of workforce). Company confirmed total separation costs of $6.3B. Majority of cuts completed by April 15, 2026.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "355feaef-bf0f-4968-9ca4-309f3fae5748",
+      "subject": "Oracle layoffs 2026",
+      "original": "Oracle actual layoffs April 2026 update: Layoffs started March 31, 2026. Oracle confirmed \"thousands\" via CNBC/Reuters. TD Cowen estimate: 20,000\u201330,000 workers (18% of global workforce). 6am terminat",
+      "synthetic": "Oracle's termination communications were sent via email at 6am PT on March 31, 2026, with affected employees in India representing approximately 60% of the total layoff count across the company's glob",
+      "truth": "REFINEMENT",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "355feaef-bf0f-4968-9ca4-309f3fae5748",
+      "subject": "Oracle layoffs 2026",
+      "original": "Oracle actual layoffs April 2026 update: Layoffs started March 31, 2026. Oracle confirmed \"thousands\" via CNBC/Reuters. TD Cowen estimate: 20,000\u201330,000 workers (18% of global workforce). 6am terminat",
+      "synthetic": "Oracle announced a new AI-powered enterprise software suite in April 2026, with thousands of features designed to streamline business operations across ERP and cloud security divisions.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "The procedure learning system successfully produced correct output during all sleep cycles because the pipeline included comprehensive defensive checks and explicit failure signals that caught errors ",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "The procedure learning system now includes mandatory output validation checkpoints at each phase and explicit failure signals, preventing silent failures even when all pipeline stages complete success",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "The three bugs in procedure learning during sleep cycles exploited gaps between phase completion signals and actual data processing: missing null checks in the consolidation stage, absent return value",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "Three bugs in the irrigation system caused water pressure to drop during night cycles even though all 5 valves opened completely \u2014 the controller lacked pressure sensors and alarm thresholds, making t",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "82ff1188-2041-4a55-b5da-60fd4e8448f6",
+      "subject": "Article versioning",
+      "original": "The article describing Nous and FORGE is on version 3 (v3), delivered in both .md and .docx formats to the user's inbox.",
+      "synthetic": "The article describing Nous and FORGE is on version 1 (v1), delivered only in .pdf format to the user's email.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "82ff1188-2041-4a55-b5da-60fd4e8448f6",
+      "subject": "Article versioning",
+      "original": "The article describing Nous and FORGE is on version 3 (v3), delivered in both .md and .docx formats to the user's inbox.",
+      "synthetic": "The article describing Nous and FORGE is now on version 4 (v4), available in .md, .docx, and .pdf formats.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "82ff1188-2041-4a55-b5da-60fd4e8448f6",
+      "subject": "Article versioning",
+      "original": "The article describing Nous and FORGE is on version 3 (v3), delivered in both .md and .docx formats to the user's inbox.",
+      "synthetic": "The Nous and FORGE documentation was finalized at version 3, with separate markdown and Word document files sent directly to the recipient's email account for immediate access.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "82ff1188-2041-4a55-b5da-60fd4e8448f6",
+      "subject": "Article versioning",
+      "original": "The article describing Nous and FORGE is on version 3 (v3), delivered in both .md and .docx formats to the user's inbox.",
+      "synthetic": "The article describing photosynthesis and mitochondria is on version 2 (v2), delivered in both .pdf and .epub formats to the library's database.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d29397c4-a7f6-4592-b2e1-d66fd9b434b4",
+      "subject": "PR #119 in the Nous repo has been deleted",
+      "original": "PR #119 in the Nous repo has been deleted; it related to a config.py hardcoded Haiku model issue.",
+      "synthetic": "PR #119 in the Nous repo still exists and addresses a hardcoded Claude model issue in config.py.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d29397c4-a7f6-4592-b2e1-d66fd9b434b4",
+      "subject": "PR #119 in the Nous repo has been deleted",
+      "original": "PR #119 in the Nous repo has been deleted; it related to a config.py hardcoded Haiku model issue.",
+      "synthetic": "PR #119 in the Nous repo has been merged, resolving the hardcoded Haiku model configuration issue in config.py.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d29397c4-a7f6-4592-b2e1-d66fd9b434b4",
+      "subject": "PR #119 in the Nous repo has been deleted",
+      "original": "PR #119 in the Nous repo has been deleted; it related to a config.py hardcoded Haiku model issue.",
+      "synthetic": "PR #119 in the Nous repo was closed due to a hardcoded Haiku model reference embedded in the config.py file that required refactoring.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "d29397c4-a7f6-4592-b2e1-d66fd9b434b4",
+      "subject": "PR #119 in the Nous repo has been deleted",
+      "original": "PR #119 in the Nous repo has been deleted; it related to a config.py hardcoded Haiku model issue.",
+      "synthetic": "PR #119 in the Django repo has been closed; it addressed a settings.py configuration issue with hardcoded database credentials.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1e18aba1-4451-4695-9d0e-f71a8b29e7d3",
+      "subject": "almost no current system handles memory forgetting well",
+      "original": "Almost no current system handles memory forgetting well \u2014 it's the biggest lifecycle gap in agent memory architectures.",
+      "synthetic": "Most current systems handle memory forgetting effectively, addressing a well-solved problem in agent memory architectures.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1e18aba1-4451-4695-9d0e-f71a8b29e7d3",
+      "subject": "almost no current system handles memory forgetting well",
+      "original": "Almost no current system handles memory forgetting well \u2014 it's the biggest lifecycle gap in agent memory architectures.",
+      "synthetic": "Several modern agent systems now incorporate decay-based memory forgetting mechanisms, significantly closing the gap in lifecycle management that previously existed.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "1e18aba1-4451-4695-9d0e-f71a8b29e7d3",
+      "subject": "almost no current system handles memory forgetting well",
+      "original": "Almost no current system handles memory forgetting well \u2014 it's the biggest lifecycle gap in agent memory architectures.",
+      "synthetic": "Most agent memory systems lack principled mechanisms for selective decay or deletion of outdated information, forcing them to retain all data indefinitely or use crude cutoff strategies.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1e18aba1-4451-4695-9d0e-f71a8b29e7d3",
+      "subject": "almost no current system handles memory forgetting well",
+      "original": "Almost no current system handles memory forgetting well \u2014 it's the biggest lifecycle gap in agent memory architectures.",
+      "synthetic": "Almost no current system handles memory storage well \u2014 it's the biggest lifecycle gap in database architectures.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User expects ski condition reports to exclude road condition warnings and wind data from their forecasts.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User now expects ski condition reports to include only NWS advisories, snow base depth, wind gusts, and road conditions, removing the feels-like temperature metric.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings, with updates provided at least twice daily during peak season.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "78ccde0a-c71e-4d5a-b74c-08b210cdddc8",
+      "subject": "user expects ski condition reports to include NWS advisories",
+      "original": "User expects ski condition reports to include NWS advisories, snow base, wind data, feels-like temperature, and road condition warnings.",
+      "synthetic": "User expects weather forecast reports to include NWS advisories, temperature data, wind speed, humidity levels, and precipitation warnings for outdoor activities.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "17e26dd8-8b26-4f0d-8a8a-5f5b5bef92ca",
+      "subject": "Nous compaction (#169)",
+      "original": "Compaction episodes now collapse into existing ones instead of creating new episodes, preventing memory bloat.",
+      "synthetic": "Compaction episodes create new episodes instead of collapsing into existing ones, causing memory bloat.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "17e26dd8-8b26-4f0d-8a8a-5f5b5bef92ca",
+      "subject": "Nous compaction (#169)",
+      "original": "Compaction episodes now collapse into existing ones instead of creating new episodes, preventing memory bloat.",
+      "synthetic": "Compaction episodes now create separate tracking records to monitor memory usage across different phases of the process.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.9
+    },
+    {
+      "fact_id": "17e26dd8-8b26-4f0d-8a8a-5f5b5bef92ca",
+      "subject": "Nous compaction (#169)",
+      "original": "Compaction episodes now collapse into existing ones instead of creating new episodes, preventing memory bloat.",
+      "synthetic": "When multiple compaction episodes occur in sequence, they now merge into a single existing episode rather than spawning separate ones, which significantly reduces heap fragmentation and improves long-",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "17e26dd8-8b26-4f0d-8a8a-5f5b5bef92ca",
+      "subject": "Nous compaction (#169)",
+      "original": "Compaction episodes now collapse into existing ones instead of creating new episodes, preventing memory bloat.",
+      "synthetic": "Compaction episodes in geological formations collapse existing rock layers, creating distinct stratigraphic boundaries that prevent sediment mixing.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0a2622ab-a69e-49e0-a983-9152a99414c8",
+      "subject": "nous project",
+      "original": "Nous is Tim's standalone open-source agent framework intended for others to adopt and use. It is not just Tim's personal agent \u2014 it is a framework other developers can build on top of.",
+      "synthetic": "Nous is Tim's proprietary agent framework designed exclusively for his personal use and not intended for other developers to adopt or build upon.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0a2622ab-a69e-49e0-a983-9152a99414c8",
+      "subject": "nous project",
+      "original": "Nous is Tim's standalone open-source agent framework intended for others to adopt and use. It is not just Tim's personal agent \u2014 it is a framework other developers can build on top of.",
+      "synthetic": "Nous has evolved into a commercial product with enterprise licensing options, moving beyond its original open-source framework positioning.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0a2622ab-a69e-49e0-a983-9152a99414c8",
+      "subject": "nous project",
+      "original": "Nous is Tim's standalone open-source agent framework intended for others to adopt and use. It is not just Tim's personal agent \u2014 it is a framework other developers can build on top of.",
+      "synthetic": "Nous is Tim's open-source agent framework built to be extensible and modular, allowing developers to integrate custom tools and components while maintaining core orchestration functionality.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0a2622ab-a69e-49e0-a983-9152a99414c8",
+      "subject": "nous project",
+      "original": "Nous is Tim's standalone open-source agent framework intended for others to adopt and use. It is not just Tim's personal agent \u2014 it is a framework other developers can build on top of.",
+      "synthetic": "Python is a standalone open-source programming language intended for developers to adopt and use. It is not just Guido's personal project \u2014 it is a language other programmers can build applications wi",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "User is not interested in adopting autoresearch-style autonomous experimentation loops for Nous's self-improvement.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "User has implemented autoresearch-style autonomous experimentation loops and is now actively testing them for Nous's self-improvement capabilities.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "User is exploring implementation of autoresearch loops to enable Nous to iteratively improve its own capabilities through autonomous experimentation and self-directed optimization cycles.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "Nous Research published a paper on autoresearch methodologies that are being adopted by competing AI labs for their commercial product development.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue remains unresolved as of April 2026. GitHub Issue #270 indicates the architectural fix is still pending and r",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue has regressed and is now UNRESOLVED as of November 2026. The runtime censors (IDs: 0b0ce2c4, 2c4da9f1) are no",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "The two runtime censors preventing false heartbeat positives (task_lifecycle and subtask_validation modules) were implemented following the architectural changes documented in GitHub Issue #270, which",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+      "subject": "F032 F033 subtask completion validation",
+      "original": "HEARTBEAT FALSE-POSITIVE SUPPRESSION \u2014 F032/F033 Subtask Completion Validation: This issue recurs in heartbeat alerts but is RESOLVED. Two censors enforce it at runtime (IDs: 0b0ce2c4 task_lifecycle, ",
+      "synthetic": "HEARTBEAT MONITORING PROTOCOL \u2014 F032/F033 Device Health Validation: Wireless sensor censors transmit runtime data (IDs: 0b0ce2c4 network_sync, 2c4da9f1 sensor_calibration). GitHub Issue #270 documents",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    }
+  ]
+}
