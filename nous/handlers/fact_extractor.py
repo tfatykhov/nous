@@ -12,6 +12,23 @@ import logging
 from typing import Any
 from uuid import UUID
 
+
+def _parse_episode_uuid(episode_id: str | None) -> UUID | None:
+    """Convert a fact_extractor episode_id to UUID, returning None on garbage.
+
+    The handle() event path falls back to ``"?"`` when the upstream event
+    data is missing ``episode_id``; previous bug (orphan-rate audit
+    2026-04-30) was that FactInput.source_episode_id was never set, so
+    every extracted fact had a NULL FK and ``link_episode_deterministic``
+    produced zero edges.
+    """
+    if not episode_id or episode_id == "?":
+        return None
+    try:
+        return UUID(episode_id)
+    except (ValueError, TypeError):
+        return None
+
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, parse_llm_json
@@ -166,7 +183,10 @@ class FactExtractor:
                     )
                     continue
 
-            # Store — P1-8 fix: pass category from LLM response
+            # Store — P1-8 fix: pass category from LLM response.
+            # F022 orphan-rate audit fix: tag the fact with its source
+            # episode so link_episode_deterministic can create the
+            # extracted_from edge in the next sleep/summary cycle.
             fact_input = FactInput(
                 subject=fact.get("subject", "unknown"),
                 content=content,
@@ -174,6 +194,7 @@ class FactExtractor:
                 confidence=confidence,
                 category=fact.get("category"),
                 source_text=transcript,  # F025 P2-E
+                source_episode_id=_parse_episode_uuid(episode_id),
             )
             result = await self._heart.learn(fact_input)
             if isinstance(result, FactRejected):
@@ -247,6 +268,8 @@ class FactExtractor:
                     logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
                     continue
 
+            # F022 orphan-rate audit fix: tag candidate facts with their
+            # source episode (same change as the LLM-fallback path above).
             fact_input = FactInput(
                 content=content,
                 subject=subject or "unknown",
@@ -254,6 +277,7 @@ class FactExtractor:
                 source="episode_summarizer",
                 confidence=0.8,  # Default confidence for LLM-extracted candidates
                 source_text=transcript,  # F025 P2-E
+                source_episode_id=_parse_episode_uuid(episode_id),
             )
             result = await self._heart.learn(fact_input)
             if isinstance(result, FactRejected):
