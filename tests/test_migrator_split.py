@@ -83,6 +83,34 @@ def test_split_drops_empty_chunks():
     assert _split_sql_statements("\n\n-- just a comment\n\n") == []
 
 
+def test_split_handles_semicolon_inside_string_literal():
+    """Regression for migration 039: a `;` inside a single-quoted COMMENT
+    string must not split the statement."""
+    sql = (
+        "ALTER TABLE brain.decisions ADD COLUMN IF NOT EXISTS confidence_raw "
+        "double precision;\n"
+        "COMMENT ON COLUMN brain.decisions.confidence_raw IS\n"
+        "    'F058: agent-recorded confidence; brain.decisions.confidence is "
+        "the calibrated value.';\n"
+    )
+    stmts = _split_sql_statements(sql)
+    assert len(stmts) == 2
+    assert stmts[0].startswith("ALTER TABLE")
+    assert stmts[1].startswith("COMMENT ON COLUMN")
+    # The full string survived intact, including the inline semicolon.
+    assert "agent-recorded confidence; brain.decisions" in stmts[1]
+
+
+def test_split_handles_doubled_singlequote_escape():
+    """Inside a string, '' is a literal single quote per SQL spec — the
+    splitter must not exit string mode there."""
+    sql = "INSERT INTO t VALUES ('it''s; fine');\nSELECT 1;"
+    stmts = _split_sql_statements(sql)
+    assert len(stmts) == 2
+    assert "it''s; fine" in stmts[0]
+    assert stmts[1] == "SELECT 1"
+
+
 def test_split_full_migration_034():
     """End-to-end: feed the exact content of migration 034 and assert
     that the three expected statements come out (ALTER TABLE, CREATE
