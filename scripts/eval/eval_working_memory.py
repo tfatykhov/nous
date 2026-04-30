@@ -34,7 +34,6 @@ from sqlalchemy import text
 
 from nous.api.anthropic_client import create_client
 from nous.config import Settings
-from nous.heart.working_memory import WorkingMemoryManager
 from nous.storage.database import Database
 
 
@@ -152,43 +151,64 @@ async def _judge_relevance(
 
 
 async def _seed_wm(db: Database, scenario_idx: int, items: list[dict]) -> str:
-    """Seed WM rows under a unique session_id for this scenario."""
+    """Seed one WM row (1 row per session) with items in the JSONB array.
+
+    Real schema: heart.working_memory has a single row per (agent_id,
+    session_id), `items` jsonb column holds a JSON array of
+    WorkingMemoryItem-shaped dicts: {type, ref_id, summary, relevance,
+    loaded_at}.
+    """
+    from datetime import UTC, datetime as dt
     session_id = f"wm-eval-session-{scenario_idx}"
+    items_json = [
+        {
+            "type": "fact",  # use a valid MemoryType
+            "ref_id": str(uuid4()),
+            "summary": item["content"],
+            "relevance": item["score"],
+            "loaded_at": dt.now(UTC).isoformat(),
+        }
+        for item in items
+    ]
     async with db.session() as session:
-        # Ensure agent exists
         await session.execute(text(
             "INSERT INTO nous_system.agents (id, name) VALUES (:aid, :n) "
             "ON CONFLICT (id) DO NOTHING"
         ), {"aid": _TEST_AGENT_ID, "n": "WM eval"})
-        # Clean prior runs
         await session.execute(text(
-            "DELETE FROM heart.working_memory WHERE session_id = :sid"
-        ), {"sid": session_id})
-        for item in items:
-            await session.execute(text(
-                "INSERT INTO heart.working_memory "
-                "(id, agent_id, session_id, content, score, tags) "
-                "VALUES (:id, :aid, :sid, :content, :score, :tags)"
-            ), {
-                "id": uuid4(), "aid": _TEST_AGENT_ID, "sid": session_id,
-                "content": item["content"], "score": item["score"],
-                "tags": item.get("tags", []),
-            })
+            "DELETE FROM heart.working_memory "
+            "WHERE agent_id = :aid AND session_id = :sid"
+        ), {"aid": _TEST_AGENT_ID, "sid": session_id})
+        await session.execute(text(
+            "INSERT INTO heart.working_memory "
+            "(agent_id, session_id, items) "
+            "VALUES (:aid, :sid, CAST(:items AS jsonb))"
+        ), {
+            "aid": _TEST_AGENT_ID, "sid": session_id,
+            "items": json.dumps(items_json),
+        })
         await session.commit()
     return session_id
 
 
 async def _load_wm(db: Database, session_id: str, threshold: float = 0.7,
                    limit: int = 10) -> list[dict]:
-    """Mirror pre_turn's WM load query."""
+    """Read items from the JSONB array, filter by relevance, sort, limit."""
     async with db.session() as session:
         result = await session.execute(text(
-            "SELECT content, score FROM heart.working_memory "
-            "WHERE agent_id = :aid AND session_id = :sid AND score >= :thr "
-            "ORDER BY score DESC LIMIT :lim"
-        ), {"aid": _TEST_AGENT_ID, "sid": session_id,
-            "thr": threshold, "lim": limit})
-        return [{"content": r[0], "score": r[1]} for r in result.all()]
+            "SELECT items FROM heart.working_memory "
+            "WHERE agent_id = :aid AND session_id = :sid"
+        ), {"aid": _TEST_AGENT_ID, "sid": session_id})
+        row = result.first()
+        if not row or not row[0]:
+            return []
+        items = row[0] if isinstance(row[0], list) else json.loads(row[0])
+        # Mirror pre_turn's filter+sort+cap.
+        filtered = [it for it in items
+                    if float(it.get("relevance", 0)) >= threshold]
+        filtered.sort(key=lambda it: -float(it.get("relevance", 0)))
+        return [{"content": it["summary"], "score": it["relevance"]}
+                for it in filtered[:limit]]
 
 
 async def main() -> int:
