@@ -152,12 +152,35 @@ async def _gen_fact_b(llm, content_a: str, action: str) -> str | None:
     return text
 
 
+def _dates_for_truth(action: str) -> tuple[str, str]:
+    """Return (date_a, date_b) so the temporal hint aligns with ground truth.
+
+    Codex P1 (PR #391): the prior version always set date_a earlier than
+    date_b, which contradicts the SUPERSEDE_B generation rule (A is the
+    newer correct fact, B is the older stale one). The model correctly
+    used the date hint and predicted SUPERSEDE_A — making SUPERSEDE_B
+    accuracy artificially low.
+
+    For non-temporal categories (MERGE, KEEP_BOTH, REMOVE_*) the dates
+    should not carry signal — use identical dates so the model treats
+    them as same-period facts.
+    """
+    if action == "SUPERSEDE_A":
+        return ("2026-04-15", "2026-04-29")  # A older, B newer (B is current)
+    if action == "SUPERSEDE_B":
+        return ("2026-04-29", "2026-04-15")  # A newer, B older (A is current)
+    # REMOVE / MERGE / KEEP_BOTH: date is irrelevant to ground truth.
+    return ("2026-04-22", "2026-04-22")
+
+
 async def _f031_resolve(
     llm, model: str, content_a: str, content_b: str,
+    truth_action: str,
 ) -> dict | None:
     """Mirror the production call in sleep_handler._phase_resolve_contradictions."""
+    date_a, date_b = _dates_for_truth(truth_action)
     prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
-        date_a="2026-04-15", date_b="2026-04-29",
+        date_a=date_a, date_b=date_b,
         content_a=content_a[:500], content_b=content_b[:500],
     )
     try:
@@ -239,6 +262,7 @@ async def main() -> int:
                 await asyncio.sleep(1.0)
                 resolution = await _f031_resolve(
                     api_client, args.resolver_model, seed, fact_b,
+                    truth_action=category,
                 )
                 if resolution is None:
                     truth_pred_matrix[(category, "CLF_FAIL")] += 1
