@@ -375,6 +375,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CROSS_TYPE_THRESHOLD` | `0.80` | Cross-type similarity threshold |
 | `NOUS_CONTRADICTION_DETECTION` | `true` | Enable LLM contradiction detection |
 | `NOUS_CONTRADICTION_MODEL` | `claude-haiku-4-5-20251001` | Model for contradiction classification |
+| `NOUS_CONFIDENCE_CALIBRATION_FACTOR` | `0.7627` | F058: multiplicative scale applied to agent-recorded decision confidence at write time. Default derived empirically from `reports/calibration_eval.md` (401 reviewed prod decisions: mean conf 0.834 vs strict accuracy 0.636, Brier 0.252 at random baseline). Set to `1.0` to disable scaling. Pre-calibration value preserved in `brain.decisions.confidence_raw`. |
 | `NOUS_SPREADING_ACTIVATION_ENABLED` | `auto` | Spreading activation (auto/true/false) |
 | `NOUS_SPREADING_ACTIVATION_DENSITY_THRESHOLD` | `3.0` | Density threshold for auto-enable |
 | `NOUS_EXECUTION_LEDGER_ENABLED` | `true` | Enable execution ledger (F026) |
