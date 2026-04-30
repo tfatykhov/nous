@@ -134,6 +134,13 @@ class GraphLinker:
         if not self.embedder or not self.settings.cross_type_linking_enabled:
             return []
 
+        # F022 audit (2026-04-30): empty/near-empty source content was the
+        # dominant cause of NO/WEAK edge verdicts. Skip the link entirely
+        # when the new fact is too short to anchor a reliable relation.
+        min_chars = self.settings.cross_type_link_min_content_chars
+        if min_chars > 0 and len((fact_content or "").strip()) < min_chars:
+            return []
+
         template_text = common_template_text("fact", fact_content)
         try:
             fact_embedding = await self.embedder.embed(template_text)
@@ -144,6 +151,8 @@ class GraphLinker:
         embedding_str = "[" + ",".join(str(float(v)) for v in fact_embedding) + "]"
 
         cutoff = datetime.now(UTC) - timedelta(days=30)
+        # F022 audit fix: gate candidate decisions on description length so
+        # rows with empty/near-empty bodies never enter the link set.
         sql = text("""
             SELECT id, description,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
@@ -152,6 +161,7 @@ class GraphLinker:
               AND embedding IS NOT NULL
               AND created_at >= :cutoff
               AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :threshold
+              AND length(coalesce(description, '')) >= :min_chars
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 5
         """)
@@ -160,6 +170,7 @@ class GraphLinker:
             "agent_id": self.agent_id,
             "cutoff": cutoff,
             "threshold": self.settings.cross_type_threshold * 0.9,
+            "min_chars": min_chars,
         })
         candidates = result.all()
 
@@ -210,6 +221,12 @@ class GraphLinker:
         if not self.embedder or not self.settings.cross_type_linking_enabled:
             return []
 
+        # F022 audit guard: short source content cannot anchor a reliable
+        # related_to edge. Same threshold as link_fact_to_decisions.
+        min_chars = self.settings.cross_type_link_min_content_chars
+        if min_chars > 0 and len((fact_content or "").strip()) < min_chars:
+            return []
+
         template_text = common_template_text("fact", fact_content)
         try:
             fact_embedding = await self.embedder.embed(template_text)
@@ -219,6 +236,7 @@ class GraphLinker:
 
         embedding_str = "[" + ",".join(str(float(v)) for v in fact_embedding) + "]"
 
+        # Gate candidates on content length to mirror the source-side guard.
         sql = text("""
             SELECT id, content,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
@@ -228,6 +246,7 @@ class GraphLinker:
               AND id != :fact_id
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> CAST(:embedding AS vector)) >= :threshold
+              AND length(coalesce(content, '')) >= :min_chars
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 5
         """)
@@ -236,6 +255,7 @@ class GraphLinker:
             "agent_id": self.agent_id,
             "fact_id": fact_id,
             "threshold": self.settings.cross_type_same_threshold * 0.9,
+            "min_chars": min_chars,
         })
         candidates = result.all()
 
