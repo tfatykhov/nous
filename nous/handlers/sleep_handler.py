@@ -131,18 +131,43 @@ _REFLECTION_SCHEMA: dict[str, Any] = {
     "required": ["patterns", "lessons", "connections", "gaps", "summary", "facts"],
 }
 
-_CONTRADICTION_RESOLUTION_PROMPT = """Two facts exist in memory about the same subject. Determine the correct action:
+# F031 prompt rewritten 2026-04-30 after the synthetic eval
+# (reports/f031_resolution_eval.md) measured 33% accuracy and a strong
+# directional bias (SUPERSEDE_A: 12/30 verdicts, SUPERSEDE_B: 1/30)
+# plus 0/10 correct on REMOVE_A. Same pattern that fixed F027 in PR #383:
+# explicit decision tree, mutability framing, examples, and a clear
+# distinction between REMOVE (factually wrong) and SUPERSEDE (mutable
+# state changed over time).
+_CONTRADICTION_RESOLUTION_PROMPT = """Two facts about the same subject exist in memory. Apply this decision tree IN ORDER and return the FIRST matching action.
 
 Fact A (stored {date_a}): {content_a}
 Fact B (stored {date_b}): {content_b}
 
-Actions:
-- SUPERSEDE_A: Fact B is the current/correct version, retire Fact A
-- SUPERSEDE_B: Fact A is the current/correct version, retire Fact B
-- MERGE: Both contain partial truth, merge into single fact
-- KEEP_BOTH: Genuinely different information, both valid
-- REMOVE_A: Fact A is wrong/stale, remove it
-- REMOVE_B: Fact B is wrong/stale, remove it
+Step 1 — Subject overlap test. Are A and B about the SAME subject and SAME aspect/property?
+- If they describe DIFFERENT subjects or different unrelated aspects → return KEEP_BOTH (no contradiction).
+
+Step 2 — Compatibility test. Can A and B both be simultaneously true?
+- Both describe COMPLEMENTARY aspects (different facets of the same subject) → return KEEP_BOTH.
+- Both partial truths that combine into a richer single fact → return MERGE (provide merged_content).
+
+Step 3 — Factual correctness test. Was either fact OBJECTIVELY WRONG at the time of writing?
+- Fact A was wrong (factual error, not state change) → return REMOVE_A.
+- Fact B was wrong (factual error, not state change) → return REMOVE_B.
+- Note: REMOVE means the fact was never accurate. Do not use REMOVE for mutable-state changes — those are SUPERSEDE.
+
+Step 4 — Temporal-update test. Could time passing reconcile the two facts (a mutable property changed)?
+- Fact B reflects the CURRENT state, A is now stale → return SUPERSEDE_A.
+- Fact A reflects the CURRENT state, B is now stale → return SUPERSEDE_B.
+- Mutable properties: schedule, status, value, count, version, location, configuration, role, ownership, price, quantity.
+
+Examples to disambiguate:
+- "Pi equals 3.14" vs "Pi equals 4" → REMOVE_B (math is fixed; 4 was never correct).
+- "Tim's flight is at 3pm" vs "Tim's flight is at 5pm" → SUPERSEDE_A (schedule moved; A was correct earlier).
+- "API returns 200" vs "API returns 500" → SUPERSEDE_A (status changes; both true at different times).
+- "X uses Postgres" + "X uses Redis for cache" → KEEP_BOTH (different layers, both valid).
+- "Project is 50% done" + "Project finished on schedule" → MERGE (combine into a single fact spanning the timeline).
+
+For `confidence`: use 0.85+ when one action is clearly right, 0.70-0.85 when borderline, below 0.70 when genuinely uncertain (will be downgraded to KEEP_BOTH by the caller).
 
 Use the resolve_contradiction tool to return your analysis."""
 
@@ -659,18 +684,43 @@ class SleepHandler:
                 if not resolution:
                     continue
 
-                action = str(resolution.get("action", "")).upper().strip()
+                raw_action = str(resolution.get("action", "")).upper().strip()
+                action = raw_action
                 confidence = float(resolution.get("confidence", 0.0))
                 fact1_id = pair["fact1_id"]
                 fact2_id = pair["fact2_id"]
 
                 # Skip low-confidence actions (review fix: treat as KEEP_BOTH)
+                downgraded = False
                 if confidence < 0.7 and action != "KEEP_BOTH":
                     logger.info(
                         "F031 resolve: confidence %.2f below 0.7 for %s, downgrading to KEEP_BOTH",
                         confidence, action,
                     )
                     action = "KEEP_BOTH"
+                    downgraded = True
+
+                # F031 persistence — log every resolution decision so a
+                # retrospective accuracy eval can run against real prod data
+                # (eval_f031_resolution.py used synthetic fixtures only).
+                # Fire-and-forget via create_task to keep the sleep loop fast.
+                try:
+                    asyncio.create_task(
+                        self._brain.emit_event(
+                            "f031_contradiction_resolution",
+                            {
+                                "raw_action": raw_action,
+                                "applied_action": action,
+                                "confidence": confidence,
+                                "downgraded_by_floor": downgraded,
+                                "fact1_id": str(fact1_id),
+                                "fact2_id": str(fact2_id),
+                                "reason": str(resolution.get("reason", ""))[:300],
+                            },
+                        )
+                    )
+                except Exception:
+                    logger.debug("F031 persistence failed (suppressed)", exc_info=True)
 
                 try:
                     if action == "SUPERSEDE_A":
