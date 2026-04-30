@@ -65,7 +65,10 @@ _RECENCY_PATTERNS = [
 # the natural-language variants users actually produce.
 _MEMORY_HINTS = {
     "decision": [
-        r"\bdecid\w*\b",  # decide, decided, deciding, decision
+        # 'deci' stem catches both 'decide' (deci-d-) and 'decision' (deci-s-)
+        # plus 'decided', 'deciding', 'decisive'. Use enumeration rather
+        # than `\bdeci\w*\b` to avoid false matches on 'decimal'/'decimate'.
+        r"\b(?:decide\w*|decision\w*|decisive\w*|deciding|decided)\b",
         r"\b(?:chose|choice|choose|chosen|recommend\w*)\b",
         r"\bshould\s+(?:we|i|they|you)\b",
     ],
