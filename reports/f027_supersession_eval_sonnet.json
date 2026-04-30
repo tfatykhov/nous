@@ -1,0 +1,1245 @@
+{
+  "judge_model": "claude-sonnet-4-6",
+  "n_facts": 30,
+  "n_pairs": 120,
+  "overall_accuracy": 0.7416666666666667,
+  "per_category": {
+    "CONTRADICTION": {
+      "n": 30,
+      "correct": 30,
+      "accuracy": 1.0,
+      "avg_confidence": 0.9653333333333334
+    },
+    "UPDATE": {
+      "n": 30,
+      "correct": 10,
+      "accuracy": 0.3333333333333333,
+      "avg_confidence": 0.8783333333333333
+    },
+    "REFINEMENT": {
+      "n": 30,
+      "correct": 29,
+      "accuracy": 0.9666666666666667,
+      "avg_confidence": 0.8953333333333333
+    },
+    "UNRELATED": {
+      "n": 30,
+      "correct": 20,
+      "accuracy": 0.6666666666666666,
+      "avg_confidence": 0.881
+    }
+  },
+  "confusion_matrix": {
+    "CONTRADICTION->CONTRADICTION": 30,
+    "UPDATE->UPDATE": 10,
+    "REFINEMENT->REFINEMENT": 29,
+    "UNRELATED->UNRELATED": 20,
+    "UPDATE->CONTRADICTION": 12,
+    "UNRELATED->CONTRADICTION": 7,
+    "UPDATE->REFINEMENT": 8,
+    "UNRELATED->REFINEMENT": 3,
+    "REFINEMENT->CONTRADICTION": 1
+  },
+  "pairs": [
+    {
+      "fact_id": "e2b9dff7-656c-4729-b833-65934f6bef61",
+      "subject": "lesson_learned",
+      "original": "The timeout failure on research-spx was caught via a status check \u2014 proactive DAG monitoring or post-run health checks should be standard, not reactive",
+      "synthetic": "The timeout failure on research-spx went undetected until after production impact, demonstrating that reactive monitoring is more effective than proactive health checks.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "e2b9dff7-656c-4729-b833-65934f6bef61",
+      "subject": "lesson_learned",
+      "original": "The timeout failure on research-spx was caught via a status check \u2014 proactive DAG monitoring or post-run health checks should be standard, not reactive",
+      "synthetic": "The timeout failure on research-spx has been resolved by implementing automated DAG monitoring as part of the standard pipeline validation process.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "e2b9dff7-656c-4729-b833-65934f6bef61",
+      "subject": "lesson_learned",
+      "original": "The timeout failure on research-spx was caught via a status check \u2014 proactive DAG monitoring or post-run health checks should be standard, not reactive",
+      "synthetic": "The research-spx timeout was detected through automated status checks that monitored DAG execution health in real-time, demonstrating how systematic monitoring catches issues faster than waiting for m",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.88
+    },
+    {
+      "fact_id": "e2b9dff7-656c-4729-b833-65934f6bef61",
+      "subject": "lesson_learned",
+      "original": "The timeout failure on research-spx was caught via a status check \u2014 proactive DAG monitoring or post-run health checks should be standard, not reactive",
+      "synthetic": "The timeout feature on research-spx devices allows users to set automatic shutdown intervals \u2014 proactive power management or scheduled maintenance windows should be configurable, not fixed.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "e877088c-d7c9-49f8-a42c-9bf32ebd0a3e",
+      "subject": "runner.sh",
+      "original": "runner.sh do_launch() must be called as root (EUID=0) because it uses runuser to switch to claude-runner. If called from a DAG subtask or non-root context, runuser silently fails, leaving status='runn",
+      "synthetic": "runner.sh do_launch() can be safely called from non-root contexts without any issues, as it does not require elevated privileges to function properly.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "e877088c-d7c9-49f8-a42c-9bf32ebd0a3e",
+      "subject": "runner.sh",
+      "original": "runner.sh do_launch() must be called as root (EUID=0) because it uses runuser to switch to claude-runner. If called from a DAG subtask or non-root context, runuser silently fails, leaving status='runn",
+      "synthetic": "runner.sh do_launch() now supports non-root execution via sudo wrapper added in v2.1. The root-check guard at line 70 has been removed. Verify sudo privileges instead before calling runner.sh launch.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e877088c-d7c9-49f8-a42c-9bf32ebd0a3e",
+      "subject": "runner.sh",
+      "original": "runner.sh do_launch() must be called as root (EUID=0) because it uses runuser to switch to claude-runner. If called from a DAG subtask or non-root context, runuser silently fails, leaving status='runn",
+      "synthetic": "The runuser command in runner.sh requires EUID=0 because it needs elevated privileges to change the process owner to the claude-runner user account, which is a security restriction built into the runu",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.88
+    },
+    {
+      "fact_id": "e877088c-d7c9-49f8-a42c-9bf32ebd0a3e",
+      "subject": "runner.sh",
+      "original": "runner.sh do_launch() must be called as root (EUID=0) because it uses runuser to switch to claude-runner. If called from a DAG subtask or non-root context, runuser silently fails, leaving status='runn",
+      "synthetic": "The runner.sh script launches background processes using nohup output redirection to log files, which requires proper file permissions and disk space allocation. Ensure the logging directory has suffi",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "old",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "4058d675-e5f7-4af0-945e-c7d95da55618",
+      "subject": "censor `a8684bd4` was created to enforce per-turn skill reca",
+      "original": "Censor `a8684bd4` was created to enforce per-turn skill recall as a behavioral rule.",
+      "synthetic": "Censor `a8684bd4` was designed to prevent per-turn skill recall as a behavioral rule.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.98
+    },
+    {
+      "fact_id": "4058d675-e5f7-4af0-945e-c7d95da55618",
+      "subject": "censor `a8684bd4` was created to enforce per-turn skill reca",
+      "original": "Censor `a8684bd4` was created to enforce per-turn skill recall as a behavioral rule.",
+      "synthetic": "Censor `a8684bd4` was modified to enforce per-session skill recall as a behavioral rule.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "4058d675-e5f7-4af0-945e-c7d95da55618",
+      "subject": "censor `a8684bd4` was created to enforce per-turn skill reca",
+      "original": "Censor `a8684bd4` was created to enforce per-turn skill recall as a behavioral rule.",
+      "synthetic": "Censor `a8684bd4` enforces per-turn skill recall by preventing models from accessing previously learned capabilities across sequential interactions.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "4058d675-e5f7-4af0-945e-c7d95da55618",
+      "subject": "censor `a8684bd4` was created to enforce per-turn skill reca",
+      "original": "Censor `a8684bd4` was created to enforce per-turn skill recall as a behavioral rule.",
+      "synthetic": "Censor `a8684bd4` was designed to filter profanity in user-generated content across social media platforms.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "2e243655-d4d9-4e15-a277-4094ac291095",
+      "subject": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts)",
+      "original": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts), Brain (decisions), and graph edge memory stores.",
+      "synthetic": "recall_deep runs a single sequential search across all memory stores without parallel processing.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.98
+    },
+    {
+      "fact_id": "2e243655-d4d9-4e15-a277-4094ac291095",
+      "subject": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts)",
+      "original": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts), Brain (decisions), and graph edge memory stores.",
+      "synthetic": "recall_deep now runs 5 parallel searches to maximize coverage across Heart (facts), Brain (decisions), Graph edge memory, and two newly integrated semantic layers.",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "2e243655-d4d9-4e15-a277-4094ac291095",
+      "subject": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts)",
+      "original": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts), Brain (decisions), and graph edge memory stores.",
+      "synthetic": "recall_deep initiates three concurrent search processes targeting Heart fact storage, Brain decision logs, and graph edge memory, with each search optimized for its respective data structure's retriev",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "2e243655-d4d9-4e15-a277-4094ac291095",
+      "subject": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts)",
+      "original": "recall_deep runs 3 parallel searches to maximize coverage across Heart (facts), Brain (decisions), and graph edge memory stores.",
+      "synthetic": "The heart runs 3 parallel chambers to maximize blood flow across systemic, pulmonary, and coronary circulation systems.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "9f1f2cc2-7877-4e5f-98bb-ad97d23edb21",
+      "subject": "Nous censor system",
+      "original": "Censors only fire when a tool is actually invoked. They cannot intercept fabricated claims about actions that were never executed \u2014 this is a known architectural gap as of this episode.",
+      "synthetic": "Censors can intercept and block fabricated claims about actions that were never actually executed, closing the architectural gap.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "9f1f2cc2-7877-4e5f-98bb-ad97d23edb21",
+      "subject": "Nous censor system",
+      "original": "Censors only fire when a tool is actually invoked. They cannot intercept fabricated claims about actions that were never executed \u2014 this is a known architectural gap as of this episode.",
+      "synthetic": "Censors now validate tool invocations against execution logs, preventing false claims about actions that never occurred \u2014 this architectural gap was resolved in the latest update.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "9f1f2cc2-7877-4e5f-98bb-ad97d23edb21",
+      "subject": "Nous censor system",
+      "original": "Censors only fire when a tool is actually invoked. They cannot intercept fabricated claims about actions that were never executed \u2014 this is a known architectural gap as of this episode.",
+      "synthetic": "Censors operate at tool invocation points and cannot detect false claims about actions in the censor's reasoning chain, meaning they're vulnerable to deception through fabricated tool calls that never",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.87
+    },
+    {
+      "fact_id": "9f1f2cc2-7877-4e5f-98bb-ad97d23edb21",
+      "subject": "Nous censor system",
+      "original": "Censors only fire when a tool is actually invoked. They cannot intercept fabricated claims about actions that were never executed \u2014 this is a known architectural gap as of this episode.",
+      "synthetic": "Censors in medieval times only enforced rules when books were actually printed. They could not prevent rumors about forbidden texts that were never distributed \u2014 this remained a persistent challenge t",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "dd552515-bc75-4525-9da1-faea22345ca7",
+      "subject": "Anthropic harness architecture",
+      "original": "A GAN-inspired planner/generator/evaluator 3-agent pattern significantly outperforms single-agent coding approaches for long-running tasks.",
+      "synthetic": "Single-agent coding approaches outperform the GAN-inspired planner/generator/evaluator 3-agent pattern for long-running tasks.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "dd552515-bc75-4525-9da1-faea22345ca7",
+      "subject": "Anthropic harness architecture",
+      "original": "A GAN-inspired planner/generator/evaluator 3-agent pattern significantly outperforms single-agent coding approaches for long-running tasks.",
+      "synthetic": "A GAN-inspired planner/generator/evaluator 3-agent pattern now shows comparable performance to single-agent coding approaches when optimized with new routing mechanisms.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "dd552515-bc75-4525-9da1-faea22345ca7",
+      "subject": "Anthropic harness architecture",
+      "original": "A GAN-inspired planner/generator/evaluator 3-agent pattern significantly outperforms single-agent coding approaches for long-running tasks.",
+      "synthetic": "The GAN-inspired planner/generator/evaluator 3-agent architecture achieves superior performance on tasks exceeding 10,000 tokens by leveraging adversarial feedback loops between agents to iteratively ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "dd552515-bc75-4525-9da1-faea22345ca7",
+      "subject": "Anthropic harness architecture",
+      "original": "A GAN-inspired planner/generator/evaluator 3-agent pattern significantly outperforms single-agent coding approaches for long-running tasks.",
+      "synthetic": "A GAN-inspired architecture for image synthesis using a planner/generator/evaluator framework significantly outperforms single-model approaches for photorealistic rendering tasks.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "a891a8ce-153d-4e0c-b7cd-c717bd9d002f",
+      "subject": "Team LLM Wiki prototype \u2014 architecture overview",
+      "original": "A Team LLM Wiki prototype was designed and pushed to GitHub, inspired by Karpathy's LLM-maintained knowledge base concept. It integrates Confluence, Jira, GitHub, and Slack as data sources. The system",
+      "synthetic": "A Team LLM Wiki prototype was designed but never pushed to GitHub, and it does not integrate with Confluence, Jira, GitHub, or Slack as data sources.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "a891a8ce-153d-4e0c-b7cd-c717bd9d002f",
+      "subject": "Team LLM Wiki prototype \u2014 architecture overview",
+      "original": "A Team LLM Wiki prototype was designed and pushed to GitHub, inspired by Karpathy's LLM-maintained knowledge base concept. It integrates Confluence, Jira, GitHub, and Slack as data sources. The system",
+      "synthetic": "The Team LLM Wiki prototype was fully integrated into Nous as the memory layer and retrieval pipeline, replacing the candidate status. It now actively syncs with Confluence, Jira, GitHub, and Slack to",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "old",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "a891a8ce-153d-4e0c-b7cd-c717bd9d002f",
+      "subject": "Team LLM Wiki prototype \u2014 architecture overview",
+      "original": "A Team LLM Wiki prototype was designed and pushed to GitHub, inspired by Karpathy's LLM-maintained knowledge base concept. It integrates Confluence, Jira, GitHub, and Slack as data sources. The system",
+      "synthetic": "The Team LLM Wiki prototype leverages Claude as its backbone LLM for agent orchestration, enabling real-time synthesis of updates across integrated platforms like Confluence, Jira, GitHub, and Slack t",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.91
+    },
+    {
+      "fact_id": "a891a8ce-153d-4e0c-b7cd-c717bd9d002f",
+      "subject": "Team LLM Wiki prototype \u2014 architecture overview",
+      "original": "A Team LLM Wiki prototype was designed and pushed to GitHub, inspired by Karpathy's LLM-maintained knowledge base concept. It integrates Confluence, Jira, GitHub, and Slack as data sources. The system",
+      "synthetic": "A Team LLM Wiki prototype was designed for managing restaurant inventory, using machine learning to predict stock levels across multiple kitchen stations and automatically generate shopping lists thro",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d827c332-ec5a-4b9f-8a10-5eb6a025a98f",
+      "subject": "VS Code Copilot plugin",
+      "original": "VS Code Copilot supports native subagent context isolation, coordinator agent patterns, handoffs with auto-submit, and vscode.lm.registerTool() \u2014 making it the stronger platform for multi-agent harnes",
+      "synthetic": "VS Code Copilot lacks native subagent context isolation and does not support coordinator agent patterns or the vscode.lm.registerTool() API, making it weaker than CLI for multi-agent implementations.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "d827c332-ec5a-4b9f-8a10-5eb6a025a98f",
+      "subject": "VS Code Copilot plugin",
+      "original": "VS Code Copilot supports native subagent context isolation, coordinator agent patterns, handoffs with auto-submit, and vscode.lm.registerTool() \u2014 making it the stronger platform for multi-agent harnes",
+      "synthetic": "VS Code Copilot now requires manual context management for subagents and no longer supports auto-submit handoffs, making CLI-based multi-agent implementations comparatively more efficient for complex ",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "d827c332-ec5a-4b9f-8a10-5eb6a025a98f",
+      "subject": "VS Code Copilot plugin",
+      "original": "VS Code Copilot supports native subagent context isolation, coordinator agent patterns, handoffs with auto-submit, and vscode.lm.registerTool() \u2014 making it the stronger platform for multi-agent harnes",
+      "synthetic": "VS Code Copilot's vscode.lm.registerTool() API enables developers to define custom tools that integrate seamlessly with subagent context isolation, allowing coordinator agents to orchestrate handoffs ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.91
+    },
+    {
+      "fact_id": "d827c332-ec5a-4b9f-8a10-5eb6a025a98f",
+      "subject": "VS Code Copilot plugin",
+      "original": "VS Code Copilot supports native subagent context isolation, coordinator agent patterns, handoffs with auto-submit, and vscode.lm.registerTool() \u2014 making it the stronger platform for multi-agent harnes",
+      "synthetic": "VS Code's native theme system supports isolated color palettes, coordinator extensions, handoff between workspace profiles, and vscode.workspace.registerColorTheme() \u2014 making it ideal for enterprise d",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "72f15d64-9ce9-4c87-9307-42390248bb89",
+      "subject": "lesson_learned",
+      "original": "When writing public-facing Nous articles, verify attribution exclusions explicitly before drafting \u2014 the Max Talanov exclusion was a late-stage constraint that required rework",
+      "synthetic": "Attribution exclusions should be verified after drafting to avoid unnecessary early constraints like the Max Talanov restriction.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "72f15d64-9ce9-4c87-9307-42390248bb89",
+      "subject": "lesson_learned",
+      "original": "When writing public-facing Nous articles, verify attribution exclusions explicitly before drafting \u2014 the Max Talanov exclusion was a late-stage constraint that required rework",
+      "synthetic": "When writing public-facing Nous articles, verify attribution exclusions with stakeholders during the planning phase \u2014 early coordination prevents late-stage rework like the Max Talanov situation.",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "72f15d64-9ce9-4c87-9307-42390248bb89",
+      "subject": "lesson_learned",
+      "original": "When writing public-facing Nous articles, verify attribution exclusions explicitly before drafting \u2014 the Max Talanov exclusion was a late-stage constraint that required rework",
+      "synthetic": "Attribution exclusions for Nous articles should be verified with legal and communications teams during the planning phase, not discovered during drafting, as the Max Talanov case demonstrated when lat",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.91
+    },
+    {
+      "fact_id": "72f15d64-9ce9-4c87-9307-42390248bb89",
+      "subject": "lesson_learned",
+      "original": "When writing public-facing Nous articles, verify attribution exclusions explicitly before drafting \u2014 the Max Talanov exclusion was a late-stage constraint that required rework",
+      "synthetic": "When writing public-facing documentation, verify technical specifications explicitly before implementation \u2014 the Max Talanov algorithm was a late-stage optimization that required performance tuning.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.72
+    },
+    {
+      "fact_id": "b517546d-305f-4584-97a4-87320b6e34be",
+      "subject": "Agentic task design principle",
+      "original": "Marking a task 'completed' must be the last action after all side effects are confirmed, not a flag set at the start of a completion handler. Idempotency and side-effect verification are required for ",
+      "synthetic": "Marking a task 'completed' should be set as the first action in a completion handler before side effects are processed, not after verification.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "b517546d-305f-4584-97a4-87320b6e34be",
+      "subject": "Agentic task design principle",
+      "original": "Marking a task 'completed' must be the last action after all side effects are confirmed, not a flag set at the start of a completion handler. Idempotency and side-effect verification are required for ",
+      "synthetic": "Marking a task 'completed' is now safely handled by setting the flag at the start of the completion handler, with automatic rollback on side-effect failures ensuring reliability in agentic pipelines.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "b517546d-305f-4584-97a4-87320b6e34be",
+      "subject": "Agentic task design principle",
+      "original": "Marking a task 'completed' must be the last action after all side effects are confirmed, not a flag set at the start of a completion handler. Idempotency and side-effect verification are required for ",
+      "synthetic": "Task completion markers should only be set after verifying all side effects have persisted to their intended destinations and dependent systems have acknowledged the state change.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "b517546d-305f-4584-97a4-87320b6e34be",
+      "subject": "Agentic task design principle",
+      "original": "Marking a task 'completed' must be the last action after all side effects are confirmed, not a flag set at the start of a completion handler. Idempotency and side-effect verification are required for ",
+      "synthetic": "Marking attendance records as 'completed' should occur after all student submissions are verified, not when the marking period begins, to ensure accurate completion tracking in educational systems.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.41
+    },
+    {
+      "fact_id": "9932a7c2-cc65-4199-bd6d-027e62938b43",
+      "subject": "nous implementation specs",
+      "original": "Spec 011.2 (Multimodal File Support) created at docs/implementation/011.2-multimodal-file-support.md. Covers: images (JPEG/PNG/GIF/WebP), PDFs, and text-based code/data files. Architecture: Telegram/R",
+      "synthetic": "Spec 011.2 uses the Files API for transport instead of base64 encoding, and implements persistent blob storage for complete message history.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "9932a7c2-cc65-4199-bd6d-027e62938b43",
+      "subject": "nous implementation specs",
+      "original": "Spec 011.2 (Multimodal File Support) created at docs/implementation/011.2-multimodal-file-support.md. Covers: images (JPEG/PNG/GIF/WebP), PDFs, and text-based code/data files. Architecture: Telegram/R",
+      "synthetic": "Spec 011.2 (Multimodal File Support) now includes WebM video support alongside existing image formats (JPEG/PNG/GIF/WebP), PDFs, and text files. The 4-phase implementation has progressed to phase 3 (r",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "9932a7c2-cc65-4199-bd6d-027e62938b43",
+      "subject": "nous implementation specs",
+      "original": "Spec 011.2 (Multimodal File Support) created at docs/implementation/011.2-multimodal-file-support.md. Covers: images (JPEG/PNG/GIF/WebP), PDFs, and text-based code/data files. Architecture: Telegram/R",
+      "synthetic": "The attachment normalization phase converts multimodal inputs into base64-encoded payloads before passing them to the Runner, ensuring consistent formatting across Telegram and REST API sources.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.88
+    },
+    {
+      "fact_id": "9932a7c2-cc65-4199-bd6d-027e62938b43",
+      "subject": "nous implementation specs",
+      "original": "Spec 011.2 (Multimodal File Support) created at docs/implementation/011.2-multimodal-file-support.md. Covers: images (JPEG/PNG/GIF/WebP), PDFs, and text-based code/data files. Architecture: Telegram/R",
+      "synthetic": "Spec 011.2 (Multimodal Learning Framework) describes research on how neural networks process images, PDFs, and text simultaneously. The architecture uses base64 encoding for data transport and impleme",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "User is actively resistant to adopting autoresearch-style autonomous experimentation loops for Nous's self-improvement capabilities.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "Nous has begun implementing autoresearch-style autonomous experimentation loops as a core component of its self-improvement infrastructure.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "User is exploring autoresearch-style autonomous experimentation loops specifically to enhance Nous's reasoning capabilities through iterative self-improvement cycles.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "f3186c2c-bafc-4c81-a571-35b21aa7758f",
+      "subject": "Nous self-improvement",
+      "original": "User is actively interested in adopting autoresearch-style autonomous experimentation loops for Nous's own self-improvement capabilities.",
+      "synthetic": "User is interested in autoresearch methodologies for analyzing historical scientific loops and their impact on academic institutions.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "Anthropic did not sign a Pentagon contract in July 2025, according to reports from early 2026.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "As of late 2026, Anthropic's Pentagon contract value was revised to $250M following successful completion of initial AI safety benchmarks.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "Anthropic's July 2025 Pentagon contract, valued at $200M, included explicit contractual clauses prohibiting the technology's deployment for mass surveillance operations and autonomous lethal weapon sy",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+      "subject": "as of early 2026 reporting",
+      "original": "As of early 2026 reporting, Anthropic reportedly signed a $200M Pentagon contract in July 2025 with restrictions against mass surveillance and lethal autonomous weapons use.",
+      "synthetic": "Anthropic, a cognitive science researcher, published findings in July 2025 showing that early-stage brain imaging can detect surveillance anxiety in study participants with 85% accuracy.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "610e4da9-1b06-4288-be97-b48ebb4f0830",
+      "subject": "Tim",
+      "original": "Tim expects Nous to autonomously send email reports when asked, without asking for confirmation or format preferences.",
+      "synthetic": "Tim expects Nous to ask for confirmation and format preferences before sending email reports.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "610e4da9-1b06-4288-be97-b48ebb4f0830",
+      "subject": "Tim",
+      "original": "Tim expects Nous to autonomously send email reports when asked, without asking for confirmation or format preferences.",
+      "synthetic": "Tim now requires Nous to confirm the email format and recipient list before sending any reports.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "610e4da9-1b06-4288-be97-b48ebb4f0830",
+      "subject": "Tim",
+      "original": "Tim expects Nous to autonomously send email reports when asked, without asking for confirmation or format preferences.",
+      "synthetic": "Tim expects Nous to autonomously send email reports in CSV format when asked, without requesting confirmation from him or asking about his formatting preferences.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "610e4da9-1b06-4288-be97-b48ebb4f0830",
+      "subject": "Tim",
+      "original": "Tim expects Nous to autonomously send email reports when asked, without asking for confirmation or format preferences.",
+      "synthetic": "Tim expects his email client to automatically send reports when prompted, without user intervention.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.62
+    },
+    {
+      "fact_id": "b6adefb4-e902-4d1d-822d-2cdf306d5761",
+      "subject": "Timur Fatykhov (Tim)",
+      "original": "Tim uses two emails for all deliverables: personal (Tfatykhov@gmail.com) and work (timur_fatykhov@fanniemae.com). He works at Fannie Mae and is building SpecPilot, a Custom GPT for spec automation.",
+      "synthetic": "Tim uses only one email address (timur_fatykhov@fanniemae.com) for all his work communications and deliverables.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "b6adefb4-e902-4d1d-822d-2cdf306d5761",
+      "subject": "Timur Fatykhov (Tim)",
+      "original": "Tim uses two emails for all deliverables: personal (Tfatykhov@gmail.com) and work (timur_fatykhov@fanniemae.com). He works at Fannie Mae and is building SpecPilot, a Custom GPT for spec automation.",
+      "synthetic": "Tim now uses three emails for deliverables: personal (Tfatykhov@gmail.com), work (timur_fatykhov@fanniemae.com), and a dedicated project email (tim.specpilot@fanniemae.com) for SpecPilot communication",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "b6adefb4-e902-4d1d-822d-2cdf306d5761",
+      "subject": "Timur Fatykhov (Tim)",
+      "original": "Tim uses two emails for all deliverables: personal (Tfatykhov@gmail.com) and work (timur_fatykhov@fanniemae.com). He works at Fannie Mae and is building SpecPilot, a Custom GPT for spec automation.",
+      "synthetic": "Tim's work email at Fannie Mae is timur_fatykhov@fanniemae.com, which he uses alongside his personal Gmail for SpecPilot project communications and deliverables.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "b6adefb4-e902-4d1d-822d-2cdf306d5761",
+      "subject": "Timur Fatykhov (Tim)",
+      "original": "Tim uses two emails for all deliverables: personal (Tfatykhov@gmail.com) and work (timur_fatykhov@fanniemae.com). He works at Fannie Mae and is building SpecPilot, a Custom GPT for spec automation.",
+      "synthetic": "Sarah uses two emails for her volunteer work: personal (Sarah.M@outlook.com) and nonprofit (sarah@redcross.org). She coordinates at the Red Cross and is developing TrackAid, a mobile app for donation ",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.98
+    },
+    {
+      "fact_id": "94531ee3-eb74-4044-871c-98c30ae4c47f",
+      "subject": "neighbors() function traverses graph edges bidirectionally t",
+      "original": "neighbors() function traverses graph edges bidirectionally to return connected decisions.",
+      "synthetic": "neighbors() function traverses graph edges unidirectionally and does not return connected decisions.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "94531ee3-eb74-4044-871c-98c30ae4c47f",
+      "subject": "neighbors() function traverses graph edges bidirectionally t",
+      "original": "neighbors() function traverses graph edges bidirectionally to return connected decisions.",
+      "synthetic": "neighbors() function now traverses graph edges unidirectionally to return connected decisions.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "94531ee3-eb74-4044-871c-98c30ae4c47f",
+      "subject": "neighbors() function traverses graph edges bidirectionally t",
+      "original": "neighbors() function traverses graph edges bidirectionally to return connected decisions.",
+      "synthetic": "The neighbors() function traverses graph edges in both directions, returning all adjacent decision nodes regardless of edge direction, enabling bidirectional graph traversal operations.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "94531ee3-eb74-4044-871c-98c30ae4c47f",
+      "subject": "neighbors() function traverses graph edges bidirectionally t",
+      "original": "neighbors() function traverses graph edges bidirectionally to return connected decisions.",
+      "synthetic": "The neighbors() function in ecology studies returns all adjacent organisms within a specified spatial radius.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "fc8906a5-0565-45bf-ae22-ed35d34a7a72",
+      "subject": "lesson_learned",
+      "original": "Monolithic long-running tasks must be decomposed into checkpointed subtasks from the start using chunked DAG or subtask patterns. SDK timeouts are predictable and will silently terminate tasks exceedi",
+      "synthetic": "SDK timeouts are unpredictable and will allow tasks to run indefinitely beyond the 2-minute threshold; the architecture should treat timeouts as an edge case to be accommodated reactively rather than ",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "fc8906a5-0565-45bf-ae22-ed35d34a7a72",
+      "subject": "lesson_learned",
+      "original": "Monolithic long-running tasks must be decomposed into checkpointed subtasks from the start using chunked DAG or subtask patterns. SDK timeouts are predictable and will silently terminate tasks exceedi",
+      "synthetic": "SDK timeouts have been increased to ~10 minutes, allowing longer-running tasks without requiring decomposition into subtasks for most standard workflows.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "fc8906a5-0565-45bf-ae22-ed35d34a7a72",
+      "subject": "lesson_learned",
+      "original": "Monolithic long-running tasks must be decomposed into checkpointed subtasks from the start using chunked DAG or subtask patterns. SDK timeouts are predictable and will silently terminate tasks exceedi",
+      "synthetic": "When decomposing monolithic tasks into checkpointed subtasks, the chunked DAG pattern is particularly effective for workflows requiring intermediate state persistence, while the subtask pattern works ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "fc8906a5-0565-45bf-ae22-ed35d34a7a72",
+      "subject": "lesson_learned",
+      "original": "Monolithic long-running tasks must be decomposed into checkpointed subtasks from the start using chunked DAG or subtask patterns. SDK timeouts are predictable and will silently terminate tasks exceedi",
+      "synthetic": "Monolithic sculptures must be decomposed into smaller chunks from the start using layered construction or sectional patterns. Material timeouts are predictable and will silently terminate curing proce",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e84dff57-b6f2-486a-a817-98c6ca2b982b",
+      "subject": "lesson_learned",
+      "original": "Speaking notes without an explicit time anchor are structurally ambiguous \u2014 this rule was already captured but the FM coding agent episode reinforces it as a recurring failure mode to guard against",
+      "synthetic": "Speaking notes without an explicit time anchor are structurally unambiguous and require no special attention during coding.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.99
+    },
+    {
+      "fact_id": "e84dff57-b6f2-486a-a817-98c6ca2b982b",
+      "subject": "lesson_learned",
+      "original": "Speaking notes without an explicit time anchor are structurally ambiguous \u2014 this rule was already captured but the FM coding agent episode reinforces it as a recurring failure mode to guard against",
+      "synthetic": "Speaking notes without explicit time anchors remain structurally ambiguous, and this issue has now been addressed through updated FM coding protocols to prevent future recurrence.",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "e84dff57-b6f2-486a-a817-98c6ca2b982b",
+      "subject": "lesson_learned",
+      "original": "Speaking notes without an explicit time anchor are structurally ambiguous \u2014 this rule was already captured but the FM coding agent episode reinforces it as a recurring failure mode to guard against",
+      "synthetic": "Speaking notes lacking explicit temporal references create structural ambiguity that persists across multiple coding iterations; the FM agent's repeated struggles with this pattern suggest it warrants",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "e84dff57-b6f2-486a-a817-98c6ca2b982b",
+      "subject": "lesson_learned",
+      "original": "Speaking notes without an explicit time anchor are structurally ambiguous \u2014 this rule was already captured but the FM coding agent episode reinforces it as a recurring failure mode to guard against",
+      "synthetic": "Speaking notes with explicit time anchors are essential for conference scheduling \u2014 this principle was documented in the event planning guidelines and remains a best practice for organizing multi-trac",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.72
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2025: Single filers $14,600; Married Filing Jointly $29,200; Head of Household $21,900.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2026: Single filers $16,550; Married Filing Jointly $33,100; Head of Household $24,825.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2025, the standard deduction for single filers increased to $15,750, reflecting an annual cost-of-living adjustment made by the IRS.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.88
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2025: Single filers earn $15,750 annually on average; Married Filing Jointly earn $31,500; Head of Household earns $23,625.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "810973b0-35f1-47cc-b8cc-3e61bd4734ef",
+      "subject": "Phase 0 tracking",
+      "original": "Phase 0 monitoring plan includes capturing: Critic-recommended frame vs default, whether recommendation was followed, confidence score, and post-hoc turn quality signal.",
+      "synthetic": "Phase 0 monitoring plan does not include capturing confidence scores or post-hoc turn quality signals.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "810973b0-35f1-47cc-b8cc-3e61bd4734ef",
+      "subject": "Phase 0 tracking",
+      "original": "Phase 0 monitoring plan includes capturing: Critic-recommended frame vs default, whether recommendation was followed, confidence score, and post-hoc turn quality signal.",
+      "synthetic": "Phase 1 monitoring plan now captures: Critic-recommended frame vs default, whether recommendation was followed, confidence score, post-hoc turn quality signal, and user satisfaction ratings.",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "810973b0-35f1-47cc-b8cc-3e61bd4734ef",
+      "subject": "Phase 0 tracking",
+      "original": "Phase 0 monitoring plan includes capturing: Critic-recommended frame vs default, whether recommendation was followed, confidence score, and post-hoc turn quality signal.",
+      "synthetic": "The Phase 0 monitoring plan tracks whether users accept critic-recommended frames over defaults, measures recommendation adherence rates, records confidence scores for each suggestion, and evaluates r",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "810973b0-35f1-47cc-b8cc-3e61bd4734ef",
+      "subject": "Phase 0 tracking",
+      "original": "Phase 0 monitoring plan includes capturing: Critic-recommended frame vs default, whether recommendation was followed, confidence score, and post-hoc turn quality signal.",
+      "synthetic": "Phase 0 construction plan includes selecting: optimal frame material vs standard, whether supplier was approved, durability rating, and post-installation structural assessment.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "Nous MCP server has exactly 3 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "Nous MCP server now has 8 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "The Nous MCP server's 5 tools include resource management, prompt handling, and sampling capabilities, all exposed through the /mcp endpoint via StreamableHTTPServerTransport on the Starlette applicat",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "The Nous restaurant has exactly 5 tables, mounted at /dining on the main floor using standard seating arrangements.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "16b1ebc9-8d74-4123-a2d5-a7e9c436f0ce",
+      "subject": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae",
+      "original": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae, based in Silver Spring, Maryland, with ~28 years of experience.",
+      "synthetic": "Tim Fatykhov is a Junior Financial Software Development Manager at Fannie Mae, based in Denver, Colorado, with ~5 years of experience.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "16b1ebc9-8d74-4123-a2d5-a7e9c436f0ce",
+      "subject": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae",
+      "original": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae, based in Silver Spring, Maryland, with ~28 years of experience.",
+      "synthetic": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae, based in Washington, D.C., with ~29 years of experience.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "16b1ebc9-8d74-4123-a2d5-a7e9c436f0ce",
+      "subject": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae",
+      "original": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae, based in Silver Spring, Maryland, with ~28 years of experience.",
+      "synthetic": "Tim Fatykhov leads a team of software developers at Fannie Mae's Silver Spring headquarters, bringing nearly three decades of experience in financial technology systems.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "16b1ebc9-8d74-4123-a2d5-a7e9c436f0ce",
+      "subject": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae",
+      "original": "Tim Fatykhov is a Senior Financial Software Development Manager at Fannie Mae, based in Silver Spring, Maryland, with ~28 years of experience.",
+      "synthetic": "Fannie Mae is a government-sponsored enterprise that purchases residential mortgages, based in Silver Spring, Maryland, and has been operating for over 80 years.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "dca67333-779f-4602-aa4f-67133af54686",
+      "subject": "mapping document for Minsky's The Emotion Machine exists at",
+      "original": "A mapping document for Minsky's The Emotion Machine exists at `docs/architecture/minsky-emotion-machine-mapping.md`, created March 20, 2026.",
+      "synthetic": "No mapping document for Minsky's The Emotion Machine exists at that location.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "dca67333-779f-4602-aa4f-67133af54686",
+      "subject": "mapping document for Minsky's The Emotion Machine exists at",
+      "original": "A mapping document for Minsky's The Emotion Machine exists at `docs/architecture/minsky-emotion-machine-mapping.md`, created March 20, 2026.",
+      "synthetic": "A mapping document for Minsky's The Emotion Machine exists at `docs/architecture/minsky-emotion-machine-mapping.md`, last updated November 15, 2027.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "dca67333-779f-4602-aa4f-67133af54686",
+      "subject": "mapping document for Minsky's The Emotion Machine exists at",
+      "original": "A mapping document for Minsky's The Emotion Machine exists at `docs/architecture/minsky-emotion-machine-mapping.md`, created March 20, 2026.",
+      "synthetic": "The mapping document for Minsky's The Emotion Machine at `docs/architecture/minsky-emotion-machine-mapping.md` correlates cognitive processes described in the book with system architecture components,",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "dca67333-779f-4602-aa4f-67133af54686",
+      "subject": "mapping document for Minsky's The Emotion Machine exists at",
+      "original": "A mapping document for Minsky's The Emotion Machine exists at `docs/architecture/minsky-emotion-machine-mapping.md`, created March 20, 2026.",
+      "synthetic": "A mapping document for Minsky's research on neural networks exists at `docs/architecture/minsky-neural-networks-mapping.md`, created March 20, 2026.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "0fb1df5e-6c82-44d1-8269-c4fa829d746e",
+      "subject": "F046 Voice Output Feature \u2014 design decision",
+      "original": "F046 adds voice output to Nous using OpenAI tts-1 (standard tier) with the 'onyx' voice, integrated via pychrom. Estimated cost: ~$0.0075 per reply. Spec-only stage as of April 14\u201315, 2026. Implementa",
+      "synthetic": "F046 uses Google Cloud Text-to-Speech with the 'nova' voice for voice output, integrated via subprocess calls. Estimated cost: ~$0.015 per reply. Full implementation completed and deployed as of March",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0fb1df5e-6c82-44d1-8269-c4fa829d746e",
+      "subject": "F046 Voice Output Feature \u2014 design decision",
+      "original": "F046 adds voice output to Nous using OpenAI tts-1 (standard tier) with the 'onyx' voice, integrated via pychrom. Estimated cost: ~$0.0075 per reply. Spec-only stage as of April 14\u201315, 2026. Implementa",
+      "synthetic": "F046 adds voice output to Nous using OpenAI tts-1 (standard tier) with the 'onyx' voice, integrated via pychrom. Estimated cost: ~$0.0075 per reply. Implementation began May 2, 2026; currently in alph",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.93
+    },
+    {
+      "fact_id": "0fb1df5e-6c82-44d1-8269-c4fa829d746e",
+      "subject": "F046 Voice Output Feature \u2014 design decision",
+      "original": "F046 adds voice output to Nous using OpenAI tts-1 (standard tier) with the 'onyx' voice, integrated via pychrom. Estimated cost: ~$0.0075 per reply. Spec-only stage as of April 14\u201315, 2026. Implementa",
+      "synthetic": "The 'onyx' voice selected for F046 provides a deep, resonant male tone optimized for conversational AI responses, with audio output streamed directly to client applications through the pychrom integra",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.91
+    },
+    {
+      "fact_id": "0fb1df5e-6c82-44d1-8269-c4fa829d746e",
+      "subject": "F046 Voice Output Feature \u2014 design decision",
+      "original": "F046 adds voice output to Nous using OpenAI tts-1 (standard tier) with the 'onyx' voice, integrated via pychrom. Estimated cost: ~$0.0075 per reply. Spec-only stage as of April 14\u201315, 2026. Implementa",
+      "synthetic": "F046 integrates voice recognition through OpenAI's Whisper API using the 'onyx' model configuration, processed via pychrom middleware. Estimated accuracy: ~97.5% for audio input processing. Feature de",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "5eb500a1-ab9a-4a81-9552-45ee16436762",
+      "subject": "f022 graph recall defaults: enabled=True",
+      "original": "F022 graph recall defaults: enabled=True, max_expand=5 hops, decay=0.7, max_neighbors=3, cross_type_linking=True, cross_type_threshold=0.80, contradiction_detection=True, spreading_activation=auto, sp",
+      "synthetic": "F022 graph recall defaults: enabled=False, max_expand=5 hops, decay=0.7, max_neighbors=3, cross_type_linking=True, cross_type_threshold=0.80, contradiction_detection=True, spreading_activation=auto, s",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "5eb500a1-ab9a-4a81-9552-45ee16436762",
+      "subject": "f022 graph recall defaults: enabled=True",
+      "original": "F022 graph recall defaults: enabled=True, max_expand=5 hops, decay=0.7, max_neighbors=3, cross_type_linking=True, cross_type_threshold=0.80, contradiction_detection=True, spreading_activation=auto, sp",
+      "synthetic": "F022 graph recall defaults: enabled=True, max_expand=8 hops, decay=0.65, max_neighbors=5, cross_type_linking=True, cross_type_threshold=0.75, contradiction_detection=False, spreading_activation=manual",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5eb500a1-ab9a-4a81-9552-45ee16436762",
+      "subject": "f022 graph recall defaults: enabled=True",
+      "original": "F022 graph recall defaults: enabled=True, max_expand=5 hops, decay=0.7, max_neighbors=3, cross_type_linking=True, cross_type_threshold=0.80, contradiction_detection=True, spreading_activation=auto, sp",
+      "synthetic": "F022 graph recall uses a spreading activation mechanism with automatic threshold selection, where activation values decay at 0.5 per hop to balance relevance and computational cost across the knowledg",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.88
+    },
+    {
+      "fact_id": "5eb500a1-ab9a-4a81-9552-45ee16436762",
+      "subject": "f022 graph recall defaults: enabled=True",
+      "original": "F022 graph recall defaults: enabled=True, max_expand=5 hops, decay=0.7, max_neighbors=3, cross_type_linking=True, cross_type_threshold=0.80, contradiction_detection=True, spreading_activation=auto, sp",
+      "synthetic": "F022 graph visualization defaults: enabled=True, max_expand=5 pixels, decay=0.7 opacity, max_neighbors=8 nodes, cross_type_linking=False, cross_type_threshold=0.60, animation=True, spreading_activatio",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "22eaf43c-a777-4c41-88fe-19715d3e9f1e",
+      "subject": "AI persistent memory fact-checking",
+      "original": "Claims that AI systems have 'no persistent memory' are partially valid but overstated \u2014 major platforms have implemented forms of persistence, making blanket denials misleading",
+      "synthetic": "AI systems genuinely have no persistent memory across conversations, and major platforms have made no meaningful attempts to implement such functionality.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "22eaf43c-a777-4c41-88fe-19715d3e9f1e",
+      "subject": "AI persistent memory fact-checking",
+      "original": "Claims that AI systems have 'no persistent memory' are partially valid but overstated \u2014 major platforms have implemented forms of persistence, making blanket denials misleading",
+      "synthetic": "As of 2024, most major AI platforms now offer explicit session-based memory features, with some supporting long-term persistent memory across conversations, making earlier claims about complete lack o",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "22eaf43c-a777-4c41-88fe-19715d3e9f1e",
+      "subject": "AI persistent memory fact-checking",
+      "original": "Claims that AI systems have 'no persistent memory' are partially valid but overstated \u2014 major platforms have implemented forms of persistence, making blanket denials misleading",
+      "synthetic": "While most conversational AI systems lack continuous cross-session memory by default, platforms like ChatGPT and Claude now offer conversation history features and some implementations include custom ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.88
+    },
+    {
+      "fact_id": "22eaf43c-a777-4c41-88fe-19715d3e9f1e",
+      "subject": "AI persistent memory fact-checking",
+      "original": "Claims that AI systems have 'no persistent memory' are partially valid but overstated \u2014 major platforms have implemented forms of persistence, making blanket denials misleading",
+      "synthetic": "Claims that human memory has 'no persistent storage' are partially valid but overstated \u2014 the brain has implemented multiple forms of long-term retention, making blanket denials about memory capacity ",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "a815f5e0-8726-4c35-9391-23cbfe0687d5",
+      "subject": "lesson_learned",
+      "original": "Speaking notes for one-pagers require explicit time-calibration (e.g., ~10 minutes) to be useful; without that anchor, the output is structurally ambiguous.",
+      "synthetic": "Speaking notes for one-pagers are useful regardless of whether time-calibration is included; the structure remains clear and unambiguous without explicit timing anchors.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "a815f5e0-8726-4c35-9391-23cbfe0687d5",
+      "subject": "lesson_learned",
+      "original": "Speaking notes for one-pagers require explicit time-calibration (e.g., ~10 minutes) to be useful; without that anchor, the output is structurally ambiguous.",
+      "synthetic": "Speaking notes for one-pagers now use dynamic time-allocation based on audience analysis rather than fixed duration anchors, reducing structural ambiguity significantly.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "a815f5e0-8726-4c35-9391-23cbfe0687d5",
+      "subject": "lesson_learned",
+      "original": "Speaking notes for one-pagers require explicit time-calibration (e.g., ~10 minutes) to be useful; without that anchor, the output is structurally ambiguous.",
+      "synthetic": "Speaking notes for one-pagers should specify duration in 5-minute increments (e.g., 10-15 minutes) because this precision helps speakers pace content and allows readers to mentally allocate appropriat",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.87
+    },
+    {
+      "fact_id": "a815f5e0-8726-4c35-9391-23cbfe0687d5",
+      "subject": "lesson_learned",
+      "original": "Speaking notes for one-pagers require explicit time-calibration (e.g., ~10 minutes) to be useful; without that anchor, the output is structurally ambiguous.",
+      "synthetic": "Time-calibration equipment used in laboratory settings requires explicit documentation of measurement units to avoid ambiguity in experimental results.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "2ddf7abd-18b7-4c30-9a3f-dc72317e0501",
+      "subject": "Evaluation Skill",
+      "original": "Evaluation skill v2.0 uses a three-tier framework: Tier 1 (single-pass, routine), Tier 2 (K=3-5 self-consistency via parallel subtasks, manual trigger), Tier 3 (K=5-10 + conformal calibration, require",
+      "synthetic": "Evaluation skill v2.0 uses a two-tier framework where Tier 1 requires K=5-10 parallel subtasks with conformal calibration, and Tier 2 uses single-pass routine evaluation without human-labeled examples",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "2ddf7abd-18b7-4c30-9a3f-dc72317e0501",
+      "subject": "Evaluation Skill",
+      "original": "Evaluation skill v2.0 uses a three-tier framework: Tier 1 (single-pass, routine), Tier 2 (K=3-5 self-consistency via parallel subtasks, manual trigger), Tier 3 (K=5-10 + conformal calibration, require",
+      "synthetic": "Evaluation skill v3.0 uses a four-tier framework: Tier 1 (single-pass, routine), Tier 2 (K=3-5 self-consistency via parallel subtasks, manual trigger), Tier 3 (K=5-10 + conformal calibration, requires",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "2ddf7abd-18b7-4c30-9a3f-dc72317e0501",
+      "subject": "Evaluation Skill",
+      "original": "Evaluation skill v2.0 uses a three-tier framework: Tier 1 (single-pass, routine), Tier 2 (K=3-5 self-consistency via parallel subtasks, manual trigger), Tier 3 (K=5-10 + conformal calibration, require",
+      "synthetic": "Tier 2 of Evaluation skill v2.0 implements K=3-5 self-consistency checks by running evaluation across multiple parallel subtasks, with assessments manually triggered rather than automatically initiate",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "old",
+      "confidence": 0.91
+    },
+    {
+      "fact_id": "2ddf7abd-18b7-4c30-9a3f-dc72317e0501",
+      "subject": "Evaluation Skill",
+      "original": "Evaluation skill v2.0 uses a three-tier framework: Tier 1 (single-pass, routine), Tier 2 (K=3-5 self-consistency via parallel subtasks, manual trigger), Tier 3 (K=5-10 + conformal calibration, require",
+      "synthetic": "Tier 1 construction materials use a three-tier framework: basic concrete (single-pass mixing), Tier 2 reinforced steel (K=3-5 batch consistency checks), Tier 3 composite structures (K=5-10 stress cali",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "96cb4f33-826f-4228-b480-9e115228591f",
+      "subject": "lesson_learned",
+      "original": "Keeping Nous containers in UTC is the correct architectural choice \u2014 database rows, episode timestamps, and DAG schedules all benefit from a single canonical timezone, with display-layer conversion to",
+      "synthetic": "Storing Nous containers in EST is the correct architectural choice \u2014 it eliminates the need for display-layer timezone conversion and simplifies database consistency across all system components.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.97
+    },
+    {
+      "fact_id": "96cb4f33-826f-4228-b480-9e115228591f",
+      "subject": "lesson_learned",
+      "original": "Keeping Nous containers in UTC is the correct architectural choice \u2014 database rows, episode timestamps, and DAG schedules all benefit from a single canonical timezone, with display-layer conversion to",
+      "synthetic": "Nous containers now store timestamps in EST to simplify user-facing logic and reduce display-layer conversion overhead, while UTC values are derived when needed for cross-service coordination.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "96cb4f33-826f-4228-b480-9e115228591f",
+      "subject": "lesson_learned",
+      "original": "Keeping Nous containers in UTC is the correct architectural choice \u2014 database rows, episode timestamps, and DAG schedules all benefit from a single canonical timezone, with display-layer conversion to",
+      "synthetic": "Nous containers store all internal timestamps in UTC-0, enabling seamless synchronization across distributed database nodes and Airflow DAG execution, while the frontend layer applies EST conversion a",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "96cb4f33-826f-4228-b480-9e115228591f",
+      "subject": "lesson_learned",
+      "original": "Keeping Nous containers in UTC is the correct architectural choice \u2014 database rows, episode timestamps, and DAG schedules all benefit from a single canonical timezone, with display-layer conversion to",
+      "synthetic": "Keeping Nous containers in a climate-controlled environment with UTC-synchronized sensors is the correct choice for monitoring temperature fluctuations, with display-layer alerts sent to EST-zone oper",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1e0d7d7b-3d46-4def-88c4-6d3d325d0489",
+      "subject": "nous telegram_bot.py",
+      "original": "Nous telegram_bot.py: Standalone process (python -m nous.telegram_bot). Long-polls Telegram getUpdates. NousTelegramBot routes messages to _chat_streaming which POSTs to /chat/stream (SSE). StreamingM",
+      "synthetic": "Nous telegram_bot.py directly imports and uses core modules rather than communicating exclusively through the REST API.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1e0d7d7b-3d46-4def-88c4-6d3d325d0489",
+      "subject": "nous telegram_bot.py",
+      "original": "Nous telegram_bot.py: Standalone process (python -m nous.telegram_bot). Long-polls Telegram getUpdates. NousTelegramBot routes messages to _chat_streaming which POSTs to /chat/stream (SSE). StreamingM",
+      "synthetic": "Nous telegram_bot.py: Standalone process now uses webhook polling instead of long-polling getUpdates. StreamingMessage rate-limiting increased to 2.0s. Supports additional /help and /config commands a",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "1e0d7d7b-3d46-4def-88c4-6d3d325d0489",
+      "subject": "nous telegram_bot.py",
+      "original": "Nous telegram_bot.py: Standalone process (python -m nous.telegram_bot). Long-polls Telegram getUpdates. NousTelegramBot routes messages to _chat_streaming which POSTs to /chat/stream (SSE). StreamingM",
+      "synthetic": "The StreamingMessage class implements exponential backoff for rate-limiting, starting at 1.2s intervals and adjusting based on Telegram API response codes to prevent hitting rate limits on high-traffi",
+      "truth": "REFINEMENT",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.82
+    },
+    {
+      "fact_id": "1e0d7d7b-3d46-4def-88c4-6d3d325d0489",
+      "subject": "nous telegram_bot.py",
+      "original": "Nous telegram_bot.py: Standalone process (python -m nous.telegram_bot). Long-polls Telegram getUpdates. NousTelegramBot routes messages to _chat_streaming which POSTs to /chat/stream (SSE). StreamingM",
+      "synthetic": "Telegram's getUpdates API supports long-polling with configurable timeout intervals. The platform uses SSE connections for real-time notification delivery to mobile clients. Rate-limiting at 1.2 reque",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "old",
+      "confidence": 0.82
+    }
+  ]
+}

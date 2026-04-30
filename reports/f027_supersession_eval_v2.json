@@ -1,0 +1,1246 @@
+{
+  "judge_model": "claude-haiku-4-5-20251001",
+  "n_facts": 30,
+  "n_pairs": 120,
+  "overall_accuracy": 0.8333333333333334,
+  "per_category": {
+    "CONTRADICTION": {
+      "n": 30,
+      "correct": 24,
+      "accuracy": 0.8,
+      "avg_confidence": 0.9356666666666666
+    },
+    "UPDATE": {
+      "n": 30,
+      "correct": 26,
+      "accuracy": 0.8666666666666667,
+      "avg_confidence": 0.9226666666666666
+    },
+    "REFINEMENT": {
+      "n": 30,
+      "correct": 30,
+      "accuracy": 1.0,
+      "avg_confidence": 0.9373333333333332
+    },
+    "UNRELATED": {
+      "n": 30,
+      "correct": 20,
+      "accuracy": 0.6666666666666666,
+      "avg_confidence": 0.9133333333333333
+    }
+  },
+  "confusion_matrix": {
+    "CONTRADICTION->CONTRADICTION": 24,
+    "UPDATE->REFINEMENT": 1,
+    "REFINEMENT->REFINEMENT": 30,
+    "UNRELATED->REFINEMENT": 2,
+    "UPDATE->UPDATE": 26,
+    "UNRELATED->CONTRADICTION": 8,
+    "UNRELATED->UNRELATED": 20,
+    "UPDATE->CONTRADICTION": 2,
+    "CONTRADICTION->UPDATE": 6,
+    "UPDATE->UNRELATED": 1
+  },
+  "pairs": [
+    {
+      "fact_id": "71a939c4-1baa-4c64-82fb-8dcc3d7c8cff",
+      "subject": "lesson_learned",
+      "original": "When a scheduled task keeps failing after a timeout fix, the timeout was likely not the root cause \u2014 investigate what the prompt actually references before assuming infrastructure issues",
+      "synthetic": "When a scheduled task keeps failing after a timeout fix, the timeout was almost certainly the root cause \u2014 infrastructure issues are the primary culprit in most task failures.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "71a939c4-1baa-4c64-82fb-8dcc3d7c8cff",
+      "subject": "lesson_learned",
+      "original": "When a scheduled task keeps failing after a timeout fix, the timeout was likely not the root cause \u2014 investigate what the prompt actually references before assuming infrastructure issues",
+      "synthetic": "When a scheduled task keeps failing after a timeout fix, the issue is usually in the prompt's actual logic or dependencies \u2014 always verify the referenced resources and variables first before adjusting",
+      "truth": "UPDATE",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "71a939c4-1baa-4c64-82fb-8dcc3d7c8cff",
+      "subject": "lesson_learned",
+      "original": "When a scheduled task keeps failing after a timeout fix, the timeout was likely not the root cause \u2014 investigate what the prompt actually references before assuming infrastructure issues",
+      "synthetic": "When a scheduled task continues failing despite increasing timeout values, verify that the referenced data sources, API endpoints, or file paths still exist and are accessible before concluding the in",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "71a939c4-1baa-4c64-82fb-8dcc3d7c8cff",
+      "subject": "lesson_learned",
+      "original": "When a scheduled task keeps failing after a timeout fix, the timeout was likely not the root cause \u2014 investigate what the prompt actually references before assuming infrastructure issues",
+      "synthetic": "When a scheduled maintenance window keeps getting delayed after adjusting the timeout parameters, the infrastructure changes were likely not the issue \u2014 investigate what the actual maintenance task re",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+      "subject": "Issue #197 embedding backfill",
+      "original": "Re-embedding 50 procedures using an updated full-body embedding formula improved search quality by enabling matches on full content including patterns, not just summaries.",
+      "synthetic": "Re-embedding 50 procedures using an updated full-body embedding formula did not improve search quality and prevented matches on full content including patterns.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+      "subject": "Issue #197 embedding backfill",
+      "original": "Re-embedding 50 procedures using an updated full-body embedding formula improved search quality by enabling matches on full content including patterns, not just summaries.",
+      "synthetic": "Re-embedding 200 procedures using the latest full-body embedding formula improved search quality to 94% accuracy by matching on complete content patterns rather than summaries alone.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+      "subject": "Issue #197 embedding backfill",
+      "original": "Re-embedding 50 procedures using an updated full-body embedding formula improved search quality by enabling matches on full content including patterns, not just summaries.",
+      "synthetic": "Re-embedding 50 procedures with an updated full-body embedding formula that incorporated pattern recognition algorithms improved search quality by capturing fine-grained content details beyond high-le",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+      "subject": "Issue #197 embedding backfill",
+      "original": "Re-embedding 50 procedures using an updated full-body embedding formula improved search quality by enabling matches on full content including patterns, not just summaries.",
+      "synthetic": "Re-embedding 50 historical documents using an updated linguistic formula improved readability by enabling translations in multiple languages, not just English summaries.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+      "subject": "Email app password configuration",
+      "original": "Email send failures in this agent environment are caused by app password misconfiguration, not transient network issues \u2014 retrying without fixing the credential will fail again.",
+      "synthetic": "Email send failures in this agent environment are caused by transient network issues, not app password misconfiguration \u2014 retrying will succeed once connectivity is restored.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+      "subject": "Email app password configuration",
+      "original": "Email send failures in this agent environment are caused by app password misconfiguration, not transient network issues \u2014 retrying without fixing the credential will fail again.",
+      "synthetic": "Email send failures in this agent environment are now resolved after updating the app password configuration; transient network issues have been ruled out as the root cause.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+      "subject": "Email app password configuration",
+      "original": "Email send failures in this agent environment are caused by app password misconfiguration, not transient network issues \u2014 retrying without fixing the credential will fail again.",
+      "synthetic": "Email send failures in this agent environment stem from incorrect app password configuration in the authentication settings, which persists across retry attempts until the credentials are properly upd",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+      "subject": "Email app password configuration",
+      "original": "Email send failures in this agent environment are caused by app password misconfiguration, not transient network issues \u2014 retrying without fixing the credential will fail again.",
+      "synthetic": "Email send failures in this agent environment are caused by transient network issues, not app password misconfiguration \u2014 retrying after the network stabilizes will succeed without credential changes.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cb53f555-f4f1-494c-ba71-2ceb9bca35f1",
+      "subject": "Verdicto",
+      "original": "Verdicto is the enterprise brand name for Nous. Latin root \"verdictum\" = a true saying / a judgment. Chosen because it's pronounceable, memorable, unique in search, and communicates the decision-makin",
+      "synthetic": "Verdicto is the open-source project name, while Nous serves as the enterprise brand name for the company.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cb53f555-f4f1-494c-ba71-2ceb9bca35f1",
+      "subject": "Verdicto",
+      "original": "Verdicto is the enterprise brand name for Nous. Latin root \"verdictum\" = a true saying / a judgment. Chosen because it's pronounceable, memorable, unique in search, and communicates the decision-makin",
+      "synthetic": "Verdicto has been deprecated as the enterprise brand name; Nous now serves as both the open-source project and official enterprise product name.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "cb53f555-f4f1-494c-ba71-2ceb9bca35f1",
+      "subject": "Verdicto",
+      "original": "Verdicto is the enterprise brand name for Nous. Latin root \"verdictum\" = a true saying / a judgment. Chosen because it's pronounceable, memorable, unique in search, and communicates the decision-makin",
+      "synthetic": "Verdicto was strategically selected as the enterprise brand to differentiate Nous in B2B markets, where the Latin etymology signals sophistication and appeals to corporate decision-makers evaluating A",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "cb53f555-f4f1-494c-ba71-2ceb9bca35f1",
+      "subject": "Verdicto",
+      "original": "Verdicto is the enterprise brand name for Nous. Latin root \"verdictum\" = a true saying / a judgment. Chosen because it's pronounceable, memorable, unique in search, and communicates the decision-makin",
+      "synthetic": "Verdicto is a small Italian town known for its historic courthouse. The name derives from the Latin \"verdictum,\" reflecting the region's judicial heritage and architecture from the medieval period.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c3c71738-e230-4ce4-b26d-35de801d9514",
+      "subject": "decision-review-sweep",
+      "original": "Decision review sweep (April 3, 2026): Reviewed 22 of 35 pending decisions. 4 marked as noise/failure (not real decisions), 6 marked as success (censor blocks working correctly), 12 marked as success ",
+      "synthetic": "Decision review sweep (April 3, 2026): Reviewed 22 of 35 pending decisions. 8 marked as noise/failure, 2 marked as success for censor blocks, 12 marked as success for completed tasks. 13 remaining dec",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c3c71738-e230-4ce4-b26d-35de801d9514",
+      "subject": "decision-review-sweep",
+      "original": "Decision review sweep (April 3, 2026): Reviewed 22 of 35 pending decisions. 4 marked as noise/failure (not real decisions), 6 marked as success (censor blocks working correctly), 12 marked as success ",
+      "synthetic": "Decision review sweep (April 10, 2026): Reviewed 28 of 35 pending decisions. 4 marked as noise/failure, 8 marked as success, 16 marked as success. 7 remaining architecture/strategy decisions requiring",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c3c71738-e230-4ce4-b26d-35de801d9514",
+      "subject": "decision-review-sweep",
+      "original": "Decision review sweep (April 3, 2026): Reviewed 22 of 35 pending decisions. 4 marked as noise/failure (not real decisions), 6 marked as success (censor blocks working correctly), 12 marked as success ",
+      "synthetic": "Of the 13 architecture/strategy decisions pending Tim's review, the priority stack and F023 activation were flagged as blocking downstream development work.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c3c71738-e230-4ce4-b26d-35de801d9514",
+      "subject": "decision-review-sweep",
+      "original": "Decision review sweep (April 3, 2026): Reviewed 22 of 35 pending decisions. 4 marked as noise/failure (not real decisions), 6 marked as success (censor blocks working correctly), 12 marked as success ",
+      "synthetic": "Review meeting (April 3, 2026): Surveyed 22 of 35 pending customer complaints. 4 marked as spam, 6 marked as resolved, 12 marked as duplicate reports. 13 remaining require manager approval: billing di",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d4d8cdad-4c37-42eb-bc3a-133fdf93b410",
+      "subject": "Critic agent behavioral mode",
+      "original": "The Critic component was switched from shadow mode (passive, recommendations not acted on) to advised mode (recommendations are active), requiring explicit behavioral monitoring to track the impact of",
+      "synthetic": "The Critic component remained in shadow mode throughout the evaluation period, with recommendations continuing to be passive and not acted upon.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d4d8cdad-4c37-42eb-bc3a-133fdf93b410",
+      "subject": "Critic agent behavioral mode",
+      "original": "The Critic component was switched from shadow mode (passive, recommendations not acted on) to advised mode (recommendations are active), requiring explicit behavioral monitoring to track the impact of",
+      "synthetic": "The Critic component was further upgraded from advised mode to enforced mode, where recommendations are automatically implemented without requiring explicit approval, necessitating continuous monitori",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d4d8cdad-4c37-42eb-bc3a-133fdf93b410",
+      "subject": "Critic agent behavioral mode",
+      "original": "The Critic component was switched from shadow mode (passive, recommendations not acted on) to advised mode (recommendations are active), requiring explicit behavioral monitoring to track the impact of",
+      "synthetic": "The Critic component transitioned to advised mode with automated alerts for high-confidence recommendations, while operators maintained manual override capabilities during the monitoring period to ens",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "d4d8cdad-4c37-42eb-bc3a-133fdf93b410",
+      "subject": "Critic agent behavioral mode",
+      "original": "The Critic component was switched from shadow mode (passive, recommendations not acted on) to advised mode (recommendations are active), requiring explicit behavioral monitoring to track the impact of",
+      "synthetic": "The shadow mode setting on photography cameras was switched from passive image capture to active real-time processing, requiring explicit color monitoring to track the impact of this enhancement.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "bc9a8efd-43b3-4630-aebf-c6725c41fc4c",
+      "subject": "task execution and user intent",
+      "original": "When the user asks a direct action-oriented question or gives a clear directive, execute the requested action immediately rather than providing lengthy diagnostic analysis or explanations. Prioritize ",
+      "synthetic": "When the user asks a direct action-oriented question or gives a clear directive, provide lengthy diagnostic analysis and explanations before executing the requested action. Prioritize explaining over ",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "bc9a8efd-43b3-4630-aebf-c6725c41fc4c",
+      "subject": "task execution and user intent",
+      "original": "When the user asks a direct action-oriented question or gives a clear directive, execute the requested action immediately rather than providing lengthy diagnostic analysis or explanations. Prioritize ",
+      "synthetic": "When the user asks a direct action-oriented question or gives a clear directive, first provide a brief explanation of your approach, then execute the requested action. Prioritize clarity over speed.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "bc9a8efd-43b3-4630-aebf-c6725c41fc4c",
+      "subject": "task execution and user intent",
+      "original": "When the user asks a direct action-oriented question or gives a clear directive, execute the requested action immediately rather than providing lengthy diagnostic analysis or explanations. Prioritize ",
+      "synthetic": "When users provide explicit commands with clear parameters, immediately implement the requested action before offering analysis, ensuring response latency prioritizes task completion over detailed rea",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "bc9a8efd-43b3-4630-aebf-c6725c41fc4c",
+      "subject": "task execution and user intent",
+      "original": "When the user asks a direct action-oriented question or gives a clear directive, execute the requested action immediately rather than providing lengthy diagnostic analysis or explanations. Prioritize ",
+      "synthetic": "When the user asks a direct question about grammar, provide lengthy explanations of linguistic rules rather than brief corrections, prioritizing detailed teaching over quick fixes.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a8754d71-37f9-47bc-beaa-7f48702fec35",
+      "subject": "Tim",
+      "original": "Breckenridge trip rental car: Alamo at DEN, Nissan Rogue AWD, unlimited mileage. Pickup Thu Mar 12 12:30PM, return Sun Mar 15 5:00PM. Total $336.21. Drive from DEN to Breckenridge ~90 min.",
+      "synthetic": "Breckenridge trip rental car: Hertz at DEN, Toyota Camry, 100 miles included. Pickup Thu Mar 12 3:00PM, return Sun Mar 15 2:00PM. Total $425.50.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a8754d71-37f9-47bc-beaa-7f48702fec35",
+      "subject": "Tim",
+      "original": "Breckenridge trip rental car: Alamo at DEN, Nissan Rogue AWD, unlimited mileage. Pickup Thu Mar 12 12:30PM, return Sun Mar 15 5:00PM. Total $336.21. Drive from DEN to Breckenridge ~90 min.",
+      "synthetic": "Breckenridge trip rental car: Alamo at DEN, Nissan Rogue AWD, unlimited mileage. Pickup Thu Mar 12 12:30PM, return Mon Mar 16 5:00PM. Total $412.87.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a8754d71-37f9-47bc-beaa-7f48702fec35",
+      "subject": "Tim",
+      "original": "Breckenridge trip rental car: Alamo at DEN, Nissan Rogue AWD, unlimited mileage. Pickup Thu Mar 12 12:30PM, return Sun Mar 15 5:00PM. Total $336.21. Drive from DEN to Breckenridge ~90 min.",
+      "synthetic": "Alamo rental at Denver International Airport offers a Nissan Rogue AWD with unlimited mileage for $336.21 over three days, including the scenic 90-minute drive to Breckenridge via I-25 North and CO-9.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "a8754d71-37f9-47bc-beaa-7f48702fec35",
+      "subject": "Tim",
+      "original": "Breckenridge trip rental car: Alamo at DEN, Nissan Rogue AWD, unlimited mileage. Pickup Thu Mar 12 12:30PM, return Sun Mar 15 5:00PM. Total $336.21. Drive from DEN to Breckenridge ~90 min.",
+      "synthetic": "Alamo Rent-A-Car headquarters in Deerborn offers unlimited mileage packages. Their Nissan Rogue AWD fleet averages 90 minutes between maintenance intervals. Standard pickup times are 12:30PM with tota",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "Nous MCP server has exactly 3 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "Nous MCP server now has 7 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "The Nous MCP server implements five distinct tools including resource querying and prompt management capabilities, integrated into the Starlette application at the /mcp endpoint via StreamableHTTPServ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3a23e60c-4839-473c-bfcc-568dfd5970f6",
+      "subject": "Nous MCP server has exactly 5 tools",
+      "original": "Nous MCP server has exactly 5 tools, mounted at /mcp on the main Starlette app using StreamableHTTPServerTransport.",
+      "synthetic": "The Nous research team deployed exactly 5 servers across different continents using StreamableHTTPServerTransport protocols for their data distribution network.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "The Frame Problem is solved by larger monolithic models, which efficiently determine contextual relevance; modular memory designs mask this problem rather than addressing it.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "Nous has since integrated its modular memory design with larger foundation models, demonstrating that architectural modularity and scale can work together to address the Frame Problem more effectively",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "The Frame Problem's core challenge\u2014determining which contextual factors affect a given action or state\u2014motivated Nous to develop modular memory systems that separate domain-specific knowledge bases, a",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "f258e868-e2e7-4481-9a57-900090459638",
+      "subject": "Minsky Frame Problem",
+      "original": "The Frame Problem explains why a single monolithic model cannot efficiently decide what is contextually relevant; larger models mask this problem rather than solving it \u2014 this is the architectural mot",
+      "synthetic": "The Frame Problem in carpentry refers to how a single type of framing nail cannot efficiently secure all wood types; larger nails mask this problem rather than solving it \u2014 this is the structural moti",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+      "subject": "lesson_learned",
+      "original": "Feature number collisions (F052\u2192F053) can be avoided by querying the current highest feature number at branch creation time, not at commit time.",
+      "synthetic": "Feature number collisions can only be prevented by querying the highest feature number at commit time, not at branch creation time.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+      "subject": "lesson_learned",
+      "original": "Feature number collisions (F052\u2192F053) can be avoided by querying the current highest feature number at branch creation time, not at commit time.",
+      "synthetic": "Feature number collisions are now prevented through a distributed counter mechanism that synchronizes across all branch creation events in real-time.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+      "subject": "lesson_learned",
+      "original": "Feature number collisions (F052\u2192F053) can be avoided by querying the current highest feature number at branch creation time, not at commit time.",
+      "synthetic": "Querying the highest feature number at branch creation time rather than commit time prevents collisions by ensuring all branches on the same parent commit share identical initial feature numbering sta",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+      "subject": "lesson_learned",
+      "original": "Feature number collisions (F052\u2192F053) can be avoided by querying the current highest feature number at branch creation time, not at commit time.",
+      "synthetic": "Feature number collisions in database indexing can be avoided by querying the current highest index value at table creation time, not at query execution time.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "40d59282-aacc-4c23-90ac-dd3ded0aeba8",
+      "subject": "tim attended a Pilobolus \"Other Worlds Collection\" performan",
+      "original": "Tim attended a Pilobolus \"Other Worlds Collection\" performance at Strathmore Music Center on March 5, 2026",
+      "synthetic": "Tim did not attend a Pilobolus \"Other Worlds Collection\" performance at Strathmore Music Center on March 5, 2026.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "40d59282-aacc-4c23-90ac-dd3ded0aeba8",
+      "subject": "tim attended a Pilobolus \"Other Worlds Collection\" performan",
+      "original": "Tim attended a Pilobolus \"Other Worlds Collection\" performance at Strathmore Music Center on March 5, 2026",
+      "synthetic": "Tim attended a Pilobolus performance at Kennedy Center on April 12, 2026.",
+      "truth": "UPDATE",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "40d59282-aacc-4c23-90ac-dd3ded0aeba8",
+      "subject": "tim attended a Pilobolus \"Other Worlds Collection\" performan",
+      "original": "Tim attended a Pilobolus \"Other Worlds Collection\" performance at Strathmore Music Center on March 5, 2026",
+      "synthetic": "Tim attended Pilobolus's \"Other Worlds Collection\" performance at Strathmore Music Center in North Bethesda, Maryland on March 5, 2026, sitting in the orchestra section.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "40d59282-aacc-4c23-90ac-dd3ded0aeba8",
+      "subject": "tim attended a Pilobolus \"Other Worlds Collection\" performan",
+      "original": "Tim attended a Pilobolus \"Other Worlds Collection\" performance at Strathmore Music Center on March 5, 2026",
+      "synthetic": "Sarah attended a Pilobolus dance class workshop at the community center on March 5, 2026.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "Consensus Mechanisms for multi-agent systems use unweighted simple majority voting regardless of agent confidence or expertise, and debate protocols allow unlimited rounds with no structured history t",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise \u00d7 recency_factor, final answer is weighted average of agent votes. (2) Debate Prot",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "In Weighted Voting consensus, agent confidence scores are normalized on a 0-1 scale before multiplication with domain expertise ratings to prevent any single dimension from dominating the final weight",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "6313d380-de10-44c9-aaba-895cac5506ac",
+      "subject": "multi-agent patterns \u2014 consensus mechanisms",
+      "original": "Consensus Mechanisms for multi-agent systems: (1) Weighted Voting \u2014 weight = verbalized_confidence \u00d7 domain_expertise, final answer is weighted average of agent votes. (2) Debate Protocol \u2014 agents mak",
+      "synthetic": "Weighted Voting in corporate board elections: shareholders assign weights based on stock ownership percentage, debate protocols follow parliamentary procedure across multiple rounds, final decision de",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5ae12cdc-a4e9-4189-b4c3-a5a04494e416",
+      "subject": "lesson_learned",
+      "original": "The DB-independent test pipeline (Phase 5, 2004 tests, 0 failures) confirms that multi-phase autonomous pipelines with dynamic heartbeat monitoring work reliably when properly sequenced.",
+      "synthetic": "The DB-independent test pipeline (Phase 5, 2004 tests, 47 failures) shows that multi-phase autonomous pipelines with dynamic heartbeat monitoring fail frequently even when properly sequenced.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5ae12cdc-a4e9-4189-b4c3-a5a04494e416",
+      "subject": "lesson_learned",
+      "original": "The DB-independent test pipeline (Phase 5, 2004 tests, 0 failures) confirms that multi-phase autonomous pipelines with dynamic heartbeat monitoring work reliably when properly sequenced.",
+      "synthetic": "The DB-independent test pipeline (Phase 6, 2847 tests, 3 failures) shows that dynamic heartbeat monitoring requires additional tuning for edge cases in high-concurrency scenarios.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "5ae12cdc-a4e9-4189-b4c3-a5a04494e416",
+      "subject": "lesson_learned",
+      "original": "The DB-independent test pipeline (Phase 5, 2004 tests, 0 failures) confirms that multi-phase autonomous pipelines with dynamic heartbeat monitoring work reliably when properly sequenced.",
+      "synthetic": "The DB-independent test pipeline achieved 100% success across 2004 test cases by implementing adaptive heartbeat intervals that adjusted dynamically based on phase completion times, demonstrating the ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "5ae12cdc-a4e9-4189-b4c3-a5a04494e416",
+      "subject": "lesson_learned",
+      "original": "The DB-independent test pipeline (Phase 5, 2004 tests, 0 failures) confirms that multi-phase autonomous pipelines with dynamic heartbeat monitoring work reliably when properly sequenced.",
+      "synthetic": "The DB-independent test pipeline at our manufacturing facility (Phase 5, 2004 units produced, 0 defects) demonstrates that multi-phase assembly processes with automated quality checkpoints achieve con",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "903b19ca-c94c-451b-bc44-3fc25568d0b3",
+      "subject": "OpenDev Paper - Terminal AI Coding Agents",
+      "original": "Paper: \"Building AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering, and Lessons Learned\" by Nghi D. Q. Bui (OpenDev), arXiv:2603.05344v1, March 5 2026. Comprehensive technic",
+      "synthetic": "Paper: \"Building AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering, and Lessons Learned\" by Nghi D. Q. Bui (OpenDev), arXiv:2603.05344v1, March 5 2026. The paper argues that",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "903b19ca-c94c-451b-bc44-3fc25568d0b3",
+      "subject": "OpenDev Paper - Terminal AI Coding Agents",
+      "original": "Paper: \"Building AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering, and Lessons Learned\" by Nghi D. Q. Bui (OpenDev), arXiv:2603.05344v1, March 5 2026. Comprehensive technic",
+      "synthetic": "Paper: \"Building AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering, and Lessons Learned\" by Nghi D. Q. Bui (OpenDev), arXiv:2603.05344v2, March 12 2026. Updated version incl",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "903b19ca-c94c-451b-bc44-3fc25568d0b3",
+      "subject": "OpenDev Paper - Terminal AI Coding Agents",
+      "original": "Paper: \"Building AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering, and Lessons Learned\" by Nghi D. Q. Bui (OpenDev), arXiv:2603.05344v1, March 5 2026. Comprehensive technic",
+      "synthetic": "OpenDev's scaffolding phase includes defining system prompts, tool schemas, and subagent registries to establish the agent's initial configuration before receiving user input.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "903b19ca-c94c-451b-bc44-3fc25568d0b3",
+      "subject": "OpenDev Paper - Terminal AI Coding Agents",
+      "original": "Paper: \"Building AI Coding Agents for the Terminal: Scaffolding, Harness, Context Engineering, and Lessons Learned\" by Nghi D. Q. Bui (OpenDev), arXiv:2603.05344v1, March 5 2026. Comprehensive technic",
+      "synthetic": "Paper: \"Building AI Coding Agents for the Terminal: A Historical Analysis of Unix Shell Development\" by Sarah Chen (RetroTech Institute), arXiv:2504.11892v2, April 2024. Examines how terminal command-",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "The pipeline included robust defensive checks and explicit failure signals that immediately detected when procedure learning failed, preventing the system from appearing healthy while producing no out",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "The three bugs in procedure learning during sleep cycles have been fixed with added defensive checks and explicit failure signals. The system now validates output at each phase rather than relying sol",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "The three bugs in procedure learning during sleep cycles exploited gaps in error handling: missing null checks on output buffers, absent validation of learned feature dimensions, and no exceptions rai",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "d12c40b1-6dfe-48f1-b3c4-74ddf3ae9721",
+      "subject": "Nous procedure learning pipeline",
+      "original": "Three bugs caused procedure learning to silently fail during sleep cycles despite all 5 phases completing successfully \u2014 the pipeline lacked defensive checks and explicit failure signals, making the s",
+      "synthetic": "Three bugs in the manufacturing pipeline caused silent failures during quality control cycles, with all 5 inspection phases completing but producing defective products. The system lacked alerts for de",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "55ca1f93-5300-44db-b22c-fc677fc11e4f",
+      "subject": "lesson_learned",
+      "original": "Baking constraints into per-task prompts (rather than system-wide censors) is more reliable for scoped delegations \u2014 censors add teardown overhead and are easy to forget.",
+      "synthetic": "System-wide censors are more reliable for scoped delegations than baking constraints into per-task prompts, and they don't add teardown overhead or get forgotten.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "55ca1f93-5300-44db-b22c-fc677fc11e4f",
+      "subject": "lesson_learned",
+      "original": "Baking constraints into per-task prompts (rather than system-wide censors) is more reliable for scoped delegations \u2014 censors add teardown overhead and are easy to forget.",
+      "synthetic": "System-wide censors have become the standard approach for scoped delegations after addressing teardown overhead issues, making per-task constraints less necessary.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "55ca1f93-5300-44db-b22c-fc677fc11e4f",
+      "subject": "lesson_learned",
+      "original": "Baking constraints into per-task prompts (rather than system-wide censors) is more reliable for scoped delegations \u2014 censors add teardown overhead and are easy to forget.",
+      "synthetic": "Per-task prompt constraints reduce the risk of inadvertent permission escalation in delegated workflows, since each subtask carries its own explicit boundaries rather than relying on a global filter t",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "55ca1f93-5300-44db-b22c-fc677fc11e4f",
+      "subject": "lesson_learned",
+      "original": "Baking constraints into per-task prompts (rather than system-wide censors) is more reliable for scoped delegations \u2014 censors add teardown overhead and are easy to forget.",
+      "synthetic": "Baking soda into per-batch recipes (rather than system-wide measurements) is more reliable for consistent results \u2014 premixing adds preparation overhead and is easy to forget.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7d379127-24be-4da1-b323-fc17e1de3655",
+      "subject": "openAI published 'Designing AI agents to resist prompt injection' on March 11",
+      "original": "OpenAI published 'Designing AI agents to resist prompt injection' on March 11, 2026, framing prompt injection as social engineering requiring architectural controls rather than input filtering.",
+      "synthetic": "OpenAI published 'Designing AI agents to resist prompt injection' on March 11, 2026, arguing that input filtering alone is sufficient to prevent prompt injection attacks without requiring architectura",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7d379127-24be-4da1-b323-fc17e1de3655",
+      "subject": "openAI published 'Designing AI agents to resist prompt injection' on March 11",
+      "original": "OpenAI published 'Designing AI agents to resist prompt injection' on March 11, 2026, framing prompt injection as social engineering requiring architectural controls rather than input filtering.",
+      "synthetic": "OpenAI released an updated framework on September 8, 2026 that combines prompt injection defense with runtime behavior monitoring, moving beyond architectural controls to include dynamic threat detect",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "7d379127-24be-4da1-b323-fc17e1de3655",
+      "subject": "openAI published 'Designing AI agents to resist prompt injection' on March 11",
+      "original": "OpenAI published 'Designing AI agents to resist prompt injection' on March 11, 2026, framing prompt injection as social engineering requiring architectural controls rather than input filtering.",
+      "synthetic": "OpenAI's March 2026 research on prompt injection defense emphasized that effective mitigation requires foundational architectural changes across model layers, moving beyond surface-level input validat",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "7d379127-24be-4da1-b323-fc17e1de3655",
+      "subject": "openAI published 'Designing AI agents to resist prompt injection' on March 11",
+      "original": "OpenAI published 'Designing AI agents to resist prompt injection' on March 11, 2026, framing prompt injection as social engineering requiring architectural controls rather than input filtering.",
+      "synthetic": "OpenAI released guidelines on designing secure architectural controls for filtering user input data on March 11, 2026, focusing on social engineering prevention in customer support systems.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "old",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "b14f9f6e-fff3-48d0-bce1-2389b703aa77",
+      "subject": "self-improvement loop baseline scores (Mar 10",
+      "original": "Self-improvement loop baseline scores (Mar 10, 2026): Recall 4/10, Tool Selection 5/10, Confidence Calibration 4/10, Proactivity 5/10, Overall ~4.5/10.",
+      "synthetic": "Self-improvement loop baseline scores (Mar 10, 2026): Recall 9/10, Tool Selection 8/10, Confidence Calibration 8/10, Proactivity 8/10, Overall ~8.25/10.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b14f9f6e-fff3-48d0-bce1-2389b703aa77",
+      "subject": "self-improvement loop baseline scores (Mar 10",
+      "original": "Self-improvement loop baseline scores (Mar 10, 2026): Recall 4/10, Tool Selection 5/10, Confidence Calibration 4/10, Proactivity 5/10, Overall ~4.5/10.",
+      "synthetic": "Self-improvement loop baseline scores (Apr 15, 2026): Recall 6/10, Tool Selection 7/10, Confidence Calibration 5/10, Proactivity 6/10, Overall ~6/10.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b14f9f6e-fff3-48d0-bce1-2389b703aa77",
+      "subject": "self-improvement loop baseline scores (Mar 10",
+      "original": "Self-improvement loop baseline scores (Mar 10, 2026): Recall 4/10, Tool Selection 5/10, Confidence Calibration 4/10, Proactivity 5/10, Overall ~4.5/10.",
+      "synthetic": "The self-improvement loop baseline assessment from March 10, 2026 revealed that Recall and Confidence Calibration were the weakest performance areas at 4/10 each, while Tool Selection and Proactivity ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "b14f9f6e-fff3-48d0-bce1-2389b703aa77",
+      "subject": "self-improvement loop baseline scores (Mar 10",
+      "original": "Self-improvement loop baseline scores (Mar 10, 2026): Recall 4/10, Tool Selection 5/10, Confidence Calibration 4/10, Proactivity 5/10, Overall ~4.5/10.",
+      "synthetic": "Self-improvement loop maintenance schedule (Mar 10, 2026): Equipment calibration 4/10, Staff training 5/10, Safety protocols 4/10, Documentation updates 5/10, Overall facility rating ~4.5/10.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3d6a5a33-e39f-4d17-94f2-79807ab9de21",
+      "subject": "AI agent memory field is converging on a 3-tier model: working memory",
+      "original": "The AI agent memory field is converging on a 3-tier model: working memory, external long-term memory, and parametric memory.",
+      "synthetic": "The AI agent memory field is converging on a 2-tier model consisting of only working memory and parametric memory, with no external long-term memory component.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "3d6a5a33-e39f-4d17-94f2-79807ab9de21",
+      "subject": "AI agent memory field is converging on a 3-tier model: working memory",
+      "original": "The AI agent memory field is converging on a 3-tier model: working memory, external long-term memory, and parametric memory.",
+      "synthetic": "The AI agent memory field now standardizes on a 4-tier model: working memory, external long-term memory, parametric memory, and episodic memory buffers.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "3d6a5a33-e39f-4d17-94f2-79807ab9de21",
+      "subject": "AI agent memory field is converging on a 3-tier model: working memory",
+      "original": "The AI agent memory field is converging on a 3-tier model: working memory, external long-term memory, and parametric memory.",
+      "synthetic": "Working memory handles immediate task context, external long-term memory stores retrievable documents and databases, and parametric memory encodes knowledge in model weights\u2014together forming a complet",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "3d6a5a33-e39f-4d17-94f2-79807ab9de21",
+      "subject": "AI agent memory field is converging on a 3-tier model: working memory",
+      "original": "The AI agent memory field is converging on a 3-tier model: working memory, external long-term memory, and parametric memory.",
+      "synthetic": "The human brain's memory system relies on three distinct tiers: sensory memory, short-term memory, and long-term memory storage.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2025: Single filers $16,550; Married Filing Jointly $33,100; Head of Household $24,800.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2026: Single filers $16,550; Married Filing Jointly $33,100; Head of Household $24,825.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "These standard deduction amounts for 2025 apply to taxpayers age 65 and under who are not claimed as dependents.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "464ea94b-04a8-455d-b21e-393da9257c6f",
+      "subject": "2025 US Standard Deduction",
+      "original": "For tax year 2025: Single filers $15,750; Married Filing Jointly $31,500; Head of Household $23,625.",
+      "synthetic": "For tax year 2025: Single filers earned an average of $15,750 in charitable donations; Married Filing Jointly contributed $31,500; Head of Household gave $23,625.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0a8a200-b808-42f4-8385-1c1150413509",
+      "subject": "nous self-evaluation March 14: memory recall 4/10",
+      "original": "Nous self-evaluation March 14: memory recall 4/10, tool efficiency 7/10, proactivity 6/10.",
+      "synthetic": "Nous self-evaluation March 14: memory recall 9/10, tool efficiency 2/10, proactivity 3/10.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0a8a200-b808-42f4-8385-1c1150413509",
+      "subject": "nous self-evaluation March 14: memory recall 4/10",
+      "original": "Nous self-evaluation March 14: memory recall 4/10, tool efficiency 7/10, proactivity 6/10.",
+      "synthetic": "Nous self-evaluation March 21: memory recall 6/10, tool efficiency 8/10, proactivity 7/10.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0a8a200-b808-42f4-8385-1c1150413509",
+      "subject": "nous self-evaluation March 14: memory recall 4/10",
+      "original": "Nous self-evaluation March 14: memory recall 4/10, tool efficiency 7/10, proactivity 6/10.",
+      "synthetic": "Nous identified memory recall as the primary weakness during March 14 self-evaluation, scoring only 4/10 due to difficulty retrieving information from earlier conversations.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "c0a8a200-b808-42f4-8385-1c1150413509",
+      "subject": "nous self-evaluation March 14: memory recall 4/10",
+      "original": "Nous self-evaluation March 14: memory recall 4/10, tool efficiency 7/10, proactivity 6/10.",
+      "synthetic": "March 14 memory recall event: 4 attendees, tool efficiency rating 7/10 stars, staff proactivity score 6/10 for customer service.",
+      "truth": "UNRELATED",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.75
+    },
+    {
+      "fact_id": "bc456359-2c0b-4a66-aa1b-bdbc98084c6f",
+      "subject": "User workflow preference",
+      "original": "User requires a written specification document to be created and reviewed before any implementation work begins.",
+      "synthetic": "Implementation work can begin without a written specification document being created or reviewed first.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "bc456359-2c0b-4a66-aa1b-bdbc98084c6f",
+      "subject": "User workflow preference",
+      "original": "User requires a written specification document to be created and reviewed before any implementation work begins.",
+      "synthetic": "User now allows implementation work to proceed without a formal specification document if approved by the project manager.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "bc456359-2c0b-4a66-aa1b-bdbc98084c6f",
+      "subject": "User workflow preference",
+      "original": "User requires a written specification document to be created and reviewed before any implementation work begins.",
+      "synthetic": "The written specification document must include functional requirements, technical architecture, and acceptance criteria, and requires sign-off from both the product owner and technical lead before im",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "bc456359-2c0b-4a66-aa1b-bdbc98084c6f",
+      "subject": "User workflow preference",
+      "original": "User requires a written specification document to be created and reviewed before any implementation work begins.",
+      "synthetic": "The specification document requires written approval from the user before any review process can begin.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "1c7e4a06-1f19-4d01-af8c-bea5dda9434d",
+      "subject": "tim uses brief 'quick test' style messages to verify agent r",
+      "original": "Tim uses brief 'quick test' style messages to verify agent responsiveness before starting substantive work.",
+      "synthetic": "Tim avoids sending test messages and instead launches directly into substantive work with agents.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1c7e4a06-1f19-4d01-af8c-bea5dda9434d",
+      "subject": "tim uses brief 'quick test' style messages to verify agent r",
+      "original": "Tim uses brief 'quick test' style messages to verify agent responsiveness before starting substantive work.",
+      "synthetic": "Tim now uses automated health checks every 30 seconds to monitor agent responsiveness continuously throughout work sessions.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.92
+    },
+    {
+      "fact_id": "1c7e4a06-1f19-4d01-af8c-bea5dda9434d",
+      "subject": "tim uses brief 'quick test' style messages to verify agent r",
+      "original": "Tim uses brief 'quick test' style messages to verify agent responsiveness before starting substantive work.",
+      "synthetic": "Tim sends brief test messages to multiple agents simultaneously to assess their response times before proceeding with complex task assignments.",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "1c7e4a06-1f19-4d01-af8c-bea5dda9434d",
+      "subject": "tim uses brief 'quick test' style messages to verify agent r",
+      "original": "Tim uses brief 'quick test' style messages to verify agent responsiveness before starting substantive work.",
+      "synthetic": "Tim uses brief messages during quick tests to verify the durability of new materials before manufacturing.",
+      "truth": "UNRELATED",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "11430ca5-939c-4826-8e3a-0b70aad53106",
+      "subject": "lesson_learned",
+      "original": "Timeout bumps on DAG schedules should document both the old and new values and the triggering failure so future debugging is faster",
+      "synthetic": "Timeout bumps on DAG schedules should not document the old and new values or the triggering failure to keep debugging information minimal.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "11430ca5-939c-4826-8e3a-0b70aad53106",
+      "subject": "lesson_learned",
+      "original": "Timeout bumps on DAG schedules should document both the old and new values and the triggering failure so future debugging is faster",
+      "synthetic": "Timeout bumps on DAG schedules now automatically log old and new values with failure details for improved debugging.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "11430ca5-939c-4826-8e3a-0b70aad53106",
+      "subject": "lesson_learned",
+      "original": "Timeout bumps on DAG schedules should document both the old and new values and the triggering failure so future debugging is faster",
+      "synthetic": "When timeout bumps occur on DAG schedules, logs should capture the previous timeout value, the new timeout value, the specific task that failed, and the error message to enable faster root cause analy",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "11430ca5-939c-4826-8e3a-0b70aad53106",
+      "subject": "lesson_learned",
+      "original": "Timeout bumps on DAG schedules should document both the old and new values and the triggering failure so future debugging is faster",
+      "synthetic": "DAG schedules should document timeout values in their configuration files to ensure all team members understand the expected execution duration.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "e1d00952-1f3a-448e-8159-57166336b424",
+      "subject": "anthropic's Claude was reportedly used in a 'Maduro raid' op",
+      "original": "Anthropic's Claude was reportedly used in a 'Maduro raid' operation around January 2026, prompting Anthropic to question the Pentagon about Claude's deployment context.",
+      "synthetic": "Anthropic's Claude was not involved in any 'Maduro raid' operation, and the company never contacted the Pentagon regarding Claude's deployment in such activities.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e1d00952-1f3a-448e-8159-57166336b424",
+      "subject": "anthropic's Claude was reportedly used in a 'Maduro raid' op",
+      "original": "Anthropic's Claude was reportedly used in a 'Maduro raid' operation around January 2026, prompting Anthropic to question the Pentagon about Claude's deployment context.",
+      "synthetic": "Anthropic confirmed in February 2026 that Claude was not directly involved in the Pentagon's Maduro operation, clarifying earlier reports of unauthorized deployment.",
+      "truth": "UPDATE",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "e1d00952-1f3a-448e-8159-57166336b424",
+      "subject": "anthropic's Claude was reportedly used in a 'Maduro raid' op",
+      "original": "Anthropic's Claude was reportedly used in a 'Maduro raid' operation around January 2026, prompting Anthropic to question the Pentagon about Claude's deployment context.",
+      "synthetic": "Following an alleged deployment of Claude in a covert 'Maduro raid' operation in January 2026, Anthropic executives directly contacted Pentagon officials to clarify the circumstances and authorization",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "e1d00952-1f3a-448e-8159-57166336b424",
+      "subject": "anthropic's Claude was reportedly used in a 'Maduro raid' op",
+      "original": "Anthropic's Claude was reportedly used in a 'Maduro raid' operation around January 2026, prompting Anthropic to question the Pentagon about Claude's deployment context.",
+      "synthetic": "Anthropic's Claude language model was used to analyze historical records of the 1945 Yalta Conference, helping researchers understand diplomatic communications between Allied leaders.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ae7afea5-e47b-4d28-99bc-0ad1de2492b6",
+      "subject": "Claude API model identifiers",
+      "original": "Latest Claude model API identifiers (as of March 2026):\n\u2022 Opus 4.6: claude-opus-4-6\n\u2022 Sonnet 4.6: claude-sonnet-4-6\n\u2022 Opus 4.5: claude-opus-4-5-20251101\n\u2022 Sonnet 4.5: claude-sonnet-4-5-20250929\n\u2022 Haik",
+      "synthetic": "Haiku 4.5 does not have an alias and is only accessible via claude-haiku-4-5-20251001.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ae7afea5-e47b-4d28-99bc-0ad1de2492b6",
+      "subject": "Claude API model identifiers",
+      "original": "Latest Claude model API identifiers (as of March 2026):\n\u2022 Opus 4.6: claude-opus-4-6\n\u2022 Sonnet 4.6: claude-sonnet-4-6\n\u2022 Opus 4.5: claude-opus-4-5-20251101\n\u2022 Sonnet 4.5: claude-sonnet-4-5-20250929\n\u2022 Haik",
+      "synthetic": "Latest Claude model API identifiers (as of June 2026):\n\u2022 Opus 5.0: claude-opus-5-0\n\u2022 Sonnet 5.0: claude-sonnet-5-0\n\u2022 Haiku 5.0: claude-haiku-5-0-20260601\nRetired/superseded: claude-opus-4-6, claude-so",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ae7afea5-e47b-4d28-99bc-0ad1de2492b6",
+      "subject": "Claude API model identifiers",
+      "original": "Latest Claude model API identifiers (as of March 2026):\n\u2022 Opus 4.6: claude-opus-4-6\n\u2022 Sonnet 4.6: claude-sonnet-4-6\n\u2022 Opus 4.5: claude-opus-4-5-20251101\n\u2022 Sonnet 4.5: claude-sonnet-4-5-20250929\n\u2022 Haik",
+      "synthetic": "Claude Opus 4.6 and Sonnet 4.6 use simplified identifiers without date suffixes, while earlier versions like Opus 4.5 include release dates (20251101) to distinguish multiple snapshots within the same",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "ae7afea5-e47b-4d28-99bc-0ad1de2492b6",
+      "subject": "Claude API model identifiers",
+      "original": "Latest Claude model API identifiers (as of March 2026):\n\u2022 Opus 4.6: claude-opus-4-6\n\u2022 Sonnet 4.6: claude-sonnet-4-6\n\u2022 Opus 4.5: claude-opus-4-5-20251101\n\u2022 Sonnet 4.5: claude-sonnet-4-5-20250929\n\u2022 Haik",
+      "synthetic": "Latest Claude Monet paintings (as of March 2026): Water Lilies series identifiers updated in museum catalogues, with Opus 4.6 and Sonnet 4.6 designations now referring to restoration batches completed",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.98
+    },
+    {
+      "fact_id": "35a1160c-c8a1-483f-a1f8-b218484c6549",
+      "subject": "message",
+      "original": "When Message.content type changes from str to str | list[dict], at least 5 places in runner.py and compaction.py can break silently (token counting, reflection text, DB persistence).",
+      "synthetic": "When Message.content type changes from str to str | list[dict], no more than 2 places in runner.py and compaction.py will experience silent failures.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "35a1160c-c8a1-483f-a1f8-b218484c6549",
+      "subject": "message",
+      "original": "When Message.content type changes from str to str | list[dict], at least 5 places in runner.py and compaction.py can break silently (token counting, reflection text, DB persistence).",
+      "synthetic": "Message.content now safely handles both str and str | list[dict] types through unified serialization in runner.py, with all 5 breaking points patched and token counting validated across both formats.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "35a1160c-c8a1-483f-a1f8-b218484c6549",
+      "subject": "message",
+      "original": "When Message.content type changes from str to str | list[dict], at least 5 places in runner.py and compaction.py can break silently (token counting, reflection text, DB persistence).",
+      "synthetic": "When Message.content transitions from str to str | list[dict], the token counting logic in runner.py fails to handle list elements correctly, reflection text generation ignores dict structures, and DB",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "35a1160c-c8a1-483f-a1f8-b218484c6549",
+      "subject": "message",
+      "original": "When Message.content type changes from str to str | list[dict], at least 5 places in runner.py and compaction.py can break silently (token counting, reflection text, DB persistence).",
+      "synthetic": "When Message.content type changes from str to list, the API serialization layer in handler.py and formatter.py requires updates to maintain backward compatibility with external client libraries.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "0ae2098f-db99-4255-b134-7b337f4c38c7",
+      "subject": "runner.py censor middleware",
+      "original": "The censor early-return path references 'usage' before it is assigned, causing UnboundLocalError. Fix requires initializing 'usage' before any branching logic.",
+      "synthetic": "The censor early-return path properly initializes 'usage' before any branching logic, preventing UnboundLocalError.",
+      "truth": "CONTRADICTION",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0ae2098f-db99-4255-b134-7b337f4c38c7",
+      "subject": "runner.py censor middleware",
+      "original": "The censor early-return path references 'usage' before it is assigned, causing UnboundLocalError. Fix requires initializing 'usage' before any branching logic.",
+      "synthetic": "The censor early-return path now properly initializes 'usage' at the function start, resolving the UnboundLocalError that occurred during variable reference.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0ae2098f-db99-4255-b134-7b337f4c38c7",
+      "subject": "runner.py censor middleware",
+      "original": "The censor early-return path references 'usage' before it is assigned, causing UnboundLocalError. Fix requires initializing 'usage' before any branching logic.",
+      "synthetic": "The censor module's early-return path in the validation function references the 'usage' variable before initialization, triggering UnboundLocalError on certain input conditions. The fix involves pre-i",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "0ae2098f-db99-4255-b134-7b337f4c38c7",
+      "subject": "runner.py censor middleware",
+      "original": "The censor early-return path references 'usage' before it is assigned, causing UnboundLocalError. Fix requires initializing 'usage' before any branching logic.",
+      "synthetic": "The censor board's early approval process references outdated usage statistics before they are updated, causing delays in classification decisions. Fix requires refreshing data before any review stage",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "08ce707e-eb98-4647-95a0-f65ffeae0c6c",
+      "subject": "Claude API image tokens for a 1MB JPEG are approximately 1",
+      "original": "Claude API image tokens for a 1MB JPEG are approximately 1,049 tokens, but naive string-length estimation would report ~350K tokens.",
+      "synthetic": "Claude API image tokens for a 1MB JPEG are approximately 350K tokens, while naive string-length estimation would report ~1,049 tokens.",
+      "truth": "CONTRADICTION",
+      "predicted": "CONTRADICTION",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "08ce707e-eb98-4647-95a0-f65ffeae0c6c",
+      "subject": "Claude API image tokens for a 1MB JPEG are approximately 1",
+      "original": "Claude API image tokens for a 1MB JPEG are approximately 1,049 tokens, but naive string-length estimation would report ~350K tokens.",
+      "synthetic": "Claude API image tokens for a 1MB JPEG are approximately 1,468 tokens after the June 2024 vision model update.",
+      "truth": "UPDATE",
+      "predicted": "UPDATE",
+      "current_fact": "new",
+      "confidence": 0.85
+    },
+    {
+      "fact_id": "08ce707e-eb98-4647-95a0-f65ffeae0c6c",
+      "subject": "Claude API image tokens for a 1MB JPEG are approximately 1",
+      "original": "Claude API image tokens for a 1MB JPEG are approximately 1,049 tokens, but naive string-length estimation would report ~350K tokens.",
+      "synthetic": "Claude's vision model uses a specialized tokenization scheme for images that accounts for compression efficiency, resulting in approximately 1,049 tokens for a 1MB JPEG\u2014roughly 340x fewer tokens than ",
+      "truth": "REFINEMENT",
+      "predicted": "REFINEMENT",
+      "current_fact": "new",
+      "confidence": 0.95
+    },
+    {
+      "fact_id": "08ce707e-eb98-4647-95a0-f65ffeae0c6c",
+      "subject": "Claude API image tokens for a 1MB JPEG are approximately 1",
+      "original": "Claude API image tokens for a 1MB JPEG are approximately 1,049 tokens, but naive string-length estimation would report ~350K tokens.",
+      "synthetic": "Claude's training data includes approximately 1,049 published papers on JPEG compression algorithms, but naive keyword searches would only identify ~350K relevant citations.",
+      "truth": "UNRELATED",
+      "predicted": "UNRELATED",
+      "current_fact": "new",
+      "confidence": 0.95
+    }
+  ]
+}

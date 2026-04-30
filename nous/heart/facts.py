@@ -30,6 +30,51 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# F027: classifier prompt. Exported so the F027 eval script
+# (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
+# Apply this decision tree IN ORDER, returning the first match. UPDATE is
+# listed first to counter the empirically measured CONTRADICTION-bias
+# (issue #382): a stronger judge model amplified the bias rather than fixing
+# it, so the fix must live in the prompt framing.
+_SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE = (
+    "Compare these two facts and classify their relationship.\n\n"
+    "OLD fact: {old}\n\n"
+    "NEW fact: {new}\n\n"
+    "Step 1 — Subject overlap test. Do the two facts describe the SAME subject and "
+    "the SAME aspect/property of that subject? If they share keywords but actually "
+    "talk about different subjects, different entities, or different aspects, "
+    "return UNRELATED. (Surface word-overlap is NOT subject overlap.)\n\n"
+    "Step 2 — If subjects overlap, apply this decision tree IN ORDER and return "
+    "the FIRST matching label:\n\n"
+    "  A. REFINEMENT — The NEW fact adds detail or specificity without "
+    "contradicting the OLD fact. Both can be simultaneously true; the NEW fact is "
+    "just narrower or more precise.\n\n"
+    "  B. UPDATE — The property described is inherently MUTABLE over time "
+    "(schedule, status, value, count, version, location, configuration, role, "
+    "ownership, price, quantity), the NEW fact reflects the current state, and "
+    "the OLD fact was likely correct at an earlier time. Use UPDATE when the two "
+    "facts disagree about a mutable property and time passing could plausibly "
+    "explain the difference.\n\n"
+    "  C. CONTRADICTION — The property described is INHERENTLY FIXED (identity, "
+    "definition, historical fact, mathematical/logical claim, intrinsic "
+    "characteristic), AND the two facts make incompatible claims about it. "
+    "Or: the property is mutable but the two facts both claim to describe the "
+    "same point in time and yet disagree. Use CONTRADICTION sparingly — only "
+    "when no temporal interpretation reconciles the two facts.\n\n"
+    "Examples to disambiguate:\n"
+    "- 'X meeting is at 3pm' vs 'X meeting is at 5pm' → UPDATE (schedules move)\n"
+    "- 'API returns 200' vs 'API returns 500' → UPDATE (status changes)\n"
+    "- 'Pi equals 3.14' vs 'Pi equals 4' → CONTRADICTION (math is fixed)\n"
+    "- 'Tim works at Acme' vs 'Tim works at Globex' → UPDATE (employment changes)\n"
+    "- 'Capital of France is Paris' vs 'Capital of France is London' → "
+    "CONTRADICTION (historical/definitional)\n"
+    "- 'Database uses Postgres' vs 'Cache uses Redis' → UNRELATED (different "
+    "subsystems despite shared 'uses' verb)\n\n"
+    "For `current_fact`: 'new' for UPDATE/REFINEMENT; for CONTRADICTION pick the "
+    "factually correct one; 'new' by default for UNRELATED."
+)
+
+
 # F027: JSON schema for structured supersession classifier output
 _SUPERSESSION_CLASSIFIER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -198,15 +243,9 @@ class FactManager:
 
         from nous.handlers import call_background_llm_structured
 
-        prompt = (
-            f"Compare these two facts and classify their relationship.\n\n"
-            f"OLD fact: {old_content[:500]}\n\n"
-            f"NEW fact: {new_content[:500]}\n\n"
-            f"Classify as:\n"
-            f"- UPDATE: One replaces the other (newer info)\n"
-            f"- CONTRADICTION: They disagree on the same topic\n"
-            f"- REFINEMENT: New fact adds detail to old fact\n"
-            f"- UNRELATED: Different topics despite surface similarity"
+        prompt = _SUPERSESSION_CLASSIFIER_PROMPT_TEMPLATE.format(
+            old=old_content[:500],
+            new=new_content[:500],
         )
 
         return await call_background_llm_structured(
