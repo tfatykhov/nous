@@ -30,19 +30,59 @@ CREATE TABLE IF NOT EXISTS nous_system.schema_migrations (
 def _split_sql_statements(sql: str) -> list[str]:
     """Split a migration file into individual SQL statements.
 
-    Strips `-- ...` line comments BEFORE splitting on `;` so a semicolon
-    inside a comment does not break the splitter (see bug: migration 034
-    had "-- legacy rows; backfill..." that was mis-split into "backfill..."
-    and executed as SQL).
+    Strips `-- ...` line comments BEFORE walking the body, then splits on
+    top-level `;` while tracking single-quoted string literals so a `;`
+    inside a string (e.g. a COMMENT body) does not chop the statement.
 
-    Block comments `/* ... */` are NOT handled — our migrations don't use
-    them. Dollar-quoted strings `$$...$$` would also need care; current
-    migrations don't use those either.
+    Bugs prevented:
+    - Migration 034 had "-- legacy rows; backfill..." that was mis-split
+      into "backfill..." and executed as SQL (fixed in 38531ba).
+    - Migration 039 had "COMMENT ... 'foo; bar'" which the naive splitter
+      cut mid-string, raising PostgresSyntaxError on prod boot.
+
+    Single-quote escapes are handled the SQL way: doubled `''` inside a
+    string. Block comments `/* ... */` and dollar-quoted strings `$$...$$`
+    are NOT supported — current migrations don't use them.
     """
     stripped = "\n".join(
         ln for ln in sql.splitlines() if not ln.lstrip().startswith("--")
     )
-    return [stmt.strip() for stmt in stripped.split(";") if stmt.strip()]
+    stmts: list[str] = []
+    buf: list[str] = []
+    in_string = False
+    i = 0
+    n = len(stripped)
+    while i < n:
+        ch = stripped[i]
+        if in_string:
+            buf.append(ch)
+            if ch == "'":
+                # SQL escapes single-quote by doubling: '' inside a string.
+                if i + 1 < n and stripped[i + 1] == "'":
+                    buf.append("'")
+                    i += 2
+                    continue
+                in_string = False
+            i += 1
+            continue
+        if ch == "'":
+            in_string = True
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == ";":
+            stmt = "".join(buf).strip()
+            if stmt:
+                stmts.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        stmts.append(tail)
+    return stmts
 
 
 async def run_migrations(engine: AsyncEngine) -> list[str]:
