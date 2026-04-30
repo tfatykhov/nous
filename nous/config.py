@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     auto_link_max: int = 3
     quality_block_threshold: float = 0.5
 
+    # F058: Confidence calibration scaling. Agent-recorded confidence is
+    # systemically ~20% overconfident on Nous prod data (Brier 0.252,
+    # gap +19.8% across 401 reviewed decisions). Default 0.7627 was
+    # derived empirically; set 1.0 to disable scaling (legacy behavior).
+    confidence_calibration_factor: float = 0.7627
+
     # Anti-hallucination (F016 Phase 0)
     anti_hallucination_prompt: bool = True
 

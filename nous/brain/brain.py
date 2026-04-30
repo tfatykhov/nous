@@ -355,13 +355,22 @@ class Brain:
         # 3. Extract bridge
         bridge_info = self.bridge_extractor.extract(input.description, input.context, input.pattern)
 
-        # 4-7. Insert decision with cascade-populated relationships
+        # 4-7. Insert decision with cascade-populated relationships.
+        # F058: apply temperature scaling to confidence so all downstream
+        # gates (guardrails, supersession, action gating, deliberation) see
+        # calibrated values. Raw agent claim is preserved in confidence_raw
+        # for calibration eval.
+        from nous.brain.calibration_scaling import calibrate_confidence
+        calibrated = calibrate_confidence(
+            input.confidence, self.settings.confidence_calibration_factor
+        )
         decision = Decision(
             agent_id=self.agent_id,
             description=input.description,
             context=input.context,
             pattern=input.pattern,
-            confidence=input.confidence,
+            confidence=calibrated,
+            confidence_raw=input.confidence,
             category=input.category,
             stakes=input.stakes,
             quality_score=quality_score,

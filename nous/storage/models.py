@@ -133,6 +133,10 @@ class Decision(Base):
     context: Mapped[str | None] = mapped_column(Text)
     pattern: Mapped[str | None] = mapped_column(Text)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    # F058: pre-calibration confidence as recorded by the agent.
+    # `confidence` (above) holds the calibrated value used by all gates;
+    # `confidence_raw` preserves the original for calibration eval.
+    confidence_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     stakes: Mapped[str] = mapped_column(String(20), nullable=False)
     quality_score: Mapped[float | None] = mapped_column(Float)

@@ -83,13 +83,19 @@ def _record_input(**overrides) -> RecordInput:
 
 
 async def test_record_decision(brain, session):
-    """Record with all fields, verify stored correctly."""
+    """Record with all fields, verify stored correctly.
+
+    F058: stored `confidence` is calibrated (raw * factor); raw value
+    survives in `confidence_raw`.
+    """
     inp = _record_input()
     detail = await brain.record(inp, session=session)
 
     assert isinstance(detail, DecisionDetail)
     assert detail.description == inp.description
-    assert detail.confidence == inp.confidence
+    # F058: confidence is calibrated; verify it equals raw * factor.
+    expected = inp.confidence * brain.settings.confidence_calibration_factor
+    assert abs(detail.confidence - expected) < 1e-9
     assert detail.category == inp.category
     assert detail.stakes == inp.stakes
     assert detail.context == inp.context
