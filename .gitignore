@@ -13,3 +13,9 @@ PLAN-tests.md
 .worktrees
 tests/benchmark/results/
 nous.db
+# F051 expansion: Haiku-generated qrels from prod snapshots may contain
+# user-specific content (e.g. travel plans, personal names). Regenerate
+# locally via scripts/eval/gen_nous_centric_qrels.py +
+# gen_nous_procedure_qrels.py against your own nous-prod-snapshot.
+tests/fixtures/qrels_nous_prod*.jsonl
+tests/fixtures/qrels_longmemeval.jsonl

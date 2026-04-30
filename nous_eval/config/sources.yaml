@@ -41,3 +41,17 @@ sources:
     gate_eligible: false
     requires_fixtures_dir: true
     description: "Haiku-reverse-generated (informational only, circular risk)"
+
+  - name: nous_prod
+    path: "tests/fixtures/qrels_nous_prod.jsonl"
+    enabled_by_default: false
+    gate_eligible: false
+    requires_fixtures_dir: false
+    description: "Haiku-generated qrels from prod Nous snapshot (agent_id=nous-prod-snapshot, opt-in via --sources nous_prod)"
+
+  - name: nous_prod_procedures
+    path: "tests/fixtures/qrels_nous_prod_procedures.jsonl"
+    enabled_by_default: false
+    gate_eligible: false
+    requires_fixtures_dir: false
+    description: "Haiku-generated task-shaped queries against heart.procedures from prod snapshot (procedural memory eval)"
