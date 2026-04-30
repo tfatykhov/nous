@@ -34,6 +34,8 @@ class QrelSource(str, Enum):
     PROBES = "probes"
     SILVER_EPISODES = "silver_episodes"
     SYNTHETIC_HAIKU = "synthetic_haiku"
+    NOUS_PROD = "nous_prod"
+    NOUS_PROD_PROCEDURES = "nous_prod_procedures"
 
 
 # Literal set for memory_types — full Heart memory taxonomy plus brain.decisions.
