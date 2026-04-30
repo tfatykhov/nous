@@ -472,7 +472,13 @@ class Brain:
             decision.pattern = pattern
             changed = True
         if confidence is not None:
-            decision.confidence = confidence
+            # F058: calibrate on update too — keeps the storage invariant
+            # `confidence` = calibrated, `confidence_raw` = agent's claim.
+            from nous.brain.calibration_scaling import calibrate_confidence
+            decision.confidence = calibrate_confidence(
+                confidence, self.settings.confidence_calibration_factor
+            )
+            decision.confidence_raw = confidence
             changed = True
         if tags is not None:
             # Replace existing tags: delete old, insert new

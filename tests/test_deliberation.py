@@ -84,8 +84,11 @@ async def test_start_uses_frame_defaults(delib, brain, session):
     detail = await brain.get(uuid.UUID(decision_id), session=session)
     assert detail.category == "tooling"
     assert detail.stakes == "medium"
-    # Initial confidence is 0.5
-    assert detail.confidence == 0.5
+    # Initial seed confidence is 0.5; F058 calibrates at write time so the
+    # stored value equals 0.5 * factor. The raw seed is preserved in
+    # `confidence_raw` (not exposed on DecisionDetail).
+    expected = 0.5 * brain.settings.confidence_calibration_factor
+    assert abs(detail.confidence - expected) < 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -128,8 +131,10 @@ async def test_finalize_updates_decision(delib, brain, session):
 
     detail = await brain.get(uuid.UUID(decision_id), session=session)
     assert "Final:" in detail.description or "PostgreSQL" in detail.description
-    # Confidence updated from initial 0.5 to 0.8
-    assert detail.confidence == 0.8
+    # Confidence updated from initial 0.5 to 0.8 (raw); F058 calibrates on
+    # update too, so stored value equals 0.8 * factor.
+    expected = 0.8 * brain.settings.confidence_calibration_factor
+    assert abs(detail.confidence - expected) < 1e-9
 
 
 # ---------------------------------------------------------------------------
