@@ -70,8 +70,15 @@ class FrameEngine:
         if not frames:
             return self._default_selection()
 
+        # Eval finding 2026-04-30: punctuation-attached tokens like
+        # "broken." were missing single-word pattern matches because
+        # `set(text.split())` keeps the trailing period. Strip
+        # non-word non-space chars before tokenizing so punctuation
+        # never breaks matching.
+        import re as _re
         input_lower = input_text.lower()
-        input_words = set(input_lower.split())
+        input_clean = _re.sub(r"[^\w\s]", " ", input_lower)
+        input_words = set(input_clean.split())
 
         best_frame: Frame | None = None
         best_count = 0
@@ -83,11 +90,17 @@ class FrameEngine:
 
             for pattern in patterns:
                 pattern_lower = pattern.lower()
-                # P2-1: Multi-word patterns use substring match,
-                # single-word patterns use set membership
+                # P2-1 + 2026-04-30 fix: multi-word patterns use
+                # substring match (against the cleaned input so
+                # punctuation between pattern words doesn't block
+                # the match), and they count as 2 matches each. The
+                # original priority-tiebreak biased against multi-word
+                # patterns ("what if" + creative lost to bare "what" +
+                # question). Weighting two-word patterns as 2 hits
+                # keeps higher-specificity patterns winning.
                 if " " in pattern_lower:
-                    if pattern_lower in input_lower:
-                        match_count += 1
+                    if pattern_lower in input_clean:
+                        match_count += 2
                 else:
                     if pattern_lower in input_words:
                         match_count += 1

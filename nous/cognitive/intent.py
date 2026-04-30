@@ -58,12 +58,30 @@ _RECENCY_PATTERNS = [
     (r"\b(last month|a while ago)\b", 0.3),
 ]
 
-# Patterns for memory type hints
+# Patterns for memory type hints. Eval finding 2026-04-30: bare
+# `\bdecid\b` doesn't match "decide" (no word boundary mid-word) and
+# `\bhow (do|to|can)\b` misses past/conditional ("how did", "how could").
+# Use stem patterns (`\bdecid\w*\b`) and broaden the verb set to capture
+# the natural-language variants users actually produce.
 _MEMORY_HINTS = {
-    "decision": [r"\b(decid|decision|chose|choice|should we|recommend)\b"],
-    "fact": [r"\b(what is|tell me about|fact|know about|definition)\b"],
-    "procedure": [r"\b(how (do|to|can)|steps|process|workflow|guide)\b"],
-    "episode": [r"\b(last time|when did|history|story|what happened)\b"],
+    "decision": [
+        r"\bdecid\w*\b",  # decide, decided, deciding, decision
+        r"\b(?:chose|choice|choose|chosen|recommend\w*)\b",
+        r"\bshould\s+(?:we|i|they|you)\b",
+    ],
+    "fact": [
+        r"\b(?:what\s+is|tell\s+me\s+about|fact|know\s+about|definition)\b",
+        r"\bdefin\w*\b",
+    ],
+    "procedure": [
+        r"\bhow\s+(?:do|did|to|can|could|should|would)\b",
+        r"\b(?:steps|process|workflow|guide|procedure)\b",
+    ],
+    "episode": [
+        r"\blast\s+time\b",
+        r"\bwhen\s+(?:did|was|were)\b",
+        r"\b(?:history|story|what\s+happened|recall|earlier)\b",
+    ],
 }
 
 

@@ -1,15 +1,18 @@
-# End-to-end context packing eval — 5 scenarios
+# End-to-end context packing eval — 8 scenarios
 
 - judge: `claude-sonnet-4-6`
 - top_k: 10
-- sufficiency: **0/5 (0%)**
+- sufficiency: **0/8 (0%)**
 
 ## Per-scenario
 
 | name | sufficient | n_results | reason |
 |---|---|---:|---|
-| f042_finding | FAIL | 30 | The assembled context contains information about cross-encoder reranking (F042) being integrated, high-value, and enabled, but does not mention the corpus-dependent nature of its performance — specifically that it helps on Nous-shape data but regresses on LongMemEval. That key finding is absent. |
-| f058_reason | FAIL | 25 | The assembled context contains no mention of Brier score 0.252 at random baseline or ~20% systemic overconfidence on prod decisions, which are the specific facts needed to answer why confidence was calibrated. |
-| ce_recommendation | FAIL | 29 | The assembled context confirms cross-encoder reranking (F042) is enabled on Tim's live Nous instance, but contains no information about the +4% MRR measurement or the corpus-dependent finding that would justify a production recommendation. |
-| calibration_factor | FAIL | 27 | The assembled context contains no mention of a calibration factor of 0.7627 or any reference to 401 reviewed production decisions. |
-| edge_audit | FAIL | 30 | The assembled context contains no information about the F022 edge audit findings, specifically nothing about 0.70 precision on informed_by/related_to edges or empty content being the dominant cause. The only F022-related fact mentions a graph edge breakdown prior to an F022 fix, but does not describe the audit findings requested. |
+| telegram_email | FAIL | 26 | The assembled context covers how the Telegram bot works (long-polling, session management, REST API communication) but contains no information about bot token + chat ID environment variables or subtask completion notifications, which are required parts of the gold answer. |
+| heartbeat_overview | FAIL | 27 | The assembled context contains no information about F034 proactive monitoring, health/email/self-initiated checks, or a tick-interval heartbeat system. The heartbeat-related facts present only cover tag matching case-sensitivity and environment variable limitations, not the heartbeat system's core architecture or monitoring purpose. |
+| skill_management | FAIL | 26 | The assembled context mentions `learn_skill` tool and SKILL.md format with EvoSkill auto-discovery, but lacks details on SkillParser, bootstrap process, and auto-activation via RECALL — all required components of the gold answer F011 skill discovery flow. |
+| subtask_workers | FAIL | 21 | The assembled context contains no information about the default number of subtask workers or the NOUS_SUBTASK_WORKERS environment variable. The context mentions subtask-related facts (session leaks, session naming format, model used) but nothing about worker count configuration. |
+| rubric_evolution | FAIL | 31 | The assembled context mentions that Phase 3b (Self-Modifying Evaluation Rubric) is the next phase and describes rubric evolution mechanics (weights, constraints, gating), but it does not contain the specific pipeline described in the gold answer: outcome signals → dimension proposals → rubric weight evolution. The causal/procedural flow of how the rubric evolver works (starting from outcome signals feeding into dimension proposals) is absent. |
+| procedure_learning | FAIL | 26 | The assembled context contains no information about F012 K-line procedure learning or auto-creation of procedures from decision clusters during sleep. None of the retrieved memory items address this topic. |
+| graph_densification | FAIL | 24 | The assembled context contains no information about graph densification, orphan backfill, reverse linking, or per-relation thresholds during sleep cycle. The retrieved memory items are about graph overlay, graph recall defaults, FactGraphLinker, and SYNAPSE — none of which address the specific concept of graph densification as defined by the gold answer. |
+| cognitive_loop | FAIL | 27 | The assembled context does not contain the 7-step cognitive loop (Sense, Frame, Recall, Deliberate, Act, Monitor, Learn). The closest reference is the SCL paper's 5-phase R-CCAM model, which is a different framework entirely. |

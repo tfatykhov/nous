@@ -52,48 +52,50 @@ class PackingScenario:
     notes: str = ""
 
 
-# Hand-curated scenarios. Drawn from the prod-snapshot domain so the
-# pipeline has real memory to retrieve.
+# Hand-curated scenarios. Queries reference content that EXISTS in the
+# nous-prod-snapshot (taken before this session's PRs). Avoid topics
+# that landed today (calibration, F022 audit, F031 fixes) since the
+# snapshot pre-dates them.
 SCENARIOS: list[PackingScenario] = [
     PackingScenario(
-        "f042_finding",
-        "Tell me what we found about cross-encoder reranking.",
-        "F042 cross-encoder is corpus-dependent — helps on Nous-shape data, regresses on LongMemEval.",
+        "telegram_email",
+        "How does the Telegram bot integration work?",
+        "Bot token + chat ID env vars; subtask completion notifications.",
     ),
     PackingScenario(
-        "f058_reason",
-        "Why did we calibrate confidence?",
-        "Brier 0.252 at random baseline; ~20% systemic overconfidence on prod decisions.",
+        "heartbeat_overview",
+        "Tell me about the heartbeat system.",
+        "F034 proactive monitoring — health/email/self-initiated checks; runs on tick interval.",
     ),
     PackingScenario(
-        "ce_recommendation",
-        "Should we enable the cross-encoder in production?",
-        "Yes — measured +4% MRR on Nous-shape data; corpus-dependent finding.",
+        "skill_management",
+        "How do skills get registered in Nous?",
+        "F011 skill discovery — learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL.",
     ),
     PackingScenario(
-        "calibration_factor",
-        "What's the calibration factor we're using?",
-        "0.7627, derived from 401 reviewed prod decisions.",
+        "subtask_workers",
+        "How many subtask workers run by default?",
+        "Default is 2; configured via NOUS_SUBTASK_WORKERS env var.",
     ),
     PackingScenario(
-        "edge_audit",
-        "Summarize what the F022 edge audit found.",
-        "0.70 precision on informed_by/related_to; empty content the dominant cause.",
+        "rubric_evolution",
+        "What does the rubric evolver do?",
+        "F024-3b — outcome signals → dimension proposals → rubric weight evolution.",
     ),
     PackingScenario(
-        "supersession_change",
-        "What changed in the F027 prompt?",
-        "Decision tree, mutability framing, examples; UPDATE accuracy 53→90%.",
+        "procedure_learning",
+        "How are procedures created automatically?",
+        "F012 K-line procedure learning — auto-creates from decision clusters during sleep.",
     ),
     PackingScenario(
-        "calibration_metric",
-        "What's the Brier score on prod decisions?",
-        "0.252 — at random-guess baseline.",
+        "graph_densification",
+        "What is graph densification?",
+        "F040 — orphan backfill, reverse linking, per-relation thresholds during sleep cycle.",
     ),
     PackingScenario(
-        "tooling_calibration",
-        "How well-calibrated are tooling decisions?",
-        "Worst category: 0.745 mean confidence vs 36% success — gap +38%.",
+        "cognitive_loop",
+        "What are the steps of the cognitive loop?",
+        "Sense, Frame, Recall, Deliberate, Act, Monitor, Learn — 7 steps.",
     ),
 ]
 
