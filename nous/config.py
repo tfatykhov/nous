@@ -59,6 +59,12 @@ class Settings(BaseSettings):
     # link_fact_to_facts). Set to 0 to disable.
     cross_type_link_min_content_chars: int = 40
 
+    # F026 decision persistence — log every action-gate verdict and claim-
+    # verification outcome to nous_system.events so a retrospective accuracy
+    # eval can run against actual production behavior. Fire-and-forget via
+    # asyncio.create_task to avoid latency on the gate path.
+    f026_persistence_enabled: bool = True
+
     # Anti-hallucination (F016 Phase 0)
     anti_hallucination_prompt: bool = True
 

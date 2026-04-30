@@ -123,6 +123,25 @@ class AgentRunner:
             CacheBreakDetector() if settings.cache_break_detection_enabled else None
         )
 
+    def _log_f026_decision(
+        self, event_type: str, data: dict, session_id: str
+    ) -> None:
+        """Fire-and-forget persistence of an F026 verdict to nous_system.events.
+
+        Enables retrospective accuracy eval against real prod data
+        (otherwise F026 verdicts are session-scoped only). asyncio.create_task
+        is used so the gate hot path never blocks on DB I/O.
+        """
+        if not self._settings.f026_persistence_enabled:
+            return
+        try:
+            asyncio.create_task(
+                self._brain.emit_event(event_type, data, session_id=session_id)
+            )
+        except Exception:  # noqa: BLE001
+            # Persistence is best-effort — never let it break a turn.
+            logger.debug("F026 persistence failed (suppressed)", exc_info=True)
+
     async def _call_gate_model(self, prompt: str) -> str:
         """F026: Call a Haiku-class model for Tier 3 action gating."""
         if not self._api:
@@ -973,6 +992,17 @@ class AgentRunner:
                         gate_result = await self._action_gate.check(
                             tc["name"], dispatch_input, ledger, user_message=user_message,
                         )
+                        self._log_f026_decision(
+                            "f026_action_gate",
+                            {
+                                "tool_name": tc["name"],
+                                "approved": gate_result.approved,
+                                "reason": gate_result.reason,
+                                "mode": self._settings.action_gating_mode,
+                                "turn": ledger.current_turn,
+                            },
+                            session_id=session_id,
+                        )
                         if gate_result.approved:
                             logger.info("F026 gate: %s approved (%s)", tc["name"], gate_result.reason)
                         else:
@@ -1229,6 +1259,17 @@ class AgentRunner:
                     if self._action_gate and ledger:
                         gate_result = await self._action_gate.check(
                             tool_name, tool_input, ledger, user_message=user_message,
+                        )
+                        self._log_f026_decision(
+                            "f026_action_gate",
+                            {
+                                "tool_name": tool_name,
+                                "approved": gate_result.approved,
+                                "reason": gate_result.reason,
+                                "mode": self._settings.action_gating_mode,
+                                "turn": ledger.current_turn,
+                            },
+                            session_id=session_id,
                         )
                         if gate_result.approved:
                             logger.info("F026 gate: %s approved (%s)", tool_name, gate_result.reason)
@@ -1601,6 +1642,25 @@ Rules:
         # Claim verification
         if self._claim_verifier:
             verification = self._claim_verifier.verify(response_text, turn_tool_names, ledger)
+            self._log_f026_decision(
+                "f026_claim_verification",
+                {
+                    "verified": verification.verified,
+                    "violation_count": len(verification.violations),
+                    "violations": [
+                        {
+                            "claimed_text": v.claimed_text[:200],
+                            "expected_tool": v.expected_tool,
+                            "found_in_turn": v.found_in_turn,
+                            "found_in_ledger": v.found_in_ledger,
+                        }
+                        for v in verification.violations
+                    ],
+                    "tool_names_this_turn": turn_tool_names,
+                    "mode": self._settings.claim_verification_mode,
+                },
+                session_id=session_id,
+            )
             if verification.verified:
                 logger.info("F026 claims: verified (%d tools this turn)", len(turn_tool_names))
             else:
