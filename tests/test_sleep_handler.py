@@ -839,3 +839,43 @@ class TestStructuredContradictionResolution:
 
         assert result is True
         assert sleep_stats.get("contradictions_resolved", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_merge_without_content_downgrades_to_keep_both(self):
+        """2026-05-01 audit: prod sleep returned MERGE without merged_content
+        and silently no-op'd. New behavior: log warning and treat as
+        KEEP_BOTH so the resolution is observable and counted accurately."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        heart.find_contradiction_candidates = AsyncMock(return_value=[
+            {
+                "fact1_id": "f1", "fact2_id": "f2",
+                "content1": "Python is fast", "content2": "Python is slow",
+                "date1": "2026-01-01", "date2": "2026-02-01",
+                "subject": "python", "category": "technical",
+            }
+        ])
+        heart.deactivate_fact = AsyncMock()
+        heart.learn = AsyncMock()
+
+        # Simulate the prod failure mode: action=MERGE, no merged_content
+        resolution = {
+            "action": "MERGE", "confidence": 0.85, "reason": "Both true at different times",
+            # merged_content omitted — this is the bug we're guarding against
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_x", "name": "resolve_contradiction",
+             "input": resolution}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+
+        assert result is True
+        # MERGE→KEEP_BOTH downgrade means no facts deactivated, no merged fact created
+        heart.deactivate_fact.assert_not_called()
+        heart.learn.assert_not_called()
+        # Counter does NOT increment for KEEP_BOTH (correct prod behavior)
+        assert sleep_stats.get("contradictions_resolved", 0) == 0

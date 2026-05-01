@@ -169,6 +169,8 @@ Examples to disambiguate:
 
 For `confidence`: use 0.85+ when one action is clearly right, 0.70-0.85 when borderline, below 0.70 when genuinely uncertain (will be downgraded to KEEP_BOTH by the caller).
 
+CRITICAL: When you choose MERGE, you MUST also produce a non-empty `merged_content` field with the combined single-fact text. If you cannot produce a meaningful merge (the two facts genuinely require both being kept), return KEEP_BOTH instead — never return MERGE with empty merged_content.
+
 Use the resolve_contradiction tool to return your analysis."""
 
 # Tool-use structured output schema for contradiction resolution (Issue #233)
@@ -687,6 +689,7 @@ class SleepHandler:
                 raw_action = str(resolution.get("action", "")).upper().strip()
                 action = raw_action
                 confidence = float(resolution.get("confidence", 0.0))
+                merged_content = str(resolution.get("merged_content", "") or "").strip()
                 fact1_id = pair["fact1_id"]
                 fact2_id = pair["fact2_id"]
 
@@ -700,10 +703,26 @@ class SleepHandler:
                     action = "KEEP_BOTH"
                     downgraded = True
 
+                # 2026-05-01 audit: production sleep cycle reported "10 found,
+                # 0 resolved" — investigation showed 8 of 10 verdicts were
+                # MERGE but `merged_content` was missing (schema makes it
+                # optional). The MERGE branch silently fell through. Treat
+                # missing merged_content on MERGE as KEEP_BOTH and log it
+                # explicitly so the issue is observable.
+                if action == "MERGE" and not merged_content:
+                    logger.warning(
+                        "F031 resolve: MERGE returned without merged_content for %s/%s — downgrading to KEEP_BOTH",
+                        fact1_id, fact2_id,
+                    )
+                    action = "KEEP_BOTH"
+                    downgraded = True
+
                 # F031 persistence — log every resolution decision so a
                 # retrospective accuracy eval can run against real prod data
                 # (eval_f031_resolution.py used synthetic fixtures only).
                 # Fire-and-forget via create_task to keep the sleep loop fast.
+                # 2026-05-01: include `merged_content_present` so the
+                # MERGE-without-content failure mode is observable in prod.
                 try:
                     asyncio.create_task(
                         self._brain.emit_event(
@@ -713,6 +732,7 @@ class SleepHandler:
                                 "applied_action": action,
                                 "confidence": confidence,
                                 "downgraded_by_floor": downgraded,
+                                "merged_content_present": bool(merged_content),
                                 "fact1_id": str(fact1_id),
                                 "fact2_id": str(fact2_id),
                                 "reason": str(resolution.get("reason", ""))[:300],
@@ -739,12 +759,14 @@ class SleepHandler:
                             action, fact2_id, fact1_id, confidence,
                         )
                     elif action == "MERGE":
-                        merged = resolution.get("merged_content", "")
-                        if merged:
+                        # merged_content is guaranteed non-empty here (the
+                        # downgrade-to-KEEP_BOTH guard above catches the empty
+                        # case); but keep a defensive check just in case.
+                        if merged_content:
                             try:
                                 await self._heart.learn(FactInput(
                                     subject=pair.get("subject", None),
-                                    content=merged,
+                                    content=merged_content,
                                     source="contradiction_resolution",
                                     confidence=0.8,
                                     category=pair.get("category", None),
