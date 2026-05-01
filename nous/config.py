@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     # link_fact_to_facts). Set to 0 to disable.
     cross_type_link_min_content_chars: int = 40
 
+    # F058 follow-up (2026-05-01): use tool-use structured output for
+    # ConversationCompactor checkpoint summaries. The eval measured 31%
+    # silent fact loss with the free-form prompt; structured output
+    # forces the model to enumerate facts in an array that can't be
+    # paraphrased away. Set to false to revert to the legacy free-form
+    # prompt path.
+    compaction_structured_facts_enabled: bool = True
+
     # F026 decision persistence — log every action-gate verdict and claim-
     # verification outcome to nous_system.events so a retrospective accuracy
     # eval can run against actual production behavior. Fire-and-forget via

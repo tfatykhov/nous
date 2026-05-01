@@ -110,6 +110,158 @@ _SECTION_PATTERNS = [
 ]
 
 
+# F058 follow-up (2026-05-01): tool-use schema for structured compaction.
+# The eval (reports/eval_compaction_fidelity.md) measured 31% silent fact
+# loss with the free-form prompt approach. By forcing the model to enumerate
+# facts in a `critical_context` array (one entry per specific value), the
+# fact ledger becomes part of the structured output and can't be silently
+# paraphrased away. The legacy markdown format is reconstructed from the
+# structured dict so downstream consumers (validate, prompt rendering) see
+# the same shape they always have.
+_CHECKPOINT_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "goal": {
+            "type": "string",
+            "description": "1-2 sentence goal of the conversation.",
+        },
+        "constraints": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Requirements, technical constraints, preferences.",
+        },
+        "progress_done": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Completed work items.",
+        },
+        "progress_in_progress": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Active/unfinished work.",
+        },
+        "key_decisions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "decision": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["decision", "rationale"],
+            },
+            "description": "Decisions made with their rationale.",
+        },
+        "conversation_dynamics": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "User tone, style preferences, behavioral instructions.",
+        },
+        "next_steps": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Ordered list of next actions.",
+        },
+        "critical_context": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {
+                        "type": "string",
+                        "description": "Short label for what this value is.",
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Verbatim value. Numbers, IPs, emails, ports, version numbers, account IDs, file paths, names, dates, identifiers — copy as stated. Do NOT paraphrase.",
+                    },
+                },
+                "required": ["topic", "value"],
+            },
+            "description": "Fact ledger — every specific value mentioned in the conversation. Each entry survives compaction verbatim. This is the load-bearing field.",
+        },
+    },
+    "required": [
+        "goal", "constraints", "progress_done", "progress_in_progress",
+        "key_decisions", "conversation_dynamics", "next_steps",
+        "critical_context",
+    ],
+}
+
+
+def _format_structured_checkpoint(data: dict[str, Any]) -> str:
+    """Render the structured tool output back into the legacy markdown format.
+
+    Downstream consumers (validation, the conversation prefix, future
+    update calls) expect the section-headed markdown. Build it from the
+    structured dict so the fact ledger is guaranteed to be present.
+    """
+    lines: list[str] = []
+    lines.append("## Goal")
+    lines.append(str(data.get("goal") or "(unspecified)").strip())
+    lines.append("")
+
+    constraints = data.get("constraints") or []
+    if constraints:
+        lines.append("## Constraints & Preferences")
+        for c in constraints:
+            lines.append(f"- {c}")
+        lines.append("")
+
+    lines.append("## Progress")
+    done = data.get("progress_done") or []
+    if done:
+        lines.append("### Done")
+        for d in done:
+            lines.append(f"- [x] {d}")
+    in_progress = data.get("progress_in_progress") or []
+    if in_progress:
+        lines.append("### In Progress")
+        for d in in_progress:
+            lines.append(f"- [ ] {d}")
+    lines.append("")
+
+    decisions = data.get("key_decisions") or []
+    if decisions:
+        lines.append("## Key Decisions")
+        for d in decisions:
+            if isinstance(d, dict):
+                lines.append(f"- **{d.get('decision','')}**: {d.get('rationale','')}")
+            else:
+                lines.append(f"- {d}")
+        lines.append("")
+
+    dynamics = data.get("conversation_dynamics") or []
+    if dynamics:
+        lines.append("## Conversation Dynamics")
+        for d in dynamics:
+            lines.append(f"- {d}")
+        lines.append("")
+
+    next_steps = data.get("next_steps") or []
+    if next_steps:
+        lines.append("## Next Steps")
+        for i, s in enumerate(next_steps, 1):
+            lines.append(f"{i}. {s}")
+        lines.append("")
+
+    # The fact ledger — always emitted, even if empty (validator requires the
+    # section header).
+    lines.append("## Critical Context")
+    crit = data.get("critical_context") or []
+    if crit:
+        for entry in crit:
+            if isinstance(entry, dict):
+                topic = entry.get("topic", "fact")
+                value = entry.get("value", "")
+                lines.append(f"- {topic}: {value}")
+            else:
+                lines.append(f"- {entry}")
+    else:
+        lines.append("- (no specific values recorded)")
+    return "\n".join(lines).strip()
+
+
 # ------------------------------------------------------------------
 # Protocol for API caller injection
 # ------------------------------------------------------------------
@@ -531,7 +683,15 @@ class ConversationCompactor:
         existing_summary: str | None,
         call_api: ApiCaller,
     ) -> str:
-        """Generate structured checkpoint summary via LLM."""
+        """Generate structured checkpoint summary via LLM.
+
+        F058 follow-up (2026-05-01): when
+        `compaction_structured_facts_enabled` is true, use a tool-use
+        schema that forces the model to enumerate facts in an explicit
+        array. The summary is then rendered from the structured output,
+        guaranteeing the fact ledger survives. Falls back to the legacy
+        free-form prompt path on tool-call failure or when disabled.
+        """
         if existing_summary:
             user_content = (
                 f"## Existing Summary\n\n{existing_summary}\n\n"
@@ -543,6 +703,17 @@ class ConversationCompactor:
             user_content = self._serialize_for_summary(old_messages)
             system = CHECKPOINT_SYSTEM_PROMPT
 
+        if getattr(self._settings, "compaction_structured_facts_enabled", False):
+            tool_text = await self._summarize_structured(
+                user_content, system, call_api
+            )
+            if tool_text:
+                return tool_text
+            # Fall through to legacy path on structured-output failure.
+            logger.warning(
+                "Compaction structured output failed; falling back to free-form prompt"
+            )
+
         response = await call_api(
             system_prompt=system,
             messages=[{"role": "user", "content": user_content}],
@@ -551,6 +722,56 @@ class ConversationCompactor:
             model_override=self._settings.background_model,
         )
         return self.extract_text(response.content)
+
+    async def _summarize_structured(
+        self,
+        user_content: str,
+        system: str,
+        call_api: ApiCaller,
+    ) -> str | None:
+        """Tool-use path: ask the model to fill in the checkpoint schema.
+
+        Returns rendered markdown on success, None on any failure
+        (parse error, missing tool_use block, schema fields missing).
+        """
+        tools = [
+            {
+                "name": "checkpoint_summary",
+                "description": (
+                    "Produce a structured checkpoint summary of the conversation. "
+                    "Every specific value (number, IP, email, port, version, name, "
+                    "date, file path, identifier) MUST appear verbatim in the "
+                    "critical_context array — that's the fact ledger that survives "
+                    "compaction."
+                ),
+                "input_schema": _CHECKPOINT_TOOL_SCHEMA,
+            }
+        ]
+        try:
+            response = await call_api(
+                system_prompt=system,
+                messages=[{"role": "user", "content": user_content}],
+                tools=tools,
+                skip_thinking=True,
+                model_override=self._settings.background_model,
+            )
+        except Exception:
+            logger.exception("Compaction structured tool call failed")
+            return None
+
+        # Extract the tool_use block.
+        for block in response.content or []:
+            if block.get("type") == "tool_use" and block.get("name") == "checkpoint_summary":
+                payload = block.get("input") or {}
+                if not isinstance(payload, dict):
+                    return None
+                rendered = _format_structured_checkpoint(payload)
+                # Sanity check — the validator below requires the section
+                # markers; rendered output always includes them.
+                if len(rendered) < 100:
+                    return None
+                return rendered
+        return None
 
     def _validate_summary(self, summary: str) -> bool:
         """Basic format + length check.
