@@ -841,6 +841,64 @@ class TestStructuredContradictionResolution:
         assert sleep_stats.get("contradictions_resolved", 0) == 0
 
     @pytest.mark.asyncio
+    async def test_persistence_flags_distinguish_downgrade_reasons(self):
+        """Codex P2 follow-up to #393: `downgraded_by_floor` must reflect
+        confidence-floor downgrades only; missing-merged_content gets its
+        own `downgraded_due_to_missing_content` flag in the persistence
+        event so eval queries can disambiguate the two."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        captured_events: list[tuple[str, dict]] = []
+
+        async def capture_emit(event_type, data, **kwargs):
+            captured_events.append((event_type, data))
+
+        brain.emit_event = capture_emit
+
+        heart.find_contradiction_candidates = AsyncMock(return_value=[
+            {
+                "fact1_id": "fA", "fact2_id": "fB",
+                "content1": "Pi=3.14", "content2": "Pi=4",
+                "date1": "2026-01-01", "date2": "2026-02-01",
+                "subject": "math", "category": "concept",
+            }
+        ])
+        heart.deactivate_fact = AsyncMock()
+        heart.learn = AsyncMock()
+
+        # MERGE without merged_content; confidence is HIGH (above 0.7) so
+        # the floor doesn't fire. Only the missing-content flag should set.
+        resolution = {
+            "action": "MERGE", "confidence": 0.92,
+            "reason": "Both partial truths",
+            # merged_content omitted
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "x", "name": "resolve_contradiction",
+             "input": resolution}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0,
+                       "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        # Drain pending fire-and-forget tasks
+        import asyncio as _aio
+        await _aio.sleep(0)
+
+        assert captured_events, "no F031 event emitted"
+        _, data = captured_events[0]
+        assert data["downgraded_by_floor"] is False, (
+            "confidence was 0.92 — floor didn't fire"
+        )
+        assert data["downgraded_due_to_missing_content"] is True, (
+            "MERGE without merged_content should set the missing-content flag"
+        )
+        assert data["applied_action"] == "KEEP_BOTH"
+        assert data["raw_action"] == "MERGE"
+
+    @pytest.mark.asyncio
     async def test_merge_without_content_downgrades_to_keep_both(self):
         """2026-05-01 audit: prod sleep returned MERGE without merged_content
         and silently no-op'd. New behavior: log warning and treat as

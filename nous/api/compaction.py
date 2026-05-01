@@ -766,9 +766,16 @@ class ConversationCompactor:
                 if not isinstance(payload, dict):
                     return None
                 rendered = _format_structured_checkpoint(payload)
-                # Sanity check — the validator below requires the section
-                # markers; rendered output always includes them.
-                if len(rendered) < 100:
+                # Codex P1 follow-up to #395: align with the downstream
+                # `_validate_summary` 200-char minimum. Returning at >=100
+                # but failing validation at 200 wastes a fallback API call.
+                # Returning None here triggers the fallback ONCE.
+                if len(rendered) < 200:
+                    logger.info(
+                        "Compaction structured output rendered to %d chars (<200); "
+                        "falling back to free-form prompt.",
+                        len(rendered),
+                    )
                     return None
                 return rendered
         return None
