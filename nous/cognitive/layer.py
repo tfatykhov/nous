@@ -252,7 +252,9 @@ class CognitiveLayer:
                     .limit(1)
                 )
                 ep_id = result.scalar_one_or_none()
-                if ep_id is not None:
+                # Defensive: only populate cache from a real UUID (not a
+                # MagicMock or stray coroutine from misconfigured tests).
+                if isinstance(ep_id, UUID):
                     ep_str = str(ep_id)
                     self._active_episodes[session_id] = ep_str
                     logger.info(
