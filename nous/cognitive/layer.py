@@ -204,20 +204,65 @@ class CognitiveLayer:
         calls so fact→episode edges are created without requiring the model
         to know or pass the UUID explicitly.
 
-        Limitation (P1-1): _active_episodes is in-memory only.  After a
-        process restart the dict is empty and this returns None, causing
-        injection to be silently skipped.  The proper fix is to add
-        session_id to the Episode DB schema and fall back to a DB query here.
-        Tracked as follow-up migration task.
+        First checks the in-memory `_active_episodes` map. After process
+        restart that map is empty — falls back to a fire-and-forget DB
+        cache refresh via `_load_active_episode_from_db` so subsequent
+        calls in the same session find the episode. The current call
+        still returns None (the runner already handles that), but
+        future calls in the same session benefit. See `awarm_active_episode`
+        for the explicit warmup hook used at the top of pre_turn.
         """
         episode_id = self._active_episodes.get(session_id)
         if episode_id is None:
             logger.debug(
-                "get_active_episode_id: no active episode for session %s "
-                "(in-memory miss — may be post-restart or low-significance turn)",
+                "get_active_episode_id: in-memory miss for session %s "
+                "(post-restart? Calling code should warmup via "
+                "warm_active_episode if a synchronous answer is needed)",
                 session_id,
             )
         return episode_id
+
+    async def warm_active_episode(self, session_id: str) -> str | None:
+        """Populate the in-memory map from DB if it's empty for this session.
+
+        F022 follow-up (2026-05-01): the in-memory `_active_episodes` map is
+        wiped on process restart. This async helper does a single DB query
+        to find the most-recent ongoing episode for the session, populates
+        the cache, and returns the episode UUID string (or None).
+
+        Call this once per turn (e.g. at the top of pre_turn) so the
+        synchronous `get_active_episode_id` used by the runner returns a
+        populated value for the rest of the turn.
+        """
+        cached = self._active_episodes.get(session_id)
+        if cached is not None:
+            return cached
+        try:
+            from sqlalchemy import select
+            from nous.storage.models import Episode
+            async with self._brain.db.session() as db_session:
+                result = await db_session.execute(
+                    select(Episode.id)
+                    .where(
+                        Episode.agent_id == self._brain.agent_id,
+                        Episode.session_id == session_id,
+                        Episode.ended_at.is_(None),
+                    )
+                    .order_by(Episode.started_at.desc())
+                    .limit(1)
+                )
+                ep_id = result.scalar_one_or_none()
+                if ep_id is not None:
+                    ep_str = str(ep_id)
+                    self._active_episodes[session_id] = ep_str
+                    logger.info(
+                        "F022 warm: restored active episode %s for session %s from DB",
+                        ep_str, session_id,
+                    )
+                    return ep_str
+        except Exception:
+            logger.debug("warm_active_episode failed (suppressed)", exc_info=True)
+        return None
 
     async def pre_turn(
         self,
@@ -532,7 +577,13 @@ class CognitiveLayer:
             logger.warning("Deliberation start failed, continuing without decision_id")
             decision_id = None
 
-        # 5. EPISODE — start if no active episode AND interaction is significant
+        # 5. EPISODE — start if no active episode AND interaction is significant.
+        # F022 follow-up (2026-05-01): warm the in-memory map from DB first
+        # so a post-restart turn finds its active episode rather than
+        # creating a duplicate.
+        if not skip_episode and session_id not in self._active_episodes:
+            await self.warm_active_episode(session_id)
+
         if not skip_episode and session_id not in self._active_episodes:
             if self._should_create_episode(session_id, user_input):
                 try:
@@ -548,6 +599,7 @@ class CognitiveLayer:
                             trigger="user_message",
                             user_id=user_id,
                             user_display_name=user_display_name,
+                            session_id=session_id,  # F022 follow-up
                         )
                         episode = await self._heart.start_episode(episode_input, session=session)
                         self._active_episodes[session_id] = str(episode.id)
@@ -770,6 +822,7 @@ class CognitiveLayer:
                     ai_response=turn_result.response_text,
                     session_id=session_id,
                     session=session,
+                    episode_id=episode_id,
                 )
                 if correction:
                     logger.info(
@@ -1401,11 +1454,20 @@ class CognitiveLayer:
             except Exception:
                 logger.warning("Failed to end episode %s", episode_id)
 
-        # 2. Extract facts from reflection
+        # 2. Extract facts from reflection.
+        # F022 follow-up (2026-05-01): tag facts with source_episode_id
+        # so link_episode_deterministic can create extracted_from edges
+        # for them. Without this, every reflection-fact landed orphaned.
         facts_extracted = 0
         if reflection:
             # P2-9: Parse "learned: X" lines
             matches = _LEARNED_PATTERN.findall(reflection)
+            ep_uuid: UUID | None = None
+            if episode_id:
+                try:
+                    ep_uuid = UUID(episode_id)
+                except (ValueError, TypeError):
+                    ep_uuid = None
             for learned_text in matches:
                 learned_text = learned_text.strip()
                 if not learned_text:
@@ -1416,6 +1478,7 @@ class CognitiveLayer:
                         content=learned_text,
                         source="reflection",
                         category="rule",
+                        source_episode_id=ep_uuid,
                     )
                     await self._heart.learn(fact_input, session=session)
                     facts_extracted += 1

@@ -345,6 +345,9 @@ class Episode(Base):
     transcript: Mapped[str | None] = mapped_column(Text, nullable=True)  # F025 P3-C
     compaction_count: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False)
     user_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # F022 follow-up (2026-05-01): session_id lets get_active_episode_id
+    # fall back to DB lookup after process restart wipes the in-memory map.
+    session_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     user_display_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

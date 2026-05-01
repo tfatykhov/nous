@@ -302,6 +302,7 @@ class MonitorEngine:
         ai_response: str,
         session_id: str,
         session: AsyncSession | None = None,
+        episode_id: str | None = None,
     ) -> dict | None:
         """F039: Detect if user_message is a correction and extract the principle.
 
@@ -352,6 +353,15 @@ class MonitorEngine:
                 return None
 
             # Store as fact
+            # F022 follow-up (2026-05-01): tag with source_episode_id so the
+            # deterministic linker creates the extracted_from edge.
+            ep_uuid = None
+            if episode_id:
+                try:
+                    from uuid import UUID as _UUID
+                    ep_uuid = _UUID(episode_id)
+                except (ValueError, TypeError):
+                    ep_uuid = None
             fact_input = FactInput(
                 content=principle,
                 category="rule",
@@ -359,6 +369,7 @@ class MonitorEngine:
                 confidence=max(0.0, min(1.0, float(extraction.get("confidence", 0.7)))),
                 source="inline_correction",
                 tags=["correction", "auto:f039"],
+                source_episode_id=ep_uuid,
             )
             await self._heart.learn(fact_input, session=session)
 

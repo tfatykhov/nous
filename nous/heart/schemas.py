@@ -33,6 +33,10 @@ class EpisodeInput(BaseModel):
     tags: list[str] = []
     user_id: str | None = None
     user_display_name: str | None = None
+    # F022 follow-up: tag the episode with the conversation session that
+    # produced it so get_active_episode_id can fall back to a DB lookup
+    # after process restart wipes the in-memory map.
+    session_id: str | None = None
 
 
 class EpisodeDetail(BaseModel):
