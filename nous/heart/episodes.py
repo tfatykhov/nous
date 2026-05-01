@@ -105,6 +105,7 @@ class EpisodeManager:
             embedding=embedding,
             user_id=input.user_id,
             user_display_name=input.user_display_name,
+            session_id=input.session_id,  # F022 follow-up
         )
         session.add(episode)
         await session.flush()
