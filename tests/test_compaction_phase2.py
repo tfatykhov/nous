@@ -78,21 +78,38 @@ def _mock_call_api(summary_text: str = VALID_SUMMARY) -> AsyncMock:
     enabled or disabled.
     """
     mock = AsyncMock()
+    # Pad the structured output so the rendered markdown clears the
+    # validator's 200-char minimum length check.
     mock.return_value = ApiResponse(
         content=[
             {
                 "type": "tool_use",
                 "name": "checkpoint_summary",
                 "input": {
-                    "goal": "Test goal",
-                    "constraints": [],
-                    "progress_done": ["Done thing"],
-                    "progress_in_progress": [],
-                    "key_decisions": [],
-                    "conversation_dynamics": [],
-                    "next_steps": [],
+                    "goal": "Set up a test environment for verifying compaction behavior across multiple scenarios.",
+                    "constraints": [
+                        "Mock tests must not depend on real API.",
+                        "Validator requires at least 200 chars.",
+                    ],
+                    "progress_done": [
+                        "Wrote initial test fixture",
+                        "Set up CI matrix",
+                    ],
+                    "progress_in_progress": [
+                        "Adding edge-case coverage",
+                    ],
+                    "key_decisions": [
+                        {"decision": "Use shared mock", "rationale": "Reduces fixture duplication"},
+                    ],
+                    "conversation_dynamics": [
+                        "User wants concise summaries",
+                    ],
+                    "next_steps": [
+                        "Add more scenarios",
+                    ],
                     "critical_context": [
-                        {"topic": "test_value", "value": "preserved"}
+                        {"topic": "test_value", "value": "preserved"},
+                        {"topic": "validator_min_chars", "value": "200"},
                     ],
                 },
             },
