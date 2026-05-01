@@ -71,10 +71,56 @@ Testing conversation compaction for Nous agent framework.
 """
 
 
-def _mock_call_api(summary_text: str = VALID_SUMMARY) -> AsyncMock:
+def _mock_call_api(
+    summary_text: str = VALID_SUMMARY, with_tool_use: bool = True,
+) -> AsyncMock:
+    """Mock that returns BOTH a tool_use block (for the F058 structured
+    compaction path) AND text content (for the legacy fallback). This way
+    the same mock works whether the test runs with structured-output
+    enabled or disabled.
+
+    Pass `with_tool_use=False` to simulate a model that returns ONLY text
+    (e.g. for tests of the legacy free-form path or fallback behavior).
+    """
     mock = AsyncMock()
+    content_blocks: list = []
+    if with_tool_use:
+        # Pad the structured output so the rendered markdown clears the
+        # validator's 200-char minimum length check.
+        content_blocks.append({
+            "type": "tool_use",
+            "name": "checkpoint_summary",
+            "input": {
+                "goal": "Set up a test environment for verifying compaction behavior across multiple scenarios.",
+                "constraints": [
+                    "Mock tests must not depend on real API.",
+                    "Validator requires at least 200 chars.",
+                ],
+                "progress_done": [
+                    "Wrote initial test fixture",
+                    "Set up CI matrix",
+                ],
+                "progress_in_progress": [
+                    "Adding edge-case coverage",
+                ],
+                "key_decisions": [
+                    {"decision": "Use shared mock", "rationale": "Reduces fixture duplication"},
+                ],
+                "conversation_dynamics": [
+                    "User wants concise summaries",
+                ],
+                "next_steps": [
+                    "Add more scenarios",
+                ],
+                "critical_context": [
+                    {"topic": "test_value", "value": "preserved"},
+                    {"topic": "validator_min_chars", "value": "200"},
+                ],
+            },
+        })
+    content_blocks.append({"type": "text", "text": summary_text})
     mock.return_value = ApiResponse(
-        content=[{"type": "text", "text": summary_text}],
+        content=content_blocks,
         stop_reason="end_turn",
         usage={"input_tokens": 100, "output_tokens": 50},
     )
@@ -222,7 +268,10 @@ class TestCompact:
         compactor = ConversationCompactor(_make_settings())
         conv = _make_conversation(10)
         messages = _make_messages(conv)
-        mock_api = _mock_call_api(summary_text="too short")
+        # Force the legacy free-form path with a too-short summary so
+        # the validator rejects it. with_tool_use=False makes the
+        # structured path return None and fall through.
+        mock_api = _mock_call_api(summary_text="too short", with_tool_use=False)
 
         asyncio.get_event_loop().run_until_complete(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
