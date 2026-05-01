@@ -158,6 +158,37 @@ async def test_summarize_structured_swallows_exceptions():
 
 
 @pytest.mark.asyncio
+async def test_summarize_structured_below_validator_minimum_returns_none():
+    """Codex P1 follow-up to #395: structured output rendering to <200
+    chars must return None so the legacy fallback runs. Previously the
+    threshold was 100, mismatched with the validator's 200, causing a
+    wasted API call."""
+    compactor = ConversationCompactor(_settings(True))
+
+    # Minimal payload renders to ~120 chars — below the validator's 200.
+    tool_payload = {
+        "goal": "G",
+        "constraints": [],
+        "progress_done": [],
+        "progress_in_progress": [],
+        "key_decisions": [],
+        "conversation_dynamics": [],
+        "next_steps": [],
+        "critical_context": [],
+    }
+    mock_response = MagicMock()
+    mock_response.content = [
+        {"type": "tool_use", "name": "checkpoint_summary", "input": tool_payload}
+    ]
+    call_api = AsyncMock(return_value=mock_response)
+
+    result = await compactor._summarize_structured(
+        user_content="x", system="y", call_api=call_api,
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_summarize_falls_back_to_freeform_when_structured_fails():
     """When the structured path returns None, _summarize tries the legacy path."""
     compactor = ConversationCompactor(_settings(True))

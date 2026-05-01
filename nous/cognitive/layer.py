@@ -241,12 +241,17 @@ class CognitiveLayer:
             from sqlalchemy import select
             from nous.storage.models import Episode
             async with self._brain.db.session() as db_session:
+                # Codex P1 follow-up to #394: trivial sessions are closed
+                # via `deactivate_episode` which only flips `active=false`
+                # and leaves `ended_at` NULL. Filter on `active=true` so
+                # those deactivated rows don't get resurrected by warm.
                 result = await db_session.execute(
                     select(Episode.id)
                     .where(
                         Episode.agent_id == self._brain.agent_id,
                         Episode.session_id == session_id,
                         Episode.ended_at.is_(None),
+                        Episode.active.is_(True),
                     )
                     .order_by(Episode.started_at.desc())
                     .limit(1)

@@ -108,3 +108,37 @@ async def test_warm_active_episode_swallows_errors():
     # Must not raise
     result = await layer.warm_active_episode("session-err")
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_warm_active_episode_query_filters_active_true():
+    """Codex P1 follow-up to #394: deactivated episodes have ended_at NULL
+    but active=false. The warm query MUST filter on active=true so
+    deactivated rows aren't resurrected. Verify by inspecting the SQL
+    fragment passed to execute()."""
+    from nous.cognitive.layer import CognitiveLayer
+
+    layer = CognitiveLayer.__new__(CognitiveLayer)
+    layer._active_episodes = {}
+    layer._brain = MagicMock()
+    layer._brain.agent_id = "test-agent"
+
+    captured_stmt = []
+
+    async def fake_execute(stmt):
+        captured_stmt.append(stmt)
+        return MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+
+    mock_session = MagicMock()
+    mock_session.execute = fake_execute
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=mock_session)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    layer._brain.db.session = MagicMock(return_value=cm)
+
+    await layer.warm_active_episode("any-session")
+    assert captured_stmt, "execute was not called"
+    # The compiled SELECT must reference both ended_at and active.
+    sql = str(captured_stmt[0])
+    assert "ended_at" in sql.lower()
+    assert "active" in sql.lower()
