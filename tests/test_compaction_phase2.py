@@ -72,9 +72,32 @@ Testing conversation compaction for Nous agent framework.
 
 
 def _mock_call_api(summary_text: str = VALID_SUMMARY) -> AsyncMock:
+    """Mock that returns BOTH a tool_use block (for the F058 structured
+    compaction path) AND text content (for the legacy fallback). This way
+    the same mock works whether the test runs with structured-output
+    enabled or disabled.
+    """
     mock = AsyncMock()
     mock.return_value = ApiResponse(
-        content=[{"type": "text", "text": summary_text}],
+        content=[
+            {
+                "type": "tool_use",
+                "name": "checkpoint_summary",
+                "input": {
+                    "goal": "Test goal",
+                    "constraints": [],
+                    "progress_done": ["Done thing"],
+                    "progress_in_progress": [],
+                    "key_decisions": [],
+                    "conversation_dynamics": [],
+                    "next_steps": [],
+                    "critical_context": [
+                        {"topic": "test_value", "value": "preserved"}
+                    ],
+                },
+            },
+            {"type": "text", "text": summary_text},
+        ],
         stop_reason="end_turn",
         usage={"input_tokens": 100, "output_tokens": 50},
     )
