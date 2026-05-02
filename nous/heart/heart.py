@@ -776,8 +776,17 @@ class Heart:
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._recall(query, limit, types, session, residual_activations)
-        return await self._recall(query, limit, types, session, residual_activations)
+                return await self._recall(
+                    query, limit, types, session, residual_activations,
+                    owns_session=True,
+                )
+        # Caller-provided session: caller owns transaction recovery. We do
+        # NOT rollback after a sub-search failure (would silently discard
+        # uncommitted caller work earlier in the same transaction).
+        return await self._recall(
+            query, limit, types, session, residual_activations,
+            owns_session=False,
+        )
 
     def set_residual_activator(self, activator: "ResidualActivator | None") -> None:
         """F055: Wire a ResidualActivator instance.
@@ -819,6 +828,7 @@ class Heart:
         types: list[str] | None,
         session: AsyncSession,
         residual_activations: dict[UUID, float] | None = None,
+        owns_session: bool = True,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -891,19 +901,25 @@ class Heart:
             except Exception as exc:
                 keys.append(memory_type)
                 results_list.append(exc)
-                # The shared AsyncSession may be in a failed-transaction state
+                # The AsyncSession may be in a failed-transaction state
                 # (e.g., asyncpg InFailedSQLTransactionError after a SQL-level
                 # error like UndefinedColumnError). Rolling back clears the
                 # failed state so subsequent sub-searches in this loop don't
                 # cascade-fail with "current transaction is aborted".
-                try:
-                    await session.rollback()
-                except Exception:
-                    logger.warning(
-                        "Recall sub-search rollback failed for %s; "
-                        "remaining sub-searches will likely fail",
-                        memory_type, exc_info=True,
-                    )
+                #
+                # Only rollback when we own the session — otherwise we'd
+                # silently discard uncommitted caller work in the same
+                # transaction. Caller-provided-session callers must handle
+                # their own transaction recovery.
+                if owns_session:
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        logger.warning(
+                            "Recall sub-search rollback failed for %s; "
+                            "remaining sub-searches will likely fail",
+                            memory_type, exc_info=True,
+                        )
 
         # Use original search scores instead of RRF positional scores.
         # Episodes, facts, and procedures use hybrid_search() (configurable
