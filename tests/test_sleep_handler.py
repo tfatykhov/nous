@@ -841,6 +841,65 @@ class TestStructuredContradictionResolution:
         assert sleep_stats.get("contradictions_resolved", 0) == 0
 
     @pytest.mark.asyncio
+    async def test_low_conf_merge_without_content_sets_both_flags(self):
+        """Codex P2 follow-up to #396: a verdict that hits BOTH the
+        confidence floor (<0.7) AND missing merged_content must set
+        BOTH flags. The pre-fix logic mutated `action` to KEEP_BOTH on
+        the floor check first, then the missing-content check failed
+        because action was no longer MERGE.
+        """
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        captured_events: list[tuple[str, dict]] = []
+
+        async def capture_emit(event_type, data, **kwargs):
+            captured_events.append((event_type, data))
+
+        brain.emit_event = capture_emit
+
+        heart.find_contradiction_candidates = AsyncMock(return_value=[
+            {
+                "fact1_id": "f1", "fact2_id": "f2",
+                "content1": "X", "content2": "Y",
+                "date1": "2026-01-01", "date2": "2026-02-01",
+                "subject": "s", "category": "c",
+            }
+        ])
+        heart.deactivate_fact = AsyncMock()
+        heart.learn = AsyncMock()
+
+        # Both: low confidence (0.5 < 0.7) AND missing merged_content.
+        resolution = {
+            "action": "MERGE", "confidence": 0.5,
+            "reason": "Both apply but unsure",
+            # merged_content omitted
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "x", "name": "resolve_contradiction",
+             "input": resolution}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0,
+                       "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+        import asyncio as _aio
+        await _aio.sleep(0)
+
+        assert captured_events
+        _, data = captured_events[0]
+        assert data["downgraded_by_floor"] is True, (
+            "0.5 < 0.7 floor — must be flagged"
+        )
+        assert data["downgraded_due_to_missing_content"] is True, (
+            "MERGE without merged_content — must be flagged regardless of "
+            "the floor downgrade order"
+        )
+        assert data["raw_action"] == "MERGE"
+        assert data["applied_action"] == "KEEP_BOTH"
+
+    @pytest.mark.asyncio
     async def test_persistence_flags_distinguish_downgrade_reasons(self):
         """Codex P2 follow-up to #393: `downgraded_by_floor` must reflect
         confidence-floor downgrades only; missing-merged_content gets its
