@@ -531,3 +531,142 @@ async def test_recall_with_cross_encoder_mocked(heart, session, monkeypatch, cap
         assert len(ce_logs) >= 1
     finally:
         RuntimeConfig.get().clear_cross_encoder_enabled()
+
+
+async def test_recall_subsearch_failure_rollback_when_we_own_session(
+    heart, session, monkeypatch,
+):
+    """When Heart owns the session, a sub-search exception triggers
+    session.rollback() so the asyncpg connection's failed-transaction
+    state is cleared and remaining sub-searches in the loop continue.
+
+    This unit test verifies the call site fires; the integration test
+    below verifies it actually clears real asyncpg state.
+    """
+    _stub_remaining_searches(heart, session, monkeypatch)
+
+    # Monkeypatch episodes.search to raise (simulates schema mismatch).
+    async def _broken_episode_search(*_args, **_kwargs):
+        raise RuntimeError("simulated session-poisoning sub-search failure")
+    monkeypatch.setattr(heart.episodes, "search", _broken_episode_search)
+
+    # Track rollback (without actually rolling back — would nuke test txn).
+    rollback_calls: list[None] = []
+
+    async def _track_rollback() -> None:
+        rollback_calls.append(None)
+    monkeypatch.setattr(session, "rollback", _track_rollback)
+
+    # Call _recall directly with owns_session=True (mirrors the path the
+    # public recall() takes when no session is passed in).
+    await heart._recall(
+        "anything", limit=10,
+        types=["episode", "fact", "procedure", "censor"],
+        session=session, owns_session=True,
+    )
+
+    assert len(rollback_calls) >= 1, (
+        "session.rollback() not called after sub-search exception — "
+        "asyncpg transaction would stay poisoned and cascade-kill remaining "
+        "sub-searches in prod."
+    )
+    assert heart._stub_facts_called == 1
+    assert heart._stub_procedures_called == 1
+    assert heart._stub_censors_called == 1
+
+
+async def test_recall_subsearch_failure_skips_rollback_when_caller_owns_session(
+    heart, session, monkeypatch,
+):
+    """When a caller passes their own session into Heart.recall, Heart
+    must NOT rollback after a sub-search exception — that would silently
+    discard the caller's uncommitted work earlier in the same transaction.
+
+    This test guards the asymmetric-ownership trap surfaced in code
+    review of the original cascade-fix: the rollback is correct for the
+    dominant 'session is None' path, dangerous for the shared-session
+    path.
+    """
+    _stub_remaining_searches(heart, session, monkeypatch)
+
+    async def _broken_episode_search(*_args, **_kwargs):
+        raise RuntimeError("session-poisoning failure")
+    monkeypatch.setattr(heart.episodes, "search", _broken_episode_search)
+
+    rollback_calls: list[None] = []
+
+    async def _track_rollback() -> None:
+        rollback_calls.append(None)
+    monkeypatch.setattr(session, "rollback", _track_rollback)
+
+    # Call via public recall() which forwards session and sets owns_session=False.
+    await heart.recall(
+        "anything", limit=10,
+        types=["episode", "fact", "procedure", "censor"],
+        session=session,
+    )
+
+    assert len(rollback_calls) == 0, (
+        "session.rollback() was called on a caller-provided session — "
+        "Heart must not silently rollback work the caller may have "
+        "queued in the same transaction."
+    )
+
+
+async def test_recall_subsearch_real_sql_error_does_not_cascade(
+    heart, monkeypatch,
+):
+    """Integration test: a real asyncpg SQL-level error in one sub-search
+    must not cascade-kill the next sub-search via
+    InFailedSQLTransactionError.
+
+    Uses heart.recall with no session so Heart opens its own (owns_session
+    path → rollback fires). Monkeypatches episodes.search to issue a real
+    bad SQL query against the shared session, then raises. Without the
+    rollback fix, the next sub-search would raise asyncpg's
+    InFailedSQLTransactionError; with the fix, it returns cleanly.
+    """
+    from sqlalchemy import text
+
+    async def _broken_episode_search(query, fetch_limit, session, **kwargs):
+        # Real SQL error → asyncpg marks the connection's transaction ABORTED.
+        try:
+            await session.execute(
+                text("SELECT bogus_col_xyz FROM heart.episodes LIMIT 1")
+            )
+        except Exception:
+            pass
+        # Session is now in InFailedSQLTransactionError state.
+        raise RuntimeError("episode search failed (poisoned the session)")
+    monkeypatch.setattr(heart.episodes, "search", _broken_episode_search)
+
+    # No session passed — Heart opens its own and owns rollback.
+    # Without the fix this raises asyncpg.InFailedSQLTransactionError
+    # from facts.search trying to query a poisoned transaction.
+    results = await heart.recall(
+        "anything", limit=10, types=["episode", "fact"],
+    )
+    # Call completed; cascade was broken. Result content doesn't matter.
+    assert results is not None
+
+
+def _stub_remaining_searches(heart, session, monkeypatch):
+    """Stub fact/procedure/censor searches and tag heart with call counts."""
+    heart._stub_facts_called = 0
+    heart._stub_procedures_called = 0
+    heart._stub_censors_called = 0
+
+    async def _stub_fact_search(*_args, **_kwargs):
+        heart._stub_facts_called += 1
+        return []
+    monkeypatch.setattr(heart.facts, "search", _stub_fact_search)
+
+    async def _stub_procedure_search(*_args, **_kwargs):
+        heart._stub_procedures_called += 1
+        return []
+    monkeypatch.setattr(heart.procedures, "search", _stub_procedure_search)
+
+    async def _stub_censor_search(*_args, **_kwargs):
+        heart._stub_censors_called += 1
+        return []
+    monkeypatch.setattr(heart.censors, "search", _stub_censor_search)
