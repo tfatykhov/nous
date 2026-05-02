@@ -46,9 +46,22 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 
 @dataclass
 class PackingScenario:
+    """One end-to-end packing scenario.
+
+    ``bucket`` separates retrieval-quality probes from documentation-only
+    probes. Set ``bucket="docs"`` when the gold_answer_hint references
+    information that lives in CLAUDE.md / source code (env-var defaults,
+    internal classnames) rather than something the agent would naturally
+    memorize as a fact/episode/decision. Headline sufficiency is reported
+    over ``bucket="memory"`` only — docs scenarios are surfaced separately
+    as a known-limitation aside so they don't depress the metric we
+    actually use to judge retrieval quality.
+    """
+
     name: str
     user_message: str
-    gold_answer_hint: str  # what info needs to be in context
+    gold_answer_hint: str
+    bucket: str = "memory"  # "memory" or "docs"
     notes: str = ""
 
 
@@ -56,6 +69,16 @@ class PackingScenario:
 # nous-prod-snapshot (taken before this session's PRs). Avoid topics
 # that landed today (calibration, F022 audit, F031 fixes) since the
 # snapshot pre-dates them.
+#
+# Bucketing rationale (2026-05-02 audit, see PR #399 follow-up):
+#   - subtask_workers: gold expects NOUS_SUBTASK_WORKERS env var default.
+#     Pure configuration — corpus probe found 0 verbatim matches. docs.
+#   - skill_management: gold expects internal classnames (SkillParser,
+#     bootstrap, auto-activation via RECALL). Source-code-level detail
+#     never verbalized as a fact — corpus probe found 0 hits for those
+#     exact terms. docs.
+#   - All others: gold corresponds to memorizable events / decisions /
+#     architectural facts that the agent has stored. memory.
 SCENARIOS: list[PackingScenario] = [
     PackingScenario(
         "telegram_email",
@@ -71,11 +94,13 @@ SCENARIOS: list[PackingScenario] = [
         "skill_management",
         "How do skills get registered in Nous?",
         "F011 skill discovery — learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL.",
+        bucket="docs",
     ),
     PackingScenario(
         "subtask_workers",
         "How many subtask workers run by default?",
         "Default is 2; configured via NOUS_SUBTASK_WORKERS env var.",
+        bucket="docs",
     ),
     PackingScenario(
         "rubric_evolution",
@@ -98,6 +123,32 @@ SCENARIOS: list[PackingScenario] = [
         "Sense, Frame, Recall, Deliberate, Act, Monitor, Learn — 7 steps.",
     ),
 ]
+
+
+def aggregate_by_bucket(results: list[dict]) -> dict:
+    """Compute headline (memory) + docs sufficiency separately.
+
+    Returns a dict with both rates so the report can show them side-by-side.
+    Headline sufficiency is what should drive the verdict on whether
+    retrieval is healthy; docs sufficiency is a known-limitation aside.
+    """
+    memory = [r for r in results if r.get("bucket", "memory") == "memory"]
+    docs = [r for r in results if r.get("bucket") == "docs"]
+
+    def _rate(items: list[dict]) -> float:
+        n = len(items)
+        if n == 0:
+            return 0.0
+        return sum(1 for r in items if r["sufficient"]) / n
+
+    return {
+        "memory_total": len(memory),
+        "memory_ok": sum(1 for r in memory if r["sufficient"]),
+        "memory_rate": _rate(memory),
+        "docs_total": len(docs),
+        "docs_ok": sum(1 for r in docs if r["sufficient"]),
+        "docs_rate": _rate(docs),
+    }
 
 
 _JUDGE_PROMPT = """You are evaluating whether an assembled memory context is sufficient to answer a user's question.
@@ -213,6 +264,7 @@ async def main() -> int:
                 )
                 results.append({
                     "name": sc.name,
+                    "bucket": sc.bucket,
                     "question": sc.user_message,
                     "gold_hint": sc.gold_answer_hint,
                     "n_results": len(results_list),
@@ -228,17 +280,26 @@ async def main() -> int:
     if not n:
         print("No results.")
         return 1
-    sufficient = sum(1 for r in results if r["sufficient"])
-    rate = sufficient / n
+    agg = aggregate_by_bucket(results)
+    headline_pct = 100 * agg["memory_rate"]
+    docs_pct = 100 * agg["docs_rate"] if agg["docs_total"] else 0.0
 
     print()
     print("=" * 76)
     print(f"CONTEXT PACKING EVAL — {n} scenarios, top_k={args.top_k}")
     print("=" * 76)
-    print(f"\n  Sufficiency: {sufficient}/{n} ({100*rate:.0f}%)\n")
+    print(f"\n  Headline (memory bucket): "
+          f"{agg['memory_ok']}/{agg['memory_total']} "
+          f"({headline_pct:.0f}%)")
+    if agg["docs_total"]:
+        print(f"  Docs aside (known limitation): "
+              f"{agg['docs_ok']}/{agg['docs_total']} "
+              f"({docs_pct:.0f}%)")
+    print()
     for r in results:
         marker = "OK  " if r["sufficient"] else "FAIL"
-        print(f"  [{marker}] {r['name']:<28s} "
+        bucket_tag = f"[{r['bucket']}]"
+        print(f"  [{marker}] {bucket_tag:<8s} {r['name']:<28s} "
               f"n_results={r['n_results']:>2}  "
               f"reason: {r['reason'][:60]}")
     print("=" * 76)
@@ -249,19 +310,34 @@ async def main() -> int:
         "",
         f"- judge: `{args.judge_model}`",
         f"- top_k: {args.top_k}",
-        f"- sufficiency: **{sufficient}/{n} ({100*rate:.0f}%)**",
+        (f"- **headline sufficiency (memory bucket): "
+         f"{agg['memory_ok']}/{agg['memory_total']} ({headline_pct:.0f}%)**"),
+    ]
+    if agg["docs_total"]:
+        md.append(
+            f"- docs aside (known-limitation gold hints): "
+            f"{agg['docs_ok']}/{agg['docs_total']} ({docs_pct:.0f}%)"
+        )
+    md += [
         "",
         "## Per-scenario",
         "",
-        "| name | sufficient | n_results | reason |",
-        "|---|---|---:|---|",
+        "| name | bucket | sufficient | n_results | reason |",
+        "|---|---|---|---:|---|",
     ]
     for r in results:
-        md.append(f"| {r['name']} | {'OK' if r['sufficient'] else 'FAIL'} | "
+        md.append(f"| {r['name']} | {r['bucket']} | "
+                  f"{'OK' if r['sufficient'] else 'FAIL'} | "
                   f"{r['n_results']} | {r['reason']} |")
     args.out.write_text("\n".join(md), encoding="utf-8")
     args.out_json.write_text(json.dumps({
-        "n": n, "sufficient": sufficient, "rate": rate,
+        "n": n,
+        "headline_sufficiency": agg["memory_rate"],
+        "headline_ok": agg["memory_ok"],
+        "headline_total": agg["memory_total"],
+        "docs_sufficiency": agg["docs_rate"],
+        "docs_ok": agg["docs_ok"],
+        "docs_total": agg["docs_total"],
         "judge_model": args.judge_model,
         "results": results,
     }, indent=2), encoding="utf-8")
