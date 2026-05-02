@@ -693,34 +693,31 @@ class SleepHandler:
                 fact1_id = pair["fact1_id"]
                 fact2_id = pair["fact2_id"]
 
-                # Skip low-confidence actions (review fix: treat as KEEP_BOTH).
-                # `downgraded_by_floor` tracks ONLY the confidence-floor downgrade
-                # so eval queries can distinguish floor-driven downgrades from
-                # other causes (Codex P2 follow-up to PR #393).
-                downgraded_by_floor = False
-                if confidence < 0.7 and action != "KEEP_BOTH":
+                # Codex P2 follow-up to #396: evaluate BOTH downgrade
+                # conditions against `raw_action` so a low-confidence
+                # MERGE-without-content correctly sets both flags. The
+                # earlier version checked the missing-content condition
+                # AFTER the floor mutation had already reset action to
+                # KEEP_BOTH, so missing-content downgrades on
+                # low-confidence verdicts were silently undercounted.
+                downgraded_by_floor = (
+                    confidence < 0.7 and raw_action != "KEEP_BOTH"
+                )
+                downgraded_due_to_missing_content = (
+                    raw_action == "MERGE" and not merged_content
+                )
+                if downgraded_by_floor:
                     logger.info(
                         "F031 resolve: confidence %.2f below 0.7 for %s, downgrading to KEEP_BOTH",
-                        confidence, action,
+                        confidence, raw_action,
                     )
-                    action = "KEEP_BOTH"
-                    downgraded_by_floor = True
-
-                # 2026-05-01 audit: production sleep cycle reported "10 found,
-                # 0 resolved" — investigation showed 8 of 10 verdicts were
-                # MERGE but `merged_content` was missing (schema makes it
-                # optional). The MERGE branch silently fell through. Treat
-                # missing merged_content on MERGE as KEEP_BOTH and log it
-                # explicitly so the issue is observable. Tracked via a
-                # separate `downgraded_due_to_missing_content` flag.
-                downgraded_due_to_missing_content = False
-                if action == "MERGE" and not merged_content:
+                if downgraded_due_to_missing_content:
                     logger.warning(
                         "F031 resolve: MERGE returned without merged_content for %s/%s — downgrading to KEEP_BOTH",
                         fact1_id, fact2_id,
                     )
+                if downgraded_by_floor or downgraded_due_to_missing_content:
                     action = "KEEP_BOTH"
-                    downgraded_due_to_missing_content = True
 
                 # F031 persistence — log every resolution decision so a
                 # retrospective accuracy eval can run against real prod data
