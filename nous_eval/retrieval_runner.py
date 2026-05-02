@@ -310,7 +310,16 @@ async def _build_heart_for_eval(
     closed, even on test failure. Background tasks (EventBus, sleep handler,
     heartbeat) are not started — those belong to :mod:`nous.main`, not to
     the eval harness.
+
+    Pre-flight: asserts the eval DB has every column the ORM expects.
+    Without this, missing migrations cascade into asyncpg
+    InFailedSQLTransactionError mid-query and the eval reports something
+    like "0% sufficient" with no surface signal that the schema is the
+    problem (see PR #398 for the cascade fix).
     """
+    from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
+    await assert_eval_db_schema_matches_orm(db)
+
     embedding_provider: EmbeddingProvider | None = None
     if settings.openai_api_key:
         embedding_provider = EmbeddingProvider(
