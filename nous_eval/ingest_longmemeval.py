@@ -275,6 +275,12 @@ async def _replay_sessions_into_scratch(
     api_client = None
     try:
         await db.connect()
+        # Surface schema drift before we start ingesting — without this,
+        # a stale-schema container would let inserts silently poison the
+        # asyncpg session and the operator sees an empty corpus instead
+        # of a clear schema error.
+        from nous_eval.schema_preflight import assert_eval_db_schema_matches_orm
+        await assert_eval_db_schema_matches_orm(db)
         embedder = EmbeddingProvider(
             api_key=settings.openai_api_key,
             model=settings.embedding_model,
