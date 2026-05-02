@@ -891,6 +891,19 @@ class Heart:
             except Exception as exc:
                 keys.append(memory_type)
                 results_list.append(exc)
+                # The shared AsyncSession may be in a failed-transaction state
+                # (e.g., asyncpg InFailedSQLTransactionError after a SQL-level
+                # error like UndefinedColumnError). Rolling back clears the
+                # failed state so subsequent sub-searches in this loop don't
+                # cascade-fail with "current transaction is aborted".
+                try:
+                    await session.rollback()
+                except Exception:
+                    logger.warning(
+                        "Recall sub-search rollback failed for %s; "
+                        "remaining sub-searches will likely fail",
+                        memory_type, exc_info=True,
+                    )
 
         # Use original search scores instead of RRF positional scores.
         # Episodes, facts, and procedures use hybrid_search() (configurable

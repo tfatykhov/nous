@@ -531,3 +531,72 @@ async def test_recall_with_cross_encoder_mocked(heart, session, monkeypatch, cap
         assert len(ce_logs) >= 1
     finally:
         RuntimeConfig.get().clear_cross_encoder_enabled()
+
+
+async def test_recall_subsearch_failure_does_not_cascade(heart, session, monkeypatch):
+    """A failing sub-search must not cascade-kill the rest.
+
+    heart._recall reuses the same AsyncSession across sub-searches. When
+    one raises (e.g., column-mismatch UndefinedColumnError), the underlying
+    asyncpg connection enters InFailedSQLTransactionError state and the
+    remaining sub-searches in the loop fail with the same error.
+
+    Fix: issue session.rollback() after a caught sub-search exception so
+    the next sub-search starts on a clean transaction state.
+    """
+    # Monkeypatch episodes.search to raise (simulates schema mismatch).
+    async def _broken_episode_search(*_args, **_kwargs):
+        raise RuntimeError("simulated session-poisoning sub-search failure")
+    monkeypatch.setattr(heart.episodes, "search", _broken_episode_search)
+
+    # Capture session.rollback() invocations without actually rolling back
+    # (the test's outer transaction would be lost).
+    rollback_calls: list[None] = []
+
+    async def _track_rollback() -> None:
+        rollback_calls.append(None)
+    monkeypatch.setattr(session, "rollback", _track_rollback)
+
+    # Stub remaining sub-searches to return empty lists (and record they ran).
+    facts_called: list[None] = []
+
+    async def _stub_fact_search(*_args, **_kwargs):
+        facts_called.append(None)
+        return []
+    monkeypatch.setattr(heart.facts, "search", _stub_fact_search)
+
+    procedures_called: list[None] = []
+
+    async def _stub_procedure_search(*_args, **_kwargs):
+        procedures_called.append(None)
+        return []
+    monkeypatch.setattr(heart.procedures, "search", _stub_procedure_search)
+
+    censors_called: list[None] = []
+
+    async def _stub_censor_search(*_args, **_kwargs):
+        censors_called.append(None)
+        return []
+    monkeypatch.setattr(heart.censors, "search", _stub_censor_search)
+
+    await heart.recall(
+        "anything", limit=10,
+        types=["episode", "fact", "procedure", "censor"],
+        session=session,
+    )
+
+    assert len(rollback_calls) >= 1, (
+        "session.rollback() not called after sub-search exception — "
+        "asyncpg transaction would stay poisoned and cascade-kill remaining "
+        "sub-searches in prod."
+    )
+    assert len(facts_called) == 1, (
+        "facts.search not invoked after episode sub-search raised — "
+        "the loop bailed out instead of continuing."
+    )
+    assert len(procedures_called) == 1, (
+        "procedures.search not invoked — loop bailed out after episode failure."
+    )
+    assert len(censors_called) == 1, (
+        "censors.search not invoked — loop bailed out after episode failure."
+    )
