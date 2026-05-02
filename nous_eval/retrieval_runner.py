@@ -400,6 +400,12 @@ def _build_brain_for_eval(
 
     Brain and Heart share the embedding provider (pattern from main.py:69)
     so we don't double up httpx pools.
+
+    Schema preflight: Brain's ORM models (Decision) are validated by the
+    Heart preflight at ``_build_heart_for_eval`` because both factories
+    are called in the same harness invocation against the same eval DB.
+    If you ever construct a Brain in a path that does NOT also build a
+    Heart, call ``assert_eval_db_schema_matches_orm(db)`` at that site.
     """
     return Brain(
         database=db,

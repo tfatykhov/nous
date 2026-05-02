@@ -112,15 +112,9 @@ def _format_drift_message(missing: list[tuple[str, list[str]]]) -> str:
     lines += [
         "",
         "This usually means the eval DB image was built before one or",
-        "more recent migrations. To apply pending migrations to the",
-        "running eval-scratch container:",
+        "more recent migrations. The canonical fix is to rebuild the",
+        "eval DB volume so initdb re-applies every migration:",
         "",
-        "  for f in sql/migrations/*.sql; do",
-        "    docker exec -i nous-eval-scratch psql -U nous \\",
-        "      -d nous_eval_scratch < \"$f\";",
-        "  done",
-        "",
-        "Or rebuild the baked image (Dockerfile.eval-db) so initdb",
-        "applies all migrations from scratch.",
+        "  uv run python -m nous_eval.rebuild",
     ]
     return "\n".join(lines)
