@@ -14,6 +14,7 @@ import pytest
 
 from nous_eval.probes.arch_query import (
     PROBES,
+    _MIN_EVALUATED_FRACTION,
     _TOP3_FLOOR,
     _TOP10_FLOOR,
     ArchProbe,
@@ -95,6 +96,24 @@ async def test_gold_ids_unions_across_fragments():
 
     ids = await _gold_ids(raw_conn, "test-agent", ("foo", "bar"))
     assert ids == {fact_id_a, fact_id_b, fact_id_c}
+
+
+def test_min_evaluated_fraction_blocks_corpus_drift_attack():
+    """The coverage floor must require at least 2/3 of probes to match
+    real gold. Without it, a corpus refresh could silently turn 6
+    probes into 1 evaluated probe and the TOP-3 / TOP-10 floors would
+    pass trivially (since 1/1 = 100%)."""
+    n_probes = len(PROBES)
+    min_required = int(n_probes * _MIN_EVALUATED_FRACTION + 0.999)
+    # Sanity: at least 4 of 6 must still match — leaves headroom for
+    # one or two scenarios going stale before failing loud.
+    assert min_required >= 4, (
+        f"Coverage floor is too low ({min_required}/{n_probes}) — "
+        f"a single stale fragment could mask all regressions."
+    )
+    assert min_required <= n_probes, (
+        f"Coverage floor is unreachable ({min_required} > {n_probes})."
+    )
 
 
 @pytest.mark.asyncio

@@ -59,9 +59,15 @@ class ArchProbe:
 
 # Hand-curated probes against agent_id=nous-prod-snapshot. If the
 # corpus snapshot is regenerated and a fragment no longer matches,
-# the probe will SKIP that scenario (won't fail loud) — but the
-# headline TOP-3 / TOP-10 totals will drop, which is the load-bearing
-# regression signal.
+# the probe SKIPs that scenario; --strict additionally fails when too
+# many scenarios skip so corpus drift cannot silently erase coverage
+# (see _MIN_EVALUATED_FRACTION below).
+#
+# Contract for ``gold_fragments``: every fragment in a single probe's
+# tuple must be a *paraphrase of the same answer fact*, not a disjoint
+# fact. ``_gold_ids`` UNIONs across fragments — if you list two
+# fragments that name different facts, the probe will accept either as
+# gold and over-count.
 PROBES: tuple[ArchProbe, ...] = (
     ArchProbe(
         query="Tell me about the heartbeat system.",
@@ -119,6 +125,12 @@ PROBES: tuple[ArchProbe, ...] = (
 # scenario flake doesn't break CI.
 _TOP3_FLOOR = 4   # was 5/6 baseline
 _TOP10_FLOOR = 5  # was 6/6 baseline
+
+# Minimum fraction of probes that must produce a gold match. Without
+# this floor, corpus drift (a fragment going stale after a re-snapshot)
+# would silently lower n_evaluated and the TOP-3/TOP-10 floors would
+# pass trivially. 0.66 = 4 of 6 probes must still find their gold.
+_MIN_EVALUATED_FRACTION = 2 / 3
 
 
 async def _gold_ids(
@@ -255,13 +267,24 @@ async def _async_main(argv: list[str] | None = None) -> int:
           f"(floor for --strict: {_TOP10_FLOOR})")
     print("=" * 80)
 
-    if args.strict and (n3 < _TOP3_FLOOR or n10 < _TOP10_FLOOR):
-        print(
-            f"\nREGRESSION: TOP-3={n3}/{n} (need >={_TOP3_FLOOR}) "
-            f"or TOP-10={n10}/{n} (need >={_TOP10_FLOOR})",
-            file=sys.stderr,
-        )
-        return 1
+    if args.strict:
+        min_evaluated = int(len(PROBES) * _MIN_EVALUATED_FRACTION + 0.999)
+        if n < min_evaluated:
+            print(
+                f"\nCOVERAGE REGRESSION: only {n} of {len(PROBES)} probes "
+                f"found gold in the corpus (need >={min_evaluated}). "
+                f"Likely a corpus refresh has stale gold_fragments — "
+                f"update the probes to match new content.",
+                file=sys.stderr,
+            )
+            return 1
+        if n3 < _TOP3_FLOOR or n10 < _TOP10_FLOOR:
+            print(
+                f"\nRANKING REGRESSION: TOP-3={n3}/{n} (need >={_TOP3_FLOOR}) "
+                f"or TOP-10={n10}/{n} (need >={_TOP10_FLOOR})",
+                file=sys.stderr,
+            )
+            return 1
     return 0
 
 
