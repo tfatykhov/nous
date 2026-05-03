@@ -427,10 +427,19 @@ class TestContradictionResolution:
         heart.deactivate_fact.assert_called_once_with(fact2_id)
 
     @pytest.mark.asyncio
-    async def test_merge_creates_new_deactivates_both(self):
-        """MERGE should learn merged fact and deactivate both originals."""
+    async def test_merge_supersedes_both_originals(self):
+        """MERGE should learn merged fact and link both originals via superseded_by.
+
+        Codex P1 on PR #411 caught that the prior implementation called
+        ``deactivate_fact()`` on both originals, leaving them ``active=False``
+        with no ``superseded_by`` link — orphaning the chain. PR #412 rewrote
+        the branch to capture ``merged_detail.id`` and set ``superseded_by`` +
+        ``active=False`` on both originals in a single session. This test
+        verifies that runtime contract.
+        """
         fact1_id = uuid4()
         fact2_id = uuid4()
+        merged_id = uuid4()
 
         heart = AsyncMock()
         heart.find_contradiction_candidates = AsyncMock(return_value=[{
@@ -442,9 +451,24 @@ class TestContradictionResolution:
             "date2": "2026-03-15",
             "similarity": 0.82,
         }])
-        heart.learn = AsyncMock(return_value=MagicMock())
+        merged_detail = MagicMock()
+        merged_detail.id = merged_id
+        heart.learn = AsyncMock(return_value=merged_detail)
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
+
+        # heart.db.session() returns an async context manager. AsyncMock alone
+        # would yield a coroutine, not an __aenter__/__aexit__ object, so build
+        # the CM explicitly.
+        orm_facts = {fact1_id: MagicMock(), fact2_id: MagicMock()}
+        mock_session = MagicMock()
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_session)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        heart.db = MagicMock()
+        heart.db.session = MagicMock(return_value=cm)
 
         llm_response = json.dumps({
             "action": "MERGE",
@@ -459,8 +483,20 @@ class TestContradictionResolution:
         await handler._phase_resolve_contradictions(sleep_stats)
 
         heart.learn.assert_called_once()
-        assert heart.deactivate_fact.call_count == 2
+        # New contract: NO deactivate_fact() calls — supersession handled in-session.
+        heart.deactivate_fact.assert_not_called()
+        # Session entered exactly once and committed.
+        heart.db.session.assert_called_once()
+        mock_session.commit.assert_awaited_once()
+        # Both originals fetched and linked to merged fact.
+        assert mock_session.get.await_count == 2
+        for orig_id, orm in orm_facts.items():
+            assert orm.superseded_by == merged_id, (
+                f"orig {orig_id} should be linked to merged_id"
+            )
+            assert orm.active is False
         assert sleep_stats["facts_created"] == 1
+        assert sleep_stats["contradictions_resolved"] == 1
 
     @pytest.mark.asyncio
     async def test_keep_both_takes_no_action(self):
