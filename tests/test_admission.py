@@ -508,6 +508,41 @@ class TestBypass:
         assert result.bypassed is True
 
     @pytest.mark.asyncio
+    async def test_cluster_consolidation_bypasses(self):
+        """Cluster_consolidation merges restate existing fact content
+        as a single compressed fact. Admission's novelty score is
+        naturally low for them, which would lead to false rejection
+        of correct merges (caught 2026-05-03 by sleep_action_audit
+        on the F027 prompt-rewrite cycle: 3 of 5 merges rejected
+        with composite scores 0.52-0.59 vs prod threshold 0.60)."""
+        ctrl = _controller(shadow_mode=False)
+        result = await ctrl.score(
+            fact_input=_fact(source="cluster_consolidation"),
+            embedding=None,
+            max_existing_similarity=0.95,  # high similarity (intentional)
+            source_text=None,
+            session=None,
+        )
+        assert result.admitted is True
+        assert result.bypassed is True
+
+    @pytest.mark.asyncio
+    async def test_contradiction_resolution_bypasses(self):
+        """F031 MERGE actions also restate existing fact content under
+        a new composition. Same admission false-rejection risk as
+        cluster_consolidation."""
+        ctrl = _controller(shadow_mode=False)
+        result = await ctrl.score(
+            fact_input=_fact(source="contradiction_resolution"),
+            embedding=None,
+            max_existing_similarity=0.95,
+            source_text=None,
+            session=None,
+        )
+        assert result.admitted is True
+        assert result.bypassed is True
+
+    @pytest.mark.asyncio
     async def test_non_bypass_source_scored(self):
         ctrl = _controller(utility_llm_enabled=False, shadow_mode=False)
         result = await ctrl.score(
