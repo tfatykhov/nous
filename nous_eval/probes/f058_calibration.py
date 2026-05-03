@@ -18,7 +18,12 @@ checks instead of waiting:
      collapses to ~0 by construction (the factor was derived from
      this same data), but **Brier and ECE deltas are NOT determined
      by the factor** — they tell us whether the scaling captures real
-     signal or just shifts the mean.
+     signal or just shifts the mean. Mathematically: Brier(k) is a
+     quadratic in the scaling factor k with minimum at
+     k* = E[c·o] / E[c²]. The shipped factor k_mean = E[o]/E[c] only
+     coincides with k* when the residual (c - o) structure is well
+     approximated by a global rescale; the Brier delta surfaces how
+     close k_mean lands to the per-instance-MSE-optimal k*.
 
   3. DIRECTION CHECK — measure raw vs calibrated calibration on the
      small post-F058 reviewed sample. Tiny n, but if the delta points
@@ -193,8 +198,23 @@ async def run(
     }
 
 
+# Tolerance for ECE regression: a small drift is noise; >1% absolute
+# drop in per-bin calibration is a real signal worth surfacing.
+_ECE_REGRESSION_EPSILON = 0.01
+
+
 def verdict_exit_code(result: dict) -> int:
-    """0 = pass, 1 = real regression. Used by --strict."""
+    """0 = pass, 1 = real regression. Used by --strict.
+
+    Fails on three orthogonal conditions, in order of severity:
+      1. Sanity break — factor not applied correctly in prod write path.
+      2. Brier degrades — applying factor makes per-instance MSE worse,
+         meaning the global rescale is mis-set.
+      3. ECE degrades by more than ``_ECE_REGRESSION_EPSILON`` — a future
+         re-derivation could improve Brier by hurting per-bin calibration
+         (e.g. helping the high-conf bin while collapsing low-conf bins).
+         Brier alone misses this; the gate must inspect ECE too.
+    """
     if not result["sanity"]["ok"]:
         return 1
     cf = result["counterfactual"]
@@ -202,6 +222,8 @@ def verdict_exit_code(result: dict) -> int:
         return 0
     if cf["calibrated"]["brier"] > cf["raw"]["brier"]:
         return 1  # F058 makes Brier WORSE — factor needs re-derivation
+    if cf["calibrated"]["ece"] > cf["raw"]["ece"] + _ECE_REGRESSION_EPSILON:
+        return 1  # Per-bin calibration regressed even though Brier didn't
     return 0
 
 
@@ -242,6 +264,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
         database=args.prod_db,
     )
     try:
+        # Defense-in-depth: this probe is read-only by intent. Marking the
+        # session read-only at the Postgres level guarantees a future
+        # contributor adding a third query cannot accidentally write to
+        # prod even if they bypass the existing two SELECTs.
+        await conn.execute("SET default_transaction_read_only = on")
         result = await run(conn, args.agent_id, args.factor)
     finally:
         await conn.close()

@@ -78,8 +78,8 @@ def test_verdict_passes_when_sanity_ok_and_brier_improves():
     result = {
         "sanity": {"ok": True, "n_post_f058": 17, "n_bad": 0},
         "counterfactual": {
-            "raw": {"n": 100, "brier": 0.25},
-            "calibrated": {"n": 100, "brier": 0.20},  # lower (better)
+            "raw": {"n": 100, "brier": 0.25, "ece": 0.10},
+            "calibrated": {"n": 100, "brier": 0.20, "ece": 0.05},
         },
     }
     assert verdict_exit_code(result) == 0
@@ -91,8 +91,8 @@ def test_verdict_fails_on_sanity_break():
     result = {
         "sanity": {"ok": False, "n_post_f058": 17, "n_bad": 5},
         "counterfactual": {
-            "raw": {"n": 100, "brier": 0.25},
-            "calibrated": {"n": 100, "brier": 0.20},
+            "raw": {"n": 100, "brier": 0.25, "ece": 0.10},
+            "calibrated": {"n": 100, "brier": 0.20, "ece": 0.05},
         },
     }
     assert verdict_exit_code(result) == 1
@@ -104,8 +104,8 @@ def test_verdict_fails_when_factor_degrades_brier():
     result = {
         "sanity": {"ok": True, "n_post_f058": 17, "n_bad": 0},
         "counterfactual": {
-            "raw": {"n": 100, "brier": 0.20},
-            "calibrated": {"n": 100, "brier": 0.25},  # worse
+            "raw": {"n": 100, "brier": 0.20, "ece": 0.05},
+            "calibrated": {"n": 100, "brier": 0.25, "ece": 0.05},
         },
     }
     assert verdict_exit_code(result) == 1
@@ -116,8 +116,37 @@ def test_verdict_passes_when_no_data():
     result = {
         "sanity": {"ok": True, "n_post_f058": 0, "n_bad": 0},
         "counterfactual": {
-            "raw": {"n": 0, "brier": float("nan")},
-            "calibrated": {"n": 0, "brier": float("nan")},
+            "raw": {"n": 0, "brier": float("nan"), "ece": float("nan")},
+            "calibrated": {"n": 0, "brier": float("nan"), "ece": float("nan")},
+        },
+    }
+    assert verdict_exit_code(result) == 0
+
+
+def test_verdict_fails_on_ece_regression_even_when_brier_holds():
+    """A re-derivation could improve Brier marginally while degrading
+    per-bin calibration — the gate must inspect ECE too, not just Brier.
+    Without this guard, a factor that helps the high-conf bin but
+    crushes low-conf bins would silently pass."""
+    result = {
+        "sanity": {"ok": True, "n_post_f058": 17, "n_bad": 0},
+        "counterfactual": {
+            # Brier holds steady (improves trivially)
+            "raw": {"n": 100, "brier": 0.20, "ece": 0.05},
+            "calibrated": {"n": 100, "brier": 0.199, "ece": 0.10},  # +0.05 ECE
+        },
+    }
+    assert verdict_exit_code(result) == 1
+
+
+def test_verdict_passes_on_tiny_ece_drift():
+    """ECE deltas under the regression epsilon (0.01) are noise; don't
+    fail loud on those."""
+    result = {
+        "sanity": {"ok": True, "n_post_f058": 17, "n_bad": 0},
+        "counterfactual": {
+            "raw": {"n": 100, "brier": 0.20, "ece": 0.05},
+            "calibrated": {"n": 100, "brier": 0.18, "ece": 0.055},  # +0.005 ECE
         },
     }
     assert verdict_exit_code(result) == 0
