@@ -99,6 +99,20 @@ class AdmissionConfig:
             "censor",
             "supersede",
             "contradict",
+            # Post-LLM consolidation operations bypass admission. By
+            # design these merge EXISTING fact content into a single
+            # compressed restatement, so the novelty score is naturally
+            # low — admission would reject them as "redundant" when the
+            # whole point is to compress redundancy. The supersede chain
+            # preserves the originals if a merge turns out wrong, so
+            # bypassing admission here is safe.
+            #
+            # Caught 2026-05-03: action audit (PR #407) found
+            # admission rejected 3 of 5 F027 merges that the judge
+            # said were correct consolidations of coherent topics
+            # (composite scores 0.52-0.59 vs prod threshold 0.60).
+            "cluster_consolidation",
+            "contradiction_resolution",
         ]
     )
     utility_llm_enabled: bool = True
