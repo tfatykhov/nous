@@ -820,7 +820,7 @@ class SleepHandler:
             return False
 
     async def _phase_stale_scan(self, sleep_stats: dict) -> bool:
-        """Deactivate facts that are old AND never recalled.
+        """Deactivate facts that are old AND have not been recalled recently.
 
         Original filter combined ``active=true`` with
         ``superseded_by IS NOT NULL`` — that intersection is empty by
@@ -829,11 +829,17 @@ class SleepHandler:
         produced 0 deactivations across 14 consecutive prod cycles.
 
         New filter targets the actual stale-fact failure mode: a fact
-        the agent stored, never used (recall_count == 0), and that has
-        aged past ``stale_scan_age_days`` (default 60). The ``rule``
-        category is excluded by default since rules represent explicit
-        user directives that may be infrequently exercised but still
-        in force; deactivating them on recall stats alone is unsafe.
+        that has aged past ``stale_scan_age_days`` (default 60) AND
+        has either NEVER been recalled or wasn't recalled within the
+        same age window. The OR on the recall side is load-bearing:
+        a ``recall_count == 0`` only filter would permanently exempt
+        facts recalled once years ago and never since — the same
+        silent-failure pattern the original code had in reverse.
+
+        The ``rule`` category is excluded by default since rules
+        represent explicit user directives that may be infrequently
+        exercised but still in force; deactivating them on recall
+        stats alone is unsafe.
         """
         try:
             settings = self._heart.settings
@@ -847,9 +853,11 @@ class SleepHandler:
                     .where(
                         Fact.agent_id == self._heart.agent_id,
                         Fact.active == True,  # noqa: E712
-                        Fact.last_recalled_at.is_(None),
-                        Fact.recall_count == 0,
                         Fact.created_at < cutoff,
+                    )
+                    .where(
+                        (Fact.last_recalled_at.is_(None))
+                        | (Fact.last_recalled_at < cutoff)
                     )
                 )
                 if excluded:
@@ -868,7 +876,8 @@ class SleepHandler:
                 sleep_stats["stale_deactivated"] = count
                 logger.info(
                     "Stale scan: deactivated %d facts older than %d days "
-                    "with recall_count=0 (excluded categories: %s)",
+                    "with no recall in the same window "
+                    "(excluded categories: %s)",
                     count, settings.stale_scan_age_days, excluded,
                 )
             return True

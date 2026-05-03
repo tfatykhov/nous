@@ -121,3 +121,41 @@ def test_recency_gate_handles_missing_created_at():
 def test_recency_gate_returns_false_on_empty_cluster():
     learner = _make_learner(recency_days=30)
     assert learner._check_recency([]) is False
+
+
+# ---------------------------------------------------------------------------
+# stale_scan filter design — verify the OR-on-recall semantics
+# ---------------------------------------------------------------------------
+
+
+def test_stale_scan_filter_uses_or_on_recall():
+    """The new filter must use OR on the recall side
+    (``last_recalled_at IS NULL OR last_recalled_at < cutoff``). A
+    ``recall_count == 0``-only filter would permanently exempt facts
+    recalled once years ago and never since — same silent-failure
+    pattern the original code had in reverse. Reviewer flagged this
+    on PR #405; verify the source contains the OR semantics rather
+    than the exclude-on-recall_count semantics.
+    """
+    import inspect
+
+    from nous.handlers.sleep_handler import SleepHandler
+
+    src = inspect.getsource(SleepHandler._phase_stale_scan)
+
+    # Filter must check both NULL and <cutoff (the OR branches).
+    assert "last_recalled_at.is_(None)" in src, (
+        "stale_scan filter must check last_recalled_at IS NULL"
+    )
+    assert "last_recalled_at < cutoff" in src, (
+        "stale_scan filter must also check last_recalled_at < cutoff "
+        "so facts recalled long-ago-and-never-again get caught"
+    )
+    # The bug-flagged version used recall_count == 0 as a hard gate.
+    # New version must not gate on recall_count in a SQLAlchemy where().
+    # (The string `recall_count` may legitimately appear in docstring
+    # text describing the bug, so check the SQL clause shape instead.)
+    assert "Fact.recall_count == 0" not in src, (
+        "stale_scan filter must NOT gate on recall_count == 0 — "
+        "facts recalled once long ago would be permanently exempted"
+    )
