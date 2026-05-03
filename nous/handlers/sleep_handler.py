@@ -313,7 +313,7 @@ GOOD REFUSE — irreconcilable contradiction:
     - "Tim's flight was cancelled"
   → should_merge=false, refuse_reason: "Three contradictory states of Tim's flight; merging would erase the cancellation which is the load-bearing latest state."
 
-Default lean: if you can produce ANY coherent merged_content even with detail loss, prefer should_merge=true over refuse. The system has a downstream admission gate that rejects redundant merges, so an over-eager merge is recoverable; a refused-but-mergeable cluster sits as bloat in memory forever.
+Default lean: if you can produce ANY coherent merged_content even with detail loss, prefer should_merge=true over refuse. The supersede chain preserves the source facts — they remain reachable via `superseded_by` links if the merged version turns out wrong, so an over-eager merge is recoverable. A refused-but-mergeable cluster, by contrast, sits as bloat in memory forever.
 
 Use the merge_facts tool to return your verdict."""
 
@@ -1115,22 +1115,29 @@ class SleepHandler:
                 # LLM refusals — so the audit can distinguish
                 # "phase fired but LLM said no" from "phase didn't fire."
                 # Outcome categories:
-                #   llm_refused: LLM returned should_merge=false (or empty)
+                #   llm_refused: explicit should_merge=false with reason
+                #   llm_malformed: should_merge=true but empty content
+                #     (PR #410 review): distinct from refused so the
+                #     audit doesn't conflate "LLM said no on purpose"
+                #     with "LLM responded incoherently"
                 #   rejected_by_admission: heart.learn returned FactRejected
                 #   merged: full success (originals deactivated, new fact stored)
-                merge_outcome = "llm_refused"
                 merged_fact_id: str | None = None
 
-                # Refusal path: explicit should_merge=false OR (legacy)
-                # missing/empty merged_content. Capture refuse_reason
-                # so the audit can judge whether the refusal was
-                # justified.
-                refused = (
-                    not merge_result
-                    or merge_result.get("should_merge") is False
-                    or not merge_result.get("merged_content")
-                )
-                if refused:
+                # Classify the LLM's response into the right refusal
+                # bucket. Order matters: explicit should_merge=false is
+                # the cleanest signal; missing-content-with-true is a
+                # response-quality issue, not an intentional refusal.
+                if not merge_result:
+                    merge_outcome = "llm_malformed"
+                elif merge_result.get("should_merge") is False:
+                    merge_outcome = "llm_refused"
+                elif not merge_result.get("merged_content"):
+                    merge_outcome = "llm_malformed"
+                else:
+                    merge_outcome = None  # proceed to merge
+
+                if merge_outcome is not None:
                     self._emit_action_event(
                         "f027_cluster_merge",
                         {
@@ -1176,6 +1183,7 @@ class SleepHandler:
                             "confidence": float(
                                 merge_result.get("confidence", 0.8)
                             ),
+                            "refuse_reason": None,
                             "outcome": merge_outcome,
                         },
                     )
@@ -1205,6 +1213,7 @@ class SleepHandler:
                         "confidence": float(
                             merge_result.get("confidence", 0.8)
                         ),
+                        "refuse_reason": None,
                         "outcome": merge_outcome,
                     },
                 )
