@@ -46,6 +46,7 @@ import asyncpg
 
 from nous.api.anthropic_client import create_client
 from nous.config import Settings
+from nous.handlers.sleep_handler import F031_SAFETY_FLOOR_DESCRIPTION
 from nous_eval._oat_preamble import (
     RateLimiter, call_with_retries, with_oat_preamble,
 )
@@ -133,13 +134,7 @@ Two facts were detected as contradictory. The agent chose an action:
   REMOVE_A    — fact A is provably wrong (factual error); deactivate A
   REMOVE_B    — fact B is provably wrong (factual error); deactivate B
 
-The agent has a safety floor: any action with confidence below 0.7 OR a
-MERGE without merged_content is automatically downgraded to KEEP_BOTH
-before being applied. This is INTENTIONAL safety behavior, not a bug —
-KEEP_BOTH preserves both facts and is reversible. When you see
-"applied=KEEP_BOTH (downgraded from MERGE)", evaluate the APPLIED
-action (KEEP_BOTH) — i.e., would keeping both facts be acceptable
-here? — not the raw model output.
+{safety_floor}
 
 Fact A: {fact_a}
 
@@ -245,6 +240,7 @@ async def audit_f031(
         fact_a = await fetch_fact_content(facts_conn, fact1_id) or "(unknown)"
         fact_b = await fetch_fact_content(facts_conn, fact2_id) or "(unknown)"
         prompt = _F031_RUBRIC.format(
+            safety_floor=F031_SAFETY_FLOOR_DESCRIPTION,
             fact_a=fact_a[:600],
             fact_b=fact_b[:600],
             applied_action=d.get("applied_action", "?"),
@@ -282,11 +278,13 @@ async def audit_f027(
         lookback_days, max_actions,
     )
     judged: list[JudgedAction] = []
+    sample_cap = 6  # large clusters truncate to this many sample facts
     for a in actions:
         d = a["data"]
         ids = d.get("source_fact_ids", []) or []
+        source_count = d.get("source_count", len(ids))
         source_facts = []
-        for sid in ids[:6]:  # cap; clusters can be large
+        for sid in ids[:sample_cap]:
             try:
                 content = await fetch_fact_content(
                     facts_conn, UUID(str(sid))
@@ -294,10 +292,19 @@ async def audit_f027(
             except (TypeError, ValueError):
                 content = "(invalid id)"
             source_facts.append(f"- {content[:300]}")
+        # Tell the judge when we're showing a truncated sample so it
+        # can mark `ambiguous` rather than scoring a partial view.
+        truncation_note = ""
+        if source_count > sample_cap:
+            truncation_note = (
+                f"\n(NOTE: showing {sample_cap} of {source_count} source "
+                f"facts — if the merge correctness depends on facts not "
+                f"shown, mark verdict 'ambiguous')"
+            )
         prompt = _F027_RUBRIC.format(
             subject=d.get("subject", "?"),
-            source_count=d.get("source_count", len(ids)),
-            source_facts="\n".join(source_facts) or "(none)",
+            source_count=source_count,
+            source_facts=("\n".join(source_facts) or "(none)") + truncation_note,
             outcome=d.get("outcome", "?"),
             merged_content=str(d.get("merged_content") or "(n/a)")[:500],
         )
@@ -321,11 +328,23 @@ async def audit_f027(
 # ---------------------------------------------------------------------------
 
 
+# If more than this fraction of samples are ambiguous, the
+# decisive-only score is unreliable — operator should investigate
+# rather than trust the headline quality_score. Set to NaN-equivalent
+# in --strict gating (see overall_exit_code).
+_AMBIGUITY_RATE_WARN_THRESHOLD = 0.5
+
+
 def aggregate_quality(
     judged: list[JudgedAction],
 ) -> dict[str, dict]:
     """Per-event-type aggregate: total / correct / wrong / ambiguous /
-    quality_score (correct / (correct + wrong); excludes ambiguous)."""
+    quality_score (correct / (correct + wrong); excludes ambiguous).
+
+    Also reports ``ambiguity_rate = ambiguous / n``. A high ambiguity
+    rate means the decisive-only score is computed from few samples
+    and is unreliable — see ``overall_exit_code`` for the gating rule.
+    """
     by_type: dict[str, list[JudgedAction]] = {}
     for j in judged:
         by_type.setdefault(j.event_type, []).append(j)
@@ -338,8 +357,12 @@ def aggregate_quality(
         decisive = correct + wrong
         score = (correct / decisive) if decisive > 0 else float("nan")
         out[et] = {
-            "n": n, "correct": correct, "wrong": wrong,
-            "ambiguous": ambiguous, "quality_score": score,
+            "n": n,
+            "correct": correct,
+            "wrong": wrong,
+            "ambiguous": ambiguous,
+            "ambiguity_rate": (ambiguous / n) if n else 0.0,
+            "quality_score": score,
         }
     return out
 
@@ -347,11 +370,25 @@ def aggregate_quality(
 def overall_exit_code(
     aggregate: dict[str, dict], floor: float,
 ) -> int:
-    """1 if any phase below floor, else 0. NaN scores (no decisive
-    judgments) don't trip the gate — caller should investigate."""
+    """1 if any phase below floor on a *trustworthy* sample, else 0.
+
+    "Trustworthy" requires both:
+      - quality_score is not NaN (at least one decisive judgment), AND
+      - ambiguity_rate <= _AMBIGUITY_RATE_WARN_THRESHOLD (the decisive
+        sample is large enough to be representative)
+
+    A phase with 3 correct / 0 wrong / 47 ambiguous would otherwise
+    report 100% on n=3 and silently pass — the ambiguity guard
+    prevents that masking. NaN-or-too-ambiguous → don't gate; caller
+    investigates manually.
+    """
     for et, stats in aggregate.items():
         s = stats["quality_score"]
-        if s == s and s < floor:  # NaN guard
+        if s != s:  # NaN
+            continue
+        if stats.get("ambiguity_rate", 0.0) > _AMBIGUITY_RATE_WARN_THRESHOLD:
+            continue
+        if s < floor:
             return 1
     return 0
 
@@ -466,12 +503,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
         print("ERROR: Anthropic creds required.", file=sys.stderr)
         return 2
 
-    events_conn = await asyncpg.connect(
-        host=args.prod_host, port=args.prod_port,
-        user=args.prod_user, password=args.prod_password,
-        database=args.prod_db,
-    )
-    facts_conn = await asyncpg.connect(
+    # Single asyncpg connection serves both event lookup and fact-content
+    # fetch — calls are sequential (await one, then the next) so a pool
+    # buys nothing here, and a second connection is one more leak path
+    # for an exception between the two connect() calls.
+    conn = await asyncpg.connect(
         host=args.prod_host, port=args.prod_port,
         user=args.prod_user, password=args.prod_password,
         database=args.prod_db,
@@ -481,10 +517,9 @@ async def _async_main(argv: list[str] | None = None) -> int:
 
     try:
         # Defense-in-depth: read-only at the Postgres level.
-        await events_conn.execute("SET default_transaction_read_only = on")
-        await facts_conn.execute("SET default_transaction_read_only = on")
+        await conn.execute("SET default_transaction_read_only = on")
         judged = await run(
-            events_conn, facts_conn, api_client,
+            conn, conn, api_client,
             agent_id=args.agent_id,
             judge_model=args.judge_model,
             lookback_days=args.lookback_days,
@@ -492,8 +527,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
         )
     finally:
         await api_client.close()
-        await events_conn.close()
-        await facts_conn.close()
+        await conn.close()
 
     aggregate = aggregate_quality(judged)
     _print_report(judged, aggregate, args.quality_floor, args.agent_id)

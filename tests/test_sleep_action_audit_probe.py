@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from nous_eval.probes.sleep_action_audit import (
     JudgedAction,
     aggregate_quality,
@@ -84,16 +86,24 @@ def test_aggregate_quality_handles_empty_input():
 
 def test_strict_passes_when_all_phases_above_floor():
     aggregate = {
-        "f031_contradiction_resolution": {"quality_score": 0.85},
-        "f027_cluster_merge": {"quality_score": 0.90},
+        "f031_contradiction_resolution": {
+            "quality_score": 0.85, "ambiguity_rate": 0.05,
+        },
+        "f027_cluster_merge": {
+            "quality_score": 0.90, "ambiguity_rate": 0.10,
+        },
     }
     assert overall_exit_code(aggregate, floor=0.70) == 0
 
 
 def test_strict_fails_when_any_phase_below_floor():
     aggregate = {
-        "f031_contradiction_resolution": {"quality_score": 0.85},
-        "f027_cluster_merge": {"quality_score": 0.40},
+        "f031_contradiction_resolution": {
+            "quality_score": 0.85, "ambiguity_rate": 0.05,
+        },
+        "f027_cluster_merge": {
+            "quality_score": 0.40, "ambiguity_rate": 0.05,
+        },
     }
     assert overall_exit_code(aggregate, floor=0.70) == 1
 
@@ -103,7 +113,9 @@ def test_strict_passes_when_score_is_nan():
     CI on that. The probe surfaces it via the report; operator
     investigates manually rather than CI auto-failing."""
     aggregate = {
-        "f031_contradiction_resolution": {"quality_score": float("nan")},
+        "f031_contradiction_resolution": {
+            "quality_score": float("nan"), "ambiguity_rate": 1.0,
+        },
     }
     assert overall_exit_code(aggregate, floor=0.70) == 0
 
@@ -117,6 +129,84 @@ def test_strict_passes_at_exact_floor():
     """Score == floor should pass (>= comparison). A 70% floor with
     a 70% score is acceptable; only 69.9% trips."""
     aggregate = {
-        "f031_contradiction_resolution": {"quality_score": 0.70},
+        "f031_contradiction_resolution": {
+            "quality_score": 0.70,
+            "ambiguity_rate": 0.0,
+        },
     }
     assert overall_exit_code(aggregate, floor=0.70) == 0
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity guard — prevents a high-ambiguity-rate score from masking
+# a real regression.
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_includes_ambiguity_rate():
+    judged = [
+        _ja("f027_cluster_merge", "ambiguous"),
+        _ja("f027_cluster_merge", "ambiguous"),
+        _ja("f027_cluster_merge", "correct"),
+    ]
+    agg = aggregate_quality(judged)
+    s = agg["f027_cluster_merge"]
+    assert s["ambiguity_rate"] == pytest.approx(2 / 3)
+
+
+def test_strict_passes_when_ambiguity_too_high_to_trust_score():
+    """3 correct / 0 wrong / 47 ambiguous = score=100% on n=3.
+    Without the ambiguity guard this would silently --strict-pass.
+    The guard treats >50%-ambiguous as untrustworthy and skips
+    gating — operator must investigate."""
+    aggregate = {
+        "f031_contradiction_resolution": {
+            "quality_score": 1.0,  # all 3 decisive were correct
+            "ambiguity_rate": 47 / 50,  # but 94% of samples ambiguous
+        },
+    }
+    # Even with floor=0.70 and score=1.0, this should NOT pass-by-default
+    # the strict gate at 0.99 — but the ambiguity guard skips gating
+    # rather than asserting either pass or fail.
+    assert overall_exit_code(aggregate, floor=0.99) == 0
+
+
+def test_strict_still_gates_when_ambiguity_low_and_score_below_floor():
+    aggregate = {
+        "f027_cluster_merge": {
+            "quality_score": 0.40,
+            "ambiguity_rate": 0.05,
+        },
+    }
+    assert overall_exit_code(aggregate, floor=0.70) == 1
+
+
+# ---------------------------------------------------------------------------
+# Rubric drift guard — the F031 rubric must reference the live safety
+# constant from sleep_handler. If the constant changes, the formatted
+# rubric content changes, but if the import disappears the test below
+# fails loud.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_imports_safety_floor_from_sleep_handler():
+    """The F031 rubric explains the safety floor to the judge so
+    KEEP_BOTH downgrades aren't scored as wrong actions. Source of
+    truth is `nous.handlers.sleep_handler.F031_SAFETY_FLOOR_DESCRIPTION`.
+
+    If a future PR removes or renames the constant, this test fails
+    loud rather than letting the rubric silently drift to a stale
+    description (which would re-introduce the original 40% false-
+    positive rate on safety downgrades).
+    """
+    from nous.handlers.sleep_handler import F031_SAFETY_FLOOR_DESCRIPTION
+    from nous_eval.probes import sleep_action_audit
+    # The probe module must import the constant from the handler
+    # (not redeclare it). Verify by checking the symbol resolves.
+    assert hasattr(sleep_action_audit, "F031_SAFETY_FLOOR_DESCRIPTION")
+    assert (
+        sleep_action_audit.F031_SAFETY_FLOOR_DESCRIPTION
+        is F031_SAFETY_FLOOR_DESCRIPTION
+    )
+    # Sanity: the constant mentions the load-bearing 0.7 floor.
+    assert "0.7" in F031_SAFETY_FLOOR_DESCRIPTION

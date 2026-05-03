@@ -131,6 +131,28 @@ _REFLECTION_SCHEMA: dict[str, Any] = {
     "required": ["patterns", "lessons", "connections", "gaps", "summary", "facts"],
 }
 
+# F031 SAFETY DOWNGRADE SEMANTICS — single source of truth.
+#
+# Used both by ``_phase_resolve_contradictions`` (the actual downgrade
+# logic) and by ``nous_eval/probes/sleep_action_audit.py`` (which
+# formats this into the F031 judge rubric so the judge correctly
+# scores downgraded actions as intentional safety, not mistakes).
+#
+# Keep the floor + the downgrade matrix in sync with the corresponding
+# ``if`` branches in ``_phase_resolve_contradictions`` below. A test in
+# ``tests/test_sleep_action_audit_probe.py`` asserts the audit rubric
+# references this constant so drift fails loud.
+F031_SAFETY_FLOOR_DESCRIPTION = (
+    "The agent has a safety floor: any action with confidence below "
+    "0.7 OR a MERGE without merged_content is automatically downgraded "
+    "to KEEP_BOTH before being applied. This is INTENTIONAL safety "
+    "behavior, not a bug — KEEP_BOTH preserves both facts and is "
+    "reversible. When you see 'applied=KEEP_BOTH (downgraded from "
+    "MERGE)', evaluate the APPLIED action (KEEP_BOTH) — i.e., would "
+    "keeping both facts be acceptable here? — not the raw model output."
+)
+
+
 # F031 prompt rewritten 2026-04-30 after the synthetic eval
 # (reports/f031_resolution_eval.md) measured 33% accuracy and a strong
 # directional bias (SUPERSEDE_A: 12/30 verdicts, SUPERSEDE_B: 1/30)
@@ -246,6 +268,11 @@ class SleepHandler:
         self._interrupted = False
         self._sleeping = False
         self._sleep_task: asyncio.Task | None = None
+        # PR #407: bounded retention for fire-and-forget per-action
+        # event emission tasks. Strong references prevent the GC from
+        # collecting a task mid-flight; add_done_callback(discard)
+        # cleans up after completion. Standard asyncio idiom.
+        self._pending_emits: set[asyncio.Task] = set()
         self._procedure_learner = None  # F012: Set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
@@ -288,11 +315,18 @@ class SleepHandler:
         so the sleep loop never blocks on DB I/O, and a debug-level
         suppression on emission failure so persistence problems can't
         break a sleep cycle.
+
+        Holds a strong reference to the task in ``_pending_emits`` until
+        completion so the GC can't collect a still-running fire-and-
+        forget task mid-flight. ``add_done_callback(discard)`` is the
+        standard idiom for this pattern.
         """
         try:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._brain.emit_event(event_type, data)
             )
+            self._pending_emits.add(task)
+            task.add_done_callback(self._pending_emits.discard)
         except Exception:
             logger.debug("%s persistence failed (suppressed)",
                          event_type, exc_info=True)
