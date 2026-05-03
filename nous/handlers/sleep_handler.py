@@ -820,23 +820,40 @@ class SleepHandler:
             return False
 
     async def _phase_stale_scan(self, sleep_stats: dict) -> bool:
-        """F027: Deactivate superseded facts that are stale and low-confidence."""
+        """Deactivate facts that are old AND never recalled.
+
+        Original filter combined ``active=true`` with
+        ``superseded_by IS NOT NULL`` — that intersection is empty by
+        design because the supersede flow sets both at the same time.
+        Sleep cycle health monitor (PR #404) caught this: the phase
+        produced 0 deactivations across 14 consecutive prod cycles.
+
+        New filter targets the actual stale-fact failure mode: a fact
+        the agent stored, never used (recall_count == 0), and that has
+        aged past ``stale_scan_age_days`` (default 60). The ``rule``
+        category is excluded by default since rules represent explicit
+        user directives that may be infrequently exercised but still
+        in force; deactivating them on recall stats alone is unsafe.
+        """
         try:
+            settings = self._heart.settings
+            cutoff = datetime.now(UTC) - timedelta(
+                days=settings.stale_scan_age_days
+            )
+            excluded = list(settings.stale_scan_excluded_categories or [])
             async with self._heart.db.session() as session:
-                cutoff = datetime.now(UTC) - timedelta(days=30)
                 stmt = (
                     select(Fact)
                     .where(
                         Fact.agent_id == self._heart.agent_id,
                         Fact.active == True,  # noqa: E712
-                        Fact.superseded_by.isnot(None),
-                        Fact.confidence < 0.5,
-                    )
-                    .where(
-                        (Fact.last_recalled_at.is_(None))
-                        | (Fact.last_recalled_at < cutoff)
+                        Fact.last_recalled_at.is_(None),
+                        Fact.recall_count == 0,
+                        Fact.created_at < cutoff,
                     )
                 )
+                if excluded:
+                    stmt = stmt.where(Fact.category.notin_(excluded))
                 result = await session.execute(stmt)
                 stale_facts = result.scalars().all()
 
@@ -849,19 +866,35 @@ class SleepHandler:
                     await session.commit()
 
                 sleep_stats["stale_deactivated"] = count
-                logger.info("F027 stale scan: deactivated %d stale superseded facts", count)
+                logger.info(
+                    "Stale scan: deactivated %d facts older than %d days "
+                    "with recall_count=0 (excluded categories: %s)",
+                    count, settings.stale_scan_age_days, excluded,
+                )
             return True
         except Exception:
-            logger.warning("F027 stale scan phase failed", exc_info=True)
+            logger.warning("stale_scan phase failed", exc_info=True)
             return False
 
     async def _phase_cluster_consolidation(self, sleep_stats: dict) -> bool:
-        """F027: Merge clusters of 3+ active facts about the same subject."""
+        """F027: Merge clusters of MIN-MAX active facts about the same subject.
+
+        Prior code picked top-5 by size, which always landed on
+        accumulating subjects like ``lesson_learned`` (164 facts) and
+        ``Tim`` (36 facts) — the LLM correctly refuses to collapse those
+        into a single fact. Sleep cycle health monitor (PR #404) caught
+        this: 14 consecutive prod cycles merged 0 clusters. Cap the
+        cluster size so accumulating subjects are skipped and the
+        actually-mergeable small clusters (3-10 facts) get a chance.
+        """
         if not self._llm:
             return True
         try:
+            settings = self._heart.settings
+            min_facts = settings.cluster_consolidation_min_facts
+            max_facts = settings.cluster_consolidation_max_facts
             async with self._heart.db.session() as session:
-                # Find subjects with 3+ active facts
+                # Find subjects with min_facts <= count <= max_facts active facts
                 stmt = (
                     select(Fact.subject, func.count().label("cnt"))
                     .where(
@@ -870,7 +903,8 @@ class SleepHandler:
                         Fact.subject.isnot(None),
                     )
                     .group_by(Fact.subject)
-                    .having(func.count() >= 3)
+                    .having(func.count() >= min_facts)
+                    .having(func.count() <= max_facts)
                     .order_by(func.count().desc())
                     .limit(5)
                 )

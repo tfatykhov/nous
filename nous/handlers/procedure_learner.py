@@ -343,8 +343,16 @@ class ProcedureLearner:
         return rate >= self._settings.procedure_success_rate_min
 
     def _check_recency(self, items: list[Any]) -> bool:
-        """Gate: at least 1 item created in the last 7 days."""
-        cutoff = datetime.now(UTC) - timedelta(days=7)
+        """Gate: at least 1 cluster member created within the recency window.
+
+        Configurable via ``procedure_recency_days`` (default 30). Was
+        hardcoded 7 days; sleep-cycle health monitor (PR #404) caught
+        that 7 days produced ~3 of 200 eligible candidates, so the
+        gate effectively blocked all clustering. 30 days gives a
+        meaningful pool.
+        """
+        days = self._settings.procedure_recency_days
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         for item in items:
             created_at = getattr(item, "created_at", None)
             if created_at and created_at >= cutoff:
