@@ -280,6 +280,23 @@ class SleepHandler:
     def is_sleeping(self) -> bool:
         return self._sleeping
 
+    def _emit_action_event(self, event_type: str, data: dict) -> None:
+        """Fire-and-forget per-action event for sleep-eval audit (PR #3).
+
+        Mirrors the F031 ``f031_contradiction_resolution`` and the
+        runner.py ``f026_action_gate`` patterns: ``asyncio.create_task``
+        so the sleep loop never blocks on DB I/O, and a debug-level
+        suppression on emission failure so persistence problems can't
+        break a sleep cycle.
+        """
+        try:
+            asyncio.create_task(
+                self._brain.emit_event(event_type, data)
+            )
+        except Exception:
+            logger.debug("%s persistence failed (suppressed)",
+                         event_type, exc_info=True)
+
     def get_stats(self) -> dict:
         """F035.1: Return sleep handler statistics."""
         return {
@@ -965,7 +982,30 @@ class SleepHandler:
                     max_tokens=500,
                 )
 
+                # Per-action event for retrospective audit (sleep eval
+                # PR #3). Emitted on EVERY merge attempt — including
+                # LLM refusals — so the audit can distinguish
+                # "phase fired but LLM said no" from "phase didn't fire."
+                # Outcome categories:
+                #   llm_refused: LLM returned no merged_content
+                #   rejected_by_admission: heart.learn returned FactRejected
+                #   merged: full success (originals deactivated, new fact stored)
+                merge_outcome = "llm_refused"
+                merged_fact_id: str | None = None
+
                 if not merge_result or not merge_result.get("merged_content"):
+                    self._emit_action_event(
+                        "f027_cluster_merge",
+                        {
+                            "subject": str(subject)[:200],
+                            "source_fact_ids": [str(f.id) for f in facts],
+                            "source_count": len(facts),
+                            "merged_content": None,
+                            "merged_fact_id": None,
+                            "confidence": None,
+                            "outcome": merge_outcome,
+                        },
+                    )
                     continue
 
                 # Create merged fact
@@ -978,6 +1018,23 @@ class SleepHandler:
                 ))
 
                 if isinstance(merged_detail, FactRejected):
+                    merge_outcome = "rejected_by_admission"
+                    self._emit_action_event(
+                        "f027_cluster_merge",
+                        {
+                            "subject": str(subject)[:200],
+                            "source_fact_ids": [str(f.id) for f in facts],
+                            "source_count": len(facts),
+                            "merged_content": str(
+                                merge_result.get("merged_content", "")
+                            )[:500],
+                            "merged_fact_id": None,
+                            "confidence": float(
+                                merge_result.get("confidence", 0.8)
+                            ),
+                            "outcome": merge_outcome,
+                        },
+                    )
                     continue
 
                 # Deactivate originals
@@ -988,6 +1045,25 @@ class SleepHandler:
                             orm_fact.superseded_by = merged_detail.id
                             orm_fact.active = False
                     await session.commit()
+
+                merged_fact_id = str(merged_detail.id)
+                merge_outcome = "merged"
+                self._emit_action_event(
+                    "f027_cluster_merge",
+                    {
+                        "subject": str(subject)[:200],
+                        "source_fact_ids": [str(f.id) for f in facts],
+                        "source_count": len(facts),
+                        "merged_content": str(
+                            merge_result.get("merged_content", "")
+                        )[:500],
+                        "merged_fact_id": merged_fact_id,
+                        "confidence": float(
+                            merge_result.get("confidence", 0.8)
+                        ),
+                        "outcome": merge_outcome,
+                    },
+                )
 
                 merged_count += 1
                 sleep_stats.setdefault("facts_created", 0)
