@@ -182,25 +182,44 @@ async def check_stale_scan(
     # genuinely stale facts." A fact is genuinely stale only if it's
     # old AND has not been recalled within the same window. An old
     # fact that was recalled yesterday is NOT stale.
+    #
+    # The fallback counts MUST apply the same category-exclusion as
+    # the primary filter — otherwise a corpus where every stale fact
+    # happens to live in the excluded `rule` category would
+    # false-RED-flag (the live filter correctly skips them, but the
+    # fallback says "stale facts exist!"). Codex P1 on PR #406.
     if n == 0:
+        excl_params: list = [agent_id, age_days]
+        excl_clause = ""
+        if excluded:
+            placeholders = ", ".join(f"${i + 3}" for i in range(len(excluded)))
+            # Match the production filter's NULL handling — categories
+            # that are NULL pass the exclusion; only the named
+            # categories are skipped.
+            excl_clause = (
+                f"AND (category IS NULL OR category NOT IN ({placeholders}))"
+            )
+            excl_params.extend(excluded)
         old_never_recalled = await conn.fetchval(
-            """
+            f"""
             SELECT COUNT(*) FROM heart.facts
             WHERE agent_id = $1 AND active = true
               AND created_at < now() - ($2::int || ' days')::interval
               AND last_recalled_at IS NULL
+              {excl_clause}
             """,
-            agent_id, age_days,
+            *excl_params,
         )
         old_recalled_long_ago = await conn.fetchval(
-            """
+            f"""
             SELECT COUNT(*) FROM heart.facts
             WHERE agent_id = $1 AND active = true
               AND created_at < now() - ($2::int || ' days')::interval
               AND last_recalled_at IS NOT NULL
               AND last_recalled_at < now() - ($2::int || ' days')::interval
+              {excl_clause}
             """,
-            agent_id, age_days,
+            *excl_params,
         )
         truly_stale = (old_never_recalled or 0) + (old_recalled_long_ago or 0)
         if truly_stale > 0:

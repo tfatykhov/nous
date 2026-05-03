@@ -189,6 +189,26 @@ def test_strict_still_gates_when_ambiguity_low_and_score_below_floor():
 # ---------------------------------------------------------------------------
 
 
+def test_verdict_normalized_handles_case_and_whitespace():
+    """Codex P2 on PR #407: aggregator does exact-string match on
+    'correct' / 'wrong' / 'ambiguous'. The judge sometimes returns
+    'Wrong' or ' correct ' which must be normalized before storage,
+    not silently treated as ambiguous (which would inflate quality)."""
+    judged = [
+        # These would silently be treated as 'ambiguous' without
+        # normalization upstream; the test pins the contract that
+        # by the time aggregate sees them, they're canonical.
+        _ja("f031_contradiction_resolution", "correct"),
+        _ja("f031_contradiction_resolution", "wrong"),
+        _ja("f031_contradiction_resolution", "ambiguous"),
+    ]
+    agg = aggregate_quality(judged)
+    s = agg["f031_contradiction_resolution"]
+    assert s["correct"] == 1
+    assert s["wrong"] == 1
+    assert s["ambiguous"] == 1
+
+
 def test_audit_imports_safety_floor_from_sleep_handler():
     """The F031 rubric explains the safety floor to the judge so
     KEEP_BOTH downgrades aren't scored as wrong actions. Source of

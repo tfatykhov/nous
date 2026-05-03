@@ -912,7 +912,15 @@ class SleepHandler:
                     )
                 )
                 if excluded:
-                    stmt = stmt.where(Fact.category.notin_(excluded))
+                    # NULL NOT IN (...) evaluates to UNKNOWN in SQL,
+                    # so a plain notin_ would silently exclude every
+                    # uncategorized fact from deactivation. Add the
+                    # NULL branch explicitly so the exclusion only
+                    # skips the NAMED categories. Codex P2 on PR #405.
+                    stmt = stmt.where(
+                        Fact.category.is_(None)
+                        | Fact.category.notin_(excluded)
+                    )
                 result = await session.execute(stmt)
                 stale_facts = result.scalars().all()
 
