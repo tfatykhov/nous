@@ -340,6 +340,68 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "often land outside top-3 in either channel."
         ),
     ),
+    # ------------------------------------------------------------------
+    # CE-off + RRF combos. CE rerank dominates the head positions and
+    # may flatten any RRF lift in baseline runs. These configs disable
+    # CE so RRF's effect on the top-K is observable.
+    # ------------------------------------------------------------------
+    "ce_off_rrf_vector_heavy": RetrievalConfig(
+        name="ce_off_rrf_vector_heavy",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.9},
+        description="CE off + RRF vector-leaning (0.9). Surface RRF effect without CE flattening.",
+    ),
+    "ce_off_rrf_balanced": RetrievalConfig(
+        name="ce_off_rrf_balanced",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.5},
+        description="CE off + RRF balanced (0.5). Surface RRF effect without CE flattening.",
+    ),
+    "ce_off_rrf_keyword_heavy": RetrievalConfig(
+        name="ce_off_rrf_keyword_heavy",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.3},
+        description="CE off + RRF keyword-leaning (0.3). Surface RRF effect without CE flattening.",
+    ),
+    "ce_off_rrf_k_low": RetrievalConfig(
+        name="ce_off_rrf_k_low",
+        flags={"cross_encoder_enabled": False, "rrf_k": 10},
+        description="CE off + sharp k=10. Top-1 RRF dominance without CE override.",
+    ),
+    "ce_off_rrf_k_high": RetrievalConfig(
+        name="ce_off_rrf_k_high",
+        flags={"cross_encoder_enabled": False, "rrf_k": 200},
+        description="CE off + smooth k=200. Tail-friendly RRF without CE override.",
+    ),
+    "ce_off_spread_on": RetrievalConfig(
+        name="ce_off_spread_on",
+        flags={"cross_encoder_enabled": False, "spreading_activation_enabled": "true"},
+        description="CE off + spreading forced on. Surface graph-hopping lift without CE override.",
+    ),
+    "ce_off_mmr_on": RetrievalConfig(
+        name="ce_off_mmr_on",
+        flags={"cross_encoder_enabled": False, "mmr_enabled": True, "mmr_skip_after_ce": False},
+        description="CE off + MMR diversity (default lambda=0.7). Tests if MMR adds when CE isn't head-cutting.",
+    ),
+    # ------------------------------------------------------------------
+    # Channel-isolation diagnostics. Answers: does the keyword channel
+    # actually contribute anything? Pure vector vs default-fused.
+    # ------------------------------------------------------------------
+    "vector_only": RetrievalConfig(
+        name="vector_only",
+        flags={"cross_encoder_enabled": False, "vector_weight": 1.0},
+        description=(
+            "Pure vector — no keyword fusion. If this ties ce_off, the "
+            "keyword channel is silent on this corpus and could be "
+            "removed to save one FTS query per recall."
+        ),
+    ),
+    "keyword_only": RetrievalConfig(
+        name="keyword_only",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.0},
+        description=(
+            "Pure keyword — no vector fusion. Worst-case bound: how much "
+            "does FTS alone recover? If close to ce_off, vector is "
+            "redundant on this corpus."
+        ),
+    ),
 }
 
 
