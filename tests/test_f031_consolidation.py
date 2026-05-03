@@ -427,10 +427,19 @@ class TestContradictionResolution:
         heart.deactivate_fact.assert_called_once_with(fact2_id)
 
     @pytest.mark.asyncio
-    async def test_merge_creates_new_deactivates_both(self):
-        """MERGE should learn merged fact and deactivate both originals."""
+    async def test_merge_supersedes_both_originals(self):
+        """MERGE should learn merged fact and link both originals via superseded_by.
+
+        Codex P1 on PR #411 caught that the prior implementation called
+        ``deactivate_fact()`` on both originals, leaving them ``active=False``
+        with no ``superseded_by`` link — orphaning the chain. PR #412 rewrote
+        the branch to capture ``merged_detail.id`` and set ``superseded_by`` +
+        ``active=False`` on both originals in a single session. This test
+        verifies that runtime contract.
+        """
         fact1_id = uuid4()
         fact2_id = uuid4()
+        merged_id = uuid4()
 
         heart = AsyncMock()
         heart.find_contradiction_candidates = AsyncMock(return_value=[{
@@ -442,9 +451,30 @@ class TestContradictionResolution:
             "date2": "2026-03-15",
             "similarity": 0.82,
         }])
-        heart.learn = AsyncMock(return_value=MagicMock())
+        merged_detail = MagicMock()
+        merged_detail.id = merged_id
+        heart.learn = AsyncMock(return_value=merged_detail)
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
+
+        # heart.db.session() returns an async context manager. AsyncMock alone
+        # would yield a coroutine, not an __aenter__/__aexit__ object, so build
+        # the CM explicitly. ORM mocks must have superseded_by=None explicitly
+        # set or MagicMock auto-attr would defeat the race-guard's `is None`
+        # check in sleep_handler.py.
+        orm1 = MagicMock()
+        orm1.superseded_by = None
+        orm2 = MagicMock()
+        orm2.superseded_by = None
+        orm_facts = {fact1_id: orm1, fact2_id: orm2}
+        mock_session = MagicMock()
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_session)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        heart.db = MagicMock()
+        heart.db.session = MagicMock(return_value=cm)
 
         llm_response = json.dumps({
             "action": "MERGE",
@@ -459,8 +489,90 @@ class TestContradictionResolution:
         await handler._phase_resolve_contradictions(sleep_stats)
 
         heart.learn.assert_called_once()
-        assert heart.deactivate_fact.call_count == 2
+        # New contract: NO deactivate_fact() calls — supersession handled in-session.
+        heart.deactivate_fact.assert_not_called()
+        # Session entered exactly once and committed.
+        heart.db.session.assert_called_once()
+        mock_session.commit.assert_awaited_once()
+        # Both originals fetched and linked to merged fact.
+        assert mock_session.get.await_count == 2
+        for orig_id, orm in orm_facts.items():
+            assert orm.superseded_by == merged_id, (
+                f"orig {orig_id} should be linked to merged_id"
+            )
+            assert orm.active is False
         assert sleep_stats["facts_created"] == 1
+        assert sleep_stats["contradictions_resolved"] == 1
+
+    @pytest.mark.asyncio
+    async def test_merge_preserves_existing_supersede_link(self):
+        """Codex P1 on PR #412: MERGE must NOT clobber a pre-existing
+        ``superseded_by`` link. If a concurrent path superseded one of the
+        candidate facts between selection and the MERGE write, the original
+        chain target must win.
+        """
+        fact1_id = uuid4()
+        fact2_id = uuid4()
+        merged_id = uuid4()
+        prior_supersede_target = uuid4()
+
+        heart = AsyncMock()
+        heart.find_contradiction_candidates = AsyncMock(return_value=[{
+            "fact1_id": fact1_id,
+            "fact2_id": fact2_id,
+            "content1": "Tim uses EST",
+            "content2": "Tim's hours are 9-5",
+            "date1": "2026-03-01",
+            "date2": "2026-03-15",
+            "similarity": 0.82,
+        }])
+        merged_detail = MagicMock()
+        merged_detail.id = merged_id
+        heart.learn = AsyncMock(return_value=merged_detail)
+        heart.deactivate_fact = AsyncMock()
+        heart.search_facts = AsyncMock(return_value=[])
+
+        # fact1 was concurrently superseded; fact2 is fresh.
+        orm1 = MagicMock()
+        orm1.superseded_by = prior_supersede_target
+        orm1.active = False  # already inactive (paired invariant)
+        orm2 = MagicMock()
+        orm2.superseded_by = None
+        orm2.active = True
+        orm_facts = {fact1_id: orm1, fact2_id: orm2}
+        mock_session = MagicMock()
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_session)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        heart.db = MagicMock()
+        heart.db.session = MagicMock(return_value=cm)
+
+        llm_response = json.dumps({
+            "action": "MERGE",
+            "confidence": 0.85,
+            "reason": "Complementary timezone info",
+            "merged_content": "Tim works in EST timezone, hours 9-5",
+        })
+        handler, _, _, _, _ = _make_sleep_handler(
+            heart=heart, llm_client=_mock_llm_client(llm_response)
+        )
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        await handler._phase_resolve_contradictions(sleep_stats)
+
+        # fact1: original chain target preserved, NOT overwritten
+        assert orm1.superseded_by == prior_supersede_target, (
+            "Race-guard must not clobber an already-populated superseded_by"
+        )
+        assert orm1.active is False  # unchanged
+
+        # fact2: normal path, gets linked to merged_id
+        assert orm2.superseded_by == merged_id
+        assert orm2.active is False
+
+        # commit still happens once (only fact2 was modified)
+        mock_session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_keep_both_takes_no_action(self):

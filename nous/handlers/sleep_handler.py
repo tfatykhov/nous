@@ -894,21 +894,85 @@ class SleepHandler:
                         # case); but keep a defensive check just in case.
                         if merged_content:
                             try:
-                                await self._heart.learn(FactInput(
-                                    subject=pair.get("subject", None),
-                                    content=merged_content,
-                                    source="contradiction_resolution",
-                                    confidence=0.8,
-                                    category=pair.get("category", None),
-                                ))
-                                await self._heart.deactivate_fact(fact1_id)
-                                await self._heart.deactivate_fact(fact2_id)
-                                sleep_stats["contradictions_resolved"] += 1
-                                sleep_stats["facts_created"] += 1
-                                logger.info(
-                                    "F031 resolve: MERGE — combined %s + %s into new fact (%.2f confidence)",
-                                    fact1_id, fact2_id, confidence,
+                                merged_detail = await self._heart.learn(
+                                    FactInput(
+                                        subject=pair.get("subject", None),
+                                        content=merged_content,
+                                        source="contradiction_resolution",
+                                        confidence=0.8,
+                                        category=pair.get("category", None),
+                                    )
                                 )
+                                # PR #411 follow-up (Codex P1): F031
+                                # MERGE used to discard the learn()
+                                # result and call deactivate_fact() on
+                                # both originals — leaving them
+                                # active=False with NO superseded_by
+                                # link. That orphaned every successful
+                                # MERGE's source facts (chain broken,
+                                # recoverable only via manual SQL).
+                                # Mirror F027's pattern: capture the
+                                # merged ID, set superseded_by AND
+                                # active=False on both originals in a
+                                # single transaction.
+                                if isinstance(merged_detail, FactRejected):
+                                    # contradiction_resolution is in
+                                    # bypass_sources so this should not
+                                    # happen, but defend in depth.
+                                    logger.warning(
+                                        "F031 MERGE: heart.learn rejected "
+                                        "the merged fact unexpectedly: %s",
+                                        merged_detail.explanation,
+                                    )
+                                else:
+                                    async with self._heart.db.session() as session:
+                                        for orig_id in (fact1_id, fact2_id):
+                                            # Defensive: never set
+                                            # superseded_by to own id.
+                                            # Heart.learn always returns
+                                            # a fresh UUID today, but the
+                                            # check is one comparison and
+                                            # removes a class of "what if
+                                            # learn ever changes" bugs.
+                                            if orig_id == merged_detail.id:
+                                                continue
+                                            orm_fact = await session.get(
+                                                Fact, orig_id
+                                            )
+                                            if orm_fact is None:
+                                                continue
+                                            # Codex P1 on PR #412: do not
+                                            # clobber an already-populated
+                                            # superseded_by. A concurrent
+                                            # path may have superseded
+                                            # this fact between candidate
+                                            # selection and now; blindly
+                                            # overwriting would lose the
+                                            # original chain target. The
+                                            # active flip is paired —
+                                            # already-superseded facts
+                                            # are already inactive.
+                                            if orm_fact.superseded_by is not None:
+                                                logger.debug(
+                                                    "F031 MERGE: skip supersede "
+                                                    "of %s — already linked to %s",
+                                                    orig_id,
+                                                    orm_fact.superseded_by,
+                                                )
+                                                continue
+                                            orm_fact.superseded_by = (
+                                                merged_detail.id
+                                            )
+                                            orm_fact.active = False
+                                        await session.commit()
+                                    sleep_stats["contradictions_resolved"] += 1
+                                    sleep_stats["facts_created"] += 1
+                                    logger.info(
+                                        "F031 resolve: MERGE — combined %s + %s "
+                                        "into %s (%.2f confidence)",
+                                        fact1_id, fact2_id,
+                                        merged_detail.id, confidence,
+                                    )
                             except Exception:
                                 logger.warning(
                                     "MERGE partially failed for %s/%s",
@@ -1192,10 +1256,28 @@ class SleepHandler:
                 # Deactivate originals
                 async with self._heart.db.session() as session:
                     for fact in facts:
+                        # Defensive (mirrors F031 fix on PR #412): never
+                        # set superseded_by to own id. Heart.learn always
+                        # returns a fresh UUID today, but cheap to guard.
+                        if fact.id == merged_detail.id:
+                            continue
                         orm_fact = await session.get(Fact, fact.id)
-                        if orm_fact:
-                            orm_fact.superseded_by = merged_detail.id
-                            orm_fact.active = False
+                        if orm_fact is None:
+                            continue
+                        # Codex P1 on PR #412 (mirror): do not clobber
+                        # an already-populated superseded_by. A
+                        # concurrent path may have superseded this fact
+                        # between candidate selection and now.
+                        if orm_fact.superseded_by is not None:
+                            logger.debug(
+                                "F027 cluster_merge: skip supersede of %s "
+                                "— already linked to %s",
+                                fact.id,
+                                orm_fact.superseded_by,
+                            )
+                            continue
+                        orm_fact.superseded_by = merged_detail.id
+                        orm_fact.active = False
                     await session.commit()
 
                 merged_fact_id = str(merged_detail.id)
