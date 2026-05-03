@@ -927,6 +927,15 @@ class SleepHandler:
                                 else:
                                     async with self._heart.db.session() as session:
                                         for orig_id in (fact1_id, fact2_id):
+                                            # Defensive: never set
+                                            # superseded_by to own id.
+                                            # Heart.learn always returns
+                                            # a fresh UUID today, but the
+                                            # check is one comparison and
+                                            # removes a class of "what if
+                                            # learn ever changes" bugs.
+                                            if orig_id == merged_detail.id:
+                                                continue
                                             orm_fact = await session.get(
                                                 Fact, orig_id
                                             )
@@ -1227,6 +1236,11 @@ class SleepHandler:
                 # Deactivate originals
                 async with self._heart.db.session() as session:
                     for fact in facts:
+                        # Defensive (mirrors F031 fix on PR #412): never
+                        # set superseded_by to own id. Heart.learn always
+                        # returns a fresh UUID today, but cheap to guard.
+                        if fact.id == merged_detail.id:
+                            continue
                         orm_fact = await session.get(Fact, fact.id)
                         if orm_fact:
                             orm_fact.superseded_by = merged_detail.id
