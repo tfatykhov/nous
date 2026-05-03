@@ -146,7 +146,15 @@ async def check_stale_scan(
     params: list = [agent_id, age_days]
     if excluded:
         placeholders = ", ".join(f"${i + 3}" for i in range(len(excluded)))
-        excluded_clause = f"AND category NOT IN ({placeholders})"
+        # Mirror the production filter's NULL handling — `NOT IN`
+        # alone evaluates UNKNOWN for NULL-category rows, silently
+        # excluding them. The fallback `truly_stale` counts already
+        # do this; the primary query must too or the probe will
+        # false-RED on corpora where stale facts are uncategorized.
+        # Codex P1 on PR #408.
+        excluded_clause = (
+            f"AND (category IS NULL OR category NOT IN ({placeholders}))"
+        )
         params.extend(excluded)
     sql = f"""
         SELECT id, content, category, created_at

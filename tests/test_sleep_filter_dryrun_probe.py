@@ -129,6 +129,27 @@ async def test_stale_scan_red_when_stale_facts_exist_but_filter_selects_zero():
     assert "17 stale facts exist" in result.verdict_reason or "12" in result.verdict_reason
 
 
+def test_stale_scan_primary_query_uses_null_aware_exclusion():
+    """Codex P1 on PR #408: the primary candidate query and the
+    fallback truly_stale counts must apply the same NULL-aware
+    category exclusion. Without symmetry, NULL-category stale facts
+    are excluded from the primary count (because `NOT IN (...)`
+    evaluates UNKNOWN on NULL) but included in fallback truly_stale,
+    causing a false RED verdict.
+    """
+    import inspect
+
+    from nous_eval.probes import sleep_filter_dryrun
+
+    src = inspect.getsource(sleep_filter_dryrun.check_stale_scan)
+    # The primary excluded_clause must match the fallback excl_clause:
+    # both should include `IS NULL OR category NOT IN`.
+    assert src.count("category IS NULL OR category NOT IN") >= 2, (
+        "primary candidate query and fallback truly_stale queries "
+        "must both use NULL-aware category exclusion"
+    )
+
+
 @pytest.mark.asyncio
 async def test_stale_scan_green_when_filter_selects_candidates():
     conn = _make_conn(
