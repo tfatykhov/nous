@@ -131,6 +131,28 @@ _REFLECTION_SCHEMA: dict[str, Any] = {
     "required": ["patterns", "lessons", "connections", "gaps", "summary", "facts"],
 }
 
+# F031 SAFETY DOWNGRADE SEMANTICS — single source of truth.
+#
+# Used both by ``_phase_resolve_contradictions`` (the actual downgrade
+# logic) and by ``nous_eval/probes/sleep_action_audit.py`` (which
+# formats this into the F031 judge rubric so the judge correctly
+# scores downgraded actions as intentional safety, not mistakes).
+#
+# Keep the floor + the downgrade matrix in sync with the corresponding
+# ``if`` branches in ``_phase_resolve_contradictions`` below. A test in
+# ``tests/test_sleep_action_audit_probe.py`` asserts the audit rubric
+# references this constant so drift fails loud.
+F031_SAFETY_FLOOR_DESCRIPTION = (
+    "The agent has a safety floor: any action with confidence below "
+    "0.7 OR a MERGE without merged_content is automatically downgraded "
+    "to KEEP_BOTH before being applied. This is INTENTIONAL safety "
+    "behavior, not a bug — KEEP_BOTH preserves both facts and is "
+    "reversible. When you see 'applied=KEEP_BOTH (downgraded from "
+    "MERGE)', evaluate the APPLIED action (KEEP_BOTH) — i.e., would "
+    "keeping both facts be acceptable here? — not the raw model output."
+)
+
+
 # F031 prompt rewritten 2026-04-30 after the synthetic eval
 # (reports/f031_resolution_eval.md) measured 33% accuracy and a strong
 # directional bias (SUPERSEDE_A: 12/30 verdicts, SUPERSEDE_B: 1/30)
@@ -246,6 +268,11 @@ class SleepHandler:
         self._interrupted = False
         self._sleeping = False
         self._sleep_task: asyncio.Task | None = None
+        # PR #407: bounded retention for fire-and-forget per-action
+        # event emission tasks. Strong references prevent the GC from
+        # collecting a task mid-flight; add_done_callback(discard)
+        # cleans up after completion. Standard asyncio idiom.
+        self._pending_emits: set[asyncio.Task] = set()
         self._procedure_learner = None  # F012: Set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
@@ -279,6 +306,30 @@ class SleepHandler:
     @property
     def is_sleeping(self) -> bool:
         return self._sleeping
+
+    def _emit_action_event(self, event_type: str, data: dict) -> None:
+        """Fire-and-forget per-action event for sleep-eval audit (PR #3).
+
+        Mirrors the F031 ``f031_contradiction_resolution`` and the
+        runner.py ``f026_action_gate`` patterns: ``asyncio.create_task``
+        so the sleep loop never blocks on DB I/O, and a debug-level
+        suppression on emission failure so persistence problems can't
+        break a sleep cycle.
+
+        Holds a strong reference to the task in ``_pending_emits`` until
+        completion so the GC can't collect a still-running fire-and-
+        forget task mid-flight. ``add_done_callback(discard)`` is the
+        standard idiom for this pattern.
+        """
+        try:
+            task = asyncio.create_task(
+                self._brain.emit_event(event_type, data)
+            )
+            self._pending_emits.add(task)
+            task.add_done_callback(self._pending_emits.discard)
+        except Exception:
+            logger.debug("%s persistence failed (suppressed)",
+                         event_type, exc_info=True)
 
     def get_stats(self) -> dict:
         """F035.1: Return sleep handler statistics."""
@@ -965,7 +1016,30 @@ class SleepHandler:
                     max_tokens=500,
                 )
 
+                # Per-action event for retrospective audit (sleep eval
+                # PR #3). Emitted on EVERY merge attempt — including
+                # LLM refusals — so the audit can distinguish
+                # "phase fired but LLM said no" from "phase didn't fire."
+                # Outcome categories:
+                #   llm_refused: LLM returned no merged_content
+                #   rejected_by_admission: heart.learn returned FactRejected
+                #   merged: full success (originals deactivated, new fact stored)
+                merge_outcome = "llm_refused"
+                merged_fact_id: str | None = None
+
                 if not merge_result or not merge_result.get("merged_content"):
+                    self._emit_action_event(
+                        "f027_cluster_merge",
+                        {
+                            "subject": str(subject)[:200],
+                            "source_fact_ids": [str(f.id) for f in facts],
+                            "source_count": len(facts),
+                            "merged_content": None,
+                            "merged_fact_id": None,
+                            "confidence": None,
+                            "outcome": merge_outcome,
+                        },
+                    )
                     continue
 
                 # Create merged fact
@@ -978,6 +1052,23 @@ class SleepHandler:
                 ))
 
                 if isinstance(merged_detail, FactRejected):
+                    merge_outcome = "rejected_by_admission"
+                    self._emit_action_event(
+                        "f027_cluster_merge",
+                        {
+                            "subject": str(subject)[:200],
+                            "source_fact_ids": [str(f.id) for f in facts],
+                            "source_count": len(facts),
+                            "merged_content": str(
+                                merge_result.get("merged_content", "")
+                            )[:500],
+                            "merged_fact_id": None,
+                            "confidence": float(
+                                merge_result.get("confidence", 0.8)
+                            ),
+                            "outcome": merge_outcome,
+                        },
+                    )
                     continue
 
                 # Deactivate originals
@@ -988,6 +1079,25 @@ class SleepHandler:
                             orm_fact.superseded_by = merged_detail.id
                             orm_fact.active = False
                     await session.commit()
+
+                merged_fact_id = str(merged_detail.id)
+                merge_outcome = "merged"
+                self._emit_action_event(
+                    "f027_cluster_merge",
+                    {
+                        "subject": str(subject)[:200],
+                        "source_fact_ids": [str(f.id) for f in facts],
+                        "source_count": len(facts),
+                        "merged_content": str(
+                            merge_result.get("merged_content", "")
+                        )[:500],
+                        "merged_fact_id": merged_fact_id,
+                        "confidence": float(
+                            merge_result.get("confidence", 0.8)
+                        ),
+                        "outcome": merge_outcome,
+                    },
+                )
 
                 merged_count += 1
                 sleep_stats.setdefault("facts_created", 0)
