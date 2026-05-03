@@ -939,11 +939,31 @@ class SleepHandler:
                                             orm_fact = await session.get(
                                                 Fact, orig_id
                                             )
-                                            if orm_fact:
-                                                orm_fact.superseded_by = (
-                                                    merged_detail.id
+                                            if orm_fact is None:
+                                                continue
+                                            # Codex P1 on PR #412: do not
+                                            # clobber an already-populated
+                                            # superseded_by. A concurrent
+                                            # path may have superseded
+                                            # this fact between candidate
+                                            # selection and now; blindly
+                                            # overwriting would lose the
+                                            # original chain target. The
+                                            # active flip is paired —
+                                            # already-superseded facts
+                                            # are already inactive.
+                                            if orm_fact.superseded_by is not None:
+                                                logger.debug(
+                                                    "F031 MERGE: skip supersede "
+                                                    "of %s — already linked to %s",
+                                                    orig_id,
+                                                    orm_fact.superseded_by,
                                                 )
-                                                orm_fact.active = False
+                                                continue
+                                            orm_fact.superseded_by = (
+                                                merged_detail.id
+                                            )
+                                            orm_fact.active = False
                                         await session.commit()
                                     sleep_stats["contradictions_resolved"] += 1
                                     sleep_stats["facts_created"] += 1
@@ -1242,9 +1262,22 @@ class SleepHandler:
                         if fact.id == merged_detail.id:
                             continue
                         orm_fact = await session.get(Fact, fact.id)
-                        if orm_fact:
-                            orm_fact.superseded_by = merged_detail.id
-                            orm_fact.active = False
+                        if orm_fact is None:
+                            continue
+                        # Codex P1 on PR #412 (mirror): do not clobber
+                        # an already-populated superseded_by. A
+                        # concurrent path may have superseded this fact
+                        # between candidate selection and now.
+                        if orm_fact.superseded_by is not None:
+                            logger.debug(
+                                "F027 cluster_merge: skip supersede of %s "
+                                "— already linked to %s",
+                                fact.id,
+                                orm_fact.superseded_by,
+                            )
+                            continue
+                        orm_fact.superseded_by = merged_detail.id
+                        orm_fact.active = False
                     await session.commit()
 
                 merged_fact_id = str(merged_detail.id)
