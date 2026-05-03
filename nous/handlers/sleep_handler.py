@@ -227,19 +227,95 @@ _CONTRADICTION_RESOLUTION_SCHEMA: dict[str, Any] = {
 _CLUSTER_MERGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "should_merge": {
+            "type": "boolean",
+            "description": (
+                "True when the source facts cohere into one merged fact. "
+                "False ONLY when merging would lose load-bearing "
+                "distinctions (different entities sharing a name, "
+                "irreconcilable contradictions). For chronological "
+                "updates or multi-aspect descriptions of the same "
+                "topic, set true even if some specifics are lost — "
+                "source facts remain accessible via supersede chain."
+            ),
+        },
         "merged_content": {
             "type": "string",
-            "description": "Single consolidated fact merging all input facts",
+            "description": (
+                "Single consolidated fact (1-3 sentences) capturing "
+                "what matters about this topic. Required when "
+                "should_merge is true; ignored when false."
+            ),
+        },
+        "refuse_reason": {
+            "type": "string",
+            "description": (
+                "When should_merge is false, briefly explain what "
+                "load-bearing information would be lost by merging. "
+                "Required when should_merge is false."
+            ),
         },
         "confidence": {
             "type": "number",
             "minimum": 0.0,
             "maximum": 1.0,
-            "description": "Confidence in the merged fact (0.0 to 1.0)",
+            "description": "Confidence in the verdict (0.0 to 1.0)",
         },
     },
-    "required": ["merged_content", "confidence"],
+    "required": ["should_merge", "confidence"],
 }
+
+
+_CLUSTER_MERGE_PROMPT = """You are consolidating a cluster of facts about the same subject in a long-running agent's memory.
+
+Subject: {subject}
+
+Facts in this cluster ({n_facts}):
+{facts}
+
+Apply this decision tree IN ORDER:
+
+Step 1 — Coherence test. Are all facts about the SAME entity/topic?
+- Same entity (just different aspects, time points, or detail levels) → continue to Step 2.
+- Different entities sharing only a string match (e.g., two people named "Tim") → set should_merge=false with refuse_reason explaining the entity collision.
+
+Step 2 — Merge feasibility test. Can the facts be summarized in 1-3 sentences that preserves what MATTERS about this topic?
+- Yes → set should_merge=true and write merged_content. Loss of specific dates, exact numbers, or fine-grained detail is ACCEPTABLE — source facts remain accessible via the supersede chain.
+- No (genuinely contradictory facts that can't be reconciled) → set should_merge=false with refuse_reason naming the contradiction.
+
+Examples:
+
+GOOD MERGE — chronological updates of same topic:
+  Inputs:
+    - "Repo at commit abc123 on Mon"
+    - "Repo at commit def456 on Tue"
+    - "Repo at commit ghi789 on Wed"
+  → merged_content: "Repo state tracked daily; HEAD has advanced through abc123 (Mon) → def456 (Tue) → ghi789 (Wed)."
+
+GOOD MERGE — multi-aspect description of same entity:
+  Inputs:
+    - "Project X uses Postgres for storage"
+    - "Project X uses pgvector extension for embeddings"
+    - "Project X uses HNSW indexes"
+  → merged_content: "Project X uses Postgres with pgvector + HNSW indexes for embedding-based storage."
+
+GOOD REFUSE — different entities:
+  Inputs about subject "John":
+    - "John is the lead engineer on the API team"
+    - "John is a customer at Acme Corp"
+    - "John released the v2.1 changelog"
+  → should_merge=false, refuse_reason: "Three different people named John (engineer, customer, and likely a third entity); merging would conflate distinct identities."
+
+GOOD REFUSE — irreconcilable contradiction:
+  Inputs:
+    - "Tim's flight is at 3pm"
+    - "Tim's flight is at 5pm"
+    - "Tim's flight was cancelled"
+  → should_merge=false, refuse_reason: "Three contradictory states of Tim's flight; merging would erase the cancellation which is the load-bearing latest state."
+
+Default lean: if you can produce ANY coherent merged_content even with detail loss, prefer should_merge=true over refuse. The supersede chain preserves the source facts — they remain reachable via `superseded_by` links if the merged version turns out wrong, so an over-eager merge is recoverable. A refused-but-mergeable cluster, by contrast, sits as bloat in memory forever.
+
+Use the merge_facts tool to return your verdict."""
 
 
 class SleepHandler:
@@ -1012,16 +1088,26 @@ class SleepHandler:
                 merge_result = await call_background_llm_structured(
                     client=self._llm,
                     model=self._settings.background_model,
-                    system_prompt="You are a memory consolidation system. Merge related facts into one.",
-                    user_message=(
-                        f"Subject: {subject}\n\n"
-                        f"Facts to merge:\n{facts_text}\n\n"
-                        f"Create a single consolidated fact that captures all information."
+                    system_prompt=(
+                        "You are a memory consolidation expert. "
+                        "Apply the decision tree carefully and prefer "
+                        "merging when subjects clearly cohere."
+                    ),
+                    user_message=_CLUSTER_MERGE_PROMPT.format(
+                        subject=subject,
+                        n_facts=len(facts),
+                        facts=facts_text,
                     ),
                     tool_name="merge_facts",
-                    tool_description="Return a single merged fact combining all input facts.",
+                    tool_description=(
+                        "Return verdict on whether the cluster merges. "
+                        "Set should_merge=true with merged_content for "
+                        "coherent topics; should_merge=false with "
+                        "refuse_reason for entity collisions or "
+                        "irreconcilable contradictions."
+                    ),
                     output_schema=_CLUSTER_MERGE_SCHEMA,
-                    max_tokens=500,
+                    max_tokens=600,
                 )
 
                 # Per-action event for retrospective audit (sleep eval
@@ -1029,13 +1115,29 @@ class SleepHandler:
                 # LLM refusals — so the audit can distinguish
                 # "phase fired but LLM said no" from "phase didn't fire."
                 # Outcome categories:
-                #   llm_refused: LLM returned no merged_content
+                #   llm_refused: explicit should_merge=false with reason
+                #   llm_malformed: should_merge=true but empty content
+                #     (PR #410 review): distinct from refused so the
+                #     audit doesn't conflate "LLM said no on purpose"
+                #     with "LLM responded incoherently"
                 #   rejected_by_admission: heart.learn returned FactRejected
                 #   merged: full success (originals deactivated, new fact stored)
-                merge_outcome = "llm_refused"
                 merged_fact_id: str | None = None
 
-                if not merge_result or not merge_result.get("merged_content"):
+                # Classify the LLM's response into the right refusal
+                # bucket. Order matters: explicit should_merge=false is
+                # the cleanest signal; missing-content-with-true is a
+                # response-quality issue, not an intentional refusal.
+                if not merge_result:
+                    merge_outcome = "llm_malformed"
+                elif merge_result.get("should_merge") is False:
+                    merge_outcome = "llm_refused"
+                elif not merge_result.get("merged_content"):
+                    merge_outcome = "llm_malformed"
+                else:
+                    merge_outcome = None  # proceed to merge
+
+                if merge_outcome is not None:
                     self._emit_action_event(
                         "f027_cluster_merge",
                         {
@@ -1044,7 +1146,14 @@ class SleepHandler:
                             "source_count": len(facts),
                             "merged_content": None,
                             "merged_fact_id": None,
-                            "confidence": None,
+                            "confidence": (
+                                float(merge_result.get("confidence", 0.0))
+                                if merge_result else None
+                            ),
+                            "refuse_reason": (
+                                str(merge_result.get("refuse_reason", ""))[:300]
+                                if merge_result else None
+                            ),
                             "outcome": merge_outcome,
                         },
                     )
@@ -1074,6 +1183,7 @@ class SleepHandler:
                             "confidence": float(
                                 merge_result.get("confidence", 0.8)
                             ),
+                            "refuse_reason": None,
                             "outcome": merge_outcome,
                         },
                     )
@@ -1103,6 +1213,7 @@ class SleepHandler:
                         "confidence": float(
                             merge_result.get("confidence", 0.8)
                         ),
+                        "refuse_reason": None,
                         "outcome": merge_outcome,
                     },
                 )
