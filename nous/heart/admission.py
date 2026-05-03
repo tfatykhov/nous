@@ -103,11 +103,12 @@ class AdmissionConfig:
             # design these merge EXISTING fact content into a single
             # compressed restatement, so the novelty score is naturally
             # low — admission would reject them as "redundant" when the
-            # whole point is to compress redundancy. The supersede chain
-            # preserves the originals if a merge turns out wrong, so
-            # bypassing admission here is safe.
+            # whole point is to compress redundancy. Originals remain
+            # reachable via the `superseded_by` link if a merge turns
+            # out wrong (no public reactivate API yet — recovery is
+            # currently manual SQL or re-learning the source content).
             #
-            # Caught 2026-05-03: action audit (PR #407) found
+            # Caught 2026-05-03: action audit (PR #410 follow-up) found
             # admission rejected 3 of 5 F027 merges that the judge
             # said were correct consolidations of coherent topics
             # (composite scores 0.52-0.59 vs prod threshold 0.60).
