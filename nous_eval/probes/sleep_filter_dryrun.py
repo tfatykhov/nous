@@ -57,14 +57,37 @@ import asyncpg
 
 _DEFAULT_AGENT_ID = "nous-prod-snapshot"
 
-# Defaults must match nous.config.Settings — when settings drift, this
-# probe should fail loud rather than silently report against stale
-# defaults.
-_DEFAULT_STALE_AGE_DAYS = 60
-_DEFAULT_STALE_EXCLUDED = ["rule"]
-_DEFAULT_CLUSTER_MIN = 3
-_DEFAULT_CLUSTER_MAX = 10
-_DEFAULT_PROCEDURE_RECENCY_DAYS = 30
+# Read defaults from the live Settings class so adding a new excluded
+# category or shifting a threshold in nous.config automatically
+# propagates here. Wrapping in a function (called once at module load)
+# keeps the imports lazy enough that this module can be imported
+# without a populated NOUS_ env.
+def _settings_defaults() -> tuple[int, list[str], int, int, int]:
+    from nous.config import Settings
+    s = Settings()
+    return (
+        s.stale_scan_age_days,
+        list(s.stale_scan_excluded_categories),
+        s.cluster_consolidation_min_facts,
+        s.cluster_consolidation_max_facts,
+        s.procedure_recency_days,
+    )
+
+
+(
+    _DEFAULT_STALE_AGE_DAYS,
+    _DEFAULT_STALE_EXCLUDED,
+    _DEFAULT_CLUSTER_MIN,
+    _DEFAULT_CLUSTER_MAX,
+    _DEFAULT_PROCEDURE_RECENCY_DAYS,
+) = _settings_defaults()
+
+# RED threshold for procedure_recency: % of total-eligible decisions
+# that must fall in the recency window. The original bug had 1.5% in a
+# 7-day window; the fix puts ~35% in a 30-day window. 5% is a
+# round-number floor between the two, but operators with low-traffic
+# corpora can tune via --procedure-recency-min-pct.
+_DEFAULT_PROCEDURE_RECENCY_MIN_PCT = 5.0
 
 
 @dataclass
@@ -108,7 +131,17 @@ async def check_stale_scan(
         )
 
     # The new filter from PR #405 (sleep_handler._phase_stale_scan).
-    # We exec the SAME SQL the sleep handler emits via SQLAlchemy.
+    # NOTE: this SQL is HAND-PORTED from the SQLAlchemy expression in
+    # _phase_stale_scan, not derived from it. If the handler's filter
+    # changes, this probe will silently disagree until someone updates
+    # this string. The cross-check is sleep_cycle_health (#404) — that
+    # passive monitor would flag persistent zero-output across N
+    # cycles. A more robust fix is to extract the WHERE expression
+    # into a shared helper both call sites consume; tracked as a
+    # follow-up.
+    # Pin now() once so the multi-step verdict logic below sees
+    # consistent boundary semantics across queries.
+    cutoff_sql = "now() - ($2::int || ' days')::interval"
     excluded_clause = ""
     params: list = [agent_id, age_days]
     if excluded:
@@ -276,6 +309,7 @@ async def check_procedure_recency(
     conn: asyncpg.Connection,
     agent_id: str,
     recency_days: int,
+    min_pct: float = _DEFAULT_PROCEDURE_RECENCY_MIN_PCT,
 ) -> FilterResult:
     """Count successful-reviewed-with-bridge decisions in the
     procedure_learner recency window. The bug was that the hardcoded
@@ -316,15 +350,16 @@ async def check_procedure_recency(
             ),
         )
     pct = 100.0 * n / total_eligible
-    if pct < 5:
+    if pct < min_pct:
         return FilterResult(
             name="procedure_recency",
             candidate_count=n,
             verdict="RED",
             verdict_reason=(
                 f"only {n} of {total_eligible} eligible decisions "
-                f"({pct:.1f}%) fall in {recency_days}-day window — "
-                f"recency_days too tight for current prod traffic"
+                f"({pct:.1f}%) fall in {recency_days}-day window "
+                f"(threshold: {min_pct}%) — recency_days too tight "
+                f"for current prod traffic"
             ),
         )
     return FilterResult(
@@ -352,6 +387,7 @@ async def run(
     cluster_min: int = _DEFAULT_CLUSTER_MIN,
     cluster_max: int = _DEFAULT_CLUSTER_MAX,
     procedure_recency_days: int = _DEFAULT_PROCEDURE_RECENCY_DAYS,
+    procedure_recency_min_pct: float = _DEFAULT_PROCEDURE_RECENCY_MIN_PCT,
 ) -> list[FilterResult]:
     """Run all 3 filter checks. Caller owns connection lifetime."""
     excluded = list(stale_excluded if stale_excluded is not None
@@ -360,7 +396,8 @@ async def run(
         await check_stale_scan(conn, agent_id, stale_age_days, excluded),
         await check_cluster_consolidation(conn, agent_id, cluster_min,
                                           cluster_max),
-        await check_procedure_recency(conn, agent_id, procedure_recency_days),
+        await check_procedure_recency(conn, agent_id, procedure_recency_days,
+                                      procedure_recency_min_pct),
     ]
 
 
@@ -378,7 +415,7 @@ def _print_report(results: list[FilterResult], agent_id: str) -> None:
         print(f"\n  {marker} {r.name:<26}  candidates={r.candidate_count}")
         print(f"         {r.verdict_reason}")
         if r.samples:
-            print(f"         samples:")
+            print("         samples:")
             for s in r.samples:
                 print(f"      {s}")
     print()
@@ -439,6 +476,11 @@ async def _async_main(argv: list[str] | None = None) -> int:
     p.add_argument("--cluster-max", type=int, default=_DEFAULT_CLUSTER_MAX)
     p.add_argument("--procedure-recency-days", type=int,
                    default=_DEFAULT_PROCEDURE_RECENCY_DAYS)
+    p.add_argument("--procedure-recency-min-pct", type=float,
+                   default=_DEFAULT_PROCEDURE_RECENCY_MIN_PCT,
+                   help=("RED-flag threshold: %% of total-eligible "
+                         "decisions that must fall in the recency "
+                         "window. Tune lower for low-traffic corpora."))
     p.add_argument("--strict", action="store_true",
                    help="Exit 1 if any filter shows a regression pattern.")
     p.add_argument("--out", type=Path,
@@ -460,6 +502,7 @@ async def _async_main(argv: list[str] | None = None) -> int:
             cluster_min=args.cluster_min,
             cluster_max=args.cluster_max,
             procedure_recency_days=args.procedure_recency_days,
+            procedure_recency_min_pct=args.procedure_recency_min_pct,
         )
     finally:
         await conn.close()

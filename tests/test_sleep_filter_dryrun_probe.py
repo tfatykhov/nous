@@ -11,7 +11,6 @@ behavior the live first-run had before fixing.
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,20 +39,38 @@ def _make_conn(
     for the queries the probe issues."""
     conn = MagicMock()
 
+    # Match by semantic SQL fragments rather than whitespace-sensitive
+    # substrings. The previous version's two
+    # "AND b.function IS NOT NULL ..." keys differed only by trailing
+    # whitespace — an autoformat run on the probe would silently route
+    # both queries to the same response. Each key here is unique enough
+    # to survive routine SQL reformatting.
+    def _classify(sql: str) -> str:
+        if "MIN(created_at)" in sql:
+            return "oldest_days"
+        if "last_recalled_at IS NULL" in sql:
+            return "old_never_recalled"
+        if "last_recalled_at < " in sql:
+            return "old_recalled_long_ago"
+        if "GROUP BY subject HAVING" in sql.replace("\n", " "):
+            return "above_cap"
+        if "d.created_at >" in sql:
+            return "proc_in_window"
+        if "AND b.function IS NOT NULL" in sql and "d.created_at" not in sql:
+            return "proc_total_eligible"
+        return "unknown"
+
     fetchval_responses = {
-        "EXTRACT(DAY FROM now() - MIN": oldest_days,
-        "AND last_recalled_at IS NULL\n            ": old_never_recalled,
-        "AND last_recalled_at IS NOT NULL": old_recalled_long_ago,
-        "SELECT COUNT(*) FROM (": above_cap,
-        "AND b.function IS NOT NULL\n          AND d.created_at": proc_in_window,
-        "AND b.function IS NOT NULL\n        ": proc_total_eligible,
+        "oldest_days": oldest_days,
+        "old_never_recalled": old_never_recalled,
+        "old_recalled_long_ago": old_recalled_long_ago,
+        "above_cap": above_cap,
+        "proc_in_window": proc_in_window,
+        "proc_total_eligible": proc_total_eligible,
     }
 
     async def _fetchval(sql, *args):
-        for key, value in fetchval_responses.items():
-            if key in sql:
-                return value
-        return 0
+        return fetchval_responses.get(_classify(sql), 0)
 
     async def _fetch(sql, *args):
         if "GROUP BY subject" in sql:
