@@ -119,10 +119,20 @@ _DEFAULT_BOUNDS: dict[str, PhaseBounds] = {
         notes="Bridge edges are rare (mostly 0, occasional 1-20). Long zero-streak common.",
     ),
     "procedures": PhaseBounds(
-        zero_warn_after=14,
-        notes="Procedure synthesis requires decision clusters; zero across 2 weeks suggests F012 stuck.",
+        zero_warn_after=21,
+        notes=("Procedure synthesis requires successful-decision clusters; "
+               "low-traffic or debugging-heavy agents can legitimately go "
+               "2+ weeks between qualifying clusters. 21-cycle floor avoids "
+               "false-positives on those agents."),
     ),
 }
+
+
+# Per-agent overrides — populate from env if needed.
+# E.g., a fresh agent with little history would want laxer bounds across
+# the board. Keep empty by default; the _DEFAULT_BOUNDS above are
+# calibrated for active agents like nous-default.
+_AGENT_OVERRIDES: dict[str, dict[str, PhaseBounds]] = {}
 
 
 @dataclass
@@ -188,12 +198,23 @@ def analyze_phase(
             "zero_streak": None,
         }
 
-    # Consecutive zeros starting from the most-recent cycle.
+    # Consecutive zeros starting from the most-recent cycle. Walk the
+    # SAME ordering we received cycles in — caller passes
+    # most-recent-first per fetch_recent_cycles(), and we need
+    # last_nonzero_cycle_at to align with the same scan.
     streak = 0
-    for v in values:
-        if v == 0:
+    last_nonzero_at = None
+    for c, v in zip(cycles, [c.data.get(phase.activity_field) for c in cycles]):
+        try:
+            v_num = float(v) if v is not None else None
+        except (TypeError, ValueError):
+            continue
+        if v_num is None:
+            continue
+        if v_num == 0:
             streak += 1
         else:
+            last_nonzero_at = c.cycle_at
             break
 
     sorted_v = sorted(values)
@@ -221,6 +242,11 @@ def analyze_phase(
         "min": min(values), "max": max(values),
         "mean": mean, "median": median,
         "zero_streak": streak,
+        # Surfaces "when did this phase last actually do something?" so
+        # an operator triaging a RED verdict can immediately see
+        # whether the phase has been broken since day one or just
+        # regressed recently.
+        "last_nonzero_cycle_at": last_nonzero_at,
     }
 
 
@@ -251,12 +277,16 @@ async def run(
 
 
 def _print_report(result: dict) -> None:
+    # Use ASCII-only output so this runs on Windows consoles without
+    # UTF-8 enabled (the sys.stdout.reconfigure earlier is best-effort
+    # and wrapped in a bare except).
     print()
     print("=" * 88)
-    print(f"SLEEP CYCLE HEALTH — agent={result['agent_id']}, "
+    print(f"SLEEP CYCLE HEALTH - agent={result['agent_id']}, "
           f"window={result['n_cycles_found']} cycles")
     if result["earliest_cycle"] and result["latest_cycle"]:
-        print(f"  range: {result['earliest_cycle']} → {result['latest_cycle']}")
+        print(f"  range: {result['earliest_cycle']} -> "
+              f"{result['latest_cycle']}")
     print("=" * 88)
     print()
     if result["n_cycles_found"] == 0:
@@ -267,23 +297,30 @@ def _print_report(result: dict) -> None:
               f"{'streak':>6}  verdict")
     print(header)
     print("  " + "-" * (len(header) - 2))
+    # ASCII-safe verdict markers (avoids UnicodeEncodeError on cp1252)
+    _MARKERS = {"GREEN": "[OK]  ", "YELLOW": "[WARN]", "RED": "[FAIL]"}
     for p in result["phases"]:
         if p["verdict"] == "NO_DATA":
             print(f"  {p['phase']:<24}  {p['field']:<24}  "
                   f"  -     -       -       -    NO_DATA")
             continue
-        marker = {"GREEN": "✓", "YELLOW": "!", "RED": "✗"}[p["verdict"]]
+        marker = _MARKERS[p["verdict"]]
         print(f"  {p['phase']:<24}  {p['field']:<24}  "
               f"{p['min']:>4.0f}  {p['max']:>4.0f}  "
               f"{p['mean']:>6.1f}  {p['zero_streak']:>6}  "
               f"{marker} {p['verdict']}")
     print()
-    # Surface RED reasons for quick triage
+    # Surface RED reasons for quick triage; show last_nonzero_cycle_at
+    # so the operator can immediately tell whether the phase regressed
+    # recently or has been broken since day one.
     reds = [p for p in result["phases"] if p["verdict"] == "RED"]
     if reds:
         print("  RED phases (silent-failure pattern):")
         for p in reds:
+            last_seen = (p.get("last_nonzero_cycle_at")
+                         or "never in this window")
             print(f"    - {p['phase']}: {p['verdict_reason']}")
+            print(f"        last non-zero output: {last_seen}")
         print()
 
 
@@ -349,7 +386,14 @@ async def _async_main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     if not args.prod_password:
-        print("ERROR: prod DB_PASSWORD not set in env / .env", file=sys.stderr)
+        # The env var is named DB_PASSWORD (shared with main DB), not
+        # PROD_DB_PASSWORD. Spell that out so an operator who set the
+        # latter (mirroring PROD_DB_HOST) sees the right name to use.
+        print(
+            "ERROR: prod database password not set. Either set the env "
+            "var DB_PASSWORD or pass --prod-password=<value>.",
+            file=sys.stderr,
+        )
         return 2
 
     conn = await asyncpg.connect(

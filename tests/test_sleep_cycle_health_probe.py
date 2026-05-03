@@ -138,3 +138,41 @@ def test_default_bounds_are_calibrated_for_observed_phases():
             f"{phase.name} threshold {bounds.zero_warn_after} too tight — "
             f"will fire on natural variance"
         )
+
+
+def test_procedures_threshold_has_extra_headroom():
+    """Procedures synthesis is gated on successful-decision clusters
+    which a low-traffic agent may legitimately go weeks without.
+    Threshold should be at least 3 weeks (21 cycles) to avoid
+    false-positives on quiet agents."""
+    assert _DEFAULT_BOUNDS["procedures"].zero_warn_after >= 21
+
+
+def test_analyze_phase_records_last_nonzero_cycle():
+    """For triage: when a phase goes RED, the operator needs to know
+    *when* it last actually did work — was it broken from day one or
+    did it regress recently?"""
+    phase = PhaseSpec("test", "x", "test")
+    bounds = PhaseBounds(zero_warn_after=5)
+    cycles = [
+        _cycle(x=0),  # most recent
+        _cycle(x=0),
+        _cycle(x=0),
+        _cycle(x=4),  # 4 cycles ago — last non-zero
+        _cycle(x=2),
+    ]
+    # Patch cycles[3] to have a distinct cycle_at for the assert
+    cycles[3] = CycleStat(cycle_at=datetime(2026, 4, 28), data={"x": 4})
+    result = analyze_phase(cycles, phase, bounds)
+    assert result["last_nonzero_cycle_at"] == datetime(2026, 4, 28)
+    assert result["zero_streak"] == 3
+
+
+def test_analyze_phase_last_nonzero_is_none_when_window_all_zero():
+    """If the phase was never non-zero in the visible window, the
+    field is None — caller renders 'never in this window' for ops."""
+    phase = PhaseSpec("test", "x", "test")
+    bounds = PhaseBounds(zero_warn_after=5)
+    cycles = [_cycle(x=0) for _ in range(10)]
+    result = analyze_phase(cycles, phase, bounds)
+    assert result["last_nonzero_cycle_at"] is None
