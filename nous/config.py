@@ -105,6 +105,30 @@ class Settings(BaseSettings):
     staleness_penalty_enabled: bool = True
     staleness_half_life_days: int = 30
 
+    # Sleep-cycle stale_scan phase: deactivate facts that are old AND
+    # never recalled. Prior filter (active=true AND superseded_by IS NOT NULL
+    # AND confidence < 0.5) was structurally impossible — the supersede flow
+    # already deactivates at the same time, and prod confidence distribution
+    # never goes below 0.7. New filter targets the actual stale-fact pattern.
+    stale_scan_age_days: int = 60
+    # Categories excluded from stale_scan. `rule` represents explicit user
+    # directives that may be infrequently exercised but still in force —
+    # deactivating them on recall stats alone is unsafe.
+    stale_scan_excluded_categories: list[str] = Field(
+        default_factory=lambda: ["rule"]
+    )
+
+    # Sleep-cycle cluster_consolidation phase (F027): merge near-duplicate
+    # facts under the same subject into one. Prior code picked top-5 clusters
+    # by size, but prod has accumulating subjects like `lesson_learned`
+    # (164 facts) and `Tim` (36 facts) at the top — the LLM correctly
+    # refuses to merge those, leaving the 11 actually-mergeable small
+    # clusters (3-5 facts each) untouched.
+    # Cap cluster size so accumulating subjects are skipped and small
+    # mergeable clusters get a chance.
+    cluster_consolidation_min_facts: int = 3
+    cluster_consolidation_max_facts: int = 10
+
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
 
@@ -437,6 +461,13 @@ class Settings(BaseSettings):
     procedure_max_per_session: int = 1
     procedure_staleness_days: int = 30
     procedure_weakness_threshold: float = 0.30
+    # Recency gate for cluster eligibility — at least one cluster member
+    # must be created within this window. Was hardcoded 7 days; sleep
+    # cycle health monitor (PR #404) caught that 7 days yielded 3 of 200
+    # eligible candidates, so most clusters never satisfied the gate.
+    # 30 days gives ~71 of 200, making the gate meaningful instead of
+    # blocking.
+    procedure_recency_days: int = 30
 
     # F037: Utility-Boosted Procedure Retrieval
     procedure_utility_boost: bool = True

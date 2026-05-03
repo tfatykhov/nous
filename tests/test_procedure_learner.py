@@ -49,6 +49,10 @@ def _make_settings(**overrides) -> MagicMock:
         procedure_max_per_session=1,
         procedure_staleness_days=30,
         procedure_weakness_threshold=0.30,
+        # Added in PR #405 — _check_recency reads this; was hardcoded
+        # 7 days, bumped to configurable default 30. Mock must supply
+        # an int because timedelta(days=MagicMock()) crashes.
+        procedure_recency_days=30,
         background_model="claude-test",
         api_base_url="https://api.anthropic.com",
         anthropic_api_key="sk-ant-test-key",
