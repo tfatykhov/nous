@@ -957,6 +957,47 @@ class TestStructuredContradictionResolution:
         assert data["applied_action"] == "KEEP_BOTH"
         assert data["raw_action"] == "MERGE"
 
+    def test_f031_merge_preserves_supersede_chain(self):
+        """Codex finding on PR #411: F031 MERGE used to discard the
+        heart.learn() result and call deactivate_fact() on both
+        originals — leaving them active=False with NO superseded_by
+        link. That orphaned every successful MERGE's source facts
+        (chain broken, recoverable only via manual SQL).
+
+        The fix mirrors F027's pattern: capture merged_detail.id and
+        set superseded_by AND active=False atomically in a single
+        session. Pin that contract via source inspection so a future
+        PR can't accidentally re-introduce the bare deactivate_fact
+        pattern.
+        """
+        import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
+        src = inspect.getsource(SleepHandler._phase_resolve_contradictions)
+
+        # Find the MERGE branch (between `elif action == "MERGE":` and
+        # the next elif).
+        merge_start = src.index('elif action == "MERGE":')
+        merge_end = src.index('elif action == "REMOVE_A":', merge_start)
+        merge_branch = src[merge_start:merge_end]
+
+        # Must capture the learn() result.
+        assert "merged_detail" in merge_branch, (
+            "F031 MERGE must capture heart.learn() return value to use "
+            "its ID for the supersede link"
+        )
+        # Must set superseded_by on the originals (not just deactivate).
+        assert "superseded_by" in merge_branch, (
+            "F031 MERGE must set superseded_by on the originals to "
+            "preserve the supersede chain — Codex P1 on PR #411"
+        )
+        # Must NOT use the bare deactivate_fact pattern that orphans.
+        assert "deactivate_fact(fact1_id)" not in merge_branch, (
+            "F031 MERGE must not bare-deactivate originals — that "
+            "drops the superseded_by link and breaks recovery"
+        )
+
     @pytest.mark.asyncio
     async def test_merge_without_content_downgrades_to_keep_both(self):
         """2026-05-01 audit: prod sleep returned MERGE without merged_content
