@@ -198,19 +198,25 @@ def analyze_phase(
             "zero_streak": None,
         }
 
-    # Consecutive zeros starting from the most-recent cycle. Walk the
-    # SAME ordering we received cycles in — caller passes
-    # most-recent-first per fetch_recent_cycles(), and we need
-    # last_nonzero_cycle_at to align with the same scan.
+    # Consecutive zeros from the most-recent cycle, preserving cycle
+    # boundaries. A cycle with a missing or non-numeric metric BREAKS
+    # the streak rather than being silently skipped — otherwise a
+    # window like [missing, 0, 0, ...] would compress to [0, 0, ...]
+    # and inflate the streak count, falsely escalating to YELLOW/RED.
+    # Codex P1 on PR #404.
     streak = 0
     last_nonzero_at = None
-    for c, v in zip(cycles, [c.data.get(phase.activity_field) for c in cycles]):
+    for c in cycles:
+        v = c.data.get(phase.activity_field)
         try:
             v_num = float(v) if v is not None else None
         except (TypeError, ValueError):
-            continue
+            v_num = None
         if v_num is None:
-            continue
+            # Missing/non-numeric breaks the streak — we cannot assert
+            # the phase produced zero on a cycle where the field is
+            # absent. Stop here without recording a last_nonzero_at.
+            break
         if v_num == 0:
             streak += 1
         else:

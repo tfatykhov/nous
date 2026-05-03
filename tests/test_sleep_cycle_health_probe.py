@@ -176,3 +176,31 @@ def test_analyze_phase_last_nonzero_is_none_when_window_all_zero():
     cycles = [_cycle(x=0) for _ in range(10)]
     result = analyze_phase(cycles, phase, bounds)
     assert result["last_nonzero_cycle_at"] is None
+
+
+def test_analyze_phase_missing_metric_breaks_streak_does_not_skip():
+    """Codex P1 on PR #404: a missing/non-numeric metric must BREAK
+    the streak rather than be silently dropped. Otherwise a window
+    like [missing, 0, 0, 0, 0, 0, 0] would compress to [0, 0, 0, 0, 0, 0]
+    and falsely escalate to RED — we cannot assert the phase produced
+    zero output on a cycle where the field is absent."""
+    phase = PhaseSpec("test", "x", "test")
+    bounds = PhaseBounds(zero_warn_after=5)
+    # Most-recent cycle is missing the metric; older cycles have zeros.
+    # Without the fix, this would compute streak=6 → RED.
+    # With the fix, the missing cycle breaks immediately → streak=0 → GREEN.
+    cycles = [
+        _cycle(other_field=1),  # most recent — missing 'x'
+        _cycle(x=0),
+        _cycle(x=0),
+        _cycle(x=0),
+        _cycle(x=0),
+        _cycle(x=0),
+        _cycle(x=0),
+    ]
+    result = analyze_phase(cycles, phase, bounds)
+    assert result["zero_streak"] == 0, (
+        "missing metric on most-recent cycle should break the streak, "
+        "not be silently skipped"
+    )
+    assert result["verdict"] == "GREEN"

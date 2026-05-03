@@ -201,17 +201,36 @@ async def _judge_one(
                                        rate_limiter=rate_limiter)
     except Exception as exc:
         return {"verdict": "ambiguous", "reason": f"judge error: {exc}"}
-    text = ""
+    # Concatenate ALL text blocks. Anthropic responses can span multiple
+    # blocks (e.g. preamble text + JSON, or thinking + answer); reading
+    # only the first silently drops decisive judgments and inflates
+    # ambiguous count. Codex P1 on PR #407.
+    text_parts: list[str] = []
     for block in resp.content:
         if isinstance(block, dict) and block.get("type") == "text":
-            text = block.get("text", "").strip()
-            break
+            t = block.get("text", "")
+            if t:
+                text_parts.append(t)
+    text = "\n".join(text_parts).strip()
     if text.startswith("```"):
         text = "\n".join(text.splitlines()[1:-1])
     try:
-        return json.loads(text)
+        verdict = json.loads(text)
     except Exception:
         return {"verdict": "ambiguous", "reason": "judge parse error"}
+
+    # Normalize the verdict enum so the aggregator's exact-string match
+    # doesn't silently drop near-misses like "Wrong" or " correct ".
+    # Codex P2 on PR #407.
+    raw = str(verdict.get("verdict", "")).strip().lower()
+    if raw not in {"correct", "wrong", "ambiguous"}:
+        verdict["verdict"] = "ambiguous"
+        verdict.setdefault(
+            "reason", f"unrecognized verdict {raw!r}; treated as ambiguous"
+        )
+    else:
+        verdict["verdict"] = raw
+    return verdict
 
 
 async def audit_f031(
