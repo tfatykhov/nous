@@ -258,6 +258,88 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         },
         description="F055 on with boost=0.5 (vs default 0.15) — can bigger boost escape CE head-cut?",
     ),
+    # ------------------------------------------------------------------
+    # Spreading-activation gate sensitivity. Default ``enabled="auto"`` +
+    # ``density_threshold=3.0`` has never been A/B'd. ``graph_off`` kills
+    # graph recall entirely; these isolate the gate logic alone.
+    # ------------------------------------------------------------------
+    "spread_force_on": RetrievalConfig(
+        name="spread_force_on",
+        flags={"spreading_activation_enabled": "true"},
+        description=(
+            "Force spreading activation regardless of density. If MRR/R@K "
+            "improves vs baseline, the auto-gate is too conservative."
+        ),
+    ),
+    "spread_force_off": RetrievalConfig(
+        name="spread_force_off",
+        flags={"spreading_activation_enabled": "false"},
+        description=(
+            "Disable spreading activation but keep 1-hop graph recall. "
+            "Isolates spreading's lift from the rest of graph recall "
+            "(unlike `graph_off` which kills both)."
+        ),
+    ),
+    "spread_low_threshold": RetrievalConfig(
+        name="spread_low_threshold",
+        flags={
+            "spreading_activation_enabled": "auto",
+            "spreading_activation_density_threshold": 1.0,
+        },
+        description=(
+            "Drop the auto-gate threshold from 3.0 to 1.0 — spreading "
+            "fires on much sparser graphs. Pair with `spread_force_on` "
+            "to triangulate the right default."
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # RRF fusion knobs. Hybrid search blends vector + keyword via
+    # ``rrf_score = vector_weight/(k+v_rank) + (1-vector_weight)/(k+k_rank)``.
+    # Defaults: ``vector_weight=0.7``, ``rrf_k=60``. Both route through
+    # RuntimeConfig (reset per-config in run_matrix), so Settings overrides
+    # take effect.
+    # ------------------------------------------------------------------
+    "rrf_vector_heavy": RetrievalConfig(
+        name="rrf_vector_heavy",
+        flags={"vector_weight": 0.9},
+        description=(
+            "Vector-leaning fusion (0.9 vector / 0.1 keyword). Tests "
+            "whether keyword signal hurts on this corpus."
+        ),
+    ),
+    "rrf_balanced": RetrievalConfig(
+        name="rrf_balanced",
+        flags={"vector_weight": 0.5},
+        description=(
+            "Balanced fusion (0.5 vector / 0.5 keyword). Default-equivalent "
+            "for a corpus where keyword recall matters more."
+        ),
+    ),
+    "rrf_keyword_heavy": RetrievalConfig(
+        name="rrf_keyword_heavy",
+        flags={"vector_weight": 0.3},
+        description=(
+            "Keyword-leaning fusion (0.3 vector / 0.7 keyword). Useful "
+            "when queries are jargon-rich and embeddings drift."
+        ),
+    ),
+    "rrf_k_low": RetrievalConfig(
+        name="rrf_k_low",
+        flags={"rrf_k": 10},
+        description=(
+            "Sharper rank weighting (k=10 vs default 60). Top-1 dominates "
+            "fused score; tail contributions decay fast."
+        ),
+    ),
+    "rrf_k_high": RetrievalConfig(
+        name="rrf_k_high",
+        flags={"rrf_k": 200},
+        description=(
+            "Smoother rank weighting (k=200 vs default 60). Tail "
+            "candidates contribute more; useful when relevant docs "
+            "often land outside top-3 in either channel."
+        ),
+    ),
 }
 
 
