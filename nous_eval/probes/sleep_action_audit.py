@@ -165,13 +165,18 @@ Source facts ({source_count}):
 
 Outcome: {outcome}
 Merged content (if any): {merged_content}
+LLM refuse reason (if outcome is LLM_REFUSED): {refuse_reason}
 
 Was this action correct? Specifically:
-  - If MERGED: does merged_content faithfully capture all distinct
-    information from the source facts without dropping or distorting?
-  - If LLM_REFUSED: were the source facts genuinely too disparate to
-    merge into one fact (correct refusal), or did they share a clear
-    common claim the LLM should have caught (wrong refusal)?
+  - If MERGED: does merged_content faithfully capture what MATTERS
+    about this topic? Loss of fine-grained specifics (exact dates,
+    individual numbers) is acceptable — source facts remain
+    accessible via the supersede chain.
+  - If LLM_REFUSED: was the refusal justified? A justified refusal
+    names a load-bearing distinction that would be lost (different
+    entities sharing a name; irreconcilable contradictions). An
+    unjustified refusal abandons a coherent topic that could have
+    been summarized in 1-3 sentences.
   - If REJECTED_BY_ADMISSION: was the merged_content clearly redundant
     with existing facts (correct rejection) or substantively new
     (wrong rejection)?
@@ -326,6 +331,7 @@ async def audit_f027(
             source_facts=("\n".join(source_facts) or "(none)") + truncation_note,
             outcome=d.get("outcome", "?"),
             merged_content=str(d.get("merged_content") or "(n/a)")[:500],
+            refuse_reason=str(d.get("refuse_reason") or "(none provided)")[:300],
         )
         verdict = await _judge_one(api_client, judge_model, prompt,
                                    rate_limiter)
