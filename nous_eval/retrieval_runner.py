@@ -261,6 +261,19 @@ def _apply_config_flags(
             sorted(unknown),
         )
     update = {k: cfg.flags[k] for k in known}
+
+    # Some Settings fields are read via `RuntimeConfig.get()` from a freshly
+    # constructed `Settings()` (see nous/heart/search.py:_resolve_vector_weight
+    # / _resolve_rrf_k), which means a `model_copy(update=...)` here would be
+    # silently ignored — the resolver builds its own Settings from env vars
+    # and never sees our override. Push these into RuntimeConfig directly so
+    # the resolver's `RuntimeConfig.get().get_*()` returns the eval value.
+    # `RuntimeConfig.reset()` is called per-config in `run_matrix`, so no leak.
+    if "vector_weight" in update:
+        RuntimeConfig.get().set_vector_weight(float(update["vector_weight"]))
+    if "rrf_k" in update:
+        RuntimeConfig.get().set_rrf_k(int(update["rrf_k"]))
+
     if not update:
         # Support stubs that don't implement model_copy with empty update.
         try:
