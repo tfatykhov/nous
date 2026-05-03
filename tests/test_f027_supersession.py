@@ -391,6 +391,14 @@ class TestPhaseStaleScam:
         bus = MagicMock()
         bus.on = MagicMock()
         handler = SleepHandler(brain, heart, settings, bus, llm_client=None)
+        # _phase_stale_scan reads settings off heart (not the handler's
+        # injected settings) — supply numeric/list values explicitly
+        # because MagicMock attribute access returns a MagicMock, which
+        # breaks `timedelta(days=...)` and `notin_(...)`.
+        heart.settings.stale_scan_age_days = 60
+        heart.settings.stale_scan_excluded_categories = ["rule"]
+        heart.settings.cluster_consolidation_min_facts = 3
+        heart.settings.cluster_consolidation_max_facts = 10
         return handler, heart
 
     @pytest.mark.asyncio
