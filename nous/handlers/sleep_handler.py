@@ -468,6 +468,16 @@ class SleepHandler:
                 if success:
                     phases_completed.append("graph_densification")
 
+            # F057: re-link active episodes that the live F022 linker
+            # missed (sessions that never received episode_ended → no
+            # summarizer trigger → no link). Runs BEFORE prune_dead_edges
+            # so the new edges (active→active endpoints) won't be touched
+            # by F053 on this cycle.
+            if not self._interrupted:
+                success = await self._phase_relink_open_episodes(sleep_stats)
+                if success:
+                    phases_completed.append("relink_open_episodes")
+
             if not self._interrupted:
                 success = await self._phase_prune_dead_edges(sleep_stats)
                 if success:
@@ -1436,6 +1446,144 @@ class SleepHandler:
             # returns False so it's excluded from phases_completed.
             sleep_stats["dead_edges_prune_error"] = type(exc).__name__
             logger.warning("F053 dead-edge prune failed", exc_info=True)
+            return False
+
+    async def _phase_relink_open_episodes(self, sleep_stats: dict) -> bool:
+        """F057: Backfill F022 episode-graph edges the live linker missed.
+
+        Investigation (2026-05-04 prod audit on nous-default): 99 of 102
+        active episodes were graph orphans — 94 stuck-open sessions never
+        received ``episode_ended`` (no summarizer trigger, no F022 link).
+        Of those 99, 27 already have facts referencing them via
+        ``source_episode_id`` — those should have been linked by the live
+        path; this phase backfills them.
+
+        Approach: find active episodes with no incident graph edges,
+        started >= ``episode_relink_min_age_hours`` ago (skip recent —
+        the live linker handles those). For each, look up linkable
+        anchors (facts via source_episode_id, decisions via
+        episode_decisions). If anchors exist, call
+        ``graph_linker.link_episode_deterministic``. Bounded by
+        ``episode_relink_max_per_cycle`` to keep the cycle short.
+
+        Episodes stay ``active=true`` so they remain searchable
+        (heart.episodes.search filters on active=true). Only the
+        linker's outputs change. F053 does NOT prune the new edges
+        because both endpoints are active=true.
+        """
+        if not getattr(self._settings, "episode_relink_enabled", True):
+            return True
+        try:
+            min_age = int(self._settings.episode_relink_min_age_hours)
+            max_per_cycle = int(self._settings.episode_relink_max_per_cycle)
+            if max_per_cycle <= 0:
+                return True
+            agent_id = self._settings.agent_id
+
+            # Without a graph_linker dependency, the phase is a no-op.
+            # Episode summarizer wires _graph_linker; sleep handler
+            # constructor doesn't, so we lazily import + instantiate here.
+            graph_linker = getattr(self, "_graph_linker", None)
+            if graph_linker is None:
+                from nous.brain.graph_linker import GraphLinker
+                graph_linker = GraphLinker(
+                    self._heart.db,
+                    self._heart._embeddings,
+                    self._settings,
+                    agent_id,
+                )
+
+            from sqlalchemy import text as sql_text
+            relinked = 0
+            edges_created = 0
+            errors = 0
+            async with self._heart.db.session() as session:
+                # Find active orphan episodes older than min_age_hours.
+                # An "orphan" here = no incident graph_edges row at all.
+                # Only surface episodes that have at least one linkable
+                # anchor (active fact via source_episode_id, or
+                # episode_decisions row). Legacy pre-F022 episodes have
+                # neither and would just be skipped inside the loop —
+                # filtering at SQL keeps the LIMIT meaningful.
+                rows = await session.execute(sql_text("""
+                    SELECT e.id
+                    FROM heart.episodes e
+                    WHERE e.agent_id = :agent_id
+                      AND e.active = true
+                      AND e.started_at < now() - make_interval(hours => :hours)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM brain.graph_edges ge
+                        WHERE ge.agent_id = :agent_id
+                          AND ((ge.source_type='episode' AND ge.source_id=e.id)
+                            OR (ge.target_type='episode' AND ge.target_id=e.id))
+                      )
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM heart.facts f
+                          WHERE f.agent_id = :agent_id
+                            AND f.source_episode_id = e.id
+                            AND f.active = true
+                        )
+                        OR EXISTS (
+                          SELECT 1 FROM heart.episode_decisions ed
+                          WHERE ed.episode_id = e.id
+                        )
+                      )
+                    ORDER BY e.started_at ASC
+                    LIMIT :lim
+                """), {
+                    "agent_id": agent_id,
+                    "hours": min_age,
+                    "lim": max_per_cycle,
+                })
+                ep_ids = [r[0] for r in rows.all()]
+
+                for ep_id in ep_ids:
+                    if self._interrupted:
+                        break
+                    # Anchors: facts referencing this episode + decisions linked
+                    f_rows = await session.execute(sql_text(
+                        "SELECT id FROM heart.facts "
+                        "WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
+                    ), {"aid": agent_id, "eid": ep_id})
+                    fact_ids = [r[0] for r in f_rows.all()]
+                    d_rows = await session.execute(sql_text(
+                        "SELECT decision_id FROM heart.episode_decisions "
+                        "WHERE episode_id=:eid"
+                    ), {"eid": ep_id})
+                    decision_ids = [r[0] for r in d_rows.all()]
+
+                    if not fact_ids and not decision_ids:
+                        continue  # no anchors — this episode needs semantic backfill, not deterministic
+                    try:
+                        new_edges = await graph_linker.link_episode_deterministic(
+                            episode_id=ep_id,
+                            decision_ids=decision_ids,
+                            fact_ids=fact_ids,
+                            session=session,
+                        )
+                        relinked += 1
+                        edges_created += len(new_edges) if new_edges else 0
+                    except Exception:
+                        errors += 1
+                        logger.warning(
+                            "F057 relink failed for episode %s", ep_id,
+                            exc_info=True,
+                        )
+                await session.commit()
+
+            sleep_stats["episodes_relinked"] = relinked
+            sleep_stats["episode_relink_edges"] = edges_created
+            if errors:
+                sleep_stats["episode_relink_errors"] = errors
+            logger.info(
+                "F057 episode relink: %d episodes, %d edges (%d errors)",
+                relinked, edges_created, errors,
+            )
+            return True
+        except Exception as exc:
+            sleep_stats["episode_relink_phase_error"] = type(exc).__name__
+            logger.warning("F057 episode relink phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:

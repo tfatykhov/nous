@@ -153,6 +153,22 @@ class Settings(BaseSettings):
     cluster_consolidation_min_facts: int = 3
     cluster_consolidation_max_facts: int = 10
 
+    # F057 (2026-05-04): episode re-linker — periodic backfill of F022
+    # episode-graph edges for episodes the live linker missed. Investigation
+    # of nous-default prod (2026-05-04) found 99/102 active episodes were
+    # graph orphans (97% rate); 94 of those are stuck-open sessions that
+    # never received `episode_ended` (so episode_summarizer + F022 linker
+    # never fired). Of the 99 orphans, 27 have facts referencing them via
+    # source_episode_id — those should have linked; the rest need semantic
+    # episode↔episode (handled separately by F040).
+    # The re-linker queries active orphan episodes older than min_age_hours,
+    # fetches their fact/decision anchors, and calls
+    # graph_linker.link_episode_deterministic. Episodes stay active=true
+    # so they remain searchable; only the linker's outputs change.
+    episode_relink_enabled: bool = True
+    episode_relink_min_age_hours: int = 24  # skip recent — live linker handles
+    episode_relink_max_per_cycle: int = 30
+
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
 
