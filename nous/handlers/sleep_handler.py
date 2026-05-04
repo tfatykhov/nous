@@ -469,6 +469,11 @@ class SleepHandler:
                     phases_completed.append("graph_densification")
 
             if not self._interrupted:
+                success = await self._phase_prune_dead_edges(sleep_stats)
+                if success:
+                    phases_completed.append("prune_dead_edges")
+
+            if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
                 if success:
                     phases_completed.append("generalize")
@@ -1341,6 +1346,96 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("F040 graph densification phase failed", exc_info=True)
+            return False
+
+    async def _phase_prune_dead_edges(self, sleep_stats: dict) -> bool:
+        """F053: Delete graph edges incident to inactive nodes.
+
+        Spreading activation walks ``brain.graph_edges`` without an
+        ``active`` filter (see ``brain/spreading_activation.py``), so
+        edges to deactivated facts/episodes/procedures/decisions waste
+        per-hop activation budget on dead nodes. The orphan supersede
+        chain audit (PR #412) found this exposure surface; this phase
+        is the periodic housekeeping pass that recovers wasted hops.
+
+        Bounded by ``dead_edge_pruning_max_per_cycle`` to keep the
+        exclusive DELETE lock short. The bound is intentional: a single
+        sleep cycle should not block other writers for more than ~1s
+        worth of pruning. If more orphans accumulate than the per-cycle
+        bound, subsequent sleep cycles will continue draining.
+
+        SQL strategy: build the inactive-id pool with one UNION ALL,
+        then DELETE edges whose source OR target appears in that pool.
+        Agent-scoped both on the edges side and the inactive-id side
+        defense-in-depth — no chance of cross-agent edge deletion even
+        if a row was misclassified at write time.
+        """
+        try:
+            if not self._settings.dead_edge_pruning_enabled:
+                return True
+            agent_id = self._settings.agent_id
+            # Defensive int() — keeps tests that mock self._settings as a
+            # bare MagicMock from raising TypeError on the `<= 0` comparison.
+            max_per_cycle = int(self._settings.dead_edge_pruning_max_per_cycle)
+            if max_per_cycle <= 0:
+                return True
+            from sqlalchemy import text
+            async with self._heart.db.session() as session:
+                # `brain.decisions` has no `active` column today — decisions
+                # are append-only and reviewed-not-deleted. If/when a soft-
+                # delete is added, append a UNION ALL branch here. Including
+                # it pre-emptively would crash every sleep cycle until the
+                # column lands (review caught this).
+                sql = text("""
+                    WITH inactive_nodes AS (
+                        SELECT id, 'fact'::text AS node_type
+                        FROM heart.facts
+                        WHERE agent_id = :agent_id AND active = false
+                        UNION ALL
+                        SELECT id, 'episode'
+                        FROM heart.episodes
+                        WHERE agent_id = :agent_id AND active = false
+                        UNION ALL
+                        SELECT id, 'procedure'
+                        FROM heart.procedures
+                        WHERE agent_id = :agent_id AND active = false
+                    ),
+                    victim_edges AS (
+                        SELECT e.id
+                        FROM brain.graph_edges e
+                        WHERE e.agent_id = :agent_id
+                          AND (
+                            (e.source_type, e.source_id) IN (
+                              SELECT node_type, id FROM inactive_nodes
+                            )
+                            OR (e.target_type, e.target_id) IN (
+                              SELECT node_type, id FROM inactive_nodes
+                            )
+                          )
+                        LIMIT :max_per_cycle
+                    )
+                    DELETE FROM brain.graph_edges
+                    WHERE id IN (SELECT id FROM victim_edges)
+                    RETURNING id
+                """)
+                result = await session.execute(
+                    sql,
+                    {"agent_id": agent_id, "max_per_cycle": max_per_cycle},
+                )
+                deleted = len(result.all())
+                await session.commit()
+            sleep_stats["dead_edges_pruned"] = deleted
+            logger.info(
+                "F053 dead-edge prune: deleted %d edges (cap=%d)",
+                deleted, max_per_cycle,
+            )
+            return True
+        except Exception as exc:
+            # Surface error type into sleep_stats so observability dashboards
+            # can alert on silent regressions (review P2). The phase still
+            # returns False so it's excluded from phases_completed.
+            sleep_stats["dead_edges_prune_error"] = type(exc).__name__
+            logger.warning("F053 dead-edge prune failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:

@@ -79,6 +79,30 @@ class Settings(BaseSettings):
     # F025 prep: hybrid search vector weight (keyword_weight = 1 - vector_weight)
     vector_weight: float = 0.7
     rrf_k: int = 60  # RRF smoothing constant (F025)
+    # F053 (2026-05-03): orphan-edge sleep cleanup.
+    # F031 MERGE / F027 cluster_consolidation deactivate facts but the
+    # `brain.graph_edges` rows incident to those facts remain. Spreading
+    # activation walks edges only (no `active` filter) so it wastes hops
+    # on dead nodes. New sleep phase prunes edges where either endpoint is
+    # an inactive node, bounded per cycle to avoid long exclusive locks.
+    dead_edge_pruning_enabled: bool = True
+    dead_edge_pruning_max_per_cycle: int = 1000
+
+    # F054 (2026-05-03): keyword channel toggle.
+    # F051 channel-isolation eval (90 nous_prod + 20 longmemeval qrels) showed
+    # vector_only ties default RRF byte-for-byte on longmemeval and -0.2% on
+    # nous_prod; keyword_only collapses (MRR 0.07/0.35). Operators with
+    # vector-dominant corpora can flip this off to save one FTS query per
+    # recall. Default True preserves current behavior; eval corpora don't
+    # represent jargon-heavy ingestion (codenames, IDs, rare terms).
+    #
+    # Caveat: when False, _rrf_merge sees an empty keyword list, so every
+    # candidate's RRF score = vector_weight/(k + v_rank) + (1-vector_weight)/
+    # (k + penalty_rank). The keyword half of the score is uniformly suppressed
+    # rather than absent, which can shift absolute scores and interact with
+    # downstream relevance_floor / staleness_penalty consumers. Order is
+    # preserved; absolute thresholds may need tuning if you flip this off.
+    hybrid_search_keyword_enabled: bool = True
 
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
