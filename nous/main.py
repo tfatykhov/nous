@@ -377,6 +377,11 @@ async def create_components(settings: Settings) -> dict:
         if sleep_handler is not None and graph_densifier is not None:
             sleep_handler._graph_densifier = graph_densifier
 
+        # F060: Wire episode summarizer into sleep handler so the abandoned-
+        # episode recovery phase can re-summarize stuck-open sessions.
+        if sleep_handler is not None and episode_summarizer is not None:
+            sleep_handler._episode_summarizer = episode_summarizer
+
         # F012: Wire procedure learner into sleep handler + monitor
         procedure_learner = None
         if settings.procedure_learning_enabled:

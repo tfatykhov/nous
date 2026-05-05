@@ -96,6 +96,8 @@ report, append one row here.
 | 2026-05-05 19:00 | retrieval | feat/F030.2 | nous-prod-snapshot | nous_prod | 40 | baseline/ce_off/ce_on (apply_mmr=None default) | all 0.833 (no movement vs prior baseline; backward-compat verified) | reports/2026-05-05T19-00-12_baseline-ce_off-ce_on.md | F030.2 default path unchanged |
 | 2026-05-05 — | context_packing | feat/F030.2 | nous-prod-snapshot | 5 scenarios (3 memory + 2 docs) | 5 | apply_mmr=None default | **0/3 memory (0%)**, 0/2 docs | reports/eval_context_packing_f030_2_default.md | F030.2 default reproduces prior baseline |
 | 2026-05-05 — | context_packing | feat/F030.2 | nous-prod-snapshot | 5 scenarios (3 memory + 2 docs) | 5 | **apply_mmr=force_on (F030.2 opt-in)** | **2/3 memory (67%)**, 0/2 docs (1 fail was judge parse error, not retrieval) | reports/eval_context_packing_f030_2_force_on.md | **F030.2 validated** — +67pp memory bucket vs default |
+| 2026-05-05 — | other | feat/F060 | f060-validation-* (synthetic) | 3 fixture episodes (active, NULL summary, transcript) | 3 | F060 _phase_recover_abandoned_episodes | **3/3 recovered**; episodes stayed active=true | scripts/eval/validate_f060.py (PASS = True) | **F060 validated end-to-end** — phase queries DB, calls summarize_episode, populates structured_summary; ran twice with clean cleanup |
+| 2026-05-05 — | other | feat/F060 | nous-prod-snapshot | snapshot inspection | 502 episodes | active+stuck-open intersection | 102 stuck-open, **0 with transcript** (all pre-date F025 P3-C transcript column) | docker exec psql probe | **finding** — eval-DB snapshot can't validate F060 against real prod data; needs fresh ingest after F025 P3-C deploy |
 
 ---
 

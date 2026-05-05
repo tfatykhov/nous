@@ -188,6 +188,20 @@ class Settings(BaseSettings):
     episode_relink_min_age_hours: int = 24  # skip recent — live linker handles
     episode_relink_max_per_cycle: int = 30
 
+    # F060 (2026-05-05): abandoned-episode recovery — sleep-cycle phase that
+    # finds active episodes with NULL structured_summary AND last activity >
+    # min_age_hours, then invokes EpisodeSummarizer.summarize_episode to
+    # populate the missing summary. Closes the gap that F058 was patching at
+    # the densifier layer. Requires the F025 P3-C transcript column (rows
+    # without a persisted transcript can't be summarized retroactively).
+    # Episodes stay active=true (matching F057 — search filters on active=true).
+    abandoned_recovery_enabled: bool = True
+    abandoned_recovery_min_age_hours: int = 24
+    abandoned_recovery_max_per_cycle: int = 50
+    # Minimum transcript length to bother summarizing — short transcripts
+    # produce low-quality summaries (per F051.5 summarize_episode skip).
+    abandoned_recovery_min_transcript_chars: int = 50
+
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
 

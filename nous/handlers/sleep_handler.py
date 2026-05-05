@@ -352,6 +352,7 @@ class SleepHandler:
         self._procedure_learner = None  # F012: Set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
+        self._episode_summarizer = None  # F060: Set externally if enabled
         # F035.1: Observability tracking
         self._total_sleeps: int = 0
         self._last_sleep_at: datetime | None = None
@@ -462,6 +463,15 @@ class SleepHandler:
                 success = await self._phase_cluster_consolidation(sleep_stats)
                 if success:
                     phases_completed.append("cluster_consolidation")
+
+            # F060: recover abandoned episodes (NULL structured_summary +
+            # last activity > N hours). Runs BEFORE graph_densification so
+            # F040 picks up the freshly-populated structured_summary instead
+            # of falling through F058's plain-summary fallback.
+            if not self._interrupted:
+                success = await self._phase_recover_abandoned_episodes(sleep_stats)
+                if success:
+                    phases_completed.append("recover_abandoned_episodes")
 
             if not self._interrupted:
                 success = await self._phase_graph_densification(sleep_stats)
@@ -1446,6 +1456,116 @@ class SleepHandler:
             # returns False so it's excluded from phases_completed.
             sleep_stats["dead_edges_prune_error"] = type(exc).__name__
             logger.warning("F053 dead-edge prune failed", exc_info=True)
+            return False
+
+    async def _phase_recover_abandoned_episodes(self, sleep_stats: dict) -> bool:
+        """F060: Populate structured_summary for abandoned active episodes.
+
+        Investigation context: F058 found that 76+ active episodes on prod
+        had `structured_summary=NULL`. The cause is sessions that never
+        receive `session_ended` (process restart before idle timeout, or
+        any path that bypasses cognitive.end_session). The
+        episode_summarizer never fires, the structured fields stay null
+        forever, and downstream consumers (F040 graph_densifier, fact
+        extraction, search relevance) lose signal.
+
+        This phase queries `heart.episodes` for active rows with NULL
+        `structured_summary` AND last activity >
+        `abandoned_recovery_min_age_hours` AND a non-empty persisted
+        `transcript` (added by F025 P3-C). For each, it calls
+        `EpisodeSummarizer.summarize_episode(...)` directly — same code
+        path as the production session-end flow, just bypassing the
+        event bus.
+
+        Episodes stay `active=true` (matching F057). Bounded by
+        `abandoned_recovery_max_per_cycle` to keep the cycle short.
+        """
+        if not getattr(self._settings, "abandoned_recovery_enabled", True):
+            return True
+        summarizer = self._episode_summarizer
+        if summarizer is None:
+            # No summarizer wired — phase is inert. Don't fail the cycle.
+            return True
+        try:
+            min_age = int(self._settings.abandoned_recovery_min_age_hours)
+            max_per_cycle = int(self._settings.abandoned_recovery_max_per_cycle)
+            min_chars = int(
+                self._settings.abandoned_recovery_min_transcript_chars
+            )
+            if max_per_cycle <= 0:
+                return True
+            agent_id = self._settings.agent_id
+
+            from sqlalchemy import text as sql_text
+            recovered = 0
+            skipped_no_transcript = 0
+            errors = 0
+
+            async with self._heart.db.session() as session:
+                # Find active episodes lacking a structured summary that are
+                # old enough to be considered abandoned. `started_at` is a
+                # safe lower bound for "last activity" — once a session is
+                # truly stuck, it accumulates no further turns. Real-time
+                # sessions younger than min_age are excluded.
+                rows = await session.execute(sql_text("""
+                    SELECT e.id, e.transcript
+                    FROM heart.episodes e
+                    WHERE e.agent_id = :agent_id
+                      AND e.active = true
+                      AND e.structured_summary IS NULL
+                      AND e.started_at < now() - make_interval(hours => :hours)
+                    ORDER BY e.started_at ASC
+                    LIMIT :lim
+                """), {
+                    "agent_id": agent_id,
+                    "hours": min_age,
+                    "lim": max_per_cycle,
+                })
+                candidates = rows.all()
+
+            for ep_id, transcript in candidates:
+                if self._interrupted:
+                    break
+                if not transcript or len(transcript) < min_chars:
+                    # No usable transcript — F060 cannot fabricate one.
+                    # Counted separately so operators can see how many
+                    # rows are unrecoverable for this reason.
+                    skipped_no_transcript += 1
+                    continue
+                try:
+                    summary = await summarizer.summarize_episode(
+                        episode_id=ep_id,
+                        transcript=transcript,
+                        agent_id=agent_id,
+                    )
+                    if summary is not None:
+                        recovered += 1
+                except Exception:
+                    errors += 1
+                    logger.warning(
+                        "F060 summarize failed for episode %s",
+                        ep_id, exc_info=True,
+                    )
+
+            sleep_stats["episodes_recovered"] = recovered
+            if skipped_no_transcript:
+                sleep_stats["abandoned_recovery_skipped_no_transcript"] = (
+                    skipped_no_transcript
+                )
+            if errors:
+                sleep_stats["abandoned_recovery_errors"] = errors
+            logger.info(
+                "F060 abandoned-episode recovery: %d recovered "
+                "(%d skipped no-transcript, %d errors)",
+                recovered, skipped_no_transcript, errors,
+            )
+            return True
+        except Exception as exc:
+            sleep_stats["abandoned_recovery_phase_error"] = type(exc).__name__
+            logger.warning(
+                "F060 abandoned-episode recovery phase failed",
+                exc_info=True,
+            )
             return False
 
     async def _phase_relink_open_episodes(self, sleep_stats: dict) -> bool:
