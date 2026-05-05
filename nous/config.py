@@ -188,6 +188,40 @@ class Settings(BaseSettings):
     episode_relink_min_age_hours: int = 24  # skip recent — live linker handles
     episode_relink_max_per_cycle: int = 30
 
+    # F060 (2026-05-05): abandoned-episode recovery — sleep-cycle phase that
+    # finds active episodes with NULL structured_summary AND last activity >
+    # min_age_hours, then invokes EpisodeSummarizer.summarize_episode to
+    # populate the missing summary. Closes the gap that F058 was patching at
+    # the densifier layer. Requires the F025 P3-C transcript column (rows
+    # without a persisted transcript can't be summarized retroactively).
+    # Episodes stay active=true (matching F057 — search filters on active=true).
+    abandoned_recovery_enabled: bool = True
+    abandoned_recovery_min_age_hours: int = 24
+    abandoned_recovery_max_per_cycle: int = 50
+    # Minimum transcript length to bother summarizing — short transcripts
+    # produce low-quality summaries (per F051.5 summarize_episode skip).
+    abandoned_recovery_min_transcript_chars: int = 50
+
+    # F060.1 (2026-05-05): fallback to plain `summary` when `transcript` is
+    # missing. Prod audit found 0/103 stuck-open episodes had transcripts
+    # but 93/103 had a plain summary (~77 chars avg). The plain summary is
+    # usually just the user's first message — degraded input vs a full
+    # transcript, but produces a usable structured_summary (title, topics)
+    # and is strictly better than leaving the row stuck forever.
+    abandoned_recovery_summary_fallback_enabled: bool = True
+    abandoned_recovery_min_summary_chars: int = 20
+
+    # F060.2 (2026-05-05): mark truly unrecoverable episodes as abandoned.
+    # An episode with NULL structured_summary AND no usable transcript AND
+    # no usable plain summary is data-empty — no path can recover it.
+    # Marking active=false + outcome='abandoned' removes them from search
+    # and stops the recovery loop from re-querying them every cycle.
+    # Separate age threshold (days, not hours) so we give recovery enough
+    # cycles to attempt before giving up.
+    abandoned_recovery_mark_abandoned_enabled: bool = True
+    abandoned_recovery_mark_age_days: int = 7
+    abandoned_recovery_mark_max_per_cycle: int = 200
+
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
 

@@ -37,6 +37,7 @@ view: *what was tested, what shipped, what's open*.
 | F053 dead-edge pruning | **NEW** — 884/3137 edges pruned in dry-run; shipped |
 | F057 episode re-linker | **NEW** — backfills F022 missed links; shipped |
 | F058 graph densifier summary fallback | **NEW** — unblocks F040 for episodes without `structured_summary`; shipped; verified on prod (orphans 487→456 first cycle, backfill 162 edges/day vs prior 7-57) |
+| **F060 abandoned-episode recovery** | **NEW** — sleep phase finds active episodes with NULL `structured_summary` + last activity > 24h + persisted transcript, calls `summarize_episode` directly. Validated end-to-end on eval DB (3/3 recovered, episodes stay active=true). PR pending. Closes the gap that F058 was patching at the densifier layer. |
 | prune_dead_edges, relink_open_episodes, generalize, evolve_rubric | covered by sleep_health probe (RED/YELLOW/GREEN/REFUSED) |
 
 ## Sleep observability
@@ -104,5 +105,6 @@ view: *what was tested, what shipped, what's open*.
 | F031 REMOVE 0% | Open — gen-prompt bug not classifier; `no-fix-eval-issue` |
 | Calibration overconfident +19.8% | **Fixed (F058 confidence, shipped)** |
 | MMR-after-CE skip globally wrong for context packing | **Fixed (F030.2 `apply_mmr` override, validated +67pp memory bucket)** |
+| Abandoned sessions never get summarized (NULL `structured_summary` forever) | **Fix in flight (F060 sleep-phase recovery, validated 3/3 on eval DB)** |
 | Keyword channel collapses standalone | Operational toggle (F054) shipped |
 | Cross-encoder corpus-dependent | Documented, default off; on for prod-shaped via env |
