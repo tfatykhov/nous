@@ -93,7 +93,14 @@ class AgentRunner:
         # Compaction (Spec 008.1)
         self._compactor: ConversationCompactor | None = None
         if settings.tool_pruning_enabled or settings.compaction_enabled:
-            self._compactor = ConversationCompactor(settings=settings)
+            self._compactor = ConversationCompactor(
+                settings=settings,
+                # F059 guard verdicts persist to nous_system.events so
+                # log rotation doesn't lose data we need to TP/FP-audit
+                # before flipping the destructive fallback flag. Mirrors
+                # F026 fire-and-forget pattern.
+                event_logger=self._log_compaction_guard,
+            )
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
         # F035.4: Context visibility
@@ -141,6 +148,21 @@ class AgentRunner:
         except Exception:  # noqa: BLE001
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
+
+    def _log_compaction_guard(
+        self, event_type: str, data: dict, session_id: str
+    ) -> None:
+        """Fire-and-forget persistence of an F059 guard verdict.
+
+        Same fire-and-forget shape as `_log_f026_decision` — never
+        blocks the compaction path on DB I/O.
+        """
+        try:
+            asyncio.create_task(
+                self._brain.emit_event(event_type, data, session_id=session_id)
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("F059 guard persistence failed (suppressed)", exc_info=True)
 
     async def _call_gate_model(self, prompt: str) -> str:
         """F026: Call a Haiku-class model for Tier 3 action gating."""

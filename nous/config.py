@@ -80,6 +80,11 @@ class Settings(BaseSettings):
     # Fall back to truncation when suspect count exceeds the threshold.
     # Default off — gather false-positive baseline from logs first.
     compaction_hallucination_fallback_enabled: bool = False
+    # Persist every fire (any non-empty suspect list, threshold or not)
+    # to nous_system.events for retrospective TP/FP audit. Without this,
+    # Docker log rotation drops evidence we'd need to decide whether to
+    # flip `_fallback_enabled`. Mirrors F026 persistence pattern.
+    compaction_hallucination_persist_enabled: bool = True
 
     # F026 decision persistence — log every action-gate verdict and claim-
     # verification outcome to nous_system.events so a retrospective accuracy

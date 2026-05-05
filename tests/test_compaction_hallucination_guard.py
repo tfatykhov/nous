@@ -276,6 +276,130 @@ async def test_guard_quiet_for_clean_summary(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_guard_persists_event_when_logger_wired() -> None:
+    settings = _make_settings(
+        compaction_hallucination_guard_enabled=True,
+        compaction_hallucination_max_suspect_count=2,
+        compaction_hallucination_fallback_enabled=False,
+        compaction_hallucination_persist_enabled=True,
+        compaction_structured_facts_enabled=False,
+    )
+    captured: list[tuple[str, dict, str]] = []
+
+    def logger(event_type: str, data: dict, session_id: str) -> None:
+        captured.append((event_type, data, session_id))
+
+    compactor = ConversationCompactor(settings, event_logger=logger)
+    conv = _make_conversation([
+        ("user", "Contact Marcus Webb at marcus.webb@acme.com about Redis port 6380."),
+        ("assistant", "Got it."),
+        ("user", "Continue."),
+    ])
+    messages = [{"role": m.role, "content": m.content} for m in conv.messages]
+    caller = _stub_caller(_SUMMARY_WITH_HALLUCINATIONS)
+
+    await compactor.compact(conv, messages, caller, cut_point=2)
+
+    assert captured, "expected the guard to persist a fire"
+    event_type, data, session_id = captured[0]
+    assert event_type == "f059_hallucination_guard"
+    assert session_id == "test-session-f059"
+    assert data["session_id"] == "test-session-f059"
+    assert data["suspect_count"] >= 1
+    assert "suspects" in data
+    assert data["exceeded_threshold"] is True
+    assert data["fallback_taken"] is False
+    assert data["threshold"] == 2
+    assert data["summary_chars"] > 0
+    assert data["input_chars"] > 0
+
+
+@pytest.mark.asyncio
+async def test_guard_persists_fallback_taken_flag() -> None:
+    settings = _make_settings(
+        compaction_hallucination_guard_enabled=True,
+        compaction_hallucination_max_suspect_count=2,
+        compaction_hallucination_fallback_enabled=True,
+        compaction_hallucination_persist_enabled=True,
+        compaction_structured_facts_enabled=False,
+    )
+    captured: list[dict] = []
+
+    def logger(event_type: str, data: dict, session_id: str) -> None:
+        captured.append(data)
+
+    compactor = ConversationCompactor(settings, event_logger=logger)
+    conv = _make_conversation([
+        ("user", "Contact Marcus Webb at marcus.webb@acme.com about Redis port 6380."),
+        ("assistant", "Got it."),
+        ("user", "Continue."),
+    ])
+    messages = [{"role": m.role, "content": m.content} for m in conv.messages]
+    caller = _stub_caller(_SUMMARY_WITH_HALLUCINATIONS)
+
+    await compactor.compact(conv, messages, caller, cut_point=2)
+
+    assert captured
+    assert captured[0]["fallback_taken"] is True
+
+
+@pytest.mark.asyncio
+async def test_guard_skips_persistence_when_disabled() -> None:
+    settings = _make_settings(
+        compaction_hallucination_guard_enabled=True,
+        compaction_hallucination_max_suspect_count=2,
+        compaction_hallucination_persist_enabled=False,
+        compaction_structured_facts_enabled=False,
+    )
+    captured: list[Any] = []
+
+    def logger(event_type: str, data: dict, session_id: str) -> None:
+        captured.append(data)
+
+    compactor = ConversationCompactor(settings, event_logger=logger)
+    conv = _make_conversation([
+        ("user", "Contact Marcus Webb at marcus.webb@acme.com about Redis port 6380."),
+        ("assistant", "Got it."),
+        ("user", "Continue."),
+    ])
+    messages = [{"role": m.role, "content": m.content} for m in conv.messages]
+    caller = _stub_caller(_SUMMARY_WITH_HALLUCINATIONS)
+
+    await compactor.compact(conv, messages, caller, cut_point=2)
+
+    assert not captured
+
+
+@pytest.mark.asyncio
+async def test_guard_persistence_swallows_logger_exceptions() -> None:
+    settings = _make_settings(
+        compaction_hallucination_guard_enabled=True,
+        compaction_hallucination_max_suspect_count=2,
+        compaction_hallucination_persist_enabled=True,
+        compaction_structured_facts_enabled=False,
+    )
+
+    def boom(event_type: str, data: dict, session_id: str) -> None:
+        raise RuntimeError("event sink down")
+
+    compactor = ConversationCompactor(settings, event_logger=boom)
+    conv = _make_conversation([
+        ("user", "Contact Marcus Webb at marcus.webb@acme.com."),
+        ("assistant", "Got it."),
+        ("user", "Continue."),
+    ])
+    messages = [{"role": m.role, "content": m.content} for m in conv.messages]
+    caller = _stub_caller(_SUMMARY_WITH_HALLUCINATIONS)
+
+    # Should not raise even though the logger does — compaction must
+    # remain unaffected by event-sink failures.
+    await compactor.compact(conv, messages, caller, cut_point=2)
+
+    # Summary still applied (warn-only mode).
+    assert conv.summary is not None
+
+
+@pytest.mark.asyncio
 async def test_guard_disabled_no_check(caplog) -> None:
     settings = _make_settings(
         compaction_hallucination_guard_enabled=False,

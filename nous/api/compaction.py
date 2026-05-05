@@ -358,6 +358,21 @@ class ApiCaller(Protocol):
     ) -> ApiResponse: ...
 
 
+class EventLogger(Protocol):
+    """Fire-and-forget event sink for guard verdicts.
+
+    AgentRunner injects a closure that wraps `Brain.emit_event` in
+    `asyncio.create_task` so the compaction path never blocks on DB I/O.
+    """
+
+    def __call__(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        session_id: str,
+    ) -> None: ...
+
+
 # ------------------------------------------------------------------
 # Token Estimator
 # ------------------------------------------------------------------
@@ -427,9 +442,18 @@ class ConversationCompactor:
     compactor.estimator for calibration after API responses.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        event_logger: "EventLogger | None" = None,
+    ) -> None:
         self._settings = settings
         self.estimator = TokenEstimator()
+        # Optional fire-and-forget callback for persisting guard fires
+        # to nous_system.events. Lets us reconstruct what F059 saw
+        # after Docker log rotation. Wired in by AgentRunner; unwired
+        # in tests + scripts.
+        self._event_logger = event_logger
 
     # ------------------------------------------------------------------
     # Layer 1: Tool Output Pruning
@@ -714,14 +738,34 @@ class ConversationCompactor:
         # F059 hallucination guard. Substring-check entity tokens in the
         # summary against the input. Suspect = entity in summary but not
         # in input. Default warn-only; fallback to truncation only when
-        # the operator opts in.
+        # the operator opts in. Every fire is persisted to
+        # nous_system.events when an event logger is wired in, so log
+        # rotation doesn't lose the evidence we'd use to flip the
+        # fallback flag later.
         if self._settings.compaction_hallucination_guard_enabled:
             input_text = self._serialize_for_summary(
                 old_messages[serialize_start:]
             )
             suspects = detect_hallucinated_entities(input_text, checkpoint_text)
             max_allowed = self._settings.compaction_hallucination_max_suspect_count
-            if len(suspects) > max_allowed:
+            exceeded = len(suspects) > max_allowed
+            fallback_taken = (
+                exceeded
+                and self._settings.compaction_hallucination_fallback_enabled
+            )
+
+            if suspects:
+                self._persist_guard_fire(
+                    conversation,
+                    suspects,
+                    max_allowed,
+                    exceeded,
+                    fallback_taken,
+                    summary_chars=len(checkpoint_text),
+                    input_chars=len(input_text),
+                )
+
+            if exceeded:
                 logger.warning(
                     "Compaction hallucination guard: %d suspect entities "
                     "(threshold %d, session=%s): %s",
@@ -730,7 +774,7 @@ class ConversationCompactor:
                     conversation.session_id,
                     suspects[:10],
                 )
-                if self._settings.compaction_hallucination_fallback_enabled:
+                if fallback_taken:
                     logger.warning(
                         "Compaction hallucination guard: falling back to "
                         "truncation (session=%s)",
@@ -950,6 +994,50 @@ class ConversationCompactor:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    def _persist_guard_fire(
+        self,
+        conversation: Conversation,
+        suspects: list[str],
+        threshold: int,
+        exceeded: bool,
+        fallback_taken: bool,
+        *,
+        summary_chars: int,
+        input_chars: int,
+    ) -> None:
+        """Best-effort persist of the F059 guard verdict.
+
+        Skipped when persistence is disabled or no event logger is
+        wired. Never raises — the compaction path must be unaffected.
+        """
+        if not self._settings.compaction_hallucination_persist_enabled:
+            return
+        if self._event_logger is None:
+            return
+        try:
+            self._event_logger(
+                "f059_hallucination_guard",
+                {
+                    "session_id": conversation.session_id,
+                    "compaction_count": conversation.compaction_count + 1,
+                    "suspect_count": len(suspects),
+                    # Cap at 20 entries so we don't blow up the events
+                    # table on a runaway summarizer. Hand-audit reads
+                    # the first few anyway.
+                    "suspects": suspects[:20],
+                    "threshold": threshold,
+                    "exceeded_threshold": exceeded,
+                    "fallback_taken": fallback_taken,
+                    "summary_chars": summary_chars,
+                    "input_chars": input_chars,
+                },
+                conversation.session_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "F059 guard persistence failed (suppressed)", exc_info=True
+            )
 
     @staticmethod
     def extract_text(content: list[dict[str, Any]]) -> str:
