@@ -1,0 +1,123 @@
+{
+  "corpus": "prod-flavored",
+  "n_scenarios": 15,
+  "n_errored": 0,
+  "n_fired": 3,
+  "fire_rate": 0.2,
+  "total_suspects": 5,
+  "results": [
+    {
+      "name": "config_value",
+      "n_turns": 8,
+      "summary_chars": 1392,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "decision_with_rationale",
+      "n_turns": 7,
+      "summary_chars": 1076,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "person_attributes",
+      "n_turns": 6,
+      "summary_chars": 1315,
+      "guard_suspect_count": 2,
+      "guard_suspects": [
+        "tom rivers",
+        "trivers@acmecorp.com"
+      ]
+    },
+    {
+      "name": "schedule_change",
+      "n_turns": 7,
+      "summary_chars": 1345,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "credential_redacted",
+      "n_turns": 7,
+      "summary_chars": 1450,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "long_chat_one_fact",
+      "n_turns": 7,
+      "summary_chars": 532,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "version_pin",
+      "n_turns": 5,
+      "summary_chars": 1225,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "negative_decision",
+      "n_turns": 5,
+      "summary_chars": 1306,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "redis streams"
+      ]
+    },
+    {
+      "name": "fact_in_assistant_turn",
+      "n_turns": 6,
+      "summary_chars": 1280,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "user_preference",
+      "n_turns": 6,
+      "summary_chars": 1179,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "deadline_change",
+      "n_turns": 5,
+      "summary_chars": 824,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "multiple_subjects",
+      "n_turns": 6,
+      "summary_chars": 1212,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "nested_priorities",
+      "n_turns": 6,
+      "summary_chars": 1999,
+      "guard_suspect_count": 2,
+      "guard_suspects": [
+        "2.1",
+        "2.3.7"
+      ]
+    },
+    {
+      "name": "model_change",
+      "n_turns": 5,
+      "summary_chars": 1008,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "incident_postmortem",
+      "n_turns": 8,
+      "summary_chars": 1208,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    }
+  ]
+}
