@@ -1,0 +1,116 @@
+{
+  "agent_id": "nous-prod-snapshot",
+  "results": [
+    {
+      "episode_id": "6cc10862-7574-4e07-bcda-f1b61bcbbab6",
+      "input_chars": 200,
+      "input_sample": "check this\nous's scheduled tick (every 30 min per --tick-interval-seconds=1800) wasn't firing reliably. CT has a self-alarm that fires\n  when no /snapshot calls have come in for 5400s (90 min = \u22653 con",
+      "output_title": "Nous Scheduled Tick Reliability Issue Investigation",
+      "output_chars": 1389,
+      "candidate_fact_count": 3,
+      "guard_suspect_count": 0,
+      "guard_suspects": [],
+      "output_summary": "The transcript fragment describes a reliability problem with Nous's scheduled tick mechanism. The tick interval is configured at 30 minutes (--tick-interval-seconds=1800) but was not firing reliably. A self-alarm exists in the system (referred to as CT) that triggers when no /snapshot calls have been received for 5400 seconds (90 minutes), which corresponds to 3 or more consecutive missed tick int"
+    },
+    {
+      "episode_id": "cfcfc59e-c0bd-426e-b9ba-aba423cc24be",
+      "input_chars": 47,
+      "input_sample": "check what schedule you have for autopilot_tick",
+      "skipped": true
+    },
+    {
+      "episode_id": "d2344031-a82e-4b57-9fbb-0932d97f3012",
+      "input_chars": 56,
+      "input_sample": "what is this parameter is for for nous - NOUS_MAX_TOKENS",
+      "output_title": "User Asked About NOUS_MAX_TOKENS Parameter Purpose",
+      "output_chars": 1030,
+      "candidate_fact_count": 1,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "user asked about"
+      ],
+      "output_summary": "The user asked a single question about the purpose of the NOUS_MAX_TOKENS parameter in the Nous cognitive agent framework. The transcript contains only the question itself \u2014 no answer or explanation was provided within the recorded exchange. The question was directed at understanding what this environment variable or configuration parameter controls within the Nous system."
+    },
+    {
+      "episode_id": "a983450f-a88a-4946-b84c-69981da645ac",
+      "input_chars": 121,
+      "input_sample": "ok i created repository - https://github.com/tfatykhov/nous-longMemEval go ahead create initial structure/ specs  for now",
+      "output_title": "Initial Structure and Specs Created for nous-longMemEval Repository",
+      "output_chars": 1294,
+      "candidate_fact_count": 2,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "https://github.com/tfatykhov/nous-longmemeval,"
+      ],
+      "output_summary": "The user created a GitHub repository at https://github.com/tfatykhov/nous-longMemEval and requested the assistant to create an initial structure and specifications for it. The repository appears to be related to long-term memory evaluation for the Nous cognitive agent framework. The assistant was tasked with scaffolding the initial project structure and specs for this repository. The transcript in"
+    },
+    {
+      "episode_id": "588c38ab-479b-416b-a6cb-2e4d47155cfb",
+      "input_chars": 46,
+      "input_sample": "get latest from nous repo. we added more stuff",
+      "skipped": true
+    },
+    {
+      "episode_id": "122bee36-aad1-4ff2-9fb8-3e5ce11e4453",
+      "input_chars": 200,
+      "input_sample": "Run this with run_python and return ONLY the raw JSON output no commentary:\n\nimport asyncio, json\nfrom sqlalchemy import text\nfrom nous.storage.database import get_session\nasync def q():\n    async wit",
+      "output_title": "Incomplete Python Script Execution via run_python",
+      "output_chars": 1268,
+      "candidate_fact_count": 2,
+      "guard_suspect_count": 0,
+      "guard_suspects": [],
+      "output_summary": "The user requested execution of a Python script using run_python, instructing the agent to return only raw JSON output with no commentary. The script was intended to query a database using SQLAlchemy's async session from nous.storage.database, with an async function defined but the transcript cuts off mid-definition \u2014 the function body and any await statements are incomplete. The script imports as"
+    },
+    {
+      "episode_id": "20fd2889-bc69-400b-b7ed-d177ab100931",
+      "input_chars": 200,
+      "input_sample": "It is good progress  with nous tiny hippo v2 but few things. 1 do not use things like heart and brain\n This is scientific article. 2. Nous was deployed 4 weeks ago. We do not have thousands of facts. ",
+      "output_title": "Nous Tiny Hippo V2 Writing Style Corrections",
+      "output_chars": 1168,
+      "candidate_fact_count": 2,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "writing style corrections"
+      ],
+      "output_summary": "User provided feedback on the Nous Tiny Hippo V2 content, identifying two specific issues to correct. First, metaphorical or informal language such as 'heart' and 'brain' should not be used, as the content is a scientific article requiring precise, formal language. Second, a factual overclaim was flagged: Nous was deployed only 4 weeks ago and therefore does not have thousands of facts accumulated"
+    },
+    {
+      "episode_id": "9aea49e2-408d-4864-9ab2-ed18ceafcd52",
+      "input_chars": 119,
+      "input_sample": "can you add actual plan to git as well? also numbering is not correct. last feature was f038 so this one should be f039",
+      "output_title": "Add plan to git and fix feature numbering to f039",
+      "output_chars": 1064,
+      "candidate_fact_count": 2,
+      "guard_suspect_count": 0,
+      "guard_suspects": [],
+      "output_summary": "The user made two requests: (1) add the actual plan file to git, and (2) correct the feature numbering. The user specified that the last feature was f038, so the current feature should be numbered f039, not whatever number was previously assigned. The transcript does not confirm whether the assistant completed these actions \u2014 it only records the user's instructions. The requests are clear directiv"
+    },
+    {
+      "episode_id": "60b34456-63fa-4417-8ee3-da3f6ec8b24b",
+      "input_chars": 120,
+      "input_sample": "using current dag is it possible to create a loop kind of process where it can repeat same tasks until condition is met?",
+      "output_title": "User Asks About DAG Loop Capability",
+      "output_chars": 1235,
+      "candidate_fact_count": 2,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "directed acyclic graph"
+      ],
+      "output_summary": "The user asked whether the current DAG (Directed Acyclic Graph) implementation supports creating loop-like processes that repeat the same tasks until a condition is met. The transcript contains only the user's question \u2014 no response or answer from the assistant is present. It is unclear whether the DAG supports conditional looping, as no answer was provided in the transcript."
+    },
+    {
+      "episode_id": "3fc54928-4f62-4e11-8be4-dc411ec57673",
+      "input_chars": 58,
+      "input_sample": "now we can use dag for a complex research is this correct?",
+      "output_title": "User Asks If DAG Supports Complex Research",
+      "output_chars": 968,
+      "candidate_fact_count": 1,
+      "guard_suspect_count": 2,
+      "guard_suspects": [
+        "directed acyclic graph",
+        "user asks if"
+      ],
+      "output_summary": "The user posed a single confirmatory question: whether DAG (Directed Acyclic Graph) can now be used for complex research. The transcript contains only this question with no assistant response, no elaboration, and no additional context. It is unclear what system, framework, or prior work the user is referencing when they say 'now we can use.' No answer, confirmation, or clarification was provided w"
+    }
+  ]
+}

@@ -241,6 +241,10 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("GraphLinker not available yet")
 
+        # Initialize before the conditional so downstream wiring (F060
+        # sleep handler, etc.) can read it unconditionally even when the
+        # summarizer is disabled or the import fails.
+        episode_summarizer = None
         try:
             from nous.handlers.episode_summarizer import EpisodeSummarizer
 
