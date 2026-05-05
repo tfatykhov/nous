@@ -1,0 +1,1125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nous Evaluations — Index</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --bg-card: #161b22;
+    --bg-code: #1f2730;
+    --fg: #e6edf3;
+    --fg-muted: #9aa5b1;
+    --fg-dim: #6b7480;
+    --border: #2d333b;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --amber: #d29922;
+    --gray: #6b7480;
+    --table-stripe: #181d24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .layout {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    min-height: 100vh;
+  }
+  nav.toc {
+    background: var(--bg-card);
+    border-right: 1px solid var(--border);
+    padding: 20px 18px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    font-size: 13px;
+  }
+  nav.toc h2 {
+    margin: 0 0 14px 0;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-muted);
+  }
+  nav.toc ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  nav.toc li {
+    margin: 4px 0;
+  }
+  nav.toc a {
+    display: block;
+    padding: 5px 8px;
+    color: var(--fg-muted);
+    text-decoration: none;
+    border-radius: 4px;
+    line-height: 1.35;
+  }
+  nav.toc a:hover {
+    background: rgba(88, 166, 255, 0.1);
+    color: var(--fg);
+  }
+  nav.toc .num {
+    color: var(--fg-dim);
+    margin-right: 6px;
+  }
+  main {
+    padding: 32px 48px 80px 48px;
+    max-width: 1100px;
+  }
+  h1 {
+    margin: 0 0 4px 0;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: 14px;
+    margin-bottom: 32px;
+  }
+  h2 {
+    margin: 56px 0 16px 0;
+    font-size: 22px;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 8px;
+    scroll-margin-top: 16px;
+  }
+  h3 {
+    margin: 28px 0 10px 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  p { margin: 8px 0 12px 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+    font-size: 14px;
+  }
+  th, td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    color: var(--fg-muted);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--bg-card);
+  }
+  tr:nth-child(even) td { background: var(--table-stripe); }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  td.bold { font-weight: 600; }
+  code {
+    background: var(--bg-code);
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-family: "SF Mono", "Monaco", "Cascadia Code", monospace;
+    font-size: 13px;
+    color: #c9d1d9;
+  }
+  pre {
+    background: var(--bg-code);
+    padding: 14px 18px;
+    border-radius: 6px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; font-size: 13px; }
+  .pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    vertical-align: middle;
+    margin-left: 8px;
+  }
+  .pill-shipped { background: rgba(63, 185, 80, 0.15); color: var(--green); border: 1px solid rgba(63, 185, 80, 0.4); }
+  .pill-dropped { background: rgba(248, 81, 73, 0.15); color: var(--red); border: 1px solid rgba(248, 81, 73, 0.4); }
+  .pill-fixed { background: rgba(88, 166, 255, 0.15); color: var(--accent); border: 1px solid rgba(88, 166, 255, 0.4); }
+  .pill-nochange { background: rgba(107, 116, 128, 0.15); color: var(--gray); border: 1px solid rgba(107, 116, 128, 0.4); }
+  .delta-pos { color: var(--green); font-weight: 600; }
+  .delta-neg { color: var(--red); font-weight: 600; }
+  .delta-zero { color: var(--fg-dim); }
+  .callout {
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin: 16px 0;
+    background: rgba(88, 166, 255, 0.05);
+    border-radius: 0 6px 6px 0;
+  }
+  .callout.warn { border-color: var(--amber); background: rgba(210, 153, 34, 0.05); }
+  .callout.bad { border-color: var(--red); background: rgba(248, 81, 73, 0.05); }
+  .callout.good { border-color: var(--green); background: rgba(63, 185, 80, 0.05); }
+  .callout strong { color: var(--fg); }
+  .meta {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 16px;
+    background: var(--bg-card);
+    padding: 14px 18px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    margin: 0 0 24px 0;
+  }
+  .meta dt { color: var(--fg-muted); font-weight: 500; }
+  .meta dd { margin: 0; font-family: "SF Mono", monospace; }
+  .scorecard {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin: 16px 0 32px 0;
+  }
+  .score {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .score .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--fg-muted);
+    margin-bottom: 6px;
+  }
+  .score .value {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .score .delta {
+    font-size: 13px;
+    margin-top: 2px;
+  }
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 40px 0;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .raw-link {
+    display: inline-block;
+    font-size: 12px;
+    color: var(--fg-dim);
+    margin-top: 4px;
+    font-family: "SF Mono", monospace;
+  }
+  .small { font-size: 13px; color: var(--fg-muted); }
+  .badge-row { margin: 8px 0 16px 0; }
+  .key-finding {
+    background: linear-gradient(180deg, rgba(63, 185, 80, 0.08), rgba(63, 185, 80, 0.02));
+    border: 1px solid rgba(63, 185, 80, 0.3);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 20px 0;
+  }
+  .key-finding h4 {
+    margin: 0 0 8px 0;
+    color: var(--green);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; height: auto; }
+    main { padding: 24px; }
+  }
+</style>
+</head>
+<body>
+
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#summary"><span class="num">§</span>Summary scorecard</a></li>
+    <li><a href="#standing"><span class="num">§</span>Standing TL;DR</a></li>
+    <li><a href="#exp1"><span class="num">1.</span>Spreading activation</a></li>
+    <li><a href="#exp2"><span class="num">2.</span>RRF tuning (broken)</a></li>
+    <li><a href="#exp3"><span class="num">3.</span>RRF tuning (fixed)</a></li>
+    <li><a href="#exp4"><span class="num">4.</span>CE rerank corpus split</a></li>
+    <li><a href="#exp5"><span class="num">5.</span>MMR stacking</a></li>
+    <li><a href="#exp6"><span class="num">6.</span>F052 conditional CE</a></li>
+    <li><a href="#exp7"><span class="num">7.</span>F053 orphan-edge prune</a></li>
+    <li><a href="#exp8"><span class="num">8.</span>F054 keyword toggle</a></li>
+    <li><a href="#decisions"><span class="num">§</span>Decisions log</a></li>
+    <li><a href="#nextsteps"><span class="num">§</span>Next steps</a></li>
+    <li><a href="#howto"><span class="num">§</span>How to run eval</a></li>
+    <li style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;"><a href="#audit"><strong>⚠ Repo-wide audit</strong></a></li>
+    <li><a href="#audit-critical"><span class="num">A1.</span>5 critical anomalies</a></li>
+    <li><a href="#audit-important"><span class="num">A2.</span>Important (P2)</a></li>
+    <li><a href="#audit-coverage"><span class="num">A3.</span>Coverage gaps</a></li>
+    <li><a href="#audit-contradictions"><span class="num">A4.</span>Contradiction matrix</a></li>
+    <li><a href="#audit-categories"><span class="num">A5.</span>Inventory by category</a></li>
+    <li><a href="#audit-actions"><span class="num">A6.</span>Action plan</a></li>
+    <li style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px;"><a href="#plan"><strong>📋 Execution plan</strong></a></li>
+    <li><a href="#plan-phase0"><span class="num">P0.</span>Run-doc discipline</a></li>
+    <li><a href="#plan-phase1"><span class="num">P1.</span>5 critical (week 1)</a></li>
+    <li><a href="#plan-phase2"><span class="num">P2.</span>5 P2 (weeks 1-2)</a></li>
+    <li><a href="#plan-phase3"><span class="num">P3.</span>6 coverage gaps</a></li>
+    <li><a href="#plan-phase4"><span class="num">P4.</span>Process changes</a></li>
+    <li><a href="#plan-sequencing"><span class="num">P5.</span>Sequencing &amp; owner</a></li>
+    <li><a href="#runs"><span class="num">§</span>Run registry (47 entries)</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<h1>Memory tuning session — 2026-05-03</h1>
+<div class="subtitle">F051 retrieval eval → 8 experiments → 2 features shipped, 1 dropped, 1 harness bug fixed. <a href="#audit" style="margin-left: 8px;">⚠️ Jump to full repo audit (30 anomalies, 5 critical) ↓</a></div>
+
+<div class="callout good" style="margin-bottom: 24px;">
+<strong>2026-05-04 progress:</strong> Phase 1 + Phase 2 quick-wins executed in four batches (A/B/C, 1.2+2.2, 2.3+1.5, 1.1).
+<strong>8 EXEC-PLAN items closed</strong> (1.1 sleep, 1.2 F031, 1.3 F027 sonnet, 1.4 determinism, 1.5 MMR gate, 2.1 archive, 2.2 F026, 2.3 edge regression).
+<strong>ALL 5 critical anomalies investigated and resolved.</strong>
+<strong>3 of 5 P2 resolved</strong> (#6 archive, #7 F026 by-design, #8 edge regression test shipped).
+12 new RUNS.md rows appended this session — <strong>discipline holding</strong>.
+<br><br>
+<strong>Pattern (4× confirmed):</strong> <em>inspect failure modes before "fixing" code</em>. F031 REMOVE (no fix needed — eval gen prompt), F026 ActionGate (by-design repetition semantics), F051 baseline drift (audit conflation), MMR context packing (real trade-off, not a gate), <em>and now sleep phases (probe-side measurement gap, not code bug)</em>. Eval-driven inspection saved an estimated 10+ days of speculative refactoring.
+</div>
+
+<dl class="meta">
+  <dt>Branch</dt><dd>tune/memory-recall-and-sleep → eval/spreading-rrf-configs (PR #413)</dd>
+  <dt>Commits</dt><dd>132992e (eval configs), ea9b040 (F052/F053/F054 impl), 4074275 (docs)</dd>
+  <dt>Eval DB</dt><dd>nous-eval-scratch (Docker on 127.0.0.1:5433)</dd>
+  <dt>Agents</dt><dd>nous-prod-snapshot (2027 facts) · nous-lme-corpus (933 facts + 200 episodes)</dd>
+  <dt>Qrel sources</dt><dd>nous_prod (40q) · nous_prod_procedures (50q) · longmemeval (20q)</dd>
+</dl>
+
+<h2 id="summary">Summary scorecard</h2>
+
+<div class="scorecard">
+  <div class="score">
+    <div class="label">Experiments run</div>
+    <div class="value">8</div>
+  </div>
+  <div class="score">
+    <div class="label">Features shipped</div>
+    <div class="value">2</div>
+    <div class="delta delta-pos">F053 + F054</div>
+  </div>
+  <div class="score">
+    <div class="label">Features dropped</div>
+    <div class="value">1</div>
+    <div class="delta delta-neg">F052 (heuristic falsified)</div>
+  </div>
+  <div class="score">
+    <div class="label">Harness bugs found</div>
+    <div class="value">1</div>
+    <div class="delta delta-pos">Fixed (RRF resolver)</div>
+  </div>
+  <div class="score">
+    <div class="label">Headline finding</div>
+    <div class="value">CE corpus split</div>
+    <div class="delta">+5.2% MRR personal-Q&amp;A if CE off</div>
+  </div>
+  <div class="score">
+    <div class="label">New tests added</div>
+    <div class="value">22</div>
+    <div class="delta delta-pos">All passing</div>
+  </div>
+</div>
+
+<table>
+  <thead><tr><th>Subsystem</th><th>Result</th><th>Action</th></tr></thead>
+  <tbody>
+    <tr><td>Spreading activation gate</td><td>0% metric movement; gate fires correctly but reorderings happen below gold</td><td><span class="pill pill-nochange">No change</span></td></tr>
+    <tr><td>RRF parameter tuning</td><td>Max ±1.6% MRR with extreme settings; corpus-noise</td><td><span class="pill pill-nochange">No change</span></td></tr>
+    <tr><td>Eval harness — vector_weight/rrf_k routing</td><td>Bug: flags silently ignored (resolver bypassed eval Settings)</td><td><span class="pill pill-fixed">Fixed</span></td></tr>
+    <tr><td>CE rerank (force off)</td><td>Codebase: -2.2% MRR · Personal-Q&amp;A: <strong class="delta-pos">+5.2% MRR / +14.2% nDCG</strong></td><td>Tried F052 → dropped</td></tr>
+    <tr><td>MMR stacking</td><td>All variants ≤ baseline on both corpora</td><td><span class="pill pill-nochange">F030.1 default validated</span></td></tr>
+    <tr><td>Channel isolation (vector_only / keyword_only)</td><td>vector_only ties baseline byte-for-byte on lme; keyword_only collapses</td><td><span class="pill pill-shipped">F054</span></td></tr>
+    <tr><td>F031 MERGE orphan supersede chains</td><td>Bug fixed in PR #412; orphan edges remain in graph</td><td><span class="pill pill-shipped">F053</span></td></tr>
+  </tbody>
+</table>
+
+<h2 id="standing">Standing TL;DR (latest validated state)</h2>
+<p class="small">Update this table when new evidence arrives.</p>
+
+<table>
+  <thead><tr><th>Subsystem</th><th>Default</th><th>Tunable?</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Cross-encoder rerank</td><td>OFF (env)</td><td><code>cross_encoder_enabled</code></td><td>Helps codebase (+2.2% MRR), hurts personal-Q&amp;A (-5.2%). Conditional gating attempted (F052) — failed. Open follow-up.</td></tr>
+    <tr><td>MMR diversity</td><td>ON, <code>mmr_skip_after_ce=True</code></td><td><code>mmr_enabled</code>, <code>mmr_diversity_weight</code></td><td>F030.1 default validated. Chaining MMR after CE neutralizes lift.</td></tr>
+    <tr><td>Spreading activation</td><td><code>auto</code> (density &gt;= 3.0)</td><td><code>spreading_activation_enabled</code>, <code>..._density_threshold</code></td><td>Measurable no-op on current eval corpora.</td></tr>
+    <tr><td>RRF fusion</td><td><code>vector_weight=0.7</code>, <code>rrf_k=60</code></td><td><code>vector_weight</code>, <code>rrf_k</code></td><td>Tuning is corpus-noise. Don't touch defaults.</td></tr>
+    <tr><td>Keyword channel</td><td>ON</td><td><code>hybrid_search_keyword_enabled</code></td><td>F054. Vector-only ties default RRF on lme. Operator opt-out for vector-dominant corpora.</td></tr>
+    <tr><td>Orphan-edge pruning</td><td>ON, 1000/cycle</td><td><code>dead_edge_pruning_enabled</code>, <code>..._max_per_cycle</code></td><td>F053 sleep phase. Not measured by retrieval eval.</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<h2 id="exp1">1. Spreading activation gate <span class="pill pill-nochange">No change</span></h2>
+<h3>Hypothesis</h3>
+<p>The <code>auto</code> gate at density ≥ 3.0 is the default. Forcing it on (or lowering threshold) may surface graph-hop lift that the gate currently suppresses.</p>
+
+<h3>Configs</h3>
+<pre><code>spread_force_on:      {"spreading_activation_enabled": "true"}
+spread_force_off:     {"spreading_activation_enabled": "false"}
+spread_low_threshold: {"spreading_activation_density_threshold": 1.0}</code></pre>
+
+<h3>Results — 90 qrels (nous_prod + nous_prod_procedures)</h3>
+<table>
+  <thead><tr><th>config</th><th class="num">spreading_used</th><th class="num">queries diverged</th><th class="num">MRR</th></tr></thead>
+  <tbody>
+    <tr><td>baseline</td><td class="num">0/90</td><td class="num">—</td><td class="num">0.828</td></tr>
+    <tr><td>spread_force_on</td><td class="num">10/90</td><td class="num">9/90</td><td class="num">0.828</td></tr>
+    <tr><td>spread_force_off</td><td class="num">0/90</td><td class="num">0/90</td><td class="num">0.828</td></tr>
+    <tr><td>spread_low_threshold</td><td class="num">10/90</td><td class="num">9/90</td><td class="num">0.828</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+<strong>Finding:</strong> Spreading fires when expected, reorders 9/90 queries' results — but reorderings happen <em>below</em> the gold position. CE rerank dominates the top of the list; spreading-pulled neighbors don't outrank what's already there.
+</div>
+
+<p class="raw-link">reports/spread_rrf_sweep/2026-05-03T22-06-36_*.{md,json}</p>
+
+<hr>
+
+<h2 id="exp2">2. RRF parameter tuning — initial (silently broken) <span class="pill pill-fixed">Fixed</span></h2>
+
+<h3>Configs</h3>
+<pre><code>rrf_vector_heavy:   {"vector_weight": 0.9}
+rrf_balanced:       {"vector_weight": 0.5}
+rrf_keyword_heavy:  {"vector_weight": 0.3}
+rrf_k_low:          {"rrf_k": 10}
+rrf_k_high:         {"rrf_k": 200}</code></pre>
+
+<h3>Results</h3>
+<p>All 5 configs produced <strong>byte-identical</strong> retrieved IDs on every query.</p>
+
+<div class="callout bad">
+<strong>Root cause:</strong> Eval-harness bug. <code>_resolve_vector_weight()</code> and <code>_resolve_rrf_k()</code> in <code>nous/heart/search.py</code> construct a fresh <code>Settings()</code> from env vars, ignoring the eval-modified Settings instance. Eval <code>RetrievalConfig.flags</code> were silently dropped.
+</div>
+
+<h3>Fix</h3>
+<p>Two-line patch in <code>nous_eval/retrieval_runner.py::_apply_config_flags</code> to push these specific keys into <code>RuntimeConfig</code> (which the resolver does check):</p>
+<pre><code>if "vector_weight" in update:
+    RuntimeConfig.get().set_vector_weight(float(update["vector_weight"]))
+if "rrf_k" in update:
+    RuntimeConfig.get().set_rrf_k(int(update["rrf_k"]))</code></pre>
+<p>Commit <code>6d0eb27</code>. Verification: <code>rrf_vector_heavy=0.9</code> now diverges from baseline on Q34 at rank 5 (was 0/90 before).</p>
+
+<hr>
+
+<h2 id="exp3">3. RRF parameter tuning — post-fix <span class="pill pill-nochange">No change</span></h2>
+
+<h3>Results — 90 qrels, CE-off variants</h3>
+<p class="small">CE-on variants all tied baseline (CE rerank dominates top-K, washes out RRF reorderings).</p>
+
+<table>
+  <thead><tr><th>config</th><th class="num">MRR</th><th class="num">Δ vs ce_off</th></tr></thead>
+  <tbody>
+    <tr><td>ce_off</td><td class="num">0.810</td><td class="num">—</td></tr>
+    <tr><td class="bold">ce_off_rrf_k_low (k=10)</td><td class="num bold">0.816</td><td class="num delta-pos">+0.7%</td></tr>
+    <tr><td>ce_off_rrf_balanced</td><td class="num">0.808</td><td class="num delta-zero">-0.2%</td></tr>
+    <tr><td>ce_off_rrf_vector_heavy (0.9)</td><td class="num">0.805</td><td class="num delta-zero">-0.6%</td></tr>
+    <tr><td>ce_off_rrf_keyword_heavy (0.3)</td><td class="num">0.797</td><td class="num delta-neg">-1.6%</td></tr>
+    <tr><td>ce_off_rrf_k_high (k=200)</td><td class="num">0.733</td><td class="num delta-neg">-9.5%</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+<strong>Finding:</strong> RRF tuning is mostly corpus-noise. Only <code>rrf_k=10</code> shows a marginal +0.7% lift; <code>rrf_k=200</code> is a clear loser at -9.5%. Within the operating range no setting meaningfully beats default.
+</div>
+
+<p class="raw-link">reports/exp1_ce_off_rrf/2026-05-03T22-33-28_*.{md,json}</p>
+
+<hr>
+
+<h2 id="exp4">4. CE rerank — corpus split <em>(headline finding)</em></h2>
+
+<div class="key-finding">
+<h4>The big result</h4>
+<p>CE rerank's value is <strong>corpus-dependent</strong>. A single global <code>cross_encoder_enabled</code> flag is wrong — production agents serve both query types.</p>
+</div>
+
+<table>
+  <thead><tr><th>corpus</th><th class="num">CE on (baseline)</th><th class="num">CE off</th><th>direction</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>nous_prod (90q, codebase)</td>
+      <td class="num bold">0.828</td>
+      <td class="num">0.810</td>
+      <td>CE <span class="delta-pos">helps +2.2%</span></td>
+    </tr>
+    <tr>
+      <td>longmemeval (20q, personal-Q&amp;A)</td>
+      <td class="num">0.892</td>
+      <td class="num bold">0.938</td>
+      <td>CE <span class="delta-neg">hurts -5.2%</span> (also -14.2% nDCG, +12.9% R@10)</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout warn">
+<strong>Why:</strong> CE uses MS-MARCO-trained MiniLM, which models "informational relevance" — works on codebase queries (short, conceptual) but down-ranks correctly-retrieved personal facts on dialogue queries ("What is my preferred gin ratio?"). Structural model limitation, not a tuning artifact.
+</div>
+
+<p class="raw-link">reports/exp_longmemeval/2026-05-03T22-37-28_*.{md,json}</p>
+
+<hr>
+
+<h2 id="exp5">5. MMR stacking on top of CE <span class="pill pill-nochange">F030.1 validated</span></h2>
+
+<h3>Hypothesis</h3>
+<p>F030.1 default <code>mmr_skip_after_ce=True</code> skips MMR when CE just reordered the head. Re-validate by forcing MMR back on at varying λ.</p>
+
+<h3>Results</h3>
+
+<table>
+  <thead><tr><th colspan="2">nous_prod (90q)</th><th colspan="2">longmemeval (20q)</th></tr><tr><th>config</th><th class="num">MRR</th><th>config</th><th class="num">MRR</th></tr></thead>
+  <tbody>
+    <tr><td class="bold">baseline (CE+skip-MMR)</td><td class="num bold">0.828</td><td>baseline</td><td class="num">0.892</td></tr>
+    <tr><td>ce_mmr_λ=0.7</td><td class="num delta-neg">0.797 (-3.7%)</td><td class="bold">ce_off</td><td class="num bold">0.938</td></tr>
+    <tr><td>ce_mmr_λ=0.85</td><td class="num delta-neg">0.810 (-2.2%)</td><td>ce_mmr_λ=0.7</td><td class="num delta-neg">0.931 (-0.7%)</td></tr>
+    <tr><td>ce_mmr_λ=0.95</td><td class="num delta-neg">0.812 (-1.9%)</td><td>ce_mmr_λ=0.85</td><td class="num delta-neg">0.933 (-0.4%)</td></tr>
+    <tr><td></td><td></td><td>ce_mmr_λ=0.95</td><td class="num delta-neg">0.935 (-0.3%)</td></tr>
+  </tbody>
+</table>
+
+<div class="callout">
+<strong>Finding:</strong> F030.1 default is correct on both corpora. Forcing MMR back on after CE never improves; only at λ=0.95 (near-pure relevance, MMR almost a no-op) does it approach baseline.
+</div>
+
+<p class="raw-link">reports/exp2_mmr_combos_prod/* · reports/exp2_mmr_combos_lme/*</p>
+
+<hr>
+
+<h2 id="exp6">6. F052 — Conditional CE rerank by memory-type dominance <span class="pill pill-dropped">Dropped</span></h2>
+
+<h3>Goal</h3>
+<p>Recover the +5.2% MRR longmemeval lift (§4) without losing the +2.2% nous_prod lift. Make CE rerank conditional per-query so it runs only when it helps.</p>
+
+<h3>Hypothesis</h3>
+<p>Personal-Q&amp;A queries surface episode-shaped candidates; CE down-ranks correctly-retrieved personal facts on those queries. Episode-share in candidate set should be a deterministic, zero-latency proxy for "this is dialogue recall — skip CE."</p>
+
+<h3>Implementation</h3>
+<pre><code># heart.py — gate inserted before CE invocation
+if (ce_enabled and self.settings.cross_encoder_episode_skip_enabled and len(merged) > 0):
+    head_size = min(self.settings.cross_encoder_max_candidates, len(merged))
+    head_sorted = sorted(merged, key=lambda r: r.score, reverse=True)
+    head_slice = head_sorted[:head_size]
+    episode_count = sum(1 for r in head_slice if r.type == "episode")
+    episode_share = episode_count / head_size if head_size else 0.0
+    if episode_share >= self.settings.cross_encoder_episode_skip_threshold:
+        ce_skipped_by_episode_gate = True</code></pre>
+
+<h3>Results — gate doesn't fire</h3>
+
+<table>
+  <thead><tr><th>corpus</th><th class="num">baseline</th><th class="num">f052_on (0.5)</th><th class="num">f052_low (0.15)</th><th class="num">f052_very_low (0.05)</th></tr></thead>
+  <tbody>
+    <tr><td>nous_prod (90q)</td><td class="num">0.828</td><td class="num">0.828</td><td>—</td><td>—</td></tr>
+    <tr><td>longmemeval (20q)</td><td class="num">0.892</td><td class="num">0.892</td><td class="num">0.892</td><td class="num">0.892</td></tr>
+  </tbody>
+</table>
+
+<h3>Why — episode-share in retrieved top-K</h3>
+
+<table>
+  <thead><tr><th>corpus</th><th>type distribution</th><th class="num">queries with episode_share ≥ 0.5</th></tr></thead>
+  <tbody>
+    <tr><td>nous_prod</td><td>52% procedure / 31% fact / 14% decision / <strong>3% episode</strong></td><td class="num">5/90</td></tr>
+    <tr><td>longmemeval</td><td><strong>100% fact</strong> / 0% episode</td><td class="num">0/20</td></tr>
+  </tbody>
+</table>
+
+<div class="callout bad">
+<strong>Falsified.</strong> longmemeval ingests dialogue as <em>facts</em> (not episodes); recall returns 100% facts. Episode-share = 0 always. nous_prod has procedures and facts dominating; episodes are only 3% of retrieved. The +5.2% longmemeval lift from <code>ce_off</code> doesn't correlate with episode-share — it correlates with <em>something else</em> about query/data shape that this heuristic doesn't capture.
+</div>
+
+<h3>Decision</h3>
+<p><strong>Drop F052.</strong> Mechanism is wrong; shipping a flag that demonstrably does nothing on the eval corpora is dead weight.</p>
+
+<p>Underlying problem (per-query CE gating) remains worth solving. Open follow-up:</p>
+<ul>
+  <li>Profile what specifically about longmemeval queries makes CE wrong (query length? embedding cluster? personal pronouns?)</li>
+  <li>Build a small classifier (heuristic or Haiku call) mapping query → "use CE? yes/no"</li>
+  <li>Re-eval</li>
+</ul>
+
+<p class="raw-link">reports/validate_lme/* · reports/validate_lme_v2/* · reports/validate_prod/*</p>
+
+<hr>
+
+<h2 id="exp7">7. F053 — Orphan-edge sleep cleanup phase <span class="pill pill-shipped">Shipped</span></h2>
+
+<h3>Motivation</h3>
+<p>PR #412 fixed the F031 MERGE supersede-chain bug (Codex P1) but existing orphan supersede chains remained — facts deactivated by F031/F027 with edges in <code>brain.graph_edges</code> still pointing at them. Spreading activation walks edges without an <code>active</code> filter, wasting per-hop activation budget on dead nodes.</p>
+
+<h3>Implementation</h3>
+<p>New sleep phase <code>_phase_prune_dead_edges</code> runs after <code>graph_densification</code>:</p>
+
+<pre><code>WITH inactive_nodes AS (
+    SELECT id, 'fact' AS node_type FROM heart.facts
+      WHERE agent_id=:agent_id AND active=false
+    UNION ALL
+    SELECT id, 'episode' FROM heart.episodes
+      WHERE agent_id=:agent_id AND active=false
+    UNION ALL
+    SELECT id, 'procedure' FROM heart.procedures
+      WHERE agent_id=:agent_id AND active=false
+), victim_edges AS (
+    SELECT e.id FROM brain.graph_edges e
+    WHERE e.agent_id=:agent_id
+      AND ((e.source_type, e.source_id) IN (SELECT node_type, id FROM inactive_nodes)
+           OR (e.target_type, e.target_id) IN (SELECT node_type, id FROM inactive_nodes))
+    LIMIT :max_per_cycle
+)
+DELETE FROM brain.graph_edges WHERE id IN (SELECT id FROM victim_edges) RETURNING id;</code></pre>
+
+<p>Bounded by <code>dead_edge_pruning_max_per_cycle</code> (default 1000) so the exclusive lock never holds longer than ~1s of pruning.</p>
+
+<h3>Code review findings (addressed inline)</h3>
+<ul>
+  <li><strong>P1</strong> — <code>brain.decisions</code> has no <code>active</code> column. Initial SQL would have crashed every sleep cycle. Fixed: dropped the decisions UNION ALL branch (decisions are append-only and reviewed-not-deleted).</li>
+  <li><strong>P2</strong> — Silent-failure surface. Added <code>sleep_stats["dead_edges_prune_error"] = type(exc).__name__</code> so observability dashboards can detect regressions.</li>
+  <li><strong>P3</strong> — Missing test for SQL drift. Added <code>test_sql_does_not_reference_decisions_active</code> to catch the regression.</li>
+</ul>
+
+<h3>Tests</h3>
+<p><code>tests/test_f053_dead_edge_prune.py</code> — 10 tests, all pass.</p>
+
+<div class="callout good">
+<strong>Decision:</strong> Ship. Real bug fix, contained risk (sleep-cycle housekeeping), well-tested. Not measurable by retrieval eval — affects future graph density and spreading activation budget. Will show up in <code>/dashboard/density</code> orphan-rate metric.
+</div>
+
+<hr>
+
+<h2 id="exp8">8. F054 — Keyword channel toggle in hybrid_search <span class="pill pill-shipped">Shipped</span></h2>
+
+<h3>Motivation</h3>
+<p>Channel-isolation eval showed <code>vector_only</code> ties default RRF byte-for-byte on longmemeval and within -0.2% on nous_prod, while <code>keyword_only</code> collapses (MRR 0.07/0.35). Keyword channel adds compute (one FTS query per recall) for ~zero recall benefit on these workloads.</p>
+
+<h3>Implementation</h3>
+<pre><code># heart/search.py
+keyword_enabled = _resolve_keyword_enabled() or embedding is None
+if keyword_enabled:
+    # ... existing FTS query
+    keyword_results = [(row.id, float(row.score)) for row in result.all()]
+# else: keyword_results stays []
+# _rrf_merge handles empty list correctly — degenerates to vector-only</code></pre>
+
+<p><code>embedding is None</code> force-on preserves the keyword-only fallback path. Settings: <code>hybrid_search_keyword_enabled=True</code> (default; preserves current behavior).</p>
+
+<h3>Validation</h3>
+
+<table>
+  <thead><tr><th>corpus</th><th class="num">baseline</th><th class="num">f054_keyword_off</th><th class="num">Δ</th></tr></thead>
+  <tbody>
+    <tr><td>nous_prod (90q)</td><td class="num">0.828</td><td class="num">0.828</td><td class="num delta-zero">identical</td></tr>
+    <tr><td>longmemeval (20q)</td><td class="num">0.892</td><td class="num">0.892</td><td class="num delta-zero">identical</td></tr>
+  </tbody>
+</table>
+
+<p>Predicted: ties baseline. Validates flag wires to production hot path. Operator opt-out is real and lossless on these corpora.</p>
+
+<div class="callout warn">
+<strong>Caveat documented:</strong> Empty keyword channel uniformly suppresses the keyword half of the RRF score (penalty rank), preserving order but shifting absolute scores. May interact with <code>relevance_floor</code> / <code>staleness_penalty</code> consumers if flipped off in prod.
+</div>
+
+<h3>Tests</h3>
+<p><code>tests/test_f054_keyword_toggle.py</code> — 6 tests, all pass.</p>
+
+<div class="callout good">
+<strong>Decision:</strong> Ship. Default True (no behavior change). Operator opt-out documented in env-var help text.
+</div>
+
+<p class="raw-link">reports/exp3_channel_iso_lme/* · reports/exp3_channel_iso_prod/*</p>
+
+<hr>
+
+<h2 id="decisions">Decisions log</h2>
+
+<table>
+  <thead><tr><th>Decision</th><th>Outcome</th><th>Branch / commit</th></tr></thead>
+  <tbody>
+    <tr><td>Fix RRF resolver bypass in eval harness</td><td><span class="pill pill-shipped">Shipped</span></td><td><code>6d0eb27</code> (PR #413)</td></tr>
+    <tr><td>Add 8 spreading + RRF tuning configs</td><td><span class="pill pill-shipped">Shipped</span></td><td><code>e5b1ca9</code> (PR #413)</td></tr>
+    <tr><td>Add 7 CE-off + channel-isolation configs</td><td><span class="pill pill-shipped">Shipped</span></td><td><code>631d9d0</code> (PR #413)</td></tr>
+    <tr><td>F052 conditional CE rerank by episode-share</td><td><span class="pill pill-dropped">Dropped</span> — heuristic falsified</td><td>(unstaged)</td></tr>
+    <tr><td>F053 orphan-edge sleep cleanup</td><td><span class="pill pill-shipped">Shipped to branch</span></td><td><code>ea9b040</code></td></tr>
+    <tr><td>F054 keyword channel toggle</td><td><span class="pill pill-shipped">Shipped to branch</span></td><td><code>ea9b040</code></td></tr>
+    <tr><td>Per-query CE gating (proper design)</td><td><span class="pill pill-fixed">Open follow-up</span></td><td>TBD</td></tr>
+  </tbody>
+</table>
+
+<h2 id="nextsteps">Next steps</h2>
+<ol>
+  <li><strong>PR #413</strong> (eval harness configs): merge after review.</li>
+  <li><strong><code>tune/memory-recall-and-sleep</code> branch</strong>: drop F052 hunks (<code>nous/heart/heart.py</code>, F052 settings, <code>tests/test_f052_conditional_ce.py</code>), open PR for F053 + F054 only.</li>
+  <li><strong>Open issue: "Per-query CE gating"</strong> — link this doc, document F052 falsification, propose Haiku-classifier or query-text-feature approach.</li>
+  <li><strong>Production deployment</strong> of F053: ship after PR review. Expect <code>dead_edges_pruned</code> counter in <code>sleep_completed</code> events.</li>
+  <li><strong>Production deployment</strong> of F054: default-True is no-op; flip to False per-deployment for vector-dominant corpora after operator A/B.</li>
+</ol>
+
+<h2 id="howto">How to run the eval</h2>
+
+<h3>Codebase corpus</h3>
+<pre><code>NOUS_EVAL_DB_NAME=nous_eval_scratch \
+NOUS_EVAL_AGENT_ID=nous-prod-snapshot \
+uv run python -m nous_eval.retrieval \
+  --configs baseline,ce_off \
+  --sources nous_prod,nous_prod_procedures \
+  --include-unreviewed --no-history \
+  --report-dir reports/myrun</code></pre>
+
+<h3>Personal-Q&amp;A corpus</h3>
+<pre><code>NOUS_EVAL_DB_NAME=nous_eval_scratch \
+NOUS_EVAL_AGENT_ID=nous-lme-corpus \
+NOUS_EVAL_FIXTURES_DIR=tests/fixtures \
+uv run python -m nous_eval.retrieval \
+  --configs baseline,ce_off \
+  --sources longmemeval \
+  --include-unreviewed --no-history \
+  --report-dir reports/myrun_lme</code></pre>
+
+<p class="small">Configs declared in <code>nous_eval/retrieval.py::_DEFAULT_CONFIGS</code>. Each maps to <code>Settings</code> field overrides applied per-config via <code>_apply_config_flags</code>.</p>
+
+<hr>
+
+<h1 id="audit" style="margin-top: 60px;">⚠ Repo-wide eval audit</h1>
+<div class="subtitle">Audit of all 47 reports under <code>reports/</code>. <strong>30 anomalies across 11 categories. 5 critical.</strong> Generated 2026-05-03 from a full-corpus pass over every <code>.md</code> report. Pairs with <a href="audit-2026-05-03.md"><code>audit-2026-05-03.md</code></a>.</div>
+
+<div class="scorecard">
+  <div class="score">
+    <div class="label">Reports audited</div>
+    <div class="value">47</div>
+    <div class="delta">across 13 subdirs</div>
+  </div>
+  <div class="score">
+    <div class="label">Critical anomalies</div>
+    <div class="value" style="color: var(--green);">5</div>
+    <div class="delta delta-pos">5 of 5 RESOLVED 2026-05-04 ✓ — all critical anomalies investigated</div>
+  </div>
+  <div class="score">
+    <div class="label">P2 anomalies</div>
+    <div class="value" style="color: var(--amber);">5</div>
+    <div class="delta delta-pos">3 RESOLVED (#6 RRF archive, #7 F026 by-design, #8 edge regression)</div>
+  </div>
+  <div class="score">
+    <div class="label">Coverage gaps</div>
+    <div class="value">6</div>
+    <div class="delta">subsystems never eval'd</div>
+  </div>
+  <div class="score">
+    <div class="label">Pre-fix invalid reports</div>
+    <div class="value">6</div>
+    <div class="delta delta-pos">archived to reports/_archived/</div>
+  </div>
+</div>
+
+<h2 id="audit-critical">A1. Critical anomalies (act this week)</h2>
+
+<div class="callout good">
+<strong>1. Sleep phases silently broken for 14 cycles — RESOLVED 2026-05-04</strong> <span class="pill pill-shipped">closed (probe fix)</span><br>
+Investigated; <strong>no code bug</strong>. Both phases ARE firing correctly. The "silent failure" was a probe-side measurement gap. <code>cluster_consolidation</code>'s <code>clusters_merged</code> counter only increments on SUCCESS; <code>sleep_action_audit</code> shows 5 events emitted in 1 day (LLM refused every attempt — corpus has accumulating subjects where refusing IS correct). <code>stale_scan</code>: dry-run confirms 0 candidates exist on this corpus.<br>
+<br>
+<strong>Shipped:</strong> new <code>REFUSED</code> verdict on <code>sleep_cycle_health</code> probe — distinguishes "phase fired and refused" from "phase didn't fire." 4 new tests; <code>overall_exit_code</code> treats REFUSED as informational (not a CI block). Detail: <a href="2026-05-04-batch-1.1-sleep-investigation.md">batch doc 1.1</a>.
+</div>
+
+<div class="callout good">
+<strong>2. F031 contradiction-resolver REMOVE actions — RESOLVED 2026-05-04</strong> <span class="pill pill-shipped">closed</span><br>
+Investigated; <strong>no code fix shipped.</strong> Inspected v3 JSON failures: Haiku's REMOVE generation prompt produced facts using mutable properties (rate limits, expiration dates, counts, timeouts). The resolver correctly identifies them as supersession candidates with confidence &lt; 0.7 — the safety floor downgrades to KEEP_BOTH (intended conservative behavior). Restricting vocabulary wouldn't help because the model would still pick SUPERSEDE for those rows; the eval would still mark them wrong against the gold REMOVE label.<br>
+<br>
+Real fix is gen-prompt rewrite (use immutable factual-error properties like math, geography, definitions). Methodology task, not audit-critical. Detail: <a href="2026-05-04-batch-1.2-2.2.md">batch doc</a>.
+</div>
+
+<table>
+  <thead><tr><th>F031 action</th><th class="num">v1</th><th class="num">v2</th><th class="num">v3 (best)</th></tr></thead>
+  <tbody>
+    <tr><td>SUPERSEDE_A</td><td class="num">60%</td><td class="num">80%</td><td class="num">80%</td></tr>
+    <tr><td>SUPERSEDE_B</td><td class="num">20%</td><td class="num">20%</td><td class="num">100%</td></tr>
+    <tr><td>MERGE</td><td class="num">40%</td><td class="num">40%</td><td class="num delta-neg">20%</td></tr>
+    <tr><td>KEEP_BOTH</td><td class="num">60%</td><td class="num">80%</td><td class="num">80%</td></tr>
+    <tr><td><strong>REMOVE_A</strong></td><td class="num delta-neg">0%</td><td class="num delta-neg">0%</td><td class="num delta-neg">20%</td></tr>
+    <tr><td><strong>REMOVE_B</strong></td><td class="num delta-neg">20%</td><td class="num delta-neg">0%</td><td class="num delta-neg">20%</td></tr>
+    <tr><td class="bold">overall</td><td class="num bold">33%</td><td class="num bold">37%</td><td class="num bold">53%</td></tr>
+  </tbody>
+</table>
+
+<div class="callout good">
+<strong>3. F027 supersession classifier judge-sensitive — RESOLVED 2026-05-04</strong> <span class="pill pill-shipped">closed</span><br>
+Re-ran F027 with sonnet judge against the post-prompt-fix v3 classifier. Sonnet now matches the haiku self-consistency number — both judges agree:<br>
+<br>
+<table style="margin: 8px 0;">
+  <thead><tr><th>Judge</th><th class="num">Overall</th><th class="num">UPDATE category</th><th>state</th></tr></thead>
+  <tbody>
+    <tr><td>haiku-4-5 (self-consistency)</td><td class="num">77.5%</td><td class="num">53.3%</td><td>pre-prompt-fix</td></tr>
+    <tr><td>sonnet-4-6</td><td class="num">74.2%</td><td class="num delta-neg">33.3%</td><td>pre-prompt-fix</td></tr>
+    <tr><td>haiku-4-5 (re-run, seeded)</td><td class="num">86.7%</td><td class="num">90.0%</td><td>post-fix self-consistency</td></tr>
+    <tr><td><strong>sonnet-4-6 (canonical)</strong></td><td class="num bold delta-pos">85.0%</td><td class="num delta-pos">90.0%</td><td><strong>post-fix, current truth</strong></td></tr>
+  </tbody>
+</table>
+The audit's anomaly was citing the <em>pre-prompt-fix</em> sonnet number (74.2%) without noticing the v3 prompt fix had landed since. Both judges now agree UPDATE is ~90% and overall is in the 85-87% band. The dashboard number stands.<br>
+<br>
+<strong>Closing eval:</strong> <code>reports/f027_supersession_eval_v4_sonnet_canonical.md</code>.
+</div>
+
+<div class="callout good">
+<strong>4. F051 baseline drifts — RESOLVED 2026-05-04</strong> <span class="pill pill-shipped">closed</span><br>
+<br>
+Determinism check (closes EXEC-PLAN 1.4) ran baseline×3 against both <code>nous_prod</code> and <code>longmemeval</code>. <strong>Both PASS</strong> with byte-identical retrieved IDs across runs. The "0.810 vs 0.828" was an audit-side conflation: 0.810 came from <code>exp1_ce_off_rrf</code> where the <em>first config row</em> was <code>ce_off</code> (CE explicitly off); 0.828 came from a <code>baseline</code> matrix (CE on per env default). The -2.2% delta matches the documented "CE on nous_prod helps +2.2%" finding exactly.<br>
+<br>
+The +8.1% jump from Apr 29 → May 2 remains real (qrel set grew 40 → 90 + scoring changes from PRs 398/399/400). Fixture-hash pinning ships in <code>determinism_check.py</code> as a safety net.<br>
+<br>
+<strong>Closing eval:</strong> <code>python -m nous_eval.determinism_check --config baseline --runs 3</code> — exit 0 on both corpora.
+</div>
+
+<div class="callout good">
+<strong>5. Context packing — RESOLVED 2026-05-04</strong> <span class="pill pill-shipped">closed (per-consumer MMR queued)</span><br>
+Investigated; the audit's "per-scenario MMR gate" framing was wrong. Real cause: <code>mmr_enabled=False</code> + <code>mmr_skip_after_ce=True</code> defaults together. Tried flipping both flags on; measured the trade-off:<br>
+<br>
+<table style="margin: 8px 0;">
+  <thead><tr><th>metric</th><th class="num">flags-off</th><th class="num">both-on</th><th class="num">Δ</th></tr></thead>
+  <tbody>
+    <tr><td>nous_prod retrieval MRR</td><td class="num">0.828</td><td class="num">0.797</td><td class="num delta-neg">-3.7%</td></tr>
+    <tr><td>longmemeval retrieval R@10</td><td class="num">0.389</td><td class="num">0.338</td><td class="num delta-neg">-13.1%</td></tr>
+    <tr><td><strong>context-packing memory</strong></td><td class="num">33%</td><td class="num bold delta-pos">100%</td><td class="num delta-pos">+67pp</td></tr>
+  </tbody>
+</table>
+F030.1 was correct for retrieval; a single global flag can't satisfy both objectives. Default rolled back; real fix is per-consumer MMR (context-packing consumers force on; raw retrieval keeps off). Detail: <a href="2026-05-04-batch-1.2-2.2.md">batch doc §1.5</a>.<br>
+<br>
+<details>
+<summary>Show original audit framing (now superseded)</summary><br>
+<table style="margin: 8px 0;">
+  <thead><tr><th>variant</th><th class="num">pass</th><th>notes</th></tr></thead>
+  <tbody>
+    <tr><td>strict, top-k baseline</td><td class="num delta-neg">0/8</td><td>every scenario insufficient</td></tr>
+    <tr><td>strict + baseline tweaks</td><td class="num">2/8</td><td>procedure_learning, graph_densification</td></tr>
+    <tr><td>loose judge, top-k</td><td class="num">4/8</td><td>+ 3 more</td></tr>
+    <tr><td>strict + MMR enabled</td><td class="num">2/8</td><td>identical to baseline (per-scenario gate)</td></tr>
+    <tr><td class="bold">strict + MMR forced</td><td class="num bold delta-pos">6/8</td><td><strong>+ 4 more (skill_management, subtask_workers, cognitive_loop)</strong></td></tr>
+  </tbody>
+</table>
+The fix is sitting in plain sight: forcing MMR on every scenario lifts pass rate 25% → 75%. Production gates MMR per-scenario in <code>cognitive/context.py</code>.<br>
+<br>
+This contradicts today's MMR-hurts-retrieval finding — context packing is downstream of retrieval, so the right MMR setting may be different at the two stages.<br>
+<br>
+<strong>Action:</strong> Investigate why production's per-scenario MMR gate suppresses the lift. Either fix the gate or accept that retrieval-MMR ≠ context-MMR.
+</details>
+</div>
+
+<h2 id="audit-important">A2. Important anomalies (P2)</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Anomaly</th><th>Impact</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>6</td>
+      <td><strong>6 pre-fix RRF reports invalid</strong> — vector_weight/rrf_k flags silently dropped before commit <code>6d0eb27</code> (today 18:25:24). Reports: <code>2026-05-03T02-12-53_baseline</code>, <code>2026-05-03T02-14-27_baseline</code>, <code>rrf_sweep_v2/</code>, <code>spread_smoke/</code>, <code>spread_rrf_sweep/</code>, <code>spread_rrf_combined/</code></td>
+      <td>Archive to <code>reports/_archived/</code> with explainer README. Don't trust their numbers.</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td><strong>F026 ActionGate duplicate detection broken</strong> — 3/12 fails (write_exact_duplicate, learn_fact_duplicate, schedule_exact_duplicate). PR #285 reportedly tightened dedup but eval shows synthetic exacts not blocked.</td>
+      <td>Re-run F026 against post-#285 code. Lower threshold or add exact-content short-circuit.</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td><strong>Edge audit oscillation</strong> — between 2026-04-26 and 2026-04-30, evidence_for jumped 0.53 → 0.75 (good) but related_to fell 0.83 → 0.70 (bad). Net: still failing. Whatever fix was applied helped one relation at the cost of another.</td>
+      <td>Add per-relation regression test to edge audit, not just aggregate.</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td><strong>Compaction hallucinates 26.7%</strong> — 33/45 facts preserved, but the 12 misses include fact fabrication ("David Park" — not in source), wrong values ("us-east-1" vs source "us-east-2"), contradictions ("Redis Streams" vs source "Postgres LISTEN/NOTIFY").</td>
+      <td>Add entity-substring check on compactor output. Surface <code>compaction_hallucinations</code> counter to observability.</td>
+    </tr>
+    <tr>
+      <td>10</td>
+      <td><strong>Calibration poor (Brier 0.252) but F058 fix verified</strong> — pre-F058 ECE 0.199, overconfident +19.8%. F058 scaling factor 0.7627 reduces ECE by -0.165 (counterfactual). tooling category worst (gap +0.385).</td>
+      <td>Track post-F058 calibration on rolling 30-day window. F058 doesn't fix per-category bias.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="audit-coverage">A3. Coverage gaps — never eval'd</h2>
+
+<ul>
+  <li><strong>sleep_ingestion</strong> (memory intake during sleep)</li>
+  <li><strong>deliberation chain-of-thought</strong> (no reasoning trace analysis)</li>
+  <li><strong>decision closure & outcome feedback loops</strong></li>
+  <li><strong>skill auto-learning effectiveness</strong> (no quality metric on newly-created skills)</li>
+  <li><strong>retrieval pre-RRF tuning</strong> (BM25 weights, hybrid weights — no ablation)</li>
+  <li><strong>fact-graph edge recall</strong> (only precision is measured)</li>
+</ul>
+
+<h2 id="audit-contradictions">A4. Contradictions between today's findings and prior reports</h2>
+
+<table>
+  <thead><tr><th>topic</th><th>prior finding</th><th>today's finding</th><th>resolution</th></tr></thead>
+  <tbody>
+    <tr><td>CE rerank value</td><td>2026-04-29: CE on lifts +3-4%</td><td>Corpus-dependent — helps codebase, hurts personal-Q&A</td><td>Both correct; corpora differ. Today's nuance supersedes.</td></tr>
+    <tr><td>MMR for retrieval</td><td>F030.1 plan: skip-after-CE correct</td><td>Re-validated: forcing MMR after CE hurts MRR</td><td>F030.1 default stands.</td></tr>
+    <tr><td>MMR for context packing</td><td>"MMR helps sufficiency" assumed</td><td>Forced MMR lifts context-packing 25% → 75%</td><td><strong>NEW:</strong> retrieval-MMR ≠ context-MMR. Different optimization.</td></tr>
+    <tr><td>Spreading activation</td><td>"Auto-gate handles it" assumed</td><td>Forcing on does nothing on either corpus</td><td>Spreading is functionally idle. Reconsider density threshold or signal.</td></tr>
+    <tr><td>Keyword channel</td><td>Always-on default</td><td>Vector-only ties baseline byte-for-byte</td><td><strong>NEW:</strong> F054 toggle ships. Default-on for safety, opt-out for vector-dominant.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="audit-categories">A5. Inventory by category (47 reports)</h2>
+
+<table>
+  <thead><tr><th>category</th><th class="num">reports</th><th>status</th><th>key findings</th></tr></thead>
+  <tbody>
+    <tr><td>retrieval (F051)</td><td class="num">18</td><td>Mixed</td><td>Baseline drift +8.1%; CE corpus-dependent (±5.2%); 6 pre-fix invalid</td></tr>
+    <tr><td>context_packing</td><td class="num">5</td><td><span class="delta-neg">Critical</span></td><td>0/8 strict, 6/8 forced MMR; production gate suppresses fix</td></tr>
+    <tr><td>classifier</td><td class="num">2</td><td><span class="delta-pos">Healthy</span></td><td>Intent 100%, frame 86.7%</td></tr>
+    <tr><td>compaction</td><td class="num">1</td><td><span class="delta-neg">Poor</span></td><td>73.3% preserve, 26.7% hallucinate/contradict</td></tr>
+    <tr><td>anti-hallucination</td><td class="num">2</td><td>Mixed</td><td>Sonnet 6.7%→0% with prompt; Haiku 0% baseline</td></tr>
+    <tr><td>calibration</td><td class="num">3</td><td>Poor pre-F058</td><td>Brier 0.252 → 0.215 with F058 scaling</td></tr>
+    <tr><td>sleep_action</td><td class="num">4</td><td><span class="delta-neg">Critical</span></td><td>2 phases broken 14 cycles; F027 50% / F031 100% (1d)</td></tr>
+    <tr><td>F027 supersession</td><td class="num">6</td><td><span class="delta-neg">Weak</span></td><td>74-87%; UPDATE 33% sonnet vs 90% haiku</td></tr>
+    <tr><td>F031 contradiction</td><td class="num">3</td><td><span class="delta-neg">Very weak</span></td><td>33-53%; REMOVE 0-20% across iterations</td></tr>
+    <tr><td>other (F026, density, edges)</td><td class="num">5</td><td>Mixed</td><td>ActionGate 75% (dup detection); edge audit oscillates</td></tr>
+    <tr><td>working_memory</td><td class="num">1</td><td>Moderate</td><td>58% precision, 83% recall</td></tr>
+  </tbody>
+</table>
+
+<h2 id="audit-actions">A6. Action plan</h2>
+
+<h3>This week</h3>
+<ol>
+  <li><strong>Fix <code>_phase_stale_scan</code> + <code>_phase_cluster_consolidation</code></strong> — 14 cycles of inactive maintenance is real data-quality risk.</li>
+  <li><strong>Re-run F027 with sonnet judge</strong> as the canonical metric. The 86.7% number is haiku self-consistency.</li>
+  <li><strong>Investigate context-packing MMR gate</strong> — eval shows forcing MMR everywhere lifts pass-rate from 25% to 75%.</li>
+  <li><strong>Archive 6 pre-fix RRF reports</strong> to <code>reports/_archived/</code> with explainer.</li>
+</ol>
+
+<h3>Next 2 weeks</h3>
+<ol start="5">
+  <li><strong>Fix F031 REMOVE actions</strong> — currently 20% accurate. Restrict vocabulary or rework prompt.</li>
+  <li><strong>Re-run F026 ActionGate post-#285</strong> — 3/12 fails are duplicate-detection misses.</li>
+  <li><strong>Add compaction hallucination guard</strong> — entity-substring check on compactor output.</li>
+  <li><strong>Backfill evals for sleep_ingestion + skill auto-learning</strong> — coverage gaps.</li>
+</ol>
+
+<h3>Process changes</h3>
+<ol start="9">
+  <li><strong>Sample-size minimum</strong>: shipping decisions require n ≥ 50 with bootstrap CIs. Current eval has many n=20 / n=12-15 runs.</li>
+  <li><strong>Judge sensitivity ritual</strong>: re-run any LLM-judged metric with stronger judge, report delta.</li>
+  <li><strong>Pin qrel fixtures by hash, not date</strong>. Same git_sha must produce byte-identical metrics.</li>
+  <li><strong>Per-relation precision regression test</strong> for graph-edge audit — evidence_for and related_to traded places.</li>
+</ol>
+
+<hr>
+
+<h1 id="plan" style="margin-top: 60px;">📋 Execution plan</h1>
+<div class="subtitle">Derived from the audit. 12 work items, 4 phases, 2-week target. <a href="EXECUTION-PLAN.md"><code>EXECUTION-PLAN.md</code></a> is the single source of truth.</div>
+
+<div class="callout">
+<strong>How this stays current:</strong> Each item closes when its verification eval lands in <a href="RUNS.md"><code>RUNS.md</code></a> with a passing result. Done items get a <code>**done:** &lt;link&gt;</code> line under them; nothing is deleted.
+</div>
+
+<h2 id="plan-phase0">P0 — Run-documentation discipline (TODAY) 🟢</h2>
+
+<p>Audit revealed 47 reports with informal naming + inconsistent metadata. Fix with two artifacts and a workflow.</p>
+
+<div class="callout good">
+<strong>Shipped this session:</strong> <code>RUNS.md</code> seeded with all 47 prior reports. <code>EXECUTION-PLAN.md</code> with 12 work items. README updated with the after-every-run workflow.
+</div>
+
+<h3>The discipline (3 steps)</h3>
+<ol>
+  <li>Eval CLI writes the report to <code>reports/&lt;name&gt;/</code></li>
+  <li>Open the report; copy date, git_sha, configs, headline metrics</li>
+  <li>Append one row to <code>RUNS.md</code> with result + decision (or <code>exploratory</code>)</li>
+</ol>
+
+<h3>Standardized report frontmatter (going forward)</h3>
+<pre><code>---
+date_utc: 2026-05-04T12:00:00Z
+type: retrieval
+git_sha: &lt;commit&gt;
+agent_id: &lt;agent&gt;
+sources: [nous_prod, longmemeval]
+configs: [baseline, ce_off]
+n_qrels: 90
+fixture_version: v2026-Q2
+notes: &lt;one-sentence purpose&gt;
+---</code></pre>
+
+<h2 id="plan-phase1">P1 — 5 critical (week 1)</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Task</th><th>Hypotheses / approach</th><th>Verification</th></tr></thead>
+  <tbody>
+    <tr style="background: rgba(63, 185, 80, 0.08);">
+      <td>1.1 <span class="pill pill-shipped">resolved</span></td>
+      <td><strong>Sleep phases broken</strong> — investigated 2026-05-04</td>
+      <td><strong>No code bug.</strong> Phases fire correctly. <code>clusters_merged</code> only counts SUCCESS path; events emit on every outcome. sleep_action_audit shows 5 events/day → phase IS firing; LLM refusing every attempt (correct behavior on accumulating subjects).</td>
+      <td>Shipped <code>REFUSED</code> verdict on cycle_health probe; distinguishes fired-and-refused from didn't-fire. 18 tests pass. <a href="2026-05-04-batch-1.1-sleep-investigation.md">batch doc</a></td>
+    </tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);">
+      <td>1.2 <span class="pill pill-shipped">resolved</span></td>
+      <td><strong>F031 REMOVE actions</strong> — investigated 2026-05-04</td>
+      <td><strong>No code fix.</strong> Audit's "20% accuracy" was a fixture-generation bug — Haiku generated REMOVE pairs using mutable properties (rate limits, timeouts); resolver correctly downgrades to KEEP_BOTH. Restricting vocab wouldn't help.</td>
+      <td>Real fix is gen-prompt rewrite — methodology task. <a href="2026-05-04-batch-1.2-2.2.md">batch doc</a></td>
+    </tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);">
+      <td>1.3 <span class="pill pill-shipped">done</span></td>
+      <td><strong>F027 sonnet judge</strong> as canonical metric</td>
+      <td>Re-ran F027 against sonnet judge on the post-prompt-fix v3 classifier.</td>
+      <td><strong class="delta-pos">85.0% overall, UPDATE 90%</strong> — both judges now agree. <code>reports/f027_supersession_eval_v4_sonnet_canonical.md</code></td>
+    </tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);">
+      <td>1.4 <span class="pill pill-shipped">done</span></td>
+      <td><strong>F051 baseline determinism</strong> + fixture pin</td>
+      <td>Built <code>nous_eval/determinism_check.py</code> with SHA256 fixture pinning. Same-config N runs assert byte-identical IDs.</td>
+      <td><strong class="delta-pos">PASS</strong> on baseline×3 against both nous_prod (40q) AND longmemeval (20q). Resolved audit #4 as conflation, not bug.</td>
+    </tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);">
+      <td>1.5 <span class="pill pill-shipped">resolved</span></td>
+      <td><strong>Context-packing MMR gate</strong> — investigated 2026-05-04</td>
+      <td><strong>No "gate" exists.</strong> Real cause: <code>mmr_enabled=False</code> + <code>mmr_skip_after_ce=True</code> defaults. Tried flipping both: <strong>+67pp context-packing</strong> but <strong>-3.7% nous_prod retrieval MRR</strong>. F030.1 was right for retrieval; audit was wrong for context. Per-consumer MMR is the proper fix.</td>
+      <td><strong>Default rolled back.</strong> Real fix queued: plumb <code>mmr_override</code> kwarg through <code>recall_deep</code> → <code>Heart.recall</code>. <a href="2026-05-04-batch-1.2-2.2.md">batch doc §1.5</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2 id="plan-phase2">P2 — 5 P2 anomalies (weeks 1-2)</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Task</th><th>Verification</th></tr></thead>
+  <tbody>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>2.1 <span class="pill pill-shipped">done</span></td><td><strong>Archived</strong> 6 pre-fix RRF reports → <code>reports/_archived/2026-05-03-rrf-pre-wiring-fix/</code> with explainer README</td><td>RUNS.md paths updated.</td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>2.2 <span class="pill pill-shipped">resolved</span></td><td><strong>F026 ActionGate</strong> — re-ran 2026-05-04. Same 9/12 with by-design <code>under-threshold</code> reasons. ActionGate is repetition-blocking (N+ in turn window), not first-occurrence-blocking. <strong>No code fix.</strong></td><td>Real fix: per-action threshold tuning (N=1 for irreversible writes). <a href="2026-05-04-batch-1.2-2.2.md">batch doc</a></td></tr>
+    <tr><td>2.3</td><td>Edge audit per-relation regression test (no relation drops &gt;0.05 abs)</td><td>All 4 relations meet 0.75 floor in new audit run.</td></tr>
+    <tr><td>2.4</td><td>Compaction hallucination guard (entity-substring check on output)</td><td>Hallucination rate drops 26.7% → &lt;5% in re-run of <code>eval_compaction_fidelity</code>.</td></tr>
+    <tr><td>2.5</td><td>Calibration rolling 30-day window, weekly cron</td><td>Cron entry exists; first weekly report lands in <code>reports/calibration_&lt;date&gt;.md</code>.</td></tr>
+  </tbody>
+</table>
+
+<h2 id="plan-phase3">P3 — 6 coverage gaps (weeks 2-4)</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Subsystem</th><th>Eval shape</th></tr></thead>
+  <tbody>
+    <tr><td>3.1</td><td>sleep_ingestion</td><td>30 ground-truth conversations × annotated facts; precision + recall</td></tr>
+    <tr><td>3.2</td><td>deliberation chain-of-thought</td><td>Sample 50 decisions; check thoughts logically support outcome</td></tr>
+    <tr><td>3.3</td><td>decision closure &amp; outcome feedback</td><td>Sample 20 reviewed decisions; verify calibration shift matches</td></tr>
+    <tr><td>3.4</td><td>skill auto-learning effectiveness</td><td>Sample 30 days of new skills; sonnet judge "is this useful?"</td></tr>
+    <tr><td>3.5</td><td>retrieval pre-RRF tuning</td><td>3-4 fusion variants (RRF, max-merge, score-mult); MRR ablation</td></tr>
+    <tr><td>3.6</td><td>fact-graph edge recall</td><td>50 ground-truth fact pairs; run graph_linker; measure recall</td></tr>
+  </tbody>
+</table>
+
+<h2 id="plan-phase4">P4 — Process changes (parallel, ongoing)</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Change</th><th>Implementation</th></tr></thead>
+  <tbody>
+    <tr><td>4.1</td><td>Sample-size minimum n≥50 for shipping decisions</td><td><code>nous_eval/qrels_loader.py</code> warns when source &lt;50 reviewed qrels</td></tr>
+    <tr><td>4.2</td><td>Judge sensitivity ritual</td><td><code>--judge-models &lt;m1,m2&gt;</code> flag; output table with per-judge results</td></tr>
+    <tr><td>4.3</td><td>Pin qrel fixtures by hash</td><td>See 1.4(a). Same git_sha + same hash = byte-identical</td></tr>
+    <tr><td>4.4</td><td>Per-relation precision regression assertions</td><td>See 2.3. Fail any relation that drops &gt;0.05 vs prior run</td></tr>
+  </tbody>
+</table>
+
+<h2 id="plan-sequencing">P5 — Sequencing &amp; ownership</h2>
+
+<table>
+  <thead><tr><th>#</th><th>Task</th><th>Phase</th><th>Owner</th><th>ETA</th></tr></thead>
+  <tbody>
+    <tr><td>0.1-0.4</td><td>Run-doc discipline + RUNS.md seed</td><td>0</td><td>Claude</td><td>today ✓</td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>1.1 ✓</td><td>Sleep phases — investigate</td><td>1</td><td>Claude</td><td><strong class="delta-pos">resolved 2026-05-04 (probe-side fix; no code bug)</strong></td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>1.2 ✓</td><td>F031 REMOVE actions</td><td>1</td><td>Claude</td><td><strong class="delta-pos">resolved 2026-05-04 (eval bug, not code)</strong></td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>1.5 ✓</td><td>Context-packing MMR gate</td><td>1</td><td>Claude</td><td><strong class="delta-pos">resolved 2026-05-04 (defaults, not gate; per-consumer MMR queued)</strong></td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>2.3 ✓</td><td>Edge audit per-relation regression</td><td>2</td><td>Claude</td><td><strong class="delta-pos">shipped 2026-05-04 (13/13 unit tests)</strong></td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>1.3 ✓</td><td>F027 sonnet judge re-eval</td><td>1</td><td>Claude</td><td><strong class="delta-pos">done 2026-05-04</strong></td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>1.4 ✓</td><td>F051 determinism + fixture pin</td><td>1</td><td>Claude</td><td><strong class="delta-pos">done 2026-05-04</strong></td></tr>
+    <tr><td>1.5</td><td>Context-packing MMR gate</td><td>1</td><td>Together</td><td>2-3d</td></tr>
+    <tr style="background: rgba(63, 185, 80, 0.08);"><td>2.1 ✓</td><td>Archive pre-fix RRF reports</td><td>2</td><td>Claude</td><td><strong class="delta-pos">done 2026-05-04</strong></td></tr>
+    <tr><td>2.2-2.5</td><td>P2 fixes</td><td>2</td><td>Claude</td><td>1 week</td></tr>
+    <tr><td>3.1-3.6</td><td>Coverage backfill</td><td>3</td><td>Claude</td><td>1-2 weeks</td></tr>
+    <tr><td>4.1-4.4</td><td>Process changes</td><td>4</td><td>Claude</td><td>parallel</td></tr>
+  </tbody>
+</table>
+
+<h3>Success criteria (2 weeks from now)</h3>
+<ul>
+  <li>All 5 critical anomalies have a closing eval report linked in RUNS.md</li>
+  <li>All 5 P2 anomalies are fixed or have an "accepted risk" entry</li>
+  <li>RUNS.md has ≥40 entries (today's seed + 2 weeks of new runs)</li>
+  <li><strong>Zero new "lost stat"</strong> — every eval run since today is in RUNS.md</li>
+  <li>≥2 of 6 coverage gaps have a first eval landed</li>
+  <li>≥2 of 4 process changes are in code</li>
+</ul>
+
+<hr>
+
+<h1 id="runs" style="margin-top: 60px;">§ Run registry</h1>
+<div class="subtitle">Append-only chronological log. <strong>52 entries</strong> (47 backfill + 5 added 2026-05-04). Source: <a href="RUNS.md"><code>RUNS.md</code></a>.</div>
+
+<div class="callout good">
+<strong>Discipline working:</strong> 5 new runs from 2026-05-04 Phase 1+2 batches appended to RUNS.md within the same session. 6 reports archived to <code>reports/_archived/2026-05-03-rrf-pre-wiring-fix/</code>. Most recent: <code>f031_resolution analysis (no-fix-eval-issue)</code>.
+</div>
+
+<h3>Distribution by type</h3>
+<table>
+  <thead><tr><th>type</th><th class="num">runs</th></tr></thead>
+  <tbody>
+    <tr><td>retrieval (F051)</td><td class="num">20</td></tr>
+    <tr><td>f027_supersession</td><td class="num">6</td></tr>
+    <tr><td>context_packing</td><td class="num">5</td></tr>
+    <tr><td>f031_resolution</td><td class="num">4</td></tr>
+    <tr><td>calibration</td><td class="num">3</td></tr>
+    <tr><td>edge_audit</td><td class="num">2</td></tr>
+    <tr><td>anti_hallucination</td><td class="num">2</td></tr>
+    <tr><td>f026_gate</td><td class="num">2</td></tr>
+    <tr><td>sleep_health / sleep_filter / sleep_action</td><td class="num">3</td></tr>
+    <tr><td>density / compaction / frame / intent / working_memory</td><td class="num">5</td></tr>
+  </tbody>
+</table>
+
+<h3>Most recent 5 runs</h3>
+<table>
+  <thead><tr><th>date</th><th>type</th><th>configs</th><th>result</th><th>decision</th></tr></thead>
+  <tbody>
+    <tr><td>2026-05-04</td><td>f031_resolution</td><td>analysis-only (v3 JSON inspection)</td><td>resolver makes defensible calls; gen prompt produced mutable-property facts mislabeled REMOVE</td><td><span class="pill pill-shipped">no-fix-eval-issue</span></td></tr>
+    <tr><td>2026-05-04</td><td>f026_gate</td><td>ClaimVerifier + ActionGate (skip Tier 3)</td><td>Same 9/12; reasons reveal by-design <code>under-threshold</code> repetition semantics</td><td><span class="pill pill-shipped">no-fix-eval-issue</span></td></tr>
+    <tr><td>2026-05-04</td><td>retrieval (determinism)</td><td>baseline ×3 (lme)</td><td><strong class="delta-pos">PASS</strong> — 20 qrels byte-identical</td><td><span class="pill pill-shipped">closes 1.4</span></td></tr>
+    <tr><td>2026-05-04</td><td>retrieval (determinism)</td><td>baseline ×3 (prod)</td><td><strong class="delta-pos">PASS</strong> — 40 qrels byte-identical; sha256=e4c61d12e7ea055b</td><td><span class="pill pill-shipped">closes 1.4</span></td></tr>
+    <tr><td>2026-05-04</td><td>f027_supersession</td><td>sonnet judge, post-prompt-fix v3</td><td><strong class="delta-pos">85.0% overall</strong>; UPDATE 90% (up from pre-fix sonnet 33.3%)</td><td><span class="pill pill-shipped">CANONICAL — closes 1.3</span></td></tr>
+  </tbody>
+</table>
+
+<p class="small">Full table with all 52 entries: <a href="RUNS.md"><code>RUNS.md</code></a></p>
+
+</main>
+
+</div>
+
+</body>
+</html>

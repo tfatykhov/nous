@@ -258,6 +258,234 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         },
         description="F055 on with boost=0.5 (vs default 0.15) — can bigger boost escape CE head-cut?",
     ),
+    # ------------------------------------------------------------------
+    # Spreading-activation gate sensitivity. Default ``enabled="auto"`` +
+    # ``density_threshold=3.0`` has never been A/B'd. ``graph_off`` kills
+    # graph recall entirely; these isolate the gate logic alone.
+    # ------------------------------------------------------------------
+    "spread_force_on": RetrievalConfig(
+        name="spread_force_on",
+        flags={"spreading_activation_enabled": "true"},
+        description=(
+            "Force spreading activation regardless of density. If MRR/R@K "
+            "improves vs baseline, the auto-gate is too conservative."
+        ),
+    ),
+    "spread_force_off": RetrievalConfig(
+        name="spread_force_off",
+        flags={"spreading_activation_enabled": "false"},
+        description=(
+            "Disable spreading activation but keep 1-hop graph recall. "
+            "Isolates spreading's lift from the rest of graph recall "
+            "(unlike `graph_off` which kills both)."
+        ),
+    ),
+    "spread_low_threshold": RetrievalConfig(
+        name="spread_low_threshold",
+        flags={
+            "spreading_activation_enabled": "auto",
+            "spreading_activation_density_threshold": 1.0,
+        },
+        description=(
+            "Drop the auto-gate threshold from 3.0 to 1.0 — spreading "
+            "fires on much sparser graphs. Pair with `spread_force_on` "
+            "to triangulate the right default."
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # RRF fusion knobs. Hybrid search blends vector + keyword via
+    # ``rrf_score = vector_weight/(k+v_rank) + (1-vector_weight)/(k+k_rank)``.
+    # Defaults: ``vector_weight=0.7``, ``rrf_k=60``. Both route through
+    # RuntimeConfig (reset per-config in run_matrix), so Settings overrides
+    # take effect.
+    # ------------------------------------------------------------------
+    "rrf_vector_heavy": RetrievalConfig(
+        name="rrf_vector_heavy",
+        flags={"vector_weight": 0.9},
+        description=(
+            "Vector-leaning fusion (0.9 vector / 0.1 keyword). Tests "
+            "whether keyword signal hurts on this corpus."
+        ),
+    ),
+    "rrf_balanced": RetrievalConfig(
+        name="rrf_balanced",
+        flags={"vector_weight": 0.5},
+        description=(
+            "Balanced fusion (0.5 vector / 0.5 keyword). Default-equivalent "
+            "for a corpus where keyword recall matters more."
+        ),
+    ),
+    "rrf_keyword_heavy": RetrievalConfig(
+        name="rrf_keyword_heavy",
+        flags={"vector_weight": 0.3},
+        description=(
+            "Keyword-leaning fusion (0.3 vector / 0.7 keyword). Useful "
+            "when queries are jargon-rich and embeddings drift."
+        ),
+    ),
+    "rrf_k_low": RetrievalConfig(
+        name="rrf_k_low",
+        flags={"rrf_k": 10},
+        description=(
+            "Sharper rank weighting (k=10 vs default 60). Top-1 dominates "
+            "fused score; tail contributions decay fast."
+        ),
+    ),
+    "rrf_k_high": RetrievalConfig(
+        name="rrf_k_high",
+        flags={"rrf_k": 200},
+        description=(
+            "Smoother rank weighting (k=200 vs default 60). Tail "
+            "candidates contribute more; useful when relevant docs "
+            "often land outside top-3 in either channel."
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # CE-off + RRF combos. CE rerank dominates the head positions and
+    # may flatten any RRF lift in baseline runs. These configs disable
+    # CE so RRF's effect on the top-K is observable.
+    # ------------------------------------------------------------------
+    "ce_off_rrf_vector_heavy": RetrievalConfig(
+        name="ce_off_rrf_vector_heavy",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.9},
+        description="CE off + RRF vector-leaning (0.9). Surface RRF effect without CE flattening.",
+    ),
+    "ce_off_rrf_balanced": RetrievalConfig(
+        name="ce_off_rrf_balanced",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.5},
+        description="CE off + RRF balanced (0.5). Surface RRF effect without CE flattening.",
+    ),
+    "ce_off_rrf_keyword_heavy": RetrievalConfig(
+        name="ce_off_rrf_keyword_heavy",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.3},
+        description="CE off + RRF keyword-leaning (0.3). Surface RRF effect without CE flattening.",
+    ),
+    "ce_off_rrf_k_low": RetrievalConfig(
+        name="ce_off_rrf_k_low",
+        flags={"cross_encoder_enabled": False, "rrf_k": 10},
+        description="CE off + sharp k=10. Top-1 RRF dominance without CE override.",
+    ),
+    "ce_off_rrf_k_high": RetrievalConfig(
+        name="ce_off_rrf_k_high",
+        flags={"cross_encoder_enabled": False, "rrf_k": 200},
+        description="CE off + smooth k=200. Tail-friendly RRF without CE override.",
+    ),
+    "ce_off_spread_on": RetrievalConfig(
+        name="ce_off_spread_on",
+        flags={"cross_encoder_enabled": False, "spreading_activation_enabled": "true"},
+        description="CE off + spreading forced on. Surface graph-hopping lift without CE override.",
+    ),
+    "ce_off_mmr_on": RetrievalConfig(
+        name="ce_off_mmr_on",
+        flags={"cross_encoder_enabled": False, "mmr_enabled": True, "mmr_skip_after_ce": False},
+        description="CE off + MMR diversity (default lambda=0.7). Tests if MMR adds when CE isn't head-cutting.",
+    ),
+    # ------------------------------------------------------------------
+    # Channel-isolation diagnostics. Answers: does the keyword channel
+    # actually contribute anything? Pure vector vs default-fused.
+    # ------------------------------------------------------------------
+    "vector_only": RetrievalConfig(
+        name="vector_only",
+        flags={"cross_encoder_enabled": False, "vector_weight": 1.0},
+        description=(
+            "Pure vector — no keyword fusion. If this ties ce_off, the "
+            "keyword channel is silent on this corpus and could be "
+            "removed to save one FTS query per recall."
+        ),
+    ),
+    "keyword_only": RetrievalConfig(
+        name="keyword_only",
+        flags={"cross_encoder_enabled": False, "vector_weight": 0.0},
+        description=(
+            "Pure keyword — no vector fusion. Worst-case bound: how much "
+            "does FTS alone recover? If close to ce_off, vector is "
+            "redundant on this corpus."
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # F052/F054 validation configs — exercise the flags this branch ships.
+    # Each isolates the new behavior so eval predicts the production lift
+    # before deployment.
+    # ------------------------------------------------------------------
+    "f052_on": RetrievalConfig(
+        name="f052_on",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.5,
+        },
+        description=(
+            "F052: CE rerank on with episode-share skip gate (default "
+            "threshold 0.5). Predicted: ties baseline on nous_prod "
+            "(fact-dominant); ties ce_off on longmemeval (episode-"
+            "dominant) — recovers the +5.2% MRR longmemeval lift "
+            "without losing the +2.2% nous_prod lift."
+        ),
+    ),
+    "f052_off_explicit": RetrievalConfig(
+        name="f052_off_explicit",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": False,
+        },
+        description=(
+            "F052 explicitly off — should match baseline-with-CE-on. "
+            "Sanity check the gate flag default doesn't change behavior."
+        ),
+    ),
+    "f054_keyword_off": RetrievalConfig(
+        name="f054_keyword_off",
+        flags={
+            "cross_encoder_enabled": True,
+            "hybrid_search_keyword_enabled": False,
+        },
+        description=(
+            "F054: vector-only hybrid_search (keyword channel disabled). "
+            "Predicted: ties baseline since channel-iso showed vector_only "
+            "matches ce_off byte-for-byte on lme. Validates flag wires "
+            "to the production hot path."
+        ),
+    ),
+    "f052_low_threshold": RetrievalConfig(
+        name="f052_low_threshold",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.15,
+        },
+        description=(
+            "F052 with low threshold (0.15) — matches longmemeval corpus "
+            "shape where facts outnumber episodes 4.7x but the qrels "
+            "target episode-flavored recall. Tests whether F052's "
+            "mechanism works at all on this data."
+        ),
+    ),
+    "f052_very_low_threshold": RetrievalConfig(
+        name="f052_very_low_threshold",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.05,
+        },
+        description=(
+            "F052 with extremely low threshold (0.05) — fires whenever "
+            "any episodes are present in the candidate set."
+        ),
+    ),
+    "f052_and_f054_combined": RetrievalConfig(
+        name="f052_and_f054_combined",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.5,
+            "hybrid_search_keyword_enabled": False,
+        },
+        description=(
+            "F052 + F054 stacked — predicted ceiling for this branch: "
+            "longmemeval lifts (CE skip on episode dominance), nous_prod "
+            "stays at baseline, keyword channel off everywhere."
+        ),
+    ),
 }
 
 

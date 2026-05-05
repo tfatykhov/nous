@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import re
 import sys
 from collections import defaultdict
 from datetime import UTC, datetime
@@ -168,12 +170,119 @@ def _precision(counts: dict[str, int]) -> float:
     return yes / denom if denom > 0 else 0.0
 
 
+# ---------------------------------------------------------------------------
+# Regression detection (EXEC-PLAN 2.3)
+# ---------------------------------------------------------------------------
+#
+# Audit 2026-05-03 found that between Apr 26 and Apr 30 evidence_for jumped
+# 0.53 → 0.75 (good) while related_to fell 0.83 → 0.70 (bad). Net: still
+# failing the gate. Without per-relation regression tracking, the eval
+# silently traded one relation for another. Fix: load the most recent prior
+# audit's per-relation precisions and fail if any drops more than
+# ``max_regression`` (default 0.05 absolute) below the prior value.
+
+
+def _load_prior_precisions(prior_json: Path) -> dict[str, float]:
+    """Return ``{relation: precision}`` from a prior audit JSON file.
+
+    Returns ``{}`` if the file is missing or malformed — caller decides
+    whether that's fatal. Prior runs that pre-date JSON output are
+    handled gracefully (they just produce no regression baseline).
+    """
+    if not prior_json.exists():
+        return {}
+    try:
+        data = json.loads(prior_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("F053 audit: prior baseline %s unreadable; skipping regression check", prior_json)
+        return {}
+    relations = data.get("relations", [])
+    return {
+        r["relation"]: float(r["precision"])
+        for r in relations
+        if "relation" in r and "precision" in r
+    }
+
+
+def _autodetect_prior_baseline(reports_dir: Path, current_path: Path) -> Path | None:
+    """Find the most recent ``edge-audit-*.json`` other than ``current_path``.
+
+    Returns ``None`` if no prior exists. Used when the operator doesn't
+    pass ``--baseline-json`` explicitly so regression is on by default.
+    """
+    if not reports_dir.exists():
+        return None
+    candidates = sorted(
+        (p for p in reports_dir.glob("edge-audit-*.json") if p != current_path),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _check_regressions(
+    current: dict[str, float],
+    prior: dict[str, float],
+    max_regression: float,
+) -> list[tuple[str, float, float, float]]:
+    """Return ``[(relation, prior, current, delta)]`` for regressions.
+
+    A regression is ``current < prior - max_regression`` modulo a
+    small float epsilon (so an exact-on-threshold drop like 0.80 → 0.75
+    at max_regression=0.05 is not flagged — IEEE 754 makes that delta
+    ``-0.050000000000000044``). Relations present in current but
+    missing from prior are NOT regressions (new relations).
+    """
+    eps = 1e-9
+    out: list[tuple[str, float, float, float]] = []
+    for relation, cur in sorted(current.items()):
+        if relation not in prior:
+            continue
+        delta = cur - prior[relation]
+        if delta < -max_regression - eps:
+            out.append((relation, prior[relation], cur, delta))
+    return out
+
+
+def _write_json(
+    per_relation: dict[str, list[EdgeJudgment]],
+    out_path: Path,
+    since: datetime | None,
+    limit_per_type: int,
+    threshold: float,
+) -> None:
+    """JSON sibling for machine-readable consumption (regression checks)."""
+    relations: list[dict[str, Any]] = []
+    for relation in sorted(per_relation.keys()):
+        judgments = per_relation[relation]
+        counts = _summarize(judgments)
+        relations.append({
+            "relation": relation,
+            "n": len(judgments),
+            "yes": counts.get("YES", 0),
+            "weak": counts.get("WEAK", 0),
+            "no": counts.get("NO", 0),
+            "parse_error": counts.get("PARSE_ERROR", 0),
+            "precision": _precision(counts),
+        })
+    payload = {
+        "generated_utc": datetime.now(tz=UTC).isoformat(),
+        "since": since.isoformat() if since else None,
+        "limit_per_type": limit_per_type,
+        "threshold": threshold,
+        "relations": relations,
+    }
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def _write_report(
     per_relation: dict[str, list[EdgeJudgment]],
     out_path: Path,
     since: datetime | None,
     limit_per_type: int,
     threshold: float,
+    regressions: list[tuple[str, float, float, float]] | None = None,
+    baseline_path: Path | None = None,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -205,6 +314,24 @@ def _write_report(
     lines.append(f"**Overall gate**: {'PASS' if overall_pass else 'FAIL'} "
                  f"(all gate-eligible relations meet precision >= {threshold:.2f})")
     lines.append("")
+    if regressions is not None:
+        lines.append("## Per-relation regression check")
+        lines.append("")
+        if baseline_path is not None:
+            lines.append(f"_Baseline: `{baseline_path}`_")
+            lines.append("")
+        if not regressions:
+            lines.append("**REGRESSION CHECK PASS** — no relation dropped beyond tolerance.")
+        else:
+            lines.append("**REGRESSION CHECK FAIL** — the following relations regressed:")
+            lines.append("")
+            lines.append("| relation | prior | current | delta |")
+            lines.append("|----------|------:|--------:|------:|")
+            for relation, prior, current, delta in regressions:
+                lines.append(
+                    f"| {relation} | {prior:.2f} | {current:.2f} | {delta:+.2f} |"
+                )
+        lines.append("")
     lines.append("## Sample of NO + WEAK verdicts (for spot-check)")
     lines.append("")
     sample_count = 0
@@ -222,8 +349,17 @@ async def run(
     limit_per_type: int,
     threshold: float,
     out_path: Path | None,
-) -> Path:
-    """Driver: build DB, sample edges, judge, write report. Returns the report path."""
+    baseline_json: Path | None = None,
+    max_regression: float = 0.05,
+    auto_baseline: bool = True,
+) -> tuple[Path, list[tuple[str, float, float, float]]]:
+    """Driver: build DB, sample edges, judge, write report.
+
+    Returns ``(report_path, regressions)``. ``regressions`` is the list
+    of ``(relation, prior, current, delta)`` for relations that dropped
+    more than ``max_regression`` below the baseline; empty list means
+    no regression (or no baseline available).
+    """
     main_settings = Settings()
     eval_scoped = _settings_for_eval_db(settings, main_settings)
     db = Database(eval_scoped)
@@ -244,8 +380,38 @@ async def run(
 
         if out_path is None:
             out_path = Path(settings.report_dir) / f"edge-audit-{datetime.now(tz=UTC):%Y%m%d-%H%M%S}.md"
-        _write_report(per_relation_verdicts, out_path, since, limit_per_type, threshold)
-        return out_path
+        json_path = out_path.with_suffix(".json")
+
+        # Resolve baseline (explicit > auto-detect from reports/) and
+        # compute regressions BEFORE writing JSON so the new file isn't
+        # accidentally picked as its own baseline.
+        resolved_baseline: Path | None = baseline_json
+        if resolved_baseline is None and auto_baseline:
+            resolved_baseline = _autodetect_prior_baseline(out_path.parent, json_path)
+
+        current_precisions = {
+            r: _precision(_summarize(judgments))
+            for r, judgments in per_relation_verdicts.items()
+        }
+        regressions: list[tuple[str, float, float, float]] = []
+        if resolved_baseline is not None:
+            prior = _load_prior_precisions(resolved_baseline)
+            if prior:
+                regressions = _check_regressions(current_precisions, prior, max_regression)
+                if regressions:
+                    logger.warning(
+                        "F053 audit: regression detected vs %s: %s",
+                        resolved_baseline,
+                        [(r, f"{p:.2f}->{c:.2f}") for r, p, c, _ in regressions],
+                    )
+
+        _write_report(
+            per_relation_verdicts, out_path, since, limit_per_type, threshold,
+            regressions=regressions if resolved_baseline is not None else None,
+            baseline_path=resolved_baseline,
+        )
+        _write_json(per_relation_verdicts, json_path, since, limit_per_type, threshold)
+        return out_path, regressions
     finally:
         await db.engine.dispose()
 
@@ -260,6 +426,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="Precision floor per relation type. Default: 0.75 (spec gate criterion 2).")
     p.add_argument("--output", type=Path, default=None,
                    help="Output markdown path. Default: reports/edge-audit-<timestamp>.md.")
+    p.add_argument("--baseline-json", type=Path, default=None,
+                   help="Prior audit JSON for per-relation regression check. "
+                        "Default: auto-detect most-recent edge-audit-*.json in --output's parent.")
+    p.add_argument("--no-auto-baseline", action="store_true",
+                   help="Disable auto-detection of prior baseline (skip regression check entirely).")
+    p.add_argument("--max-regression", type=float, default=0.05,
+                   help="Max allowed per-relation precision drop vs baseline (absolute). Default: 0.05.")
+    p.add_argument("--exit-on-regression", action="store_true",
+                   help="Exit with code 3 if any relation regressed beyond --max-regression.")
     return p.parse_args(argv)
 
 
@@ -278,14 +453,25 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     settings = EvalSettings()
-    out = asyncio.run(run(
+    out, regressions = asyncio.run(run(
         settings=settings,
         since=since,
         limit_per_type=ns.limit_per_type,
         threshold=ns.threshold,
         out_path=ns.output,
+        baseline_json=ns.baseline_json,
+        max_regression=ns.max_regression,
+        auto_baseline=not ns.no_auto_baseline,
     ))
     print(f"Wrote: {out}")
+    if regressions:
+        print(f"REGRESSION CHECK: {len(regressions)} relation(s) dropped beyond {ns.max_regression}:",
+              file=sys.stderr)
+        for relation, prior, current, delta in regressions:
+            print(f"  {relation}: {prior:.2f} -> {current:.2f} ({delta:+.2f})",
+                  file=sys.stderr)
+        if ns.exit_on_regression:
+            return 3
     return 0
 
 
