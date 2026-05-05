@@ -1,0 +1,62 @@
+{
+  "n": 5,
+  "headline_sufficiency": 0.6666666666666666,
+  "headline_ok": 2,
+  "headline_total": 3,
+  "docs_sufficiency": 0.0,
+  "docs_ok": 0,
+  "docs_total": 2,
+  "judge_model": "claude-sonnet-4-6",
+  "results": [
+    {
+      "name": "telegram_email",
+      "bucket": "memory",
+      "question": "How does the Telegram bot integration work?",
+      "gold_hint": "Bot token + chat ID env vars; subtask completion notifications.",
+      "n_results": 24,
+      "sufficient": false,
+      "reason": "parse error",
+      "context_preview": "[fact] Nous telegram_bot.py: Standalone process (python -m nous.telegram_bot). Long-polls Telegram getUpdates. NousTelegramBot routes messages to _chat_streaming which POSTs to /chat/stream (SSE). StreamingMessage class handles progressive message editing with 1.2s rate-limiting. Supports /start, /new (session reset), /debug, /identity commands. Maintains _sessions dict mapping chat_id\u2192session_id. Communicates with Nous only via REST API \u2014 no direct imports of core modules. Sanitizes markdown\u2192HTML for Telegram formatting.\n\n[fact] Telegram file sending is unreliable as a primary delivery channe"
+    },
+    {
+      "name": "heartbeat_overview",
+      "bucket": "memory",
+      "question": "Tell me about the heartbeat system.",
+      "gold_hint": "F034 proactive monitoring \u2014 health/email/self-initiated checks; runs on tick interval.",
+      "n_results": 27,
+      "sufficient": true,
+      "reason": "The assembled context contains detailed information about F034 heartbeat system including proactive monitoring, health checks, email checks, self-initiated checks, and the tick interval (30s), fully covering the gold-answer requirements.",
+      "context_preview": "[fact] [F034 Heartbeat \u2014 Full Implementation] Shipped April 3, 2026. Autonomous background loop (30s tick) with 4 built-in checks: HealthCheck (60min, stale decisions/facts/censors/procedures), SelfInitiatedCheck (30min, TODO/follow-up scanning), EmailCheck (3min, IMAP polling, urgent_override, disabled by default), DriveCheck (10min, Google Drive polling). Triage: high\u2192Telegram alert, normal\u2192cognitive session via run_turn(), low\u2192logged. Features: circuit breaker (3 failures trips), per-check timeouts, token budget (50K/day), quiet hours (23-08 UTC), missed-check detection on startup, hot-conf"
+    },
+    {
+      "name": "skill_management",
+      "bucket": "docs",
+      "question": "How do skills get registered in Nous?",
+      "gold_hint": "F011 skill discovery \u2014 learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL.",
+      "n_results": 26,
+      "sufficient": false,
+      "reason": "The assembled context mentions `learn_skill` tool and SKILL.md format, but lacks details about SkillParser, bootstrap process, and auto-activation via RECALL \u2014 the key components of F011 skill discovery required for a complete answer.",
+      "context_preview": "[fact] Skills in Nous are learned/registered at runtime, not shipped out of the box \u2014 this is a key point the user wants emphasized.\n\n[fact] Total registered skills in Nous: 40 (as of this session).\n\n[procedure] writing-skills: Create, edit, and validate Nous skills (SKILL.md files) with proper frontmatter, triggers, and implementation bodies.\n\n[fact] The nous skills system uses SKILL.md format with env-var gating and EvoSkill auto-discovery.\n\n[fact] Nous has a `learn_skill` tool for registering skills with YAML frontmatter\n\n[fact] The Nous repo lives at `/tmp/nous-workspace/nous`, not in a sk"
+    },
+    {
+      "name": "subtask_workers",
+      "bucket": "docs",
+      "question": "How many subtask workers run by default?",
+      "gold_hint": "Default is 2; configured via NOUS_SUBTASK_WORKERS env var.",
+      "n_results": 22,
+      "sufficient": false,
+      "reason": "The assembled context contains no mention of NOUS_SUBTASK_WORKERS or the default number of subtask workers (2). While there are many facts about subtasks, none address this specific configuration.",
+      "context_preview": "[fact] NOUS_SUBTASK_TOOL_CALL_LIMIT default = 20 (nous/config.py:256). Not overridable per-subtask (spawn_task has no max_tool_calls parameter). Not exposed in docker-compose.yml env list. When hit, runner.py:1299 forces a final tools=None API call; if model returns empty text, subtask completes with empty result and no error. Fix requires: (a) raise default to 40-50, (b) add env override to docker-compose, (c) add max_tool_calls kwarg to spawn_task/SubtaskInput so long workflows can request higher budget, (d) treat empty-result-after-limit as failed not completed.\n\n[fact] Async subtasks suppo"
+    },
+    {
+      "name": "rubric_evolution",
+      "bucket": "memory",
+      "question": "What does the rubric evolver do?",
+      "gold_hint": "F024-3b \u2014 outcome signals \u2192 dimension proposals \u2192 rubric weight evolution.",
+      "n_results": 31,
+      "sufficient": true,
+      "reason": "The assembled context explicitly describes RubricEvolver as handling weekly evolution cycles, and the facts describe the flow: outcome signals (collected via OutcomeDetector/outcome_signals table), correlation with dimensions (CorrelationEngine), and rubric weight evolution (L1 weight adjustment, \u00b15% shifts per cycle) \u2014 matching the gold answer's F024-3b flow of outcome signals \u2192 dimension proposals \u2192 rubric weight evolution.",
+      "context_preview": "[fact] Self-Modifying Evaluation Rubrics feature delivered +2,600 lines across 25 files. It targets a self-evaluation score plateau of ~6.5-6.75 on 4 dimensions by enabling rubrics to evolve dynamically.\n\n[fact] Rubric versions are immutable; rollback reactivates old versions rather than mutating\n\n[fact] Rubric evolution is gated by `RUBRIC_EVOLUTION_ENABLED` env var (default false) and `rubric_min_episodes_for_correlation = 50`\n\n[fact] EvoSkill (arXiv:2603.02766, Mar 2026) is a self-evolving framework from Sentient + Virginia Tech that automatically discovers and refines agent skills through "
+    }
+  ]
+}

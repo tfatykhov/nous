@@ -1,0 +1,62 @@
+{
+  "n": 5,
+  "headline_sufficiency": 0.0,
+  "headline_ok": 0,
+  "headline_total": 3,
+  "docs_sufficiency": 0.0,
+  "docs_ok": 0,
+  "docs_total": 2,
+  "judge_model": "claude-sonnet-4-6",
+  "results": [
+    {
+      "name": "telegram_email",
+      "bucket": "memory",
+      "question": "How does the Telegram bot integration work?",
+      "gold_hint": "Bot token + chat ID env vars; subtask completion notifications.",
+      "n_results": 25,
+      "sufficient": false,
+      "reason": "The assembled context describes how the Telegram bot works architecturally (long-polling, routing, session management, markdown formatting) but contains no information about bot token + chat ID environment variables or subtask completion notifications, which are the required elements of the gold answer.",
+      "context_preview": "[fact] The Telegram bot had a bug where session IDs were never cleared from the in-memory _sessions dict after idle timeouts or explicit session ends, causing session state to persist incorrectly across conversations.\n\n[fact] Delivering .docx files via Telegram requires careful pre-flight checks: (1) File generation depends on python-docx \u2014 always verify its availability on the host before promising this delivery format. (2) On Windows, there is no native base64 CLI, so Python or PowerShell must be used for file encoding prior to multipart upload via the Telegram Bot API. Skipping either check"
+    },
+    {
+      "name": "heartbeat_overview",
+      "bucket": "memory",
+      "question": "Tell me about the heartbeat system.",
+      "gold_hint": "F034 proactive monitoring \u2014 health/email/self-initiated checks; runs on tick interval.",
+      "n_results": 28,
+      "sufficient": false,
+      "reason": "The assembled context contains various heartbeat-related facts (false positives, sweep results, timeout failures) but does not describe the heartbeat system's core design: proactive monitoring of health/email/self-initiated checks running on a tick interval (F034). The gold-answer information about what the heartbeat system fundamentally is and does is absent.",
+      "context_preview": "[fact] HEARTBEAT FALSE-POSITIVE \u2014 Episode commitments: \"back to nous. get latest see if there is anything new\" (Feb 25), \"Hey how was your conversation with Emerson?\" (Feb 25), and \"ok what outstanding items we do have?\" (Feb 25) are all resolved historical episodes. They recur as heartbeat false positives. Confirmed resolved as of April 30, 2026.\n\n[procedure] bdi-mental-states: This skill should be used when the user asks to \"model agent mental states\", \"implement BDI architecture\", \"create belief-desire-intention models\", \"transform RDF to beliefs\", \"build cognitive agent\", or mentions BDI o"
+    },
+    {
+      "name": "skill_management",
+      "bucket": "docs",
+      "question": "How do skills get registered in Nous?",
+      "gold_hint": "F011 skill discovery \u2014 learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL.",
+      "n_results": 26,
+      "sufficient": false,
+      "reason": "The assembled context mentions `learn_skill` tool and SKILL.md format with EvoSkill auto-discovery, but lacks details on SkillParser, bootstrap process, and auto-activation via RECALL \u2014 key components required by the gold answer.",
+      "context_preview": "[fact] Skills in Nous are learned/registered at runtime, not shipped out of the box \u2014 this is a key point the user wants emphasized.\n\n[fact] Nous has at least 23 registered skills across writing, documents, communication, cognition, and engineering domains\n\n[fact] As of commit 6d008d3, nous has 39 registered skills, a get_procedure tool, 3-layer compaction (SmartCompress L0, Tool Pruning L1, History Compaction L2), and 5 MCP server tools.\n\n[fact] Total registered skills in Nous: 40 (as of this session).\n\n[fact] Nous has a `learn_skill` tool for registering skills with YAML frontmatter\n\n[fact] "
+    },
+    {
+      "name": "subtask_workers",
+      "bucket": "docs",
+      "question": "How many subtask workers run by default?",
+      "gold_hint": "Default is 2; configured via NOUS_SUBTASK_WORKERS env var.",
+      "n_results": 21,
+      "sufficient": false,
+      "reason": "The assembled context contains no information about the default number of subtask workers or the NOUS_SUBTASK_WORKERS environment variable. It mentions subtask timeout settings and worker bugs, but not the worker count configuration.",
+      "context_preview": "[fact] Subtask timeout overrides set in /home/pirate/nous_workspace/nous/.env on 2026-04-19: NOUS_SUBTASK_DEFAULT_TIMEOUT=2000, NOUS_SUBTASK_MAX_TIMEOUT=5000. Required for long-running Claude Code DAG subtasks whose completion_check polls for up to 40 min. Previous defaults (120/600) killed the launcher before the job completed. Container must be restarted (docker compose up -d) to pick up .env.\n\n[fact] Two duplicate 'Check conditions' subtasks (IDs: 2af85a2d and de88e8c2) were found running hourly, generating 13 completed runs in a single day before being noticed and cancelled by the user. Ro"
+    },
+    {
+      "name": "rubric_evolution",
+      "bucket": "memory",
+      "question": "What does the rubric evolver do?",
+      "gold_hint": "F024-3b \u2014 outcome signals \u2192 dimension proposals \u2192 rubric weight evolution.",
+      "n_results": 31,
+      "sufficient": false,
+      "reason": "The assembled context mentions rubric evolution and self-modifying evaluation rubrics but does not contain the specific pipeline described in the gold answer: outcome signals \u2192 dimension proposals \u2192 rubric weight evolution (F024-3b). The context only states rubrics 'evolve dynamically' and mentions gating conditions, but lacks the specific mechanism of how outcome signals feed into dimension proposals which then drive rubric weight evolution.",
+      "context_preview": "[fact] Self-Modifying Evaluation Rubrics feature delivered +2,600 lines across 25 files. It targets a self-evaluation score plateau of ~6.5-6.75 on 4 dimensions by enabling rubrics to evolve dynamically.\n\n[fact] Rubric evolution is gated by `RUBRIC_EVOLUTION_ENABLED` env var (default false) and `rubric_min_episodes_for_correlation = 50`\n\n[procedure] bdi-mental-states: This skill should be used when the user asks to \"model agent mental states\", \"implement BDI architecture\", \"create belief-desire-intention models\", \"transform RDF to beliefs\", \"build cognitive agent\", or mentions BDI ontology, me"
+    }
+  ]
+}
