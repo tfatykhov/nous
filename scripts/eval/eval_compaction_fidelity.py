@@ -33,7 +33,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nous.api.anthropic_client import create_client
-from nous.api.compaction import ConversationCompactor
+from nous.api.compaction import (
+    ConversationCompactor,
+    detect_hallucinated_entities,
+)
 from nous.api.models import Conversation, Message
 from nous.config import Settings
 from nous_eval._oat_preamble import (
@@ -401,6 +404,12 @@ async def main() -> int:
             )
 
             preserved = sum(1 for v in verdicts if v.get("preserved"))
+            # F059 hallucination guard verdict, recorded alongside the
+            # judge so we can compare guard fire rate against ground-truth
+            # silent fact loss.
+            guard_suspects = detect_hallucinated_entities(
+                convo_text, summary_text
+            )
             results.append({
                 "name": sc.name,
                 "n_facts": len(sc.load_bearing_facts),
@@ -408,6 +417,8 @@ async def main() -> int:
                 "rate": preserved / len(sc.load_bearing_facts),
                 "verdicts": verdicts,
                 "summary": summary_text[:600],
+                "guard_suspect_count": len(guard_suspects),
+                "guard_suspects": guard_suspects,
             })
             overall_facts += len(sc.load_bearing_facts)
             overall_preserved += preserved
@@ -456,6 +467,33 @@ async def main() -> int:
             continue
         md.append(f"| {r['name']} | {r['n_facts']} | {r['preserved']} | "
                   f"{r['rate']:.0%} |")
+    # F059 guard summary — fire rate vs. judge "dropped fact" rate.
+    fired = sum(
+        1 for r in results
+        if r.get("guard_suspect_count", 0) > 0
+    )
+    md.extend([
+        "",
+        "## F059 hallucination guard",
+        "",
+        f"- scenarios with guard suspects: **{fired}/{len(results)}**",
+        "",
+        "| name | dropped facts | guard suspects |",
+        "|---|---:|---|",
+    ])
+    for r in results:
+        if "compact_error" in r:
+            continue
+        n_dropped = sum(
+            1 for v in r.get("verdicts", []) if not v.get("preserved")
+        )
+        suspects = r.get("guard_suspects", []) or []
+        sample = ", ".join(suspects[:3]) + ("…" if len(suspects) > 3 else "")
+        md.append(
+            f"| {r['name']} | {n_dropped} | "
+            f"{len(suspects)} ({sample if sample else '—'}) |"
+        )
+
     md.extend(["", "## Dropped facts (samples)", ""])
     for r in results:
         if "compact_error" in r:

@@ -110,6 +110,84 @@ _SECTION_PATTERNS = [
 ]
 
 
+# F059 (2026-05-05): entity-token regexes for the compaction hallucination
+# guard. These match the kinds of values that, if substituted by the
+# summarizer, produce confident-looking-but-wrong summaries. Patterns are
+# anchored to characters that cannot appear inside paraphrasing (`@`, `:`,
+# `.` between digits, `/` between path segments) so the false-positive
+# rate from prose match is low.
+_HALLUCINATION_ENTITY_PATTERNS = [
+    # Emails — primary substitution target
+    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),
+    # URLs (http/https/ftp)
+    re.compile(r"https?://[^\s<>'\"]+"),
+    # IPv4 addresses (with or without :port)
+    re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?\b"),
+    # Version strings: 1.2, 1.2.3, 1.2.3-rc1
+    re.compile(r"\b\d+\.\d+(?:\.\d+)?(?:-[A-Za-z0-9]+)?\b"),
+    # File paths: at least two slash-separated segments with a word char start
+    re.compile(r"(?:/[A-Za-z0-9_.-]+){2,}/?"),
+    # Multi-word capitalized name tokens (`Marcus Webb`, `Sarah Chen`,
+    # `Acme Corp`). At least 2 capitalized words back-to-back.
+    re.compile(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b"),
+    # Bare port numbers prefixed with `port ` or `:` (`port 6380`, `:8080`)
+    re.compile(r"(?:\bport\s+|(?<=:))\d{2,5}\b", re.IGNORECASE),
+    # Hex identifiers (8+ chars), commit SHAs, UUIDs
+    re.compile(r"\b[A-Fa-f0-9]{8,}\b"),
+]
+
+
+def _extract_entities(text: str) -> set[str]:
+    """Extract entity tokens worth defending against substitution.
+
+    Skips markdown header lines (`## Critical Context` would otherwise
+    match the multi-word capitalized name regex and produce structural
+    false positives). Lowercases everything so the input/summary
+    comparison is case-insensitive.
+    """
+    out: set[str] = set()
+    if not text:
+        return out
+    body = "\n".join(
+        line for line in text.split("\n") if not line.lstrip().startswith("#")
+    )
+    for pat in _HALLUCINATION_ENTITY_PATTERNS:
+        for match in pat.findall(body):
+            tok = match.strip().lower()
+            if len(tok) >= 3:
+                out.add(tok)
+    return out
+
+
+def detect_hallucinated_entities(input_text: str, summary: str) -> list[str]:
+    """Return entities present in `summary` but absent from `input_text`.
+
+    Two rules for "found":
+      1. Direct substring match on lowercased input (catches verbatim
+         preservation, including partial overlaps like `:8080` in
+         `0.0.0.0:8080`).
+      2. For multi-word entities (e.g. `marcus webb`), at least one
+         word of length >= 4 appears as a substring in input. This
+         covers the case where input has `marcus.webb@acme.com` and
+         summary unpacks the name into `Marcus Webb` — same person,
+         different surface form.
+    """
+    if not input_text or not summary:
+        return []
+    input_lc = input_text.lower()
+    suspects: list[str] = []
+    for ent in _extract_entities(summary):
+        if ent in input_lc:
+            continue
+        words = ent.split()
+        if len(words) > 1 and any(
+            len(w) >= 4 and w in input_lc for w in words
+        ):
+            continue
+        suspects.append(ent)
+    return sorted(suspects)
+
+
 # F058 follow-up (2026-05-01): tool-use schema for structured compaction.
 # The eval (reports/eval_compaction_fidelity.md) measured 31% silent fact
 # loss with the free-form prompt approach. By forcing the model to enumerate
@@ -280,6 +358,21 @@ class ApiCaller(Protocol):
     ) -> ApiResponse: ...
 
 
+class EventLogger(Protocol):
+    """Fire-and-forget event sink for guard verdicts.
+
+    AgentRunner injects a closure that wraps `Brain.emit_event` in
+    `asyncio.create_task` so the compaction path never blocks on DB I/O.
+    """
+
+    def __call__(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        session_id: str,
+    ) -> None: ...
+
+
 # ------------------------------------------------------------------
 # Token Estimator
 # ------------------------------------------------------------------
@@ -349,9 +442,18 @@ class ConversationCompactor:
     compactor.estimator for calibration after API responses.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        event_logger: "EventLogger | None" = None,
+    ) -> None:
         self._settings = settings
         self.estimator = TokenEstimator()
+        # Optional fire-and-forget callback for persisting guard fires
+        # to nous_system.events. Lets us reconstruct what F059 saw
+        # after Docker log rotation. Wired in by AgentRunner; unwired
+        # in tests + scripts.
+        self._event_logger = event_logger
 
     # ------------------------------------------------------------------
     # Layer 1: Tool Output Pruning
@@ -633,6 +735,67 @@ class ConversationCompactor:
             )
             return
 
+        # F059 hallucination guard. Substring-check entity tokens in the
+        # summary against the input. Suspect = entity in summary but not
+        # in input. Default warn-only; fallback to truncation only when
+        # the operator opts in. Every fire is persisted to
+        # nous_system.events when an event logger is wired in, so log
+        # rotation doesn't lose the evidence we'd use to flip the
+        # fallback flag later.
+        if self._settings.compaction_hallucination_guard_enabled:
+            input_text = self._serialize_for_summary(
+                old_messages[serialize_start:]
+            )
+            suspects = detect_hallucinated_entities(input_text, checkpoint_text)
+            max_allowed = self._settings.compaction_hallucination_max_suspect_count
+            exceeded = len(suspects) > max_allowed
+            fallback_taken = (
+                exceeded
+                and self._settings.compaction_hallucination_fallback_enabled
+            )
+
+            if suspects:
+                self._persist_guard_fire(
+                    conversation,
+                    suspects,
+                    max_allowed,
+                    exceeded,
+                    fallback_taken,
+                    summary_chars=len(checkpoint_text),
+                    input_chars=len(input_text),
+                )
+
+            if exceeded:
+                logger.warning(
+                    "Compaction hallucination guard: %d suspect entities "
+                    "(threshold %d, session=%s): %s",
+                    len(suspects),
+                    max_allowed,
+                    conversation.session_id,
+                    suspects[:10],
+                )
+                if fallback_taken:
+                    logger.warning(
+                        "Compaction hallucination guard: falling back to "
+                        "truncation (session=%s)",
+                        conversation.session_id,
+                    )
+                    conversation.messages = conversation.messages[cut_point:]
+                    conversation.summary = None
+                    conversation.compaction_count = max(
+                        0, conversation.compaction_count - 1
+                    )
+                    return
+            elif suspects:
+                logger.info(
+                    "Compaction hallucination guard: %d suspect entities "
+                    "(below threshold %d, session=%s): %s",
+                    len(suspects),
+                    max_allowed,
+                    conversation.session_id,
+                    suspects,
+                )
+
         # Rebuild messages with summary prefix
         compacted_prefix = [
             Message(
@@ -831,6 +994,50 @@ class ConversationCompactor:
     # ------------------------------------------------------------------
     # Utilities
     # ------------------------------------------------------------------
+
+    def _persist_guard_fire(
+        self,
+        conversation: Conversation,
+        suspects: list[str],
+        threshold: int,
+        exceeded: bool,
+        fallback_taken: bool,
+        *,
+        summary_chars: int,
+        input_chars: int,
+    ) -> None:
+        """Best-effort persist of the F059 guard verdict.
+
+        Skipped when persistence is disabled or no event logger is
+        wired. Never raises — the compaction path must be unaffected.
+        """
+        if not self._settings.compaction_hallucination_persist_enabled:
+            return
+        if self._event_logger is None:
+            return
+        try:
+            self._event_logger(
+                "f059_hallucination_guard",
+                {
+                    "session_id": conversation.session_id,
+                    "compaction_count": conversation.compaction_count + 1,
+                    "suspect_count": len(suspects),
+                    # Cap at 20 entries so we don't blow up the events
+                    # table on a runaway summarizer. Hand-audit reads
+                    # the first few anyway.
+                    "suspects": suspects[:20],
+                    "threshold": threshold,
+                    "exceeded_threshold": exceeded,
+                    "fallback_taken": fallback_taken,
+                    "summary_chars": summary_chars,
+                    "input_chars": input_chars,
+                },
+                conversation.session_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "F059 guard persistence failed (suppressed)", exc_info=True
+            )
 
     @staticmethod
     def extract_text(content: list[dict[str, Any]]) -> str:
