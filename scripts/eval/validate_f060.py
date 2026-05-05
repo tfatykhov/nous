@@ -1,15 +1,21 @@
-"""F060 — abandoned-episode recovery validation against eval DB.
+"""F060 + F060.1 + F060.2 — abandoned-episode recovery eval-DB validation.
 
-Synthesizes a fixture of N stuck-open episodes (active=true,
-structured_summary=NULL, populated transcript, started_at > min_age_hours
-ago) under a unique agent_id, then runs F060 directly against the eval
-DB. Verifies that:
+Synthesizes a mixed fixture covering all three paths and verifies the
+phase produces the expected per-row outcome:
 
-  - The phase finds the synthesized episodes
-  - `summarize_episode` populates `structured_summary` for each
-  - Episodes stay `active=true` (matching F057 contract)
+  Path A — full transcript recovery (F060):
+    structured_summary populated, episode stays active=true.
 
-Cost: ~$0.50 (3 LLM summarization calls). Re-runnable — agent_id is
+  Path B — summary fallback (F060.1):
+    transcript NULL, plain summary present (>=20 chars). Phase calls
+    summarize_episode with summary as input. structured_summary still
+    populated, active=true.
+
+  Path C — mark abandoned (F060.2):
+    transcript NULL AND summary < 20 chars (or NULL), age > 7 days.
+    Phase issues UPDATE: active=false, outcome='abandoned'.
+
+Cost: ~$1.00 (4 LLM summarization calls). Re-runnable — agent_id is
 namespaced with a timestamp to avoid stale-fixture interference.
 
 Usage:
@@ -64,11 +70,21 @@ Assistant: Acknowledged: budget estimate for read replicas due 2026-05-19.""",
 ]
 
 
-async def _seed_fixture(db: Database, agent_id: str) -> list[uuid.UUID]:
-    """Insert N stuck-open episodes (active=true, NULL summary, with transcript)."""
-    started_24h_ago = datetime.now(UTC) - timedelta(hours=25)
-    ids: list[uuid.UUID] = []
+async def _seed_fixture(db: Database, agent_id: str) -> dict[str, list[uuid.UUID]]:
+    """Insert mixed-path stuck-open episodes.
+
+    Returns a dict keyed by path label so the caller can assert per-path
+    outcomes precisely.
+
+      "full"     — has long transcript + summary (path A)
+      "fallback" — transcript NULL, summary present (path B, F060.1)
+      "abandon"  — transcript NULL, summary too short, age > 7 days (path C, F060.2)
+    """
+    started_25h_ago = datetime.now(UTC) - timedelta(hours=25)
+    started_8d_ago = datetime.now(UTC) - timedelta(days=8)
+    ids: dict[str, list[uuid.UUID]] = {"full": [], "fallback": [], "abandon": []}
     async with db.session() as session:
+        # Path A — full transcript
         for i, transcript in enumerate(_FIXTURE_TRANSCRIPTS):
             ep_id = uuid.uuid4()
             await session.execute(sql_text("""
@@ -82,12 +98,54 @@ async def _seed_fixture(db: Database, agent_id: str) -> list[uuid.UUID]:
             """), {
                 "id": ep_id,
                 "agent_id": agent_id,
-                "session_id": f"f060-fixture-{i}",
+                "session_id": f"f060-full-{i}",
                 "summary": f"Fixture episode {i+1} (placeholder)",
                 "transcript": transcript,
-                "started_at": started_24h_ago,
+                "started_at": started_25h_ago,
             })
-            ids.append(ep_id)
+            ids["full"].append(ep_id)
+
+        # Path B — F060.1 fallback (no transcript, has plain summary)
+        ep_id = uuid.uuid4()
+        await session.execute(sql_text("""
+            INSERT INTO heart.episodes (
+                id, agent_id, session_id, summary, transcript,
+                structured_summary, active, outcome, started_at, ended_at
+            ) VALUES (
+                :id, :agent_id, :session_id, :summary, NULL,
+                NULL, true, NULL, :started_at, NULL
+            )
+        """), {
+            "id": ep_id,
+            "agent_id": agent_id,
+            "session_id": "f060-fallback-1",
+            "summary": (
+                "User asked about NOUS_MAX_TOKENS configuration value — "
+                "what does this parameter do and what's the default."
+            ),
+            "started_at": started_25h_ago,
+        })
+        ids["fallback"].append(ep_id)
+
+        # Path C — F060.2 mark abandoned (no transcript, summary too short, > 7 days)
+        ep_id = uuid.uuid4()
+        await session.execute(sql_text("""
+            INSERT INTO heart.episodes (
+                id, agent_id, session_id, summary, transcript,
+                structured_summary, active, outcome, started_at, ended_at
+            ) VALUES (
+                :id, :agent_id, :session_id, :summary, NULL,
+                NULL, true, NULL, :started_at, NULL
+            )
+        """), {
+            "id": ep_id,
+            "agent_id": agent_id,
+            "session_id": "f060-abandon-1",
+            "summary": "?",  # 1 char < 20 char threshold
+            "started_at": started_8d_ago,
+        })
+        ids["abandon"].append(ep_id)
+
         await session.commit()
     return ids
 
@@ -150,8 +208,14 @@ async def main() -> int:
     try:
         async with heart, brain:
             print(f"\nSeeding fixture under agent_id={_AGENT_ID}...")
-            seeded_ids = await _seed_fixture(db, _AGENT_ID)
-            print(f"  Seeded {len(seeded_ids)} stuck-open episodes")
+            seeded = await _seed_fixture(db, _AGENT_ID)
+            n_full = len(seeded["full"])
+            n_fallback = len(seeded["fallback"])
+            n_abandon = len(seeded["abandon"])
+            print(
+                f"  Seeded: {n_full} full-transcript, {n_fallback} fallback, "
+                f"{n_abandon} mark-abandoned"
+            )
 
             before = await _count_summarized(db, _AGENT_ID)
             print(f"  Summarized BEFORE phase run: {before}")
@@ -186,26 +250,46 @@ async def main() -> int:
             print(f"\n  Summarized AFTER phase run: {after}")
             print(f"  Recovered this run: {after - before}")
 
-            # Verify episodes still active=true
+            # Verify per-path outcomes
             async with db.session() as session:
-                rows = await session.execute(sql_text(
-                    "SELECT id, active, structured_summary IS NOT NULL "
-                    "FROM heart.episodes WHERE agent_id=:aid"
-                ), {"aid": _AGENT_ID})
-                for ep_id, active, has_summary in rows.all():
-                    print(
-                        f"  Episode {str(ep_id)[:8]}... "
-                        f"active={active} summarized={has_summary}"
-                    )
+                for path, ep_ids in seeded.items():
+                    print(f"\n  Path '{path}':")
+                    for ep_id in ep_ids:
+                        row = await session.execute(sql_text(
+                            "SELECT active, outcome, "
+                            "structured_summary IS NOT NULL AS has_summary "
+                            "FROM heart.episodes WHERE id=:id"
+                        ), {"id": ep_id})
+                        active, outcome, has_summary = row.one()
+                        print(
+                            f"    {str(ep_id)[:8]}... active={active} "
+                            f"outcome={outcome} summarized={has_summary}"
+                        )
 
-            # Pass criteria
-            recovered = after - before
+            # Per-path pass criteria
+            recovered_full = sleep_stats.get("episodes_recovered_full_transcript", 0)
+            recovered_fb = sleep_stats.get("episodes_recovered_summary_only", 0)
+            marked = sleep_stats.get("episodes_marked_abandoned", 0)
+
             passed = (
                 ok
-                and recovered == len(_FIXTURE_TRANSCRIPTS)
-                and sleep_stats.get("episodes_recovered") == len(_FIXTURE_TRANSCRIPTS)
+                and recovered_full == n_full
+                and recovered_fb == n_fallback
+                and marked == n_abandon
             )
-            print(f"\n  PASS = {passed}")
+            print(
+                f"\n  Recovered full:    {recovered_full}/{n_full} "
+                f"({'PASS' if recovered_full == n_full else 'FAIL'})"
+            )
+            print(
+                f"  Recovered fallback: {recovered_fb}/{n_fallback} "
+                f"({'PASS' if recovered_fb == n_fallback else 'FAIL'})"
+            )
+            print(
+                f"  Marked abandoned:   {marked}/{n_abandon} "
+                f"({'PASS' if marked == n_abandon else 'FAIL'})"
+            )
+            print(f"\n  OVERALL PASS = {passed}")
 
             return 0 if passed else 1
     finally:

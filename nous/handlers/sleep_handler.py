@@ -1459,26 +1459,27 @@ class SleepHandler:
             return False
 
     async def _phase_recover_abandoned_episodes(self, sleep_stats: dict) -> bool:
-        """F060: Populate structured_summary for abandoned active episodes.
+        """F060: Populate structured_summary or mark abandoned for stuck episodes.
 
-        Investigation context: F058 found that 76+ active episodes on prod
-        had `structured_summary=NULL`. The cause is sessions that never
-        receive `session_ended` (process restart before idle timeout, or
-        any path that bypasses cognitive.end_session). The
+        Three sub-operations in one phase:
+          - F060 base: full recovery from persisted transcript (F025 P3-C).
+          - F060.1 fallback: when transcript is missing/short, fall back to
+            the plain `summary` field as input. Degraded but better than
+            leaving the row stuck forever. Prod audit (2026-05-05): 0/103
+            stuck-open episodes had transcripts; 93/103 had plain summary.
+          - F060.2 mark abandoned: rows with NO usable content AND age >
+            `mark_age_days` get `active=false, outcome='abandoned'`. Single
+            UPDATE — no LLM, separate bound (default 200/cycle).
+
+        Investigation context: F058 found 76+ active episodes on prod had
+        `structured_summary=NULL`. The cause is sessions that never reach
+        `cognitive.end_session` (process restart before idle timeout). The
         episode_summarizer never fires, the structured fields stay null
         forever, and downstream consumers (F040 graph_densifier, fact
         extraction, search relevance) lose signal.
 
-        This phase queries `heart.episodes` for active rows with NULL
-        `structured_summary` AND last activity >
-        `abandoned_recovery_min_age_hours` AND a non-empty persisted
-        `transcript` (added by F025 P3-C). For each, it calls
-        `EpisodeSummarizer.summarize_episode(...)` directly — same code
-        path as the production session-end flow, just bypassing the
-        event bus.
-
-        Episodes stay `active=true` (matching F057). Bounded by
-        `abandoned_recovery_max_per_cycle` to keep the cycle short.
+        Recovered episodes stay `active=true` (matching F057). Marked-
+        abandoned episodes go `active=false` so search excludes them.
         """
         if not getattr(self._settings, "abandoned_recovery_enabled", True):
             return True
@@ -1489,26 +1490,50 @@ class SleepHandler:
         try:
             min_age = int(self._settings.abandoned_recovery_min_age_hours)
             max_per_cycle = int(self._settings.abandoned_recovery_max_per_cycle)
-            min_chars = int(
+            min_transcript = int(
                 self._settings.abandoned_recovery_min_transcript_chars
             )
+            fallback_enabled = bool(getattr(
+                self._settings,
+                "abandoned_recovery_summary_fallback_enabled",
+                True,
+            ))
+            min_summary = int(getattr(
+                self._settings,
+                "abandoned_recovery_min_summary_chars",
+                20,
+            ))
+            mark_enabled = bool(getattr(
+                self._settings,
+                "abandoned_recovery_mark_abandoned_enabled",
+                True,
+            ))
+            mark_age_days = int(getattr(
+                self._settings,
+                "abandoned_recovery_mark_age_days",
+                7,
+            ))
+            mark_max = int(getattr(
+                self._settings,
+                "abandoned_recovery_mark_max_per_cycle",
+                200,
+            ))
             if max_per_cycle <= 0:
                 return True
             agent_id = self._settings.agent_id
 
             from sqlalchemy import text as sql_text
-            recovered = 0
-            skipped_no_transcript = 0
+            recovered_full = 0
+            recovered_summary_only = 0
+            skipped_no_data = 0
+            marked_abandoned = 0
             errors = 0
 
+            # Loop A — recovery (F060 base + F060.1 fallback). Bounded by
+            # max_per_cycle because each row costs an LLM call.
             async with self._heart.db.session() as session:
-                # Find active episodes lacking a structured summary that are
-                # old enough to be considered abandoned. `started_at` is a
-                # safe lower bound for "last activity" — once a session is
-                # truly stuck, it accumulates no further turns. Real-time
-                # sessions younger than min_age are excluded.
                 rows = await session.execute(sql_text("""
-                    SELECT e.id, e.transcript
+                    SELECT e.id, e.transcript, e.summary
                     FROM heart.episodes e
                     WHERE e.agent_id = :agent_id
                       AND e.active = true
@@ -1523,23 +1548,39 @@ class SleepHandler:
                 })
                 candidates = rows.all()
 
-            for ep_id, transcript in candidates:
+            for ep_id, transcript, plain_summary in candidates:
                 if self._interrupted:
                     break
-                if not transcript or len(transcript) < min_chars:
-                    # No usable transcript — F060 cannot fabricate one.
-                    # Counted separately so operators can see how many
-                    # rows are unrecoverable for this reason.
-                    skipped_no_transcript += 1
+
+                # Pick the best available input: full transcript, plain
+                # summary fallback, or skip.
+                source: str | None = None
+                source_kind: str | None = None
+                if transcript and len(transcript) >= min_transcript:
+                    source = transcript
+                    source_kind = "transcript"
+                elif (
+                    fallback_enabled
+                    and plain_summary
+                    and len(plain_summary) >= min_summary
+                ):
+                    source = plain_summary
+                    source_kind = "summary"
+                else:
+                    skipped_no_data += 1
                     continue
+
                 try:
                     summary = await summarizer.summarize_episode(
                         episode_id=ep_id,
-                        transcript=transcript,
+                        transcript=source,
                         agent_id=agent_id,
                     )
                     if summary is not None:
-                        recovered += 1
+                        if source_kind == "transcript":
+                            recovered_full += 1
+                        else:
+                            recovered_summary_only += 1
                 except Exception:
                     errors += 1
                     logger.warning(
@@ -1547,17 +1588,60 @@ class SleepHandler:
                         ep_id, exc_info=True,
                     )
 
-            sleep_stats["episodes_recovered"] = recovered
-            if skipped_no_transcript:
-                sleep_stats["abandoned_recovery_skipped_no_transcript"] = (
-                    skipped_no_transcript
+            # Loop B — F060.2 mark abandoned. Targets rows with no usable
+            # content AND age >= mark_age_days. Cheap SQL UPDATE; can clear
+            # a large legacy backlog quickly.
+            if mark_enabled and not self._interrupted:
+                async with self._heart.db.session() as session:
+                    result = await session.execute(sql_text("""
+                        UPDATE heart.episodes
+                        SET active = false,
+                            outcome = 'abandoned',
+                            ended_at = COALESCE(ended_at, now())
+                        WHERE id IN (
+                          SELECT id FROM heart.episodes
+                          WHERE agent_id = :agent_id
+                            AND active = true
+                            AND structured_summary IS NULL
+                            AND started_at < now() - make_interval(days => :days)
+                            AND (transcript IS NULL OR length(transcript) < :min_t)
+                            AND (summary IS NULL OR length(summary) < :min_s)
+                          ORDER BY started_at ASC
+                          LIMIT :lim
+                        )
+                    """), {
+                        "agent_id": agent_id,
+                        "days": mark_age_days,
+                        "min_t": min_transcript,
+                        "min_s": min_summary,
+                        "lim": mark_max,
+                    })
+                    marked_abandoned = result.rowcount or 0
+                    await session.commit()
+
+            sleep_stats["episodes_recovered"] = (
+                recovered_full + recovered_summary_only
+            )
+            if recovered_full:
+                sleep_stats["episodes_recovered_full_transcript"] = recovered_full
+            if recovered_summary_only:
+                sleep_stats["episodes_recovered_summary_only"] = (
+                    recovered_summary_only
                 )
+            if marked_abandoned:
+                sleep_stats["episodes_marked_abandoned"] = marked_abandoned
+            if skipped_no_data:
+                sleep_stats["abandoned_recovery_skipped_no_data"] = skipped_no_data
             if errors:
                 sleep_stats["abandoned_recovery_errors"] = errors
             logger.info(
-                "F060 abandoned-episode recovery: %d recovered "
-                "(%d skipped no-transcript, %d errors)",
-                recovered, skipped_no_transcript, errors,
+                "F060 recovery: %d full + %d summary-only recovered, "
+                "%d marked abandoned, %d skipped (%d errors)",
+                recovered_full,
+                recovered_summary_only,
+                marked_abandoned,
+                skipped_no_data,
+                errors,
             )
             return True
         except Exception as exc:

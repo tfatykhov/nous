@@ -202,6 +202,26 @@ class Settings(BaseSettings):
     # produce low-quality summaries (per F051.5 summarize_episode skip).
     abandoned_recovery_min_transcript_chars: int = 50
 
+    # F060.1 (2026-05-05): fallback to plain `summary` when `transcript` is
+    # missing. Prod audit found 0/103 stuck-open episodes had transcripts
+    # but 93/103 had a plain summary (~77 chars avg). The plain summary is
+    # usually just the user's first message — degraded input vs a full
+    # transcript, but produces a usable structured_summary (title, topics)
+    # and is strictly better than leaving the row stuck forever.
+    abandoned_recovery_summary_fallback_enabled: bool = True
+    abandoned_recovery_min_summary_chars: int = 20
+
+    # F060.2 (2026-05-05): mark truly unrecoverable episodes as abandoned.
+    # An episode with NULL structured_summary AND no usable transcript AND
+    # no usable plain summary is data-empty — no path can recover it.
+    # Marking active=false + outcome='abandoned' removes them from search
+    # and stops the recovery loop from re-querying them every cycle.
+    # Separate age threshold (days, not hours) so we give recovery enough
+    # cycles to attempt before giving up.
+    abandoned_recovery_mark_abandoned_enabled: bool = True
+    abandoned_recovery_mark_age_days: int = 7
+    abandoned_recovery_mark_max_per_cycle: int = 200
+
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
 
