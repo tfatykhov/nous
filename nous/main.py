@@ -539,9 +539,10 @@ async def create_components(settings: Settings) -> dict:
         logger.info("F035.4: ContextLogger wired (full_payload=%s)", settings.context_log_full_payload)
 
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
+    # F061 PR-3: pass bus so inline hardened subtasks emit subtask_outcome telemetry.
     if settings.subtask_enabled:
         from nous.api.tools import register_subtask_tools
-        register_subtask_tools(dispatcher, heart, settings, runner=runner)
+        register_subtask_tools(dispatcher, heart, settings, runner=runner, bus=bus)
 
     # 012.3: Register programmatic tool calling (run_python)
     if settings.programmatic_tools_enabled:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 from datetime import UTC, datetime
 
 import httpx
@@ -149,7 +150,18 @@ class SubtaskWorkerPool:
                 # Late import: nous.handlers.subtask_executor imports
                 # build_subtask_prefix from nous.api.tools, which imports
                 # this module — top-level import would deadlock at startup.
-                from nous.handlers.subtask_executor import execute_hardened
+                # (functools.partial is stdlib and circular-safe; imported
+                # at module top.)
+                from nous.handlers.subtask_executor import (
+                    emit_outcome_event,
+                    execute_hardened,
+                )
+
+                # F061 PR-3: pass an emit_event callback that forwards to
+                # the bus-level outcome event with full telemetry payload.
+                _outcome_emitter = partial(
+                    emit_outcome_event, self._bus, settings=self._settings,
+                )
 
                 try:
                     final_text, _result = await execute_hardened(
@@ -157,6 +169,7 @@ class SubtaskWorkerPool:
                         runner=self._runner,
                         heart=self._heart,
                         settings=self._settings,
+                        emit_event=_outcome_emitter,
                     )
                     # Telemetry parity with the legacy path. Persistence is
                     # already done inside execute_hardened.

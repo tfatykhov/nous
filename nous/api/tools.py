@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -1158,13 +1159,36 @@ def build_subtask_prefix(
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
 
-def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = None) -> dict[str, Any]:
+def create_subtask_tools(
+    heart: Heart,
+    settings: "Settings",
+    runner: object = None,
+    bus: object = None,
+) -> dict[str, Any]:
     """Create subtask/schedule tool closures with Heart captured in closure context.
 
     Returns a dict of async callables suitable for ToolDispatcher registration.
-    The optional runner param enables inline (await_result) subtask execution.
+    The optional ``runner`` param enables inline (await_result) subtask execution.
+    The optional ``bus`` param (F061 PR-3) is the EventBus the inline hardened
+    path uses to emit ``subtask_outcome`` telemetry; ``None`` disables that
+    emission for inline subtasks (background subtasks emit via the worker pool).
     """
     from nous.config import Settings as _Settings  # noqa: F811 — deferred to avoid circular
+
+    # F061 PR-3 silent-failure review P2.1: warn loudly when inline telemetry
+    # is silently disabled because no bus was wired through. Operator who
+    # forgets to pass bus= would otherwise see dashboard rows for inline
+    # subtasks without subtask_outcome events for them.
+    if (
+        bus is None
+        and getattr(settings, "subtask_outcome_persistence_enabled", True)
+        and getattr(settings, "subtask_hardening_enabled", False)
+    ):
+        logger.warning(
+            "F061 PR-3: inline subtask telemetry disabled (bus=None passed to "
+            "create_subtask_tools). subtask_outcome events from "
+            "await_result=True path will be lost."
+        )
 
     async def spawn_task(
         task: str,
@@ -1300,8 +1324,20 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             if settings.subtask_hardening_enabled:
                 # Late import: nous.handlers.subtask_executor imports
                 # build_subtask_prefix from THIS module — top-level import
-                # would deadlock at startup.
-                from nous.handlers.subtask_executor import execute_hardened
+                # would deadlock at startup. (functools.partial is stdlib
+                # and circular-safe; imported at module top.)
+                from nous.handlers.subtask_executor import (
+                    emit_outcome_event,
+                    execute_hardened,
+                )
+
+                # F061 PR-3: pass an emit_event callback so inline subtasks
+                # also produce subtask_outcome telemetry. ``bus`` is captured
+                # by the outer create_subtask_tools closure when available.
+                _outcome_emitter = (
+                    partial(emit_outcome_event, bus, settings=settings)
+                    if bus is not None else None
+                )
 
                 # `executed` flag prevents double-persist on programming-
                 # error in the response-formatting code below: if any
@@ -1315,6 +1351,7 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                         execute_hardened(
                             subtask, subtask_session_id,
                             runner=runner, heart=heart, settings=settings,
+                            emit_event=_outcome_emitter,
                         ),
                         timeout=effective_timeout,
                     )
@@ -1727,13 +1764,21 @@ _CANCEL_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "Settings", runner: object = None) -> None:
+def register_subtask_tools(
+    dispatcher: ToolDispatcher,
+    heart: Heart,
+    settings: "Settings",
+    runner: object = None,
+    bus: object = None,
+) -> None:
     """Create subtask/schedule tools and register them with the dispatcher.
 
     Called at startup when subtask_enabled is True.
-    The optional runner enables inline (await_result) subtask execution.
+    The optional ``runner`` enables inline (await_result) subtask execution.
+    The optional ``bus`` (F061 PR-3) lets inline hardened subtasks emit
+    ``subtask_outcome`` telemetry via the EventBus.
     """
-    closures = create_subtask_tools(heart, settings, runner)
+    closures = create_subtask_tools(heart, settings, runner, bus=bus)
 
     dispatcher.register("spawn_task", closures["spawn_task"], _SPAWN_TASK_SCHEMA)
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)

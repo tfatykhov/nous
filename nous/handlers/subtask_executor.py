@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Awaitable, Callable
 
 from nous.api.subtask_tools import (
@@ -32,6 +33,72 @@ from nous.api.tools import build_subtask_prefix
 from nous.heart.subtask_validator import ValidationResult, validate_report
 
 logger = logging.getLogger(__name__)
+
+
+# F061 PR-3: structured outcome event for /dashboard/subtasks. Emitted via
+# the EventBus to nous_system.events. Schema mirrors spec mechanism 10.
+SUBTASK_OUTCOME_EVENT_TYPE = "subtask_outcome"
+
+
+async def emit_outcome_event(
+    bus,
+    subtask,
+    last_result: ValidationResult,
+    last_payload: dict | None,
+    *,
+    settings,
+    duration_ms: int | None = None,
+    attempts: int | None = None,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+    tool_calls_made: int | None = None,
+) -> None:
+    """Emit a ``subtask_outcome`` event via the EventBus.
+
+    Per silent-failure spec review P1.5: the entire body is wrapped in
+    try/except + ``logger.exception``. Without inner error handling,
+    fire-and-forget ``asyncio.create_task`` would silently drop the
+    telemetry event on any DB / event-bus failure — recreating the exact
+    silent-failure pattern F061 exists to eliminate.
+    """
+    if not settings.subtask_outcome_persistence_enabled:
+        return
+    if bus is None:
+        return
+    try:
+        from nous.events import Event
+
+        data: dict[str, Any] = {
+            "subtask_id": str(subtask.id),
+            "agent_id": getattr(subtask, "agent_id", None),
+            "frame_type": getattr(subtask, "frame_type", None),
+            "final_outcome": last_result.outcome,
+            "ok": last_result.ok,
+            "validator_reason": (
+                last_result.reason if not last_result.ok else None
+            ),
+            "attempts": attempts,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tool_calls_made": tool_calls_made,
+            "duration_ms": duration_ms,
+            "dag_node_id": (
+                str(subtask.dag_node_id)
+                if getattr(subtask, "dag_node_id", None) is not None
+                else None
+            ),
+        }
+        await bus.emit(Event(
+            type=SUBTASK_OUTCOME_EVENT_TYPE,
+            agent_id=getattr(subtask, "agent_id", "") or settings.agent_id,
+            session_id=f"subtask-{subtask.id.hex[:8]}",
+            data=data,
+        ))
+    except Exception:
+        logger.exception(
+            "Failed to emit %s event for subtask %s",
+            SUBTASK_OUTCOME_EVENT_TYPE, subtask.id.hex[:8],
+        )
 
 
 # Caller is responsible for ``end_conversation``; we just persist + emit telemetry.
@@ -86,6 +153,7 @@ async def execute_hardened(
     total_out = 0
     total_calls = 0
     attempt = 0  # populated in the loop; survives no-iter case via initial 0
+    started_monotonic = time.monotonic()
 
     force_tool = (
         "submit_final_report"
@@ -93,74 +161,103 @@ async def execute_hardened(
         else None
     )
 
-    for attempt in range(1, max_attempts + 1):
-        collector.reset()
-        try:
-            response_text, _ctx, usage = await runner.run_turn(
-                session_id=session_id,
-                user_message=user_message,
-                agent_id=settings.agent_id,
-                system_prompt_prefix=system_prefix,
-                skip_episode=True,
-                is_subtask=True,
-                max_tool_calls=settings.subtask_tool_call_limit,
-                model_override=subtask.model or settings.background_model,
-                is_background=True,
-                extra_tools=extra_tools,
-                force_tool_on_penultimate=force_tool,
-            )
-        except asyncio.CancelledError:
-            raise  # propagate cooperatively
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            logger.exception(
-                "Subtask %s attempt %d errored", subtask.id.hex[:8], attempt,
-            )
-            last_result = ValidationResult.failed("errored", error_msg)
+    cancelled = False
+    try:
+        for attempt in range(1, max_attempts + 1):
+            collector.reset()
+            try:
+                response_text, _ctx, usage = await runner.run_turn(
+                    session_id=session_id,
+                    user_message=user_message,
+                    agent_id=settings.agent_id,
+                    system_prompt_prefix=system_prefix,
+                    skip_episode=True,
+                    is_subtask=True,
+                    max_tool_calls=settings.subtask_tool_call_limit,
+                    model_override=subtask.model or settings.background_model,
+                    is_background=True,
+                    extra_tools=extra_tools,
+                    force_tool_on_penultimate=force_tool,
+                )
+            except asyncio.CancelledError:
+                # F061 PR-3 silent-failure review P1.1: persist + emit on
+                # cancellation so the dashboard never silently misses a
+                # subtask. The finally-block below handles the actual write
+                # under asyncio.shield.
+                cancelled = True
+                last_result = ValidationResult.failed(
+                    "cancelled", "Subtask cancelled (worker shutdown or external cancel).",
+                )
+                raise
+            except Exception as exc:
+                error_msg = f"{type(exc).__name__}: {exc}"
+                logger.exception(
+                    "Subtask %s attempt %d errored", subtask.id.hex[:8], attempt,
+                )
+                last_result = ValidationResult.failed("errored", error_msg)
+                break
+
+            total_in += usage.get("input_tokens", 0)
+            total_out += usage.get("output_tokens", 0)
+            total_calls += usage.get("tool_calls", 0)
+
+            last_payload = collector.get()
+            last_result = validate_report(last_payload, min_summary_chars=min_summary)
+
+            if last_result.ok or last_result.outcome == "incomplete_blocked":
+                break
+            if (
+                attempt < max_attempts
+                and last_result.outcome in {"incomplete_no_terminal", "validation_failed"}
+            ):
+                logger.warning(
+                    "Subtask %s attempt %d rejected (%s: %s); retrying",
+                    subtask.id.hex[:8], attempt, last_result.outcome, last_result.reason,
+                )
+                user_message = _build_retry_message(
+                    subtask.task, last_payload, last_result.reason,
+                )
+                continue
+            # Either out of attempts or non-recoverable outcome — exit.
             break
-
-        total_in += usage.get("input_tokens", 0)
-        total_out += usage.get("output_tokens", 0)
-        total_calls += usage.get("tool_calls", 0)
-
-        last_payload = collector.get()
-        last_result = validate_report(last_payload, min_summary_chars=min_summary)
-
-        if last_result.ok or last_result.outcome == "incomplete_blocked":
-            break
-        if (
-            attempt < max_attempts
-            and last_result.outcome in {"incomplete_no_terminal", "validation_failed"}
-        ):
-            logger.warning(
-                "Subtask %s attempt %d rejected (%s: %s); retrying",
-                subtask.id.hex[:8], attempt, last_result.outcome, last_result.reason,
-            )
-            user_message = _build_retry_message(
-                subtask.task, last_payload, last_result.reason,
-            )
-            continue
-        # Either out of attempts or non-recoverable outcome — exit.
-        break
-
-    await _persist_outcome(
-        heart,
-        subtask,
-        last_result,
-        last_payload,
-        attempts=attempt or 1,
-        tokens_in=total_in,
-        tokens_out=total_out,
-        tool_calls_made=total_calls,
-    )
-
-    if emit_event:
+    finally:
+        # Always persist + emit, even on CancelledError. asyncio.shield
+        # protects the DB writes from being aborted by the same cancel
+        # tearing down the worker. Any persistence/emission failure is
+        # logged loudly via logger.exception, NEVER silently dropped.
         try:
-            await emit_event(subtask, last_result, last_payload)
-        except Exception:  # pragma: no cover — defensive; emitter is best-effort
+            await asyncio.shield(_persist_outcome(
+                heart,
+                subtask,
+                last_result,
+                last_payload,
+                attempts=attempt or 1,
+                tokens_in=total_in,
+                tokens_out=total_out,
+                tool_calls_made=total_calls,
+            ))
+        except Exception:
             logger.exception(
-                "Subtask %s emit_event failed", subtask.id.hex[:8],
+                "Subtask %s _persist_outcome failed in finally (cancelled=%s)",
+                subtask.id.hex[:8], cancelled,
             )
+
+        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+        if emit_event:
+            try:
+                await asyncio.shield(emit_event(
+                    subtask, last_result, last_payload,
+                    duration_ms=duration_ms,
+                    attempts=attempt or 1,
+                    tokens_in=total_in,
+                    tokens_out=total_out,
+                    tool_calls_made=total_calls,
+                ))
+            except Exception:
+                logger.exception(
+                    "Subtask %s emit_event failed in finally (cancelled=%s)",
+                    subtask.id.hex[:8], cancelled,
+                )
     if notify_telegram:
         try:
             await notify_telegram(subtask, last_result, last_payload)
