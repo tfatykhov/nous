@@ -684,6 +684,22 @@ class Subtask(Base):
         "metadata", JSONB, nullable=False, server_default="{}"
     )
 
+    # F061: subtask hardening — populated by the hardened executor only.
+    # Pre-flag rows have NULL final_outcome / report_jsonb and 0 counters.
+    report_jsonb: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    final_outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tokens_in: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tokens_out: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    tool_calls_made: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    output_format: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dag_node_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nous_system.dag_nodes.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
 
 class Schedule(Base):
     """Scheduled or recurring task."""

@@ -102,6 +102,66 @@ def test_analyze_phase_handles_non_numeric_gracefully():
     assert result["max"] == 4
 
 
+def test_analyze_phase_refused_when_zero_streak_but_events_emitted():
+    """The audit-2026-05-04 finding: cluster_consolidation showed 14
+    zero cycles, BUT 5 f027_cluster_merge events fired. Phase IS
+    firing; the LLM is just refusing/admitting-rejecting every
+    attempt. This must NOT be reported as RED — different operator
+    triage path (prompt quality, not silent failure).
+    """
+    phase = PhaseSpec(
+        "cluster_consolidation", "clusters_merged", "test",
+        event_type="f027_cluster_merge",
+    )
+    bounds = PhaseBounds(zero_warn_after=10)
+    cycles = [_cycle(clusters_merged=0) for _ in range(14)]
+    result = analyze_phase(cycles, phase, bounds, event_count=5)
+    assert result["verdict"] == "REFUSED"
+    assert "5 f027_cluster_merge events emitted" in result["verdict_reason"]
+    assert result["event_count"] == 5
+    # zero_streak metric is unchanged — operator can still see the streak
+    assert result["zero_streak"] == 14
+
+
+def test_analyze_phase_red_when_no_events_emitted_either():
+    """Same zero-streak as above but ZERO events emitted — phase truly
+    didn't fire. Stays RED."""
+    phase = PhaseSpec(
+        "cluster_consolidation", "clusters_merged", "test",
+        event_type="f027_cluster_merge",
+    )
+    bounds = PhaseBounds(zero_warn_after=10)
+    cycles = [_cycle(clusters_merged=0) for _ in range(14)]
+    result = analyze_phase(cycles, phase, bounds, event_count=0)
+    assert result["verdict"] == "RED"
+    assert "silently broken" in result["verdict_reason"].lower()
+
+
+def test_analyze_phase_red_when_no_event_type_declared():
+    """Phases without an event_type can't get a REFUSED verdict —
+    we have no way to disambiguate fired-and-refused from didn't-fire.
+    Default to RED on long zero-streak (existing behavior preserved).
+    """
+    phase = PhaseSpec("stale_scan", "stale_deactivated", "test")
+    bounds = PhaseBounds(zero_warn_after=7)
+    cycles = [_cycle(stale_deactivated=0) for _ in range(10)]
+    result = analyze_phase(cycles, phase, bounds, event_count=42)
+    # event_count is ignored when phase.event_type is None
+    assert result["verdict"] == "RED"
+
+
+def test_overall_exit_code_refused_does_not_block():
+    """REFUSED is informational, not a CI failure — operator triages
+    via prompt quality / data inspection, not via on-call alert.
+    """
+    phases = [
+        {"verdict": "GREEN"},
+        {"verdict": "REFUSED"},
+        {"verdict": "GREEN"},
+    ]
+    assert overall_exit_code(phases) == 0
+
+
 def test_overall_exit_code_red_blocks_strict_mode():
     """--strict CI gate must surface ANY red phase."""
     phases = [

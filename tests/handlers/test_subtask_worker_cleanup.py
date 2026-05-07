@@ -168,6 +168,146 @@ async def test_execute_subtask_outer_timeout_ends_conversation():
     assert ended.is_set()
 
 
+async def test_process_subtask_timeout_persists_attempts_at_least_one():
+    """F061 PR-3 Codex review: worker outer-timeout path must pass
+    attempts >= 1 to heart.subtasks.fail() so the dashboard retry-rate
+    metric isn't skewed by timeout rows persisting attempts=0.
+
+    Round 4: ``attempts`` is now read from HardenedRunState. With the
+    legacy path (no state set), attempts falls back to 1.
+    """
+    runner = AsyncMock()
+
+    async def blocking_run_turn(**_kwargs):
+        await asyncio.Event().wait()
+
+    runner.run_turn = blocking_run_turn
+    runner.end_conversation = AsyncMock()
+
+    heart = _make_heart()
+    settings = _make_settings()
+    # Force flag-off → legacy path → no state populated → falls back to 1.
+    settings.subtask_hardening_enabled = False
+    pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings)
+
+    subtask = _make_subtask()
+    subtask.timeout_seconds = 0.05
+
+    await pool._process_subtask(subtask)
+
+    heart.subtasks.fail.assert_awaited_once()
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs.get("final_outcome") == "timed_out"
+    assert kwargs.get("attempts", 0) >= 1, (
+        "timeout path must persist attempts>=1; one execution attempt happened "
+        "before the timeout. attempts=0 would skew dashboard retry-rate metrics."
+    )
+
+
+async def test_process_subtask_timeout_reads_real_attempt_count_from_state():
+    """F061 round 4 P1-A: hardened-path timeout reads HardenedRunState
+    for the actual in-progress attempt count rather than hardcoding 1.
+
+    Setup: pool runs hardened path; state is mutated in-place by
+    execute_hardened. We patch execute_hardened to set state.attempts=2
+    (simulating "currently on attempt 2") then block forever.
+    """
+    from unittest.mock import patch
+
+    from nous.handlers.subtask_executor import HardenedRunState
+
+    runner = AsyncMock()
+    runner.end_conversation = AsyncMock()
+    heart = _make_heart()
+    settings = _make_settings(subtask_hardening_enabled=True)
+    pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings)
+
+    subtask = _make_subtask()
+    subtask.timeout_seconds = 0.05
+    subtask.output_format = None
+    subtask.success_criteria = None
+    subtask.frame_type = None
+
+    # Patch execute_hardened to mutate state to attempt=2 then block.
+    async def fake_execute_hardened(_subtask, _session_id, *, state, **_kw):
+        state.attempts = 2
+        state.tokens_in = 1234
+        state.tokens_out = 567
+        state.tool_calls_made = 4
+        await asyncio.Event().wait()  # block until cancelled
+
+    with patch(
+        "nous.handlers.subtask_executor.execute_hardened",
+        side_effect=fake_execute_hardened,
+    ):
+        await pool._process_subtask(subtask)
+
+    heart.subtasks.fail.assert_awaited_once()
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs.get("final_outcome") == "timed_out"
+    assert kwargs.get("attempts") == 2, (
+        "round 4 P1-A: timeout must read actual attempt count from "
+        "HardenedRunState, not hardcode 1"
+    )
+    assert kwargs.get("tokens_in") == 1234
+    assert kwargs.get("tokens_out") == 567
+    assert kwargs.get("tool_calls_made") == 4
+
+
+async def test_process_subtask_timeout_emits_outcome_event():
+    """F061 round 4 P1-D: outer timeout handler emits a subtask_outcome
+    event so event-driven telemetry consumers don't silently miss
+    timeouts (execute_hardened skipped emission on cancel).
+    """
+    from unittest.mock import AsyncMock as _AsyncMock
+    from unittest.mock import patch
+
+    from nous.handlers.subtask_executor import (
+        SUBTASK_OUTCOME_EVENT_TYPE,
+    )
+
+    runner = AsyncMock()
+    runner.end_conversation = AsyncMock()
+    heart = _make_heart()
+    settings = _make_settings(subtask_hardening_enabled=True)
+    bus = MagicMock()
+    bus.emit = _AsyncMock()
+    pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings, bus=bus)
+
+    subtask = _make_subtask()
+    subtask.timeout_seconds = 0.05
+    subtask.output_format = None
+    subtask.success_criteria = None
+    subtask.frame_type = None
+
+    async def fake_execute_hardened(_subtask, _session_id, *, state, **_kw):
+        state.attempts = 1
+        state.tokens_in = 100
+        state.tokens_out = 50
+        await asyncio.Event().wait()
+
+    with patch(
+        "nous.handlers.subtask_executor.execute_hardened",
+        side_effect=fake_execute_hardened,
+    ):
+        await pool._process_subtask(subtask)
+
+    # bus.emit must have been called with a subtask_outcome event for
+    # the timed_out outcome.
+    timed_out_emits = [
+        c for c in bus.emit.await_args_list
+        if c.args and c.args[0].type == SUBTASK_OUTCOME_EVENT_TYPE
+        and c.args[0].data.get("final_outcome") == "timed_out"
+    ]
+    assert len(timed_out_emits) == 1, (
+        f"expected exactly one subtask_outcome 'timed_out' emit; "
+        f"got {len(timed_out_emits)}"
+    )
+    event_data = timed_out_emits[0].args[0].data
+    assert event_data["attempts"] == 1
+    assert event_data["tokens_in"] == 100
+
+
 async def test_cleanup_timeout_logs_error(caplog):
     """end_conversation hangs past cleanup timeout → TimeoutError branch hits with ERROR log."""
     runner = AsyncMock()

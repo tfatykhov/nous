@@ -352,6 +352,7 @@ class SleepHandler:
         self._procedure_learner = None  # F012: Set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
+        self._episode_summarizer = None  # F060: Set externally if enabled
         # F035.1: Observability tracking
         self._total_sleeps: int = 0
         self._last_sleep_at: datetime | None = None
@@ -463,10 +464,34 @@ class SleepHandler:
                 if success:
                     phases_completed.append("cluster_consolidation")
 
+            # F060: recover abandoned episodes (NULL structured_summary +
+            # last activity > N hours). Runs BEFORE graph_densification so
+            # F040 picks up the freshly-populated structured_summary instead
+            # of falling through F058's plain-summary fallback.
+            if not self._interrupted:
+                success = await self._phase_recover_abandoned_episodes(sleep_stats)
+                if success:
+                    phases_completed.append("recover_abandoned_episodes")
+
             if not self._interrupted:
                 success = await self._phase_graph_densification(sleep_stats)
                 if success:
                     phases_completed.append("graph_densification")
+
+            # F057: re-link active episodes that the live F022 linker
+            # missed (sessions that never received episode_ended → no
+            # summarizer trigger → no link). Runs BEFORE prune_dead_edges
+            # so the new edges (active→active endpoints) won't be touched
+            # by F053 on this cycle.
+            if not self._interrupted:
+                success = await self._phase_relink_open_episodes(sleep_stats)
+                if success:
+                    phases_completed.append("relink_open_episodes")
+
+            if not self._interrupted:
+                success = await self._phase_prune_dead_edges(sleep_stats)
+                if success:
+                    phases_completed.append("prune_dead_edges")
 
             if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
@@ -1341,6 +1366,428 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("F040 graph densification phase failed", exc_info=True)
+            return False
+
+    async def _phase_prune_dead_edges(self, sleep_stats: dict) -> bool:
+        """F053: Delete graph edges incident to inactive nodes.
+
+        Spreading activation walks ``brain.graph_edges`` without an
+        ``active`` filter (see ``brain/spreading_activation.py``), so
+        edges to deactivated facts/episodes/procedures/decisions waste
+        per-hop activation budget on dead nodes. The orphan supersede
+        chain audit (PR #412) found this exposure surface; this phase
+        is the periodic housekeeping pass that recovers wasted hops.
+
+        Bounded by ``dead_edge_pruning_max_per_cycle`` to keep the
+        exclusive DELETE lock short. The bound is intentional: a single
+        sleep cycle should not block other writers for more than ~1s
+        worth of pruning. If more orphans accumulate than the per-cycle
+        bound, subsequent sleep cycles will continue draining.
+
+        SQL strategy: build the inactive-id pool with one UNION ALL,
+        then DELETE edges whose source OR target appears in that pool.
+        Agent-scoped both on the edges side and the inactive-id side
+        defense-in-depth — no chance of cross-agent edge deletion even
+        if a row was misclassified at write time.
+        """
+        try:
+            if not self._settings.dead_edge_pruning_enabled:
+                return True
+            agent_id = self._settings.agent_id
+            # Defensive int() — keeps tests that mock self._settings as a
+            # bare MagicMock from raising TypeError on the `<= 0` comparison.
+            max_per_cycle = int(self._settings.dead_edge_pruning_max_per_cycle)
+            if max_per_cycle <= 0:
+                return True
+            from sqlalchemy import text
+            async with self._heart.db.session() as session:
+                # `brain.decisions` has no `active` column today — decisions
+                # are append-only and reviewed-not-deleted. If/when a soft-
+                # delete is added, append a UNION ALL branch here. Including
+                # it pre-emptively would crash every sleep cycle until the
+                # column lands (review caught this).
+                sql = text("""
+                    WITH inactive_nodes AS (
+                        SELECT id, 'fact'::text AS node_type
+                        FROM heart.facts
+                        WHERE agent_id = :agent_id AND active = false
+                        UNION ALL
+                        SELECT id, 'episode'
+                        FROM heart.episodes
+                        WHERE agent_id = :agent_id AND active = false
+                        UNION ALL
+                        SELECT id, 'procedure'
+                        FROM heart.procedures
+                        WHERE agent_id = :agent_id AND active = false
+                    ),
+                    victim_edges AS (
+                        SELECT e.id
+                        FROM brain.graph_edges e
+                        WHERE e.agent_id = :agent_id
+                          AND (
+                            (e.source_type, e.source_id) IN (
+                              SELECT node_type, id FROM inactive_nodes
+                            )
+                            OR (e.target_type, e.target_id) IN (
+                              SELECT node_type, id FROM inactive_nodes
+                            )
+                          )
+                        LIMIT :max_per_cycle
+                    )
+                    DELETE FROM brain.graph_edges
+                    WHERE id IN (SELECT id FROM victim_edges)
+                    RETURNING id
+                """)
+                result = await session.execute(
+                    sql,
+                    {"agent_id": agent_id, "max_per_cycle": max_per_cycle},
+                )
+                deleted = len(result.all())
+                await session.commit()
+            sleep_stats["dead_edges_pruned"] = deleted
+            logger.info(
+                "F053 dead-edge prune: deleted %d edges (cap=%d)",
+                deleted, max_per_cycle,
+            )
+            return True
+        except Exception as exc:
+            # Surface error type into sleep_stats so observability dashboards
+            # can alert on silent regressions (review P2). The phase still
+            # returns False so it's excluded from phases_completed.
+            sleep_stats["dead_edges_prune_error"] = type(exc).__name__
+            logger.warning("F053 dead-edge prune failed", exc_info=True)
+            return False
+
+    async def _phase_recover_abandoned_episodes(self, sleep_stats: dict) -> bool:
+        """F060: Populate structured_summary or mark abandoned for stuck episodes.
+
+        Three sub-operations in one phase:
+          - F060 base: full recovery from persisted transcript (F025 P3-C).
+          - F060.1 fallback: when transcript is missing/short, fall back to
+            the plain `summary` field as input. Degraded but better than
+            leaving the row stuck forever. Prod audit (2026-05-05): 0/103
+            stuck-open episodes had transcripts; 93/103 had plain summary.
+          - F060.2 mark abandoned: rows with NO usable content AND age >
+            `mark_age_days` get `active=false, outcome='abandoned'`. Single
+            UPDATE — no LLM, separate bound (default 200/cycle).
+
+        Investigation context: F058 found 76+ active episodes on prod had
+        `structured_summary=NULL`. The cause is sessions that never reach
+        `cognitive.end_session` (process restart before idle timeout). The
+        episode_summarizer never fires, the structured fields stay null
+        forever, and downstream consumers (F040 graph_densifier, fact
+        extraction, search relevance) lose signal.
+
+        Recovered episodes stay `active=true` (matching F057). Marked-
+        abandoned episodes go `active=false` so search excludes them.
+        """
+        if not getattr(self._settings, "abandoned_recovery_enabled", True):
+            return True
+        summarizer = self._episode_summarizer
+        if summarizer is None:
+            # No summarizer wired — phase is inert. Don't fail the cycle.
+            return True
+        try:
+            min_age = int(self._settings.abandoned_recovery_min_age_hours)
+            max_per_cycle = int(self._settings.abandoned_recovery_max_per_cycle)
+            min_transcript = int(
+                self._settings.abandoned_recovery_min_transcript_chars
+            )
+            fallback_enabled = bool(getattr(
+                self._settings,
+                "abandoned_recovery_summary_fallback_enabled",
+                True,
+            ))
+            min_summary = int(getattr(
+                self._settings,
+                "abandoned_recovery_min_summary_chars",
+                20,
+            ))
+            mark_enabled = bool(getattr(
+                self._settings,
+                "abandoned_recovery_mark_abandoned_enabled",
+                True,
+            ))
+            mark_age_days = int(getattr(
+                self._settings,
+                "abandoned_recovery_mark_age_days",
+                7,
+            ))
+            mark_max = int(getattr(
+                self._settings,
+                "abandoned_recovery_mark_max_per_cycle",
+                200,
+            ))
+            if max_per_cycle <= 0:
+                return True
+            agent_id = self._settings.agent_id
+
+            from sqlalchemy import text as sql_text
+            recovered_full = 0
+            recovered_summary_only = 0
+            skipped_no_data = 0
+            marked_abandoned = 0
+            errors = 0
+
+            # Loop A — recovery (F060 base + F060.1 fallback). Bounded by
+            # max_per_cycle because each row costs an LLM call.
+            async with self._heart.db.session() as session:
+                rows = await session.execute(sql_text("""
+                    SELECT e.id, e.transcript, e.summary
+                    FROM heart.episodes e
+                    WHERE e.agent_id = :agent_id
+                      AND e.active = true
+                      AND e.structured_summary IS NULL
+                      AND e.started_at < now() - make_interval(hours => :hours)
+                    ORDER BY e.started_at ASC
+                    LIMIT :lim
+                """), {
+                    "agent_id": agent_id,
+                    "hours": min_age,
+                    "lim": max_per_cycle,
+                })
+                candidates = rows.all()
+
+            for ep_id, transcript, plain_summary in candidates:
+                if self._interrupted:
+                    break
+
+                # Pick the best available input: full transcript, plain
+                # summary fallback, or skip.
+                source: str | None = None
+                source_kind: str | None = None
+                if transcript and len(transcript) >= min_transcript:
+                    source = transcript
+                    source_kind = "transcript"
+                elif (
+                    fallback_enabled
+                    and plain_summary
+                    and len(plain_summary) >= min_summary
+                ):
+                    source = plain_summary
+                    source_kind = "summary"
+                else:
+                    skipped_no_data += 1
+                    continue
+
+                try:
+                    summary = await summarizer.summarize_episode(
+                        episode_id=ep_id,
+                        transcript=source,
+                        agent_id=agent_id,
+                    )
+                    if summary is not None:
+                        if source_kind == "transcript":
+                            recovered_full += 1
+                        else:
+                            recovered_summary_only += 1
+                except Exception:
+                    errors += 1
+                    logger.warning(
+                        "F060 summarize failed for episode %s",
+                        ep_id, exc_info=True,
+                    )
+
+            # Loop B — F060.2 mark abandoned. Targets rows with no usable
+            # content AND age >= mark_age_days. Cheap SQL UPDATE; can clear
+            # a large legacy backlog quickly.
+            if mark_enabled and not self._interrupted:
+                async with self._heart.db.session() as session:
+                    result = await session.execute(sql_text("""
+                        UPDATE heart.episodes
+                        SET active = false,
+                            outcome = 'abandoned',
+                            ended_at = COALESCE(ended_at, now())
+                        WHERE id IN (
+                          SELECT id FROM heart.episodes
+                          WHERE agent_id = :agent_id
+                            AND active = true
+                            AND structured_summary IS NULL
+                            AND started_at < now() - make_interval(days => :days)
+                            AND (transcript IS NULL OR length(transcript) < :min_t)
+                            AND (summary IS NULL OR length(summary) < :min_s)
+                          ORDER BY started_at ASC
+                          LIMIT :lim
+                        )
+                    """), {
+                        "agent_id": agent_id,
+                        "days": mark_age_days,
+                        "min_t": min_transcript,
+                        "min_s": min_summary,
+                        "lim": mark_max,
+                    })
+                    marked_abandoned = result.rowcount or 0
+                    await session.commit()
+
+            sleep_stats["episodes_recovered"] = (
+                recovered_full + recovered_summary_only
+            )
+            if recovered_full:
+                sleep_stats["episodes_recovered_full_transcript"] = recovered_full
+            if recovered_summary_only:
+                sleep_stats["episodes_recovered_summary_only"] = (
+                    recovered_summary_only
+                )
+            if marked_abandoned:
+                sleep_stats["episodes_marked_abandoned"] = marked_abandoned
+            if skipped_no_data:
+                sleep_stats["abandoned_recovery_skipped_no_data"] = skipped_no_data
+            if errors:
+                sleep_stats["abandoned_recovery_errors"] = errors
+            logger.info(
+                "F060 recovery: %d full + %d summary-only recovered, "
+                "%d marked abandoned, %d skipped (%d errors)",
+                recovered_full,
+                recovered_summary_only,
+                marked_abandoned,
+                skipped_no_data,
+                errors,
+            )
+            return True
+        except Exception as exc:
+            sleep_stats["abandoned_recovery_phase_error"] = type(exc).__name__
+            logger.warning(
+                "F060 abandoned-episode recovery phase failed",
+                exc_info=True,
+            )
+            return False
+
+    async def _phase_relink_open_episodes(self, sleep_stats: dict) -> bool:
+        """F057: Backfill F022 episode-graph edges the live linker missed.
+
+        Investigation (2026-05-04 prod audit on nous-default): 99 of 102
+        active episodes were graph orphans — 94 stuck-open sessions never
+        received ``episode_ended`` (no summarizer trigger, no F022 link).
+        Of those 99, 27 already have facts referencing them via
+        ``source_episode_id`` — those should have been linked by the live
+        path; this phase backfills them.
+
+        Approach: find active episodes with no incident graph edges,
+        started >= ``episode_relink_min_age_hours`` ago (skip recent —
+        the live linker handles those). For each, look up linkable
+        anchors (facts via source_episode_id, decisions via
+        episode_decisions). If anchors exist, call
+        ``graph_linker.link_episode_deterministic``. Bounded by
+        ``episode_relink_max_per_cycle`` to keep the cycle short.
+
+        Episodes stay ``active=true`` so they remain searchable
+        (heart.episodes.search filters on active=true). Only the
+        linker's outputs change. F053 does NOT prune the new edges
+        because both endpoints are active=true.
+        """
+        if not getattr(self._settings, "episode_relink_enabled", True):
+            return True
+        try:
+            min_age = int(self._settings.episode_relink_min_age_hours)
+            max_per_cycle = int(self._settings.episode_relink_max_per_cycle)
+            if max_per_cycle <= 0:
+                return True
+            agent_id = self._settings.agent_id
+
+            # Without a graph_linker dependency, the phase is a no-op.
+            # Episode summarizer wires _graph_linker; sleep handler
+            # constructor doesn't, so we lazily import + instantiate here.
+            graph_linker = getattr(self, "_graph_linker", None)
+            if graph_linker is None:
+                from nous.brain.graph_linker import GraphLinker
+                graph_linker = GraphLinker(
+                    self._heart.db,
+                    self._heart._embeddings,
+                    self._settings,
+                    agent_id,
+                )
+
+            from sqlalchemy import text as sql_text
+            relinked = 0
+            edges_created = 0
+            errors = 0
+            async with self._heart.db.session() as session:
+                # Find active orphan episodes older than min_age_hours.
+                # An "orphan" here = no incident graph_edges row at all.
+                # Only surface episodes that have at least one linkable
+                # anchor (active fact via source_episode_id, or
+                # episode_decisions row). Legacy pre-F022 episodes have
+                # neither and would just be skipped inside the loop —
+                # filtering at SQL keeps the LIMIT meaningful.
+                rows = await session.execute(sql_text("""
+                    SELECT e.id
+                    FROM heart.episodes e
+                    WHERE e.agent_id = :agent_id
+                      AND e.active = true
+                      AND e.started_at < now() - make_interval(hours => :hours)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM brain.graph_edges ge
+                        WHERE ge.agent_id = :agent_id
+                          AND ((ge.source_type='episode' AND ge.source_id=e.id)
+                            OR (ge.target_type='episode' AND ge.target_id=e.id))
+                      )
+                      AND (
+                        EXISTS (
+                          SELECT 1 FROM heart.facts f
+                          WHERE f.agent_id = :agent_id
+                            AND f.source_episode_id = e.id
+                            AND f.active = true
+                        )
+                        OR EXISTS (
+                          SELECT 1 FROM heart.episode_decisions ed
+                          WHERE ed.episode_id = e.id
+                        )
+                      )
+                    ORDER BY e.started_at ASC
+                    LIMIT :lim
+                """), {
+                    "agent_id": agent_id,
+                    "hours": min_age,
+                    "lim": max_per_cycle,
+                })
+                ep_ids = [r[0] for r in rows.all()]
+
+                for ep_id in ep_ids:
+                    if self._interrupted:
+                        break
+                    # Anchors: facts referencing this episode + decisions linked
+                    f_rows = await session.execute(sql_text(
+                        "SELECT id FROM heart.facts "
+                        "WHERE agent_id=:aid AND source_episode_id=:eid AND active=true"
+                    ), {"aid": agent_id, "eid": ep_id})
+                    fact_ids = [r[0] for r in f_rows.all()]
+                    d_rows = await session.execute(sql_text(
+                        "SELECT decision_id FROM heart.episode_decisions "
+                        "WHERE episode_id=:eid"
+                    ), {"eid": ep_id})
+                    decision_ids = [r[0] for r in d_rows.all()]
+
+                    if not fact_ids and not decision_ids:
+                        continue  # no anchors — this episode needs semantic backfill, not deterministic
+                    try:
+                        new_edges = await graph_linker.link_episode_deterministic(
+                            episode_id=ep_id,
+                            decision_ids=decision_ids,
+                            fact_ids=fact_ids,
+                            session=session,
+                        )
+                        relinked += 1
+                        edges_created += len(new_edges) if new_edges else 0
+                    except Exception:
+                        errors += 1
+                        logger.warning(
+                            "F057 relink failed for episode %s", ep_id,
+                            exc_info=True,
+                        )
+                await session.commit()
+
+            sleep_stats["episodes_relinked"] = relinked
+            sleep_stats["episode_relink_edges"] = edges_created
+            if errors:
+                sleep_stats["episode_relink_errors"] = errors
+            logger.info(
+                "F057 episode relink: %d episodes, %d edges (%d errors)",
+                relinked, edges_created, errors,
+            )
+            return True
+        except Exception as exc:
+            sleep_stats["episode_relink_phase_error"] = type(exc).__name__
+            logger.warning("F057 episode relink phase failed", exc_info=True)
             return False
 
     async def _phase_generalize(self, sleep_stats: dict) -> bool:

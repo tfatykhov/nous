@@ -1025,6 +1025,159 @@ class TestDAGEdgeCases:
             await orchestrator.start_dag(dag.id)
 
 
+class TestF061OutcomeAware:
+    """F061: _sync_subtask_node reads final_outcome and treats
+    incomplete_blocked / incomplete_no_terminal / validation_failed as
+    DAG node failure (instead of advancing on garbage).
+    """
+
+    @pytest.mark.asyncio
+    async def test_incomplete_blocked_marks_node_failed(
+        self, store, orchestrator, subtask_mgr,
+    ):
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+
+        # Subtask self-reported incomplete_blocked. status='completed' (per spec)
+        # but final_outcome surfaces the block.
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id,
+            status="completed",
+            result="blocked",
+            error=None,
+            final_outcome="incomplete_blocked",
+            report_jsonb={
+                "summary": "blocked",
+                "incomplete": True,
+                "blocked_reason": "permission denied on /etc/shadow",
+                "confidence": 0.0,
+            },
+        )
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        write = next(n for n in fetched.nodes if n.name == "write")
+
+        assert research.status == "failed", (
+            "incomplete_blocked must NOT advance the DAG"
+        )
+        assert "incomplete_blocked" in (research.error or "")
+        assert "permission denied" in (research.error or "")
+        # Dependent node was never started — DAG halted
+        assert write.status == "blocked"
+        assert fetched.status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_incomplete_no_terminal_marks_node_failed(
+        self, store, orchestrator, subtask_mgr,
+    ):
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id,
+            status="failed",
+            result=None,
+            error="Subtask exited without calling submit_final_report.",
+            final_outcome="incomplete_no_terminal",
+            report_jsonb=None,
+        )
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "failed"
+        assert "incomplete_no_terminal" in (research.error or "")
+
+    @pytest.mark.asyncio
+    async def test_validation_failed_marks_node_failed(
+        self, store, orchestrator, subtask_mgr,
+    ):
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id,
+            status="failed",
+            result=None,
+            error="summary_too_short: len=12 (min 50)",
+            final_outcome="validation_failed",
+            report_jsonb={
+                "summary": "too short",
+                "confidence": 0.5,
+            },
+        )
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "failed"
+        assert "validation_failed" in (research.error or "")
+
+    @pytest.mark.asyncio
+    async def test_completed_with_outcome_completed_advances_normally(
+        self, store, orchestrator, subtask_mgr,
+    ):
+        """Regression guard: final_outcome='completed' MUST advance the DAG."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id,
+            status="completed",
+            result="real summary text here",
+            error=None,
+            final_outcome="completed",
+            report_jsonb={"summary": "real summary text here", "confidence": 0.9},
+        )
+        # On the second tick, the dependent's subtask returns pending so the
+        # outer DAG status stays running. Replace return_value AFTER tick.
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "completed"
+        assert research.result == "real summary text here"
+
+    @pytest.mark.asyncio
+    async def test_legacy_row_no_final_outcome_falls_through_to_status(
+        self, store, orchestrator, subtask_mgr,
+    ):
+        """Pre-flag rows have final_outcome=None — must use existing status path."""
+        dag = await store.create(_two_subtask_request())
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=research.subtask_id,
+            status="completed",
+            result="legacy text result",
+            error=None,
+            final_outcome=None,  # legacy / pre-flag row
+            report_jsonb=None,
+        )
+
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "completed"  # legacy advances normally
+        assert research.result == "legacy text result"
+
+
 class TestCheckNodeCompletionCheck:
     """Test that check-type nodes honour completion_check after heartbeat finishes."""
 
@@ -1180,6 +1333,38 @@ class TestDAGOrchestratorTimeoutClamp:
         subtask_mgr.create.assert_called_once()
         _, kwargs = subtask_mgr.create.call_args
         assert kwargs["timeout"] == settings.dag_node_max_timeout
+
+    @pytest.mark.asyncio
+    async def test_launch_subtask_node_passes_dag_node_id(
+        self, orchestrator, subtask_mgr
+    ):
+        """F061 round 5 Codex review: DAG-created subtasks must have
+        ``dag_node_id`` set so the dashboard ``dag_correlation`` card
+        (which filters ``WHERE dag_node_id IS NOT NULL``) actually shows
+        them. Without this, the card stays empty in production.
+        """
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=uuid.uuid4(),
+            name="n",
+            node_type="subtask",
+            status="ready",
+            timeout_seconds=600,
+            wave=0,
+            instructions="x",
+        )
+        dag = ExecutionDAG(
+            id=uuid.uuid4(), agent_id="test", name="t",
+            status="running", nodes=[node], edges=[],
+        )
+        await orchestrator._launch_subtask_node(node, dag)
+        subtask_mgr.create.assert_called_once()
+        kwargs = subtask_mgr.create.call_args.kwargs
+        assert kwargs.get("dag_node_id") == node.id, (
+            "F061 round 5: dag_node_id must be passed through to "
+            "subtask_mgr.create() so the dashboard dag_correlation card "
+            "can attribute outcomes to DAG nodes."
+        )
 
     @pytest.mark.asyncio
     async def test_orchestrator_clamps_check_node_timeout_to_max(

@@ -53,6 +53,15 @@ class PhaseSpec:
     name: str
     activity_field: str
     description: str
+    # Optional per-action event type emitted by the phase. When set, a
+    # zero-streak in `activity_field` is cross-checked against the count
+    # of these events in the same window. Phases that emit events on
+    # every attempt (success + LLM-refused + admission-rejected) get a
+    # distinct verdict ("REFUSED") instead of "RED" when attempts > 0
+    # but successes == 0. F027/F031 audit (2026-05-04) found that
+    # cluster_consolidation's "RED for 14 cycles" was actually "LLM
+    # refused every cluster" — phases were firing, just not succeeding.
+    event_type: str | None = None
 
 
 # Order chosen to match sleep_handler.py phase order so the report reads
@@ -61,11 +70,13 @@ PHASES: tuple[PhaseSpec, ...] = (
     PhaseSpec("reflect", "facts_created",
               "LLM cross-session pattern extraction → facts"),
     PhaseSpec("resolve_contradictions", "contradictions_resolved",
-              "F031 SUPERSEDE/MERGE/REMOVE actions on contradicting fact pairs"),
+              "F031 SUPERSEDE/MERGE/REMOVE actions on contradicting fact pairs",
+              event_type="f031_contradiction_resolution"),
     PhaseSpec("stale_scan", "stale_deactivated",
               "Deactivate facts older than the staleness threshold"),
     PhaseSpec("cluster_consolidation", "clusters_merged",
-              "F027 merge clusters of similar facts into one"),
+              "F027 merge clusters of similar facts into one",
+              event_type="f027_cluster_merge"),
     PhaseSpec("graph_densification", "orphan_edges_created",
               "F040 create cross-type edges for orphan nodes"),
     PhaseSpec("graph_densification_ce", "ce_backfill_survived",
@@ -141,6 +152,37 @@ class CycleStat:
     data: dict
 
 
+async def fetch_phase_event_counts(
+    conn: asyncpg.Connection,
+    agent_id: str,
+    event_types: list[str],
+    since: object | None,
+) -> dict[str, int]:
+    """Count per-action events per phase since ``since``.
+
+    When a phase has ``event_type`` set, it emits one event per attempt
+    (success, LLM_REFUSED, REJECTED_BY_ADMISSION). A zero-streak in the
+    activity counter combined with non-zero events here means the phase
+    is firing but not succeeding — distinct verdict from "phase silently
+    didn't fire."
+    """
+    if not event_types:
+        return {}
+    since_clause = "AND created_at >= $3" if since else ""
+    rows = await conn.fetch(
+        f"""
+        SELECT event_type, COUNT(*) AS cnt
+        FROM nous_system.events
+        WHERE event_type = ANY($1::text[])
+          AND agent_id = $2
+          {since_clause}
+        GROUP BY event_type
+        """,
+        event_types, agent_id, *(([since] if since else [])),
+    )
+    return {r["event_type"]: int(r["cnt"]) for r in rows}
+
+
 async def fetch_recent_cycles(
     conn: asyncpg.Connection, agent_id: str, n: int,
 ) -> list[CycleStat]:
@@ -170,6 +212,7 @@ async def fetch_recent_cycles(
 
 def analyze_phase(
     cycles: list[CycleStat], phase: PhaseSpec, bounds: PhaseBounds,
+    event_count: int = 0,
 ) -> dict:
     """For one phase, compute aggregate stats + verdict across cycles.
 
@@ -227,10 +270,23 @@ def analyze_phase(
     median = sorted_v[n // 2] if n % 2 == 1 else (sorted_v[n // 2 - 1] + sorted_v[n // 2]) / 2
     mean = sum(values) / n
 
+    # When a phase emits per-action events on every attempt and the
+    # zero-streak is long enough to escalate, distinguish "phase is
+    # silently broken" (no events emitted at all) from "phase fires
+    # but every attempt refused/rejected" (events emitted, just no
+    # successes). The latter is a prompt/data quality issue, not a
+    # silent failure — operator triage path is different.
     if streak >= bounds.zero_warn_after:
-        verdict = "RED"
-        reason = (f"{streak} consecutive zeros — "
-                  f"{phase.name} appears silently broken")
+        if phase.event_type is not None and event_count > 0:
+            verdict = "REFUSED"
+            reason = (f"{streak} consecutive zeros, but "
+                      f"{event_count} {phase.event_type} events emitted — "
+                      f"phase IS firing; LLM refusing or admission rejecting "
+                      f"every attempt")
+        else:
+            verdict = "RED"
+            reason = (f"{streak} consecutive zeros — "
+                      f"{phase.name} appears silently broken")
     elif streak >= max(2, bounds.zero_warn_after // 2):
         verdict = "YELLOW"
         reason = (f"{streak} consecutive zeros — "
@@ -253,11 +309,21 @@ def analyze_phase(
         # whether the phase has been broken since day one or just
         # regressed recently.
         "last_nonzero_cycle_at": last_nonzero_at,
+        # Count of per-action events emitted by this phase in the
+        # window. Non-zero with zero successes ⇒ REFUSED verdict.
+        "event_type": phase.event_type,
+        "event_count": event_count,
     }
 
 
 def overall_exit_code(per_phase: list[dict]) -> int:
-    """1 if any phase RED, else 0."""
+    """1 if any phase RED, else 0.
+
+    REFUSED is NOT counted as RED — a phase that's firing but having
+    its work refused is a data/prompt quality issue, not a silent
+    failure. Operators see it in the report; the eval doesn't fail
+    the gate on it.
+    """
     return 1 if any(p["verdict"] == "RED" for p in per_phase) else 0
 
 
@@ -268,8 +334,22 @@ async def run(
     """Fetch + analyze. Caller owns connection lifetime."""
     bounds = bounds or _DEFAULT_BOUNDS
     cycles = await fetch_recent_cycles(conn, agent_id, n_cycles)
+
+    # Pull per-action event counts for any phase that emits them, scoped
+    # to the same time window as the cycles we just fetched. Use the
+    # earliest sampled cycle as the lower bound — the upper bound is
+    # implicit (now()).
+    since = cycles[-1].cycle_at if cycles else None
+    event_types = [p.event_type for p in PHASES if p.event_type]
+    event_counts = await fetch_phase_event_counts(
+        conn, agent_id, event_types, since
+    )
+
     per_phase = [
-        analyze_phase(cycles, p, bounds[p.name])
+        analyze_phase(
+            cycles, p, bounds[p.name],
+            event_count=event_counts.get(p.event_type or "", 0),
+        )
         for p in PHASES
     ]
     return {
@@ -327,6 +407,15 @@ def _print_report(result: dict) -> None:
                          or "never in this window")
             print(f"    - {p['phase']}: {p['verdict_reason']}")
             print(f"        last non-zero output: {last_seen}")
+        print()
+    refused = [p for p in result["phases"] if p["verdict"] == "REFUSED"]
+    if refused:
+        print("  REFUSED phases (firing but no successful work — "
+              "prompt/data quality issue, not silent failure):")
+        for p in refused:
+            print(f"    - {p['phase']}: {p['verdict_reason']}")
+            print(f"        triage via sleep_action_audit "
+                  f"(judges per-event correctness)")
         print()
 
 

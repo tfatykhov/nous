@@ -93,7 +93,14 @@ class AgentRunner:
         # Compaction (Spec 008.1)
         self._compactor: ConversationCompactor | None = None
         if settings.tool_pruning_enabled or settings.compaction_enabled:
-            self._compactor = ConversationCompactor(settings=settings)
+            self._compactor = ConversationCompactor(
+                settings=settings,
+                # F059 guard verdicts persist to nous_system.events so
+                # log rotation doesn't lose data we need to TP/FP-audit
+                # before flipping the destructive fallback flag. Mirrors
+                # F026 fire-and-forget pattern.
+                event_logger=self._log_compaction_guard,
+            )
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
         # F035.4: Context visibility
@@ -141,6 +148,21 @@ class AgentRunner:
         except Exception:  # noqa: BLE001
             # Persistence is best-effort — never let it break a turn.
             logger.debug("F026 persistence failed (suppressed)", exc_info=True)
+
+    def _log_compaction_guard(
+        self, event_type: str, data: dict, session_id: str
+    ) -> None:
+        """Fire-and-forget persistence of an F059 guard verdict.
+
+        Same fire-and-forget shape as `_log_f026_decision` — never
+        blocks the compaction path on DB I/O.
+        """
+        try:
+            asyncio.create_task(
+                self._brain.emit_event(event_type, data, session_id=session_id)
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("F059 guard persistence failed (suppressed)", exc_info=True)
 
     async def _call_gate_model(self, prompt: str) -> str:
         """F026: Call a Haiku-class model for Tier 3 action gating."""
@@ -222,6 +244,12 @@ class AgentRunner:
         model_override: str | None = None,
         tool_filter: list[str] | None = None,  # F034.5: restrict available tools
         is_background: bool = False,
+        # F061: per-call tool injection + forced terminal tool. Used only by
+        # the hardened subtask executor; chat sessions leave both at default.
+        # Routed straight through to _tool_loop without affecting the global
+        # ToolDispatcher (so no leak risk on crash).
+        extra_tools: dict[str, tuple[dict, Any]] | None = None,
+        force_tool_on_penultimate: str | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -359,6 +387,8 @@ class AgentRunner:
                 ledger=ledger,
                 tool_filter=tool_filter,
                 is_background=is_background,
+                extra_tools=extra_tools,
+                force_tool_on_penultimate=force_tool_on_penultimate,
             )
             conversation.messages.append(Message(role="assistant", content=response_text))
         except Exception as e:
@@ -458,6 +488,7 @@ class AgentRunner:
         stream: bool = False,
         skip_thinking: bool = False,
         model_override: str | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build Anthropic Messages API request payload.
 
@@ -583,6 +614,12 @@ class AgentRunner:
         }
         if tools:
             payload["tools"] = tools
+        if tool_choice is not None:
+            # F061: forced tool_choice on penultimate subtask turn. Anthropic
+            # docs require tool_choice in {"auto","none"} when extended thinking
+            # is on; the caller (_tool_loop) is responsible for not setting
+            # this when thinking is enabled for the effective model.
+            payload["tool_choice"] = tool_choice
         if stream:
             payload["stream"] = True
 
@@ -642,6 +679,7 @@ class AgentRunner:
         skip_thinking: bool = False,
         model_override: str | None = None,
         is_background: bool = False,
+        tool_choice: dict[str, Any] | None = None,
     ) -> ApiResponse:
         """Call Anthropic Messages API via configured backend.
 
@@ -650,6 +688,8 @@ class AgentRunner:
         F036: system_prompt may be str or dict[str, str] (tier split).
         F048: when is_background=True and feature flag enabled, routes through
         call_streaming_aggregated() to avoid idle-connection drops on long runs.
+        F061: tool_choice (None default) lets the subtask executor force a
+        terminal tool call on the penultimate turn.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
@@ -657,6 +697,7 @@ class AgentRunner:
         payload = self._build_api_payload(
             system_prompt, messages, tools,
             skip_thinking=skip_thinking, model_override=model_override,
+            tool_choice=tool_choice,
         )
         if is_background:
             if self._settings.api_background_streaming_enabled:
@@ -1153,6 +1194,9 @@ class AgentRunner:
         ledger: ExecutionLedger | None = None,
         tool_filter: list[str] | None = None,  # F034.5: restrict to named tools
         is_background: bool = False,
+        # F061: per-call tool injection + forced terminal tool gating.
+        extra_tools: dict[str, tuple[dict, Any]] | None = None,
+        force_tool_on_penultimate: str | None = None,
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1186,22 +1230,102 @@ class AgentRunner:
 
         all_tool_results: list[ToolResult] = []
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
-        total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        # F061: include tool_calls counter so the hardened executor's per-attempt
+        # accumulator can populate heart.subtasks.tool_calls_made (was missing).
+        total_usage: dict[str, int] = {
+            "input_tokens": 0, "output_tokens": 0, "tool_calls": 0,
+        }
         turns = 0
         total_tool_calls = 0
         max_turns = self._settings.max_turns
 
+        # F061: detect whether forced tool_choice is safe for this call. Forced
+        # tool_choice is incompatible with extended thinking — Anthropic only
+        # allows {"type":"auto"|"none"} when thinking is enabled. Detect off
+        # via global thinking_mode OR the haiku-family check the rest of the
+        # runner uses.
+        effective_model_for_force = (model_override or self._settings.model).lower()
+        thinking_off = (
+            self._settings.thinking_mode == "off"
+            or "haiku" in effective_model_for_force
+        )
+        force_enabled = bool(force_tool_on_penultimate) and thinking_off
+        terminate_after_tool_results = False  # set when submit_final_report fires
+        # F061 round 4 P2-I: cap the number of force_tool_on_penultimate
+        # fires within a single run_turn. Without this cap, the >= math
+        # could fire force on multiple consecutive turns when the model
+        # keeps producing schema-invalid payloads — 3× token cost on the
+        # worst-case validator-fail path. Cap at 2 (penultimate + ultimate)
+        # which preserves the recovery benefit without unbounded retries.
+        _force_fires_remaining = 2
+
         while turns < max_turns:
             # F020: Rebuild tool list each iteration for dynamic cache_retrieve
             tools = list(base_tools)
+            # F061: append per-call extra tool schemas (NOT registered globally).
+            if extra_tools:
+                for _name, (_schema, _exec) in extra_tools.items():
+                    tools.append(_schema)
 
-            api_response = await self._call_api(
-                system_prompt=system_prompt,
-                messages=messages,
-                tools=tools if tools else None,
-                model_override=model_override,
-                is_background=is_background,
+            # F061: force the terminal tool on the LAST TWO allowed turns
+            # (penultimate + ultimate) when force_tool_on_penultimate is set
+            # and thinking is off. Forcing on only the ultimate turn (the
+            # earlier ``turns - 1`` math) left no recovery if the model
+            # still failed to call submit_final_report — recoverable cases
+            # became ``incomplete_no_terminal``. Forcing on the penultimate
+            # turn AND the ultimate turn gives the model two pushed
+            # opportunities to terminate before the existing tool-call-limit
+            # fallback kicks in.
+            #
+            # Math (max_turns=4, max_tool_calls=20):
+            #   turns=0: skipped by ``turns > 0`` (never force first turn)
+            #   turns=1: not yet penultimate (1 < 2)
+            #   turns=2: penultimate — force fires; if model terminates,
+            #            short-circuit returns.
+            #   turns=3: ultimate — force still fires as last push.
+            #   ↳ If model still misses, the existing ``max_turns`` branch
+            #     makes a final no-tools summary call.
+            #
+            # ``>=`` (not ``==``) handles the case where the model dispatched
+            # multiple tools in one response and jumped past the boundary.
+            tool_choice_arg: dict[str, Any] | None = None
+            # F061 round 4 P2-G: clamp the (limit - 2) thresholds to 1.
+            # Without the clamp, ``max_turns=2`` or ``max_tool_calls=2``
+            # produces a threshold of 0 — the ``>=`` test then matches on
+            # turn 1 / first tool call, forcing the model to terminate
+            # before any work has run. Clamping to 1 means force fires no
+            # earlier than the 2nd turn / 2nd tool call.
+            _turn_threshold = max(1, max_turns - 2)
+            _tool_threshold = (
+                max(1, max_tool_calls - 2) if max_tool_calls is not None else None
             )
+            is_penultimate = (
+                force_enabled
+                and force_tool_on_penultimate is not None
+                and turns > 0
+                and _force_fires_remaining > 0
+                and (turns >= _turn_threshold
+                     or (_tool_threshold is not None
+                         and total_tool_calls >= _tool_threshold))
+            )
+            if is_penultimate:
+                tool_choice_arg = {
+                    "type": "tool", "name": force_tool_on_penultimate,
+                }
+                _force_fires_remaining -= 1
+
+            # Only pass tool_choice when non-None so existing mocks of
+            # _call_api (which don't accept the new kwarg) continue to work.
+            _call_kwargs: dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "messages": messages,
+                "tools": tools if tools else None,
+                "model_override": model_override,
+                "is_background": is_background,
+            }
+            if tool_choice_arg is not None:
+                _call_kwargs["tool_choice"] = tool_choice_arg
+            api_response = await self._call_api(**_call_kwargs)
 
             # F035.4: Update context log with response metadata
             if self._context_logger and self._last_context_entry_id and api_response.usage:
@@ -1289,9 +1413,26 @@ class AgentRunner:
 
                     if not gated:
                         start_time = time.monotonic()
-                        result_text, is_error = await self._dispatcher.dispatch(
-                            tool_name, tool_input, session_id=session_id
-                        )
+                        # F061: per-call dispatch override for extra_tools.
+                        # Routes submit_final_report (and any other per-run
+                        # tool) to the executor passed by the subtask harness
+                        # WITHOUT registering globally — no leak risk on crash.
+                        if extra_tools and tool_name in extra_tools:
+                            _schema, executor = extra_tools[tool_name]
+                            result_text, is_error = await executor(**tool_input)
+                            # Short-circuit: any successful extra_tools call
+                            # terminates the loop. F061's submit_final_report
+                            # is currently the only extra_tool and its
+                            # semantics are "I am done" — even when the
+                            # model voluntarily called it (force_tool was
+                            # None on this turn), we still want to exit
+                            # rather than make wasted follow-up API calls.
+                            if not is_error:
+                                terminate_after_tool_results = True
+                        else:
+                            result_text, is_error = await self._dispatcher.dispatch(
+                                tool_name, tool_input, session_id=session_id
+                            )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch)
@@ -1342,6 +1483,14 @@ class AgentRunner:
                         duration_ms=duration_ms,
                     ))
 
+                    # F061 PR-3 Codex review P2: stop dispatching remaining
+                    # tool_use blocks once a successful submit_final_report
+                    # accepted the terminal payload. Subsequent tools in
+                    # the same assistant message would otherwise run with
+                    # side effects after termination has been declared.
+                    if terminate_after_tool_results:
+                        break
+
             # Append all tool results as single user message
             messages.append({
                 "role": "user",
@@ -1349,6 +1498,19 @@ class AgentRunner:
             })
 
             total_tool_calls += len(tool_results_for_message)
+            total_usage["tool_calls"] += len(tool_results_for_message)
+
+            # F061: short-circuit on successful submit_final_report. Caller
+            # reads the validated payload from the collector — response_text
+            # is intentionally a thin marker since the contract is the tool
+            # input, not free-form prose.
+            if terminate_after_tool_results:
+                return (
+                    "Report submitted.",
+                    all_tool_results,
+                    total_usage,
+                    all_thinking_blocks,
+                )
 
             # 012.2: Enforce subtask tool call limit
             if max_tool_calls and total_tool_calls >= max_tool_calls:

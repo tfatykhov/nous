@@ -67,6 +67,25 @@ class Settings(BaseSettings):
     # prompt path.
     compaction_structured_facts_enabled: bool = True
 
+    # F059 (2026-05-05): defense-in-depth hallucination guard on compaction
+    # output. Extracts entity tokens (emails, IPs, version strings, file
+    # paths, named tokens) from the input and the summary, flags entities
+    # in the summary that are absent from the input. Warn-only by default
+    # so we measure false-positive rate before activating fallback.
+    # eval_compaction_fidelity.md showed worst-case substitutions:
+    # `marcus.webb@acme.com` → `david.park@acmecorp.com` (authoritative-
+    # looking but fabricated). This guard catches that pattern.
+    compaction_hallucination_guard_enabled: bool = True
+    compaction_hallucination_max_suspect_count: int = 2
+    # Fall back to truncation when suspect count exceeds the threshold.
+    # Default off — gather false-positive baseline from logs first.
+    compaction_hallucination_fallback_enabled: bool = False
+    # Persist every fire (any non-empty suspect list, threshold or not)
+    # to nous_system.events for retrospective TP/FP audit. Without this,
+    # Docker log rotation drops evidence we'd need to decide whether to
+    # flip `_fallback_enabled`. Mirrors F026 persistence pattern.
+    compaction_hallucination_persist_enabled: bool = True
+
     # F026 decision persistence — log every action-gate verdict and claim-
     # verification outcome to nous_system.events so a retrospective accuracy
     # eval can run against actual production behavior. Fire-and-forget via
@@ -79,6 +98,30 @@ class Settings(BaseSettings):
     # F025 prep: hybrid search vector weight (keyword_weight = 1 - vector_weight)
     vector_weight: float = 0.7
     rrf_k: int = 60  # RRF smoothing constant (F025)
+    # F053 (2026-05-03): orphan-edge sleep cleanup.
+    # F031 MERGE / F027 cluster_consolidation deactivate facts but the
+    # `brain.graph_edges` rows incident to those facts remain. Spreading
+    # activation walks edges only (no `active` filter) so it wastes hops
+    # on dead nodes. New sleep phase prunes edges where either endpoint is
+    # an inactive node, bounded per cycle to avoid long exclusive locks.
+    dead_edge_pruning_enabled: bool = True
+    dead_edge_pruning_max_per_cycle: int = 1000
+
+    # F054 (2026-05-03): keyword channel toggle.
+    # F051 channel-isolation eval (90 nous_prod + 20 longmemeval qrels) showed
+    # vector_only ties default RRF byte-for-byte on longmemeval and -0.2% on
+    # nous_prod; keyword_only collapses (MRR 0.07/0.35). Operators with
+    # vector-dominant corpora can flip this off to save one FTS query per
+    # recall. Default True preserves current behavior; eval corpora don't
+    # represent jargon-heavy ingestion (codenames, IDs, rare terms).
+    #
+    # Caveat: when False, _rrf_merge sees an empty keyword list, so every
+    # candidate's RRF score = vector_weight/(k + v_rank) + (1-vector_weight)/
+    # (k + penalty_rank). The keyword half of the score is uniformly suppressed
+    # rather than absent, which can shift absolute scores and interact with
+    # downstream relevance_floor / staleness_penalty consumers. Order is
+    # preserved; absolute thresholds may need tuning if you flip this off.
+    hybrid_search_keyword_enabled: bool = True
 
     # F017: Relevance floor
     relevance_floor_enabled: bool = True
@@ -128,6 +171,56 @@ class Settings(BaseSettings):
     # mergeable clusters get a chance.
     cluster_consolidation_min_facts: int = 3
     cluster_consolidation_max_facts: int = 10
+
+    # F057 (2026-05-04): episode re-linker — periodic backfill of F022
+    # episode-graph edges for episodes the live linker missed. Investigation
+    # of nous-default prod (2026-05-04) found 99/102 active episodes were
+    # graph orphans (97% rate); 94 of those are stuck-open sessions that
+    # never received `episode_ended` (so episode_summarizer + F022 linker
+    # never fired). Of the 99 orphans, 27 have facts referencing them via
+    # source_episode_id — those should have linked; the rest need semantic
+    # episode↔episode (handled separately by F040).
+    # The re-linker queries active orphan episodes older than min_age_hours,
+    # fetches their fact/decision anchors, and calls
+    # graph_linker.link_episode_deterministic. Episodes stay active=true
+    # so they remain searchable; only the linker's outputs change.
+    episode_relink_enabled: bool = True
+    episode_relink_min_age_hours: int = 24  # skip recent — live linker handles
+    episode_relink_max_per_cycle: int = 30
+
+    # F060 (2026-05-05): abandoned-episode recovery — sleep-cycle phase that
+    # finds active episodes with NULL structured_summary AND last activity >
+    # min_age_hours, then invokes EpisodeSummarizer.summarize_episode to
+    # populate the missing summary. Closes the gap that F058 was patching at
+    # the densifier layer. Requires the F025 P3-C transcript column (rows
+    # without a persisted transcript can't be summarized retroactively).
+    # Episodes stay active=true (matching F057 — search filters on active=true).
+    abandoned_recovery_enabled: bool = True
+    abandoned_recovery_min_age_hours: int = 24
+    abandoned_recovery_max_per_cycle: int = 50
+    # Minimum transcript length to bother summarizing — short transcripts
+    # produce low-quality summaries (per F051.5 summarize_episode skip).
+    abandoned_recovery_min_transcript_chars: int = 50
+
+    # F060.1 (2026-05-05): fallback to plain `summary` when `transcript` is
+    # missing. Prod audit found 0/103 stuck-open episodes had transcripts
+    # but 93/103 had a plain summary (~77 chars avg). The plain summary is
+    # usually just the user's first message — degraded input vs a full
+    # transcript, but produces a usable structured_summary (title, topics)
+    # and is strictly better than leaving the row stuck forever.
+    abandoned_recovery_summary_fallback_enabled: bool = True
+    abandoned_recovery_min_summary_chars: int = 20
+
+    # F060.2 (2026-05-05): mark truly unrecoverable episodes as abandoned.
+    # An episode with NULL structured_summary AND no usable transcript AND
+    # no usable plain summary is data-empty — no path can recover it.
+    # Marking active=false + outcome='abandoned' removes them from search
+    # and stops the recovery loop from re-querying them every cycle.
+    # Separate age threshold (days, not hours) so we give recovery enough
+    # cycles to attempt before giving up.
+    abandoned_recovery_mark_abandoned_enabled: bool = True
+    abandoned_recovery_mark_age_days: int = 7
+    abandoned_recovery_mark_max_per_cycle: int = 200
 
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
@@ -324,6 +417,19 @@ class Settings(BaseSettings):
         validation_alias="NOUS_SUBTASK_CLEANUP_TIMEOUT_SECONDS",
         description="F049: max seconds to wait for end_conversation in subtask finally before logging ERROR",
     )
+
+    # F061: Subtask Hardening — forced terminal-tool contract + structural validator + bounded retry.
+    # All fields use plain names (no validation_alias); env_prefix="NOUS_" picks up NOUS_SUBTASK_*.
+    subtask_hardening_enabled: bool = False
+    subtask_max_attempts: int = Field(default=2, ge=1, le=3)
+    subtask_report_min_summary_chars: int = Field(default=50, ge=1)
+    # bootstrap/work timeouts are observability-only labels until PR-2 wires them
+    # into _execute_hardened. The outer asyncio.wait_for(timeout_seconds) in the
+    # worker is unchanged. Setting these in PR-1 has no runtime effect.
+    subtask_bootstrap_timeout: int = Field(default=30, ge=1)
+    subtask_work_timeout: int = Field(default=570, ge=1)
+    subtask_outcome_persistence_enabled: bool = True
+    subtask_force_tool_on_penultimate: bool = True
 
     # F049: WM TTL safety-net sweep
     working_memory_ttl_hours: int = Field(

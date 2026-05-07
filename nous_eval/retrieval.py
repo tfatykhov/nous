@@ -402,6 +402,90 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "redundant on this corpus."
         ),
     ),
+    # ------------------------------------------------------------------
+    # F052/F054 validation configs — exercise the flags this branch ships.
+    # Each isolates the new behavior so eval predicts the production lift
+    # before deployment.
+    # ------------------------------------------------------------------
+    "f052_on": RetrievalConfig(
+        name="f052_on",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.5,
+        },
+        description=(
+            "F052: CE rerank on with episode-share skip gate (default "
+            "threshold 0.5). Predicted: ties baseline on nous_prod "
+            "(fact-dominant); ties ce_off on longmemeval (episode-"
+            "dominant) — recovers the +5.2% MRR longmemeval lift "
+            "without losing the +2.2% nous_prod lift."
+        ),
+    ),
+    "f052_off_explicit": RetrievalConfig(
+        name="f052_off_explicit",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": False,
+        },
+        description=(
+            "F052 explicitly off — should match baseline-with-CE-on. "
+            "Sanity check the gate flag default doesn't change behavior."
+        ),
+    ),
+    "f054_keyword_off": RetrievalConfig(
+        name="f054_keyword_off",
+        flags={
+            "cross_encoder_enabled": True,
+            "hybrid_search_keyword_enabled": False,
+        },
+        description=(
+            "F054: vector-only hybrid_search (keyword channel disabled). "
+            "Predicted: ties baseline since channel-iso showed vector_only "
+            "matches ce_off byte-for-byte on lme. Validates flag wires "
+            "to the production hot path."
+        ),
+    ),
+    "f052_low_threshold": RetrievalConfig(
+        name="f052_low_threshold",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.15,
+        },
+        description=(
+            "F052 with low threshold (0.15) — matches longmemeval corpus "
+            "shape where facts outnumber episodes 4.7x but the qrels "
+            "target episode-flavored recall. Tests whether F052's "
+            "mechanism works at all on this data."
+        ),
+    ),
+    "f052_very_low_threshold": RetrievalConfig(
+        name="f052_very_low_threshold",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.05,
+        },
+        description=(
+            "F052 with extremely low threshold (0.05) — fires whenever "
+            "any episodes are present in the candidate set."
+        ),
+    ),
+    "f052_and_f054_combined": RetrievalConfig(
+        name="f052_and_f054_combined",
+        flags={
+            "cross_encoder_enabled": True,
+            "cross_encoder_episode_skip_enabled": True,
+            "cross_encoder_episode_skip_threshold": 0.5,
+            "hybrid_search_keyword_enabled": False,
+        },
+        description=(
+            "F052 + F054 stacked — predicted ceiling for this branch: "
+            "longmemeval lifts (CE skip on episode dominance), nous_prod "
+            "stays at baseline, keyword channel off everywhere."
+        ),
+    ),
 }
 
 

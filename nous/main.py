@@ -241,6 +241,10 @@ async def create_components(settings: Settings) -> dict:
         except ImportError:
             logger.debug("GraphLinker not available yet")
 
+        # Initialize before the conditional so downstream wiring (F060
+        # sleep handler, etc.) can read it unconditionally even when the
+        # summarizer is disabled or the import fails.
+        episode_summarizer = None
         try:
             from nous.handlers.episode_summarizer import EpisodeSummarizer
 
@@ -376,6 +380,11 @@ async def create_components(settings: Settings) -> dict:
         # F040: Wire graph densifier into sleep handler
         if sleep_handler is not None and graph_densifier is not None:
             sleep_handler._graph_densifier = graph_densifier
+
+        # F060: Wire episode summarizer into sleep handler so the abandoned-
+        # episode recovery phase can re-summarize stuck-open sessions.
+        if sleep_handler is not None and episode_summarizer is not None:
+            sleep_handler._episode_summarizer = episode_summarizer
 
         # F012: Wire procedure learner into sleep handler + monitor
         procedure_learner = None
@@ -530,9 +539,10 @@ async def create_components(settings: Settings) -> dict:
         logger.info("F035.4: ContextLogger wired (full_payload=%s)", settings.context_log_full_payload)
 
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
+    # F061 PR-3: pass bus so inline hardened subtasks emit subtask_outcome telemetry.
     if settings.subtask_enabled:
         from nous.api.tools import register_subtask_tools
-        register_subtask_tools(dispatcher, heart, settings, runner=runner)
+        register_subtask_tools(dispatcher, heart, settings, runner=runner, bus=bus)
 
     # 012.3: Register programmatic tool calling (run_python)
     if settings.programmatic_tools_enabled:

@@ -759,6 +759,7 @@ class Heart:
         types: list[str] | None = None,
         session: AsyncSession | None = None,
         residual_activations: dict[UUID, float] | None = None,
+        apply_mmr: bool | None = None,
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
 
@@ -773,12 +774,22 @@ class Heart:
         recall_deep tool layer. When provided + non-empty, ``_recall``
         applies an additive boost before CE rerank (spec §B). None or
         empty dict skips the boost (cold recall).
+
+        F030.2: ``apply_mmr`` overrides the global MMR gate.
+          - ``None`` — settings-driven (current default): MMR runs only when
+            ``mmr_enabled`` is true AND CE didn't reorder (or
+            ``mmr_skip_after_ce`` is false).
+          - ``True`` — force MMR on regardless of ``mmr_enabled`` AND
+            bypass ``mmr_skip_after_ce``. For diversity-hungry consumers
+            (context packing) where coverage beats top-1 ranking.
+          - ``False`` — force MMR off. For pure relevance scoring.
         """
         if session is None:
             async with self.db.session() as session:
                 return await self._recall(
                     query, limit, types, session, residual_activations,
                     owns_session=True,
+                    apply_mmr=apply_mmr,
                 )
         # Caller-provided session: caller owns transaction recovery. We do
         # NOT rollback after a sub-search failure (would silently discard
@@ -786,6 +797,7 @@ class Heart:
         return await self._recall(
             query, limit, types, session, residual_activations,
             owns_session=False,
+            apply_mmr=apply_mmr,
         )
 
     def set_residual_activator(self, activator: "ResidualActivator | None") -> None:
@@ -829,6 +841,7 @@ class Heart:
         session: AsyncSession,
         residual_activations: dict[UUID, float] | None = None,
         owns_session: bool = True,
+        apply_mmr: bool | None = None,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -1000,14 +1013,28 @@ class Heart:
         # MMR off in this case. MMR's diversity selection over CE's reordered
         # top-20 otherwise neutralizes CE's relevance signal. Set
         # NOUS_MMR_SKIP_AFTER_CE=false to restore pre-F030.1 chained behavior.
-        mmr_blocked_by_ce = ce_reordered and self.settings.mmr_skip_after_ce
-        if mmr_blocked_by_ce:
-            logger.info(
-                "MMR: skipped (F030.1 — CE reordered head, mmr_skip_after_ce=True)"
-            )
+        # F030.2: per-consumer override — `apply_mmr=True` from the caller
+        # forces MMR on regardless of `mmr_enabled` AND bypasses the
+        # skip-after-CE gate. `apply_mmr=False` forces MMR off. None keeps
+        # the settings-driven default. Diversity-hungry callers (context
+        # packing) opt in; ranking-sensitive callers leave it None.
+        if apply_mmr is True:
+            mmr_blocked_by_ce = False
+            mmr_active = True
+            logger.info("MMR: forced on (F030.2 apply_mmr=True override)")
+        elif apply_mmr is False:
+            mmr_blocked_by_ce = False
+            mmr_active = False
+            logger.info("MMR: forced off (F030.2 apply_mmr=False override)")
+        else:
+            mmr_blocked_by_ce = ce_reordered and self.settings.mmr_skip_after_ce
+            mmr_active = self.settings.mmr_enabled and not mmr_blocked_by_ce
+            if mmr_blocked_by_ce:
+                logger.info(
+                    "MMR: skipped (F030.1 — CE reordered head, mmr_skip_after_ce=True)"
+                )
         if (
-            self.settings.mmr_enabled
-            and not mmr_blocked_by_ce
+            mmr_active
             and len(merged) > 1
             and self._embeddings is not None
         ):

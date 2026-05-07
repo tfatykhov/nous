@@ -198,7 +198,24 @@ async def main() -> int:
     p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--out", type=Path, default=Path("reports/eval_context_packing.md"))
     p.add_argument("--out-json", type=Path, default=Path("reports/eval_context_packing.json"))
+    p.add_argument(
+        "--apply-mmr",
+        choices=["none", "force_on", "force_off"],
+        default="none",
+        help=(
+            "F030.2 per-consumer MMR override. 'none' uses settings-driven "
+            "default (matches the recall_deep tool path). 'force_on' opts "
+            "into MMR diversity for every recall (the diversity-hungry "
+            "consumer mode that lifts context packing memory bucket "
+            "0/8 → 6/8 in the EXEC-PLAN 1.5 eval)."
+        ),
+    )
     args = p.parse_args()
+    _apply_mmr: bool | None = (
+        True if args.apply_mmr == "force_on"
+        else False if args.apply_mmr == "force_off"
+        else None
+    )
 
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -248,6 +265,7 @@ async def main() -> int:
                     query=sc.user_message,
                     heart=heart, brain=brain, settings=settings,
                     limit=args.top_k,
+                    apply_mmr=_apply_mmr,  # F030.2 override
                 )
                 # Assemble the LLM-facing context string.
                 context_lines = []

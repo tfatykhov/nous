@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -1066,37 +1067,194 @@ def register_cache_retrieve_tool(
 # ---------------------------------------------------------------------------
 
 
-def build_subtask_prefix(task: str, frame_type: str | None = None) -> str:
+_F061_DEFAULT_SUCCESS_CRITERIA = (
+    "The summary directly addresses the task and is internally consistent."
+)
+_F061_DEFAULT_BOUNDARIES = (
+    "Do not spawn further subtasks. Do not modify files unless the task "
+    "explicitly requires it. Cap tool calls per the runner limit."
+)
+_F061_FRAME_OUTPUT_FORMATS = {
+    "task":         "Concise summary of what was done + verification of success.",
+    "research":     "Synthesis of findings, with key facts in `findings[]` and sources in `evidence_refs[]`.",
+    "decision":     "Decision recommendation + reasoning + confidence; record the decision via record_decision and reference its ID in `evidence_refs[]`.",
+    "debug":        "Root cause + fix suggestion + verification steps.",
+    "conversation": "Direct natural-language answer to the question.",
+}
+
+
+def _f061_default_output_format(frame_type: str | None) -> str:
+    return _F061_FRAME_OUTPUT_FORMATS.get(
+        frame_type or "", "Free-form summary appropriate to the task."
+    )
+
+
+def build_subtask_prefix(
+    task: str,
+    frame_type: str | None = None,
+    *,
+    output_format: str | None = None,
+    success_criteria: str | None = None,
+    boundaries: str | None = None,
+    hardening_enabled: bool = False,
+) -> str:
     """Build a system prompt prefix for subtask execution.
 
     Used by both inline (await_result) and background worker subtask execution
     to ensure consistent frame-aware context assembly.
+
+    When ``hardening_enabled=False`` (default), emits the legacy text —
+    byte-identical to pre-F061. PR-6 will remove this branch once the flag
+    is locked on. When ``hardening_enabled=True``, emits the F061 four-part
+    brief + termination contract (objective + output_format + success_criteria
+    + boundaries) and instructs the agent to terminate via the
+    ``submit_final_report`` tool.
     """
     from nous.api.runner import FRAME_TOOLS
 
-    base = (
-        "You are executing a background subtask.\n"
-        "Deliver a clear, complete result. Do not ask questions."
+    if not hardening_enabled:
+        # LEGACY — DO NOT MODIFY. PR-6 deletes this branch.
+        base = (
+            "You are executing a background subtask.\n"
+            "Deliver a clear, complete result. Do not ask questions."
+        )
+        frame_instruction = ""
+        if frame_type and frame_type in FRAME_TOOLS:
+            frame_instruction = (
+                f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate "
+                "reasoning and tool usage."
+            )
+        return f"{base}{frame_instruction}\n\nTask: {task}"
+
+    of = output_format or _f061_default_output_format(frame_type)
+    sc = success_criteria or _F061_DEFAULT_SUCCESS_CRITERIA
+    bd = boundaries or _F061_DEFAULT_BOUNDARIES
+    # Render the Frame block for any non-empty frame name (including
+    # 'research' which is not in FRAME_TOOLS). The Frame block is
+    # informational; FRAME_TOOLS gates only tool availability.
+    frame_block = ""
+    if frame_type:
+        frame_block = (
+            f"\n# Frame\n{frame_type} — apply {frame_type}-appropriate "
+            "reasoning and tool usage.\n"
+        )
+    return (
+        "You are a Nous subtask agent. Your ONLY way to terminate is to call "
+        "the submit_final_report tool with a schema-valid payload.\n\n"
+        f"# Objective\n{task}\n\n"
+        f"# Output format\n{of}\n\n"
+        f"# Success criteria\n{sc}\n\n"
+        f"# Boundaries\n{bd}\n"
+        f"{frame_block}\n"
+        "# Termination\n"
+        "When you are done — and ONLY when done — call submit_final_report. "
+        "Do not produce a final text-only response; the parent agent will "
+        "read only the report payload. If you genuinely cannot complete the "
+        "task, call submit_final_report with incomplete=true and a specific "
+        "blocked_reason."
     )
 
-    frame_instruction = ""
-    if frame_type and frame_type in FRAME_TOOLS:
-        frame_instruction = f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate reasoning and tool usage."
 
-    return f"{base}{frame_instruction}\n\nTask: {task}"
+async def _persist_and_emit_inline_outcome(
+    *,
+    heart: Heart,
+    bus: object,
+    settings: "Settings",
+    subtask: Any,
+    final_outcome: str,
+    error_msg: str,
+    state: Any,
+) -> None:
+    """F061 round 4: inline path's outer timeout/exception handler must
+    persist accurate attempts + token counts AND emit a subtask_outcome
+    event. Mirrors ``SubtaskWorkerPool._emit_outcome_from_outer`` for the
+    inline ``await_result=true`` path.
+    """
+    attempts = max(1, getattr(state, "attempts", 0) or 0)
+    tokens_in = getattr(state, "tokens_in", 0)
+    tokens_out = getattr(state, "tokens_out", 0)
+    tool_calls_made = getattr(state, "tool_calls_made", 0)
+
+    await heart.subtasks.fail(
+        subtask.id, error_msg,
+        final_outcome=final_outcome,
+        attempts=attempts,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        tool_calls_made=tool_calls_made,
+    )
+
+    if bus is None or not settings.subtask_outcome_persistence_enabled:
+        return
+    try:
+        from nous.events import Event
+        from nous.handlers.subtask_executor import SUBTASK_OUTCOME_EVENT_TYPE
+
+        data: dict[str, Any] = {
+            "subtask_id": str(subtask.id),
+            "agent_id": getattr(subtask, "agent_id", None),
+            "frame_type": getattr(subtask, "frame_type", None),
+            "final_outcome": final_outcome,
+            "ok": False,
+            "validator_reason": error_msg,
+            "attempts": attempts,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tool_calls_made": tool_calls_made,
+            "duration_ms": None,
+            "dag_node_id": (
+                str(subtask.dag_node_id)
+                if getattr(subtask, "dag_node_id", None) is not None
+                else None
+            ),
+        }
+        await bus.emit(Event(
+            type=SUBTASK_OUTCOME_EVENT_TYPE,
+            agent_id=getattr(subtask, "agent_id", "") or settings.agent_id,
+            session_id=f"subtask-{subtask.id.hex[:8]}",
+            data=data,
+        ))
+    except Exception:
+        logger.exception(
+            "Failed to emit subtask_outcome from inline outer handler for %s",
+            subtask.id.hex[:8],
+        )
 
 
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
 
-def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = None) -> dict[str, Any]:
+def create_subtask_tools(
+    heart: Heart,
+    settings: "Settings",
+    runner: object = None,
+    bus: object = None,
+) -> dict[str, Any]:
     """Create subtask/schedule tool closures with Heart captured in closure context.
 
     Returns a dict of async callables suitable for ToolDispatcher registration.
-    The optional runner param enables inline (await_result) subtask execution.
+    The optional ``runner`` param enables inline (await_result) subtask execution.
+    The optional ``bus`` param (F061 PR-3) is the EventBus the inline hardened
+    path uses to emit ``subtask_outcome`` telemetry; ``None`` disables that
+    emission for inline subtasks (background subtasks emit via the worker pool).
     """
     from nous.config import Settings as _Settings  # noqa: F811 — deferred to avoid circular
+
+    # F061 PR-3 silent-failure review P2.1: warn loudly when inline telemetry
+    # is silently disabled because no bus was wired through. Operator who
+    # forgets to pass bus= would otherwise see dashboard rows for inline
+    # subtasks without subtask_outcome events for them.
+    if (
+        bus is None
+        and getattr(settings, "subtask_outcome_persistence_enabled", True)
+        and getattr(settings, "subtask_hardening_enabled", False)
+    ):
+        logger.warning(
+            "F061 PR-3: inline subtask telemetry disabled (bus=None passed to "
+            "create_subtask_tools). subtask_outcome events from "
+            "await_result=True path will be lost."
+        )
 
     async def spawn_task(
         task: str,
@@ -1106,6 +1264,13 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
         frame_type: str | None = None,
         await_result: bool = False,
         model: str | None = None,
+        # F061: 2 of 4 brief fields are persisted. ``boundaries`` is
+        # intentionally NOT a parameter — it has no DB column and would
+        # silently drop. Fold boundary constraints into ``task`` until a
+        # follow-up PR adds storage. Worker / executor synthesize frame-
+        # derived defaults at execute time when these are None.
+        output_format: str | None = None,
+        success_criteria: str | None = None,
         _session_id: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
@@ -1181,6 +1346,9 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                 parent_session_id=_session_id,
                 frame_type=frame_type,
                 model=effective_model,
+                # F061: persist the four-part brief for the executor.
+                output_format=output_format,
+                success_criteria=success_criteria,
             )
 
             if not await_result:
@@ -1213,6 +1381,106 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             import asyncio as _asyncio
 
             subtask_session_id = f"subtask-{subtask.id.hex[:8]}"
+
+            # F061: route inline path through the SAME hardened executor as
+            # the worker pool when the flag is on. Closes the silent-failure
+            # gap (P1.1 from spec review): otherwise the new prompt would
+            # mention submit_final_report on a path where that tool isn't
+            # registered, relocating the exact failure F061 fixes.
+            if settings.subtask_hardening_enabled:
+                # Late import: nous.handlers.subtask_executor imports
+                # build_subtask_prefix from THIS module — top-level import
+                # would deadlock at startup. (functools.partial is stdlib
+                # and circular-safe; imported at module top.)
+                from nous.handlers.subtask_executor import (
+                    HardenedRunState,
+                    emit_outcome_event,
+                    execute_hardened,
+                )
+
+                # F061 PR-3: pass an emit_event callback so inline subtasks
+                # also produce subtask_outcome telemetry. ``bus`` is captured
+                # by the outer create_subtask_tools closure when available.
+                _outcome_emitter = (
+                    partial(emit_outcome_event, bus, settings=settings)
+                    if bus is not None else None
+                )
+
+                # F061 round 4: HardenedRunState side channel so the timeout
+                # / exception handlers below can read accurate attempts +
+                # token counts, persist them on the row, AND emit a
+                # subtask_outcome event (execute_hardened skips persist+emit
+                # on cancel — outer handler is the authoritative classifier).
+                state = HardenedRunState()
+
+                # `executed` flag prevents double-persist on programming-
+                # error in the response-formatting code below: if any
+                # AttributeError leaks from the body builder after
+                # execute_hardened has already persisted via _persist_outcome,
+                # the outer `except Exception` below would overwrite the row
+                # with status='failed' even though it was already 'completed'.
+                executed = False
+                try:
+                    final_text, _result = await _asyncio.wait_for(
+                        execute_hardened(
+                            subtask, subtask_session_id,
+                            runner=runner, heart=heart, settings=settings,
+                            emit_event=_outcome_emitter,
+                            state=state,
+                        ),
+                        timeout=effective_timeout,
+                    )
+                    executed = True
+                    if _result.ok:
+                        body = (
+                            f"[Subtask {subtask.id.hex[:8]} completed]\n\n{final_text}"
+                        )
+                    elif _result.outcome == "incomplete_blocked":
+                        body = (
+                            f"[Subtask {subtask.id.hex[:8]} blocked: {_result.reason}]"
+                        )
+                    else:
+                        body = (
+                            f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: "
+                            f"{_result.reason}]"
+                        )
+                    return {"content": [{"type": "text", "text": body}]}
+                except _asyncio.TimeoutError:
+                    if not executed:
+                        await _persist_and_emit_inline_outcome(
+                            heart=heart, bus=bus, settings=settings,
+                            subtask=subtask,
+                            final_outcome="timed_out",
+                            error_msg=f"Timeout after {effective_timeout}s",
+                            state=state,
+                        )
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]",
+                            }
+                        ]
+                    }
+                except Exception as e:
+                    if not executed:
+                        await _persist_and_emit_inline_outcome(
+                            heart=heart, bus=bus, settings=settings,
+                            subtask=subtask,
+                            final_outcome="errored",
+                            error_msg=str(e),
+                            state=state,
+                        )
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"[Subtask {subtask.id.hex[:8]} failed: {e}]",
+                            }
+                        ]
+                    }
+
+            # Legacy inline path — bytewise unchanged from pre-F061.
             system_prefix = build_subtask_prefix(task, frame_type)
 
             try:
@@ -1231,7 +1499,11 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     timeout=effective_timeout,
                 )
 
-                await heart.subtasks.complete(subtask.id, response_text)
+                # F061 PR-1: record outcome on legacy path so dashboard rows
+                # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+                await heart.subtasks.complete(
+                    subtask.id, response_text, final_outcome="completed",
+                )
                 return {
                     "content": [
                         {
@@ -1242,7 +1514,12 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                 }
 
             except _asyncio.TimeoutError:
-                await heart.subtasks.fail(subtask.id, f"Timeout after {effective_timeout}s")
+                # F061 PR-3 Codex review: attempts=1 because one execution
+                # attempt definitely happened before the timeout.
+                await heart.subtasks.fail(
+                    subtask.id, f"Timeout after {effective_timeout}s",
+                    final_outcome="timed_out", attempts=1,
+                )
                 return {
                     "content": [
                         {
@@ -1252,7 +1529,9 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     ]
                 }
             except Exception as e:
-                await heart.subtasks.fail(subtask.id, str(e))
+                await heart.subtasks.fail(
+                    subtask.id, str(e), final_outcome="errored", attempts=1,
+                )
                 return {
                     "content": [
                         {
@@ -1492,6 +1771,19 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks.",
         },
+        # F061: 2 of 4 brief fields exposed via schema (output_format,
+        # success_criteria). The 4th field "boundaries" is NOT exposed yet
+        # — it has no persistence path so would silently drop. Fold
+        # boundary constraints into the ``task`` string until a follow-up
+        # PR adds a column.
+        "output_format": {
+            "type": "string",
+            "description": "How the subtask should structure its final report. Optional; sensible default applied per frame_type.",
+        },
+        "success_criteria": {
+            "type": "string",
+            "description": "What 'done' looks like. Optional; default 'summary directly addresses the task and is internally consistent'.",
+        },
     },
     "required": ["task"],
 }
@@ -1556,13 +1848,21 @@ _CANCEL_TASK_SCHEMA: dict[str, Any] = {
 }
 
 
-def register_subtask_tools(dispatcher: ToolDispatcher, heart: Heart, settings: "Settings", runner: object = None) -> None:
+def register_subtask_tools(
+    dispatcher: ToolDispatcher,
+    heart: Heart,
+    settings: "Settings",
+    runner: object = None,
+    bus: object = None,
+) -> None:
     """Create subtask/schedule tools and register them with the dispatcher.
 
     Called at startup when subtask_enabled is True.
-    The optional runner enables inline (await_result) subtask execution.
+    The optional ``runner`` enables inline (await_result) subtask execution.
+    The optional ``bus`` (F061 PR-3) lets inline hardened subtasks emit
+    ``subtask_outcome`` telemetry via the EventBus.
     """
-    closures = create_subtask_tools(heart, settings, runner)
+    closures = create_subtask_tools(heart, settings, runner, bus=bus)
 
     dispatcher.register("spawn_task", closures["spawn_task"], _SPAWN_TASK_SCHEMA)
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)

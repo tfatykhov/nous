@@ -1542,6 +1542,31 @@ def create_app(
             logger.error("Dashboard density error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F061: Subtask hardening dashboard ---
+
+    async def dashboard_subtasks(request: Request) -> JSONResponse:
+        """GET /dashboard/subtasks - Subtask outcome metrics for dashboard.
+
+        Query params:
+          - hours: window length in hours (default 24, max 168 = 7 days).
+        """
+        try:
+            hours = max(1, min(int(request.query_params.get("hours", "24")), 168))
+        except ValueError:
+            return JSONResponse({"error": "hours must be an integer"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_subtask_dashboard_data
+
+            async with database.session() as session:
+                data = await get_subtask_dashboard_data(
+                    session, settings.agent_id, hours=hours,
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.exception("Dashboard subtasks error")
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F024 Phase 3b: Rubric endpoints ---
 
     async def get_rubric(request: Request) -> JSONResponse:
@@ -2440,6 +2465,7 @@ def create_app(
         Route("/dashboard/dag", dashboard_dag),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
+        Route("/dashboard/subtasks", dashboard_subtasks),
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),

@@ -33,12 +33,27 @@ class TestEntityConfig:
         assert content_col == "t.content"
         assert "t.active" in extra
 
-    def test_episode_uses_structured_summary(self):
+    def test_episode_uses_structured_summary_with_fallback(self):
+        """F058: F040 was filtering out 100% of stuck-open episodes
+        because structured_summary was NULL (set only by
+        episode_summarizer on episode_ended). The COALESCE fallback
+        unblocks them; the IS NOT NULL filter is dropped so episodes
+        with only the plain `summary` field are now F040-eligible."""
         _, _, content_col, extra = _ENTITY_CONFIG["episode"]
+        # Both structured_summary AND plain summary must appear in the
+        # content extractor (COALESCE fallback)
         assert "structured_summary" in content_col
+        assert "COALESCE" in content_col
+        assert "t.summary" in content_col
         assert "t." in content_col
+        # Active filter still required
         assert "t.active = true" in extra
-        assert "t.structured_summary IS NOT NULL" in extra
+        # The IS NOT NULL filter MUST be gone (that was the bug)
+        assert "structured_summary IS NOT NULL" not in extra, (
+            "F058 dropped the structured_summary filter; if it's back, "
+            "F040 will silently exclude stuck-open episodes again "
+            "(76/76 prod orphans had this problem pre-F058)."
+        )
 
     def test_decision_no_tags_filter(self):
         """Decision config must NOT reference tags column."""
@@ -186,6 +201,88 @@ async def test_find_orphans_excludes_linked(db, settings, mock_embeddings, _fix_
         orphan_ids = [oid for oid, _ in orphans]
         assert fact_a not in orphan_ids
         assert fact_b not in orphan_ids
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_find_orphans_episode_with_only_plain_summary_is_returned(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F058 regression: episodes with NULL structured_summary but a
+    populated `summary` field MUST be returned by find_orphans.
+
+    Pre-F058 the entity-config filter was
+    ``t.active = true AND t.structured_summary IS NOT NULL`` which
+    silently excluded 100% of stuck-open prod episodes (76/76 in the
+    eval-scratch snapshot, identical shape to prod nous-default).
+    The fix dropped the structured_summary filter and added a
+    COALESCE(structured_summary->>'summary', summary) content fallback
+    so F040 can densify these orphans.
+    """
+    from datetime import UTC, datetime
+    agent_id = f"test-f058-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    plain_only_ep = uuid4()
+    structured_ep = uuid4()
+    emb1 = await mock_embeddings.embed("plain summary only")
+    emb2 = await mock_embeddings.embed("with structured summary")
+    emb1_str = "[" + ",".join(str(float(v)) for v in emb1) + "]"
+    emb2_str = "[" + ",".join(str(float(v)) for v in emb2) + "]"
+
+    async with db.session() as session:
+        # Episode with plain summary only — pre-F058 was excluded
+        await session.execute(text("""
+            INSERT INTO heart.episodes
+              (id, agent_id, summary, structured_summary, started_at,
+               active, tags, embedding)
+            VALUES (:id, :aid, :s, NULL, :t, true, '{}',
+                    CAST(:emb AS vector))
+        """), {
+            "id": plain_only_ep, "aid": agent_id,
+            "s": "stuck-open episode with no structured_summary",
+            "t": datetime.now(UTC), "emb": emb1_str,
+        })
+        # Episode with structured_summary populated (pre-F058 also
+        # included; ensure F058 still includes it)
+        await session.execute(text("""
+            INSERT INTO heart.episodes
+              (id, agent_id, summary, structured_summary, started_at,
+               active, tags, embedding)
+            VALUES (:id, :aid, :s, CAST(:ss AS jsonb), :t, true, '{}',
+                    CAST(:emb AS vector))
+        """), {
+            "id": structured_ep, "aid": agent_id,
+            "s": "fallback summary text", "ss": '{"summary": "structured-version"}',
+            "t": datetime.now(UTC), "emb": emb2_str,
+        })
+        await session.commit()
+
+    try:
+        async with db.session() as session:
+            orphans = await densifier.find_orphans("episode", 50, session)
+            ids_to_content = {oid: content for oid, content in orphans}
+
+        # Both episodes must be returned — F058 fix
+        assert plain_only_ep in ids_to_content, (
+            "plain-summary-only episode missing from find_orphans → "
+            "F058 COALESCE/filter regression"
+        )
+        assert structured_ep in ids_to_content
+
+        # Content extractor must return the right text per episode:
+        # - plain_only_ep: COALESCE picks `summary` (structured is NULL)
+        # - structured_ep: COALESCE picks `structured_summary->>'summary'`
+        assert ids_to_content[plain_only_ep] == \
+            "stuck-open episode with no structured_summary"
+        assert ids_to_content[structured_ep] == "structured-version"
+    finally:
+        async with db.session() as cs:
+            await cs.execute(text(
+                "DELETE FROM heart.episodes WHERE agent_id=:aid"
+            ), {"aid": agent_id})
+            await cs.commit()
 
 
 @pytest.mark.postgres_only

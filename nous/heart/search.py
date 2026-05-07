@@ -55,6 +55,24 @@ def _resolve_rrf_k() -> int:
     return RuntimeConfig.get().get_rrf_k(settings)
 
 
+def _resolve_keyword_enabled() -> bool:
+    """Resolve hybrid_search_keyword_enabled from settings > default True.
+
+    F054: operator opt-out for vector-dominant corpora. Eval (F051) showed
+    vector-only ties default RRF byte-for-byte on personal-Q&A and within
+    -0.2% on codebase docs, so the FTS query is dead weight on those shapes.
+    No RuntimeConfig override path — this is intentionally a static config
+    flip, not a per-request knob.
+    """
+    from nous.config import Settings
+
+    try:
+        settings = Settings()
+    except Exception:
+        return True
+    return bool(getattr(settings, "hybrid_search_keyword_enabled", True))
+
+
 def _rrf_merge(
     vector_ranked: list[tuple[UUID, float]],
     keyword_ranked: list[tuple[UUID, float]],
@@ -178,19 +196,26 @@ async def hybrid_search(
         result = await session.execute(vector_sql, params)
         vector_results = [(row.id, float(row.score)) for row in result.all()]
 
-    # Keyword search
-    keyword_sql = text(f"""
-        SELECT t.id,
-            ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
-            / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
-        FROM {table} t
-        WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
-            {filter_clauses}
-        ORDER BY score DESC
-        LIMIT :limit_expanded
-    """)
-    result = await session.execute(keyword_sql, params)
-    keyword_results = [(row.id, float(row.score)) for row in result.all()]
+    # F054: keyword channel toggle. Skip the FTS query when disabled.
+    # _rrf_merge handles an empty keyword list correctly — degenerates to
+    # vector-only ranking weighted by vector_weight (penalty rank applied to
+    # missing channel cancels out when one channel is empty).
+    # Force-on path when embedding is None preserves the keyword-only
+    # fallback: callers that intentionally pass embedding=None still get FTS.
+    keyword_enabled = _resolve_keyword_enabled() or embedding is None
+    if keyword_enabled:
+        keyword_sql = text(f"""
+            SELECT t.id,
+                ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))
+                / (1.0 + ts_rank_cd(t.search_tsv, plainto_tsquery('english', :query_text))) AS score
+            FROM {table} t
+            WHERE t.search_tsv @@ plainto_tsquery('english', :query_text)
+                {filter_clauses}
+            ORDER BY score DESC
+            LIMIT :limit_expanded
+        """)
+        result = await session.execute(keyword_sql, params)
+        keyword_results = [(row.id, float(row.score)) for row in result.all()]
 
     if embedding is None:
         # Keyword-only fallback — return keyword results directly

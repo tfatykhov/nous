@@ -1,0 +1,168 @@
+{
+  "corpus": "longmemeval",
+  "n_scenarios": 20,
+  "n_errored": 0,
+  "n_fired": 7,
+  "fire_rate": 0.35,
+  "total_suspects": 11,
+  "results": [
+    {
+      "name": "e47becba",
+      "n_turns": 40,
+      "summary_chars": 5290,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "the almanack"
+      ]
+    },
+    {
+      "name": "118b2229",
+      "n_turns": 40,
+      "summary_chars": 8243,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "51a45a95",
+      "n_turns": 40,
+      "summary_chars": 4499,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "58bf7951",
+      "n_turns": 40,
+      "summary_chars": 6244,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "1e043500",
+      "n_turns": 40,
+      "summary_chars": 5059,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "c5e8278d",
+      "n_turns": 40,
+      "summary_chars": 5866,
+      "guard_suspect_count": 2,
+      "guard_suspects": [
+        "/running/cycling",
+        "christopher walken"
+      ]
+    },
+    {
+      "name": "6ade9755",
+      "n_turns": 40,
+      "summary_chars": 5221,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "/shrubs/vegetables"
+      ]
+    },
+    {
+      "name": "6f9b354f",
+      "n_turns": 40,
+      "summary_chars": 0,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "58ef2f1c",
+      "n_turns": 40,
+      "summary_chars": 6323,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "f8c5f88b",
+      "n_turns": 40,
+      "summary_chars": 5003,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "5d3d2817",
+      "n_turns": 40,
+      "summary_chars": 4894,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "7527f7e2",
+      "n_turns": 40,
+      "summary_chars": 6022,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "discussed eko"
+      ]
+    },
+    {
+      "name": "c960da58",
+      "n_turns": 40,
+      "summary_chars": 6060,
+      "guard_suspect_count": 1,
+      "guard_suspects": [
+        "1.5"
+      ]
+    },
+    {
+      "name": "3b6f954b",
+      "n_turns": 40,
+      "summary_chars": 5647,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "726462e0",
+      "n_turns": 40,
+      "summary_chars": 365,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "94f70d80",
+      "n_turns": 40,
+      "summary_chars": 4747,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "66f24dbb",
+      "n_turns": 40,
+      "summary_chars": 3484,
+      "guard_suspect_count": 3,
+      "guard_suspects": [
+        "/etc/systemd/system/nfsshare.mount",
+        "emily_chen@email.com",
+        "rachellee@email.com"
+      ]
+    },
+    {
+      "name": "ad7109d1",
+      "n_turns": 40,
+      "summary_chars": 5848,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    },
+    {
+      "name": "af8d2e46",
+      "n_turns": 40,
+      "summary_chars": 5895,
+      "guard_suspect_count": 2,
+      "guard_suspects": [
+        "franz liszt",
+        "richard wagner"
+      ]
+    },
+    {
+      "name": "dccbc061",
+      "n_turns": 40,
+      "summary_chars": 4058,
+      "guard_suspect_count": 0,
+      "guard_suspects": []
+    }
+  ]
+}

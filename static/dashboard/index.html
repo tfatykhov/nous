@@ -91,6 +91,12 @@
                 </svg>
                 <span>DAG Orchestrator</span>
             </a>
+            <a href="#/subtasks" class="nav-link" data-view="subtasks" aria-label="Subtasks">
+                <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd" d="M3 4a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm9 0a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1V4zM3 12a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1H4a1 1 0 01-1-1v-3zm9 0a1 1 0 011-1h3a1 1 0 011 1v3a1 1 0 01-1 1h-3a1 1 0 01-1-1v-3z" clip-rule="evenodd"/>
+                </svg>
+                <span>Subtasks</span>
+            </a>
         </div>
         <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar">
             <svg viewBox="0 0 20 20" fill="currentColor" width="16" height="16"><path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
@@ -120,6 +126,7 @@
         <div id="view-cache" class="view"></div>
         <div id="view-density" class="view"></div>
         <div id="view-dag" class="view"></div>
+        <div id="view-subtasks" class="view"></div>
     </main>
 
     <script src="lib/chart.min.js"></script>
@@ -139,5 +146,6 @@
     <script src="js/cache.js"></script>
     <script src="js/density.js"></script>
     <script src="js/dag.js"></script>
+    <script src="js/subtasks.js"></script>
 </body>
 </html>

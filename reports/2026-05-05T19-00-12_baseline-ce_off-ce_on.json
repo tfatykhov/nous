@@ -1,0 +1,4755 @@
+{
+  "version": 1,
+  "generated_at": "2026-05-05T19:00:12.944597+00:00",
+  "git_sha": "5cb16282a62548941283e6d3e1b3c0bb02885d6b",
+  "fixture_version": "v2026-Q2",
+  "notes": "",
+  "sources": [
+    {
+      "name": "nous_prod",
+      "gate_eligible": false,
+      "available": true,
+      "skip_reason": null,
+      "resolved_path": "tests\\fixtures\\qrels_nous_prod.jsonl"
+    }
+  ],
+  "configs": [
+    {
+      "name": "baseline",
+      "flags": {},
+      "description": "Defaults from Settings() \u2014 nothing overridden.",
+      "duration_seconds": 32.94488770002499,
+      "pipeline_stats_summary": {
+        "graph_expansion_used": 10,
+        "spreading_activation_used": 0,
+        "contradiction_checks_ran": 10
+      },
+      "metrics": {
+        "mrr": 0.8333333333333334,
+        "p_at_1": 0.8,
+        "p_at_5": 0.17500000000000002,
+        "p_at_10": 0.08750000000000001,
+        "r_at_1": 0.8,
+        "r_at_5": 0.875,
+        "r_at_10": 0.875,
+        "ndcg_at_10": 0.8440464876785729,
+        "n_qrels": 40,
+        "n_errored": 0
+      },
+      "per_qrel": [
+        {
+          "index": 0,
+          "query": "Why does Heartbeat keep triggering false alarms on the same issues?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9975e1a0-3211-4960-a483-dd6935fe46a2"
+          ],
+          "retrieved_ids": [
+            "fec94159-76d0-4472-9cb6-7c880b3bd6b2",
+            "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+            "9975e1a0-3211-4960-a483-dd6935fe46a2",
+            "21c30d1f-04fd-4dca-8abc-b1b50018bbf1",
+            "d0070ec0-ec4e-4df1-9e1c-80b8fd6eedd6",
+            "bdfcdb87-09d2-42db-a6c5-3e0395654153",
+            "049423aa-afda-4579-a58c-01f3575f7e4b",
+            "531758de-825e-4183-a643-f88e36d87565",
+            "87d83cf0-80e0-4b09-b39b-c6c62512b8cf",
+            "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+            "321ea6e7-92fb-4837-8bd6-4b5571830deb",
+            "a34ca9f1-8cb9-4d14-8161-91d33916da84"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 3,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 1,
+          "query": "What debugging approach worked well for the crypto DAG issues we encountered?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "c5ace100-84c4-48de-a12f-c39ff99a2c93"
+          ],
+          "retrieved_ids": [
+            "c5ace100-84c4-48de-a12f-c39ff99a2c93",
+            "9dd86fee-ff20-487b-9ff6-dc28b2049b25",
+            "6502ea9a-0824-4d8c-8bf8-6d30d964146d",
+            "11430ca5-939c-4826-8e3a-0b70aad53106",
+            "3fd361b0-82e3-44f7-9de3-c6532a5ca4bf",
+            "bfb52a00-979f-442b-b7b1-450c8e27d8ae",
+            "dd500b60-6f8a-48ad-9238-afd5143a88d8",
+            "5a8ba993-a33e-46e7-b2a9-5cee7b320c65",
+            "14997220-7071-4c6b-9d49-ecb7c6d28dab",
+            "9c6470f6-0e6a-436a-829a-54ef481fe1d0"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 2,
+          "query": "What is Tim currently working on for his tech blog?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "90a04637-9a70-4e68-8496-f0a0c3a3dad2"
+          ],
+          "retrieved_ids": [
+            "90a04637-9a70-4e68-8496-f0a0c3a3dad2",
+            "9cfbba1c-88c8-4745-a55f-ee575ab37115",
+            "ac47f41d-9a9e-4a33-9b50-d1684c318369",
+            "b6adefb4-e902-4d1d-822d-2cdf306d5761",
+            "670c753f-c3a8-4d51-ad4e-5c0bba1ce3dc",
+            "bc0a27f4-ebe8-4ce5-a73f-3f23dcdaec10",
+            "dfd6f962-3c26-46c8-a12d-08b17d8b8160",
+            "62cd6387-9c3f-480a-bbbb-56e8c6e43848",
+            "986c5c61-919f-4181-8e29-fbf220ff4ea1",
+            "9bc0fbc2-12ee-4cf7-8866-876a08fc1b2a"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 3,
+          "query": "What timeout value should I use for research nodes that make external API calls?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "cd100e3f-ce71-43fb-b17a-e78f51e7d164"
+          ],
+          "retrieved_ids": [
+            "cd100e3f-ce71-43fb-b17a-e78f51e7d164",
+            "2334b3be-8eb9-4ae0-8521-288402a7ae0d",
+            "a4e664c0-3bad-46fb-a5a8-ed25b1070ce1",
+            "428ae1d3-91a6-418a-9f57-6d5f44555f77",
+            "631aae8c-6f77-431e-95fa-faa3bf262dcf",
+            "8c42e04d-84a9-41c8-af27-b77f2fcb18bc",
+            "049423aa-afda-4579-a58c-01f3575f7e4b",
+            "5a5b08e7-01e6-49b1-8ae9-e9b05631dfa2",
+            "40efaab2-0c9b-4f2c-a168-47304df400b8",
+            "dd500b60-6f8a-48ad-9238-afd5143a88d8"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 4,
+          "query": "What is the three-layer architecture that Nous has developed for their AI stack?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "dc79f4da-4246-41cc-a914-98a03b37e254"
+          ],
+          "retrieved_ids": [
+            "f39c4430-8098-45a4-99d5-791e0f8ad14c",
+            "dc79f4da-4246-41cc-a914-98a03b37e254",
+            "647eb29b-244e-4ed0-ae84-45952c5bfa02",
+            "bf03a866-1b14-4f8b-ab8e-58d684b81af6",
+            "4dbe888f-05ed-4530-9775-79b3ddb64a32",
+            "46ec59dd-0227-4ff4-9b41-af27885a0707",
+            "e185c6f7-c9a6-44bf-aa46-7548db18b2e4",
+            "f8080826-981d-4846-8364-667d5aecbaf4",
+            "8267afb9-9039-4263-9a70-386367bceb42",
+            "35d61b5a-3b3b-41e0-b4e5-82e68952a621",
+            "11665040-8a34-4e0f-b143-c30b34c0608b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 2,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 5,
+          "query": "When should I use graph structure instead of embeddings alone for retrieval?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "d8df346b-f812-457e-8d8f-ffe8e4bc3579"
+          ],
+          "retrieved_ids": [
+            "d8df346b-f812-457e-8d8f-ffe8e4bc3579",
+            "31fec06c-e306-43b9-ad02-7abffb1a13aa",
+            "1b19d7ab-dad6-42e2-9cc1-ae17328386e9",
+            "f84997a7-ceea-49f8-9c6a-f53ba553388d",
+            "98602c2c-432e-49f5-ad4a-7c5f4e057d58",
+            "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc",
+            "eafef282-9074-42de-99c2-1bd8cdb214f2",
+            "7979811c-4273-4719-94ca-588f6f2643f3",
+            "b150af87-b1f3-4bec-ab44-4a54542faf23",
+            "e97f2790-a383-454c-b3a8-aaa860b36627"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 6,
+          "query": "Why do my emails keep failing to send in this agent environment?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a"
+          ],
+          "retrieved_ids": [
+            "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+            "7ff9c4e4-cab6-49d2-ac76-bf7c6f0db501",
+            "0f55f0ce-dd9d-421d-b782-fb9f24e304e6",
+            "b97df8d9-e426-485d-aebc-733a50eccc69",
+            "0c710310-d991-40e1-b622-28b7094bc44f",
+            "f2955e49-fc3f-42a8-9de8-357e166eb647",
+            "67161a14-62f1-456f-bad7-4cb95ce4093c",
+            "7976dd2f-bec6-4c0a-a277-3f5ea6e05105",
+            "bb90c5db-ce0d-4927-8fbc-396f799804c4",
+            "0aa6acf1-f343-4f0a-aaa5-0e2cb02b66bc"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 7,
+          "query": "What does the ERL paper say about using heuristics versus raw trajectories for task performance?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc"
+          ],
+          "retrieved_ids": [
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc",
+            "66dad6cb-f5d1-4a1d-9938-3c8454785726",
+            "a01c2d34-9bee-4399-9467-1766789b8476",
+            "44484f2f-ce02-4ff7-9635-0e06fe60e383",
+            "ea63a82b-82c0-45d8-a626-2595458e1ca2",
+            "587de2c4-c6f2-4fb3-8b5d-17d3cc4b1e15",
+            "c05bc214-8dc6-4c9a-98da-9bd84bf9a60e",
+            "d888041b-4141-4dfe-a358-4214bda11f96",
+            "4a3bae81-165c-4320-a8ff-620824a00252",
+            "b1e6f63b-3f09-4014-9748-fa78115a6e4b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 8,
+          "query": "What's that self-evolving framework from Sentient that automatically improves agent skills?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "6e2b6800-7adc-4092-bdc2-fee96219025d"
+          ],
+          "retrieved_ids": [
+            "6e2b6800-7adc-4092-bdc2-fee96219025d",
+            "2c127fbe-ca24-4d9c-a499-0c9489eb6f6b",
+            "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+            "0f7a2531-491b-463a-9a7c-2d54b5c79ccf",
+            "a01c2d34-9bee-4399-9467-1766789b8476",
+            "fd71d00e-cd7c-4312-90e9-9f936a64e894",
+            "05b7d7a6-5353-4a93-b098-6960e8daa32f",
+            "f8ee6e05-7c90-4e92-b6eb-3ceb47b795da",
+            "48b70c96-614b-439e-8e89-1fa78fb12a3f",
+            "8596dac7-4244-4860-b8bb-ab5a0d58cf53"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 9,
+          "query": "What changes were made to the F027 Supersession Detection spec recently?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "c7abd62b-579b-4040-814c-b8a858956266"
+          ],
+          "retrieved_ids": [
+            "c7abd62b-579b-4040-814c-b8a858956266",
+            "734bb2a9-79b0-4ea4-965f-a5f1800193f4",
+            "dba97f2d-613b-4c6d-8cff-c5566e4f48d1",
+            "62cb5659-c183-4c00-bd2f-becdc092c748",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "e97957de-f8a7-4a06-bebc-b1d17f08b267",
+            "f85f27e5-ac26-49de-a6e6-ca3ed1c6944f",
+            "6c464269-a9f7-41d1-bee3-b88bc2f28f54",
+            "cf7a9e01-444d-4272-9013-7c36118fe5b0",
+            "fdfaeda6-a8bb-45ea-890f-f8bcbf13c6d4",
+            "3a3870b7-583a-47b5-8f91-189713eb3937"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 10,
+          "query": "What material stack and dimensions does your memristor device use for switching?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "747b3279-3ea8-41b9-ab6c-976a446b0cda"
+          ],
+          "retrieved_ids": [
+            "747b3279-3ea8-41b9-ab6c-976a446b0cda",
+            "520d0125-b3d9-4709-a632-d8d6d12afcbb",
+            "636785f1-363c-4593-a240-f298ac12286f",
+            "4994020e-c424-4141-b7f4-5765c4c531a9",
+            "8f5bad3b-17ce-4bae-acab-961656972534",
+            "46f883b7-1b8c-4063-8281-54583ff97732",
+            "84f80956-43d4-44f0-ad07-3159a0ceb6d9",
+            "710a867a-f6ac-4874-8752-7a9f965e42cc",
+            "c14fa7d0-3975-4582-921d-7c9a0d897150",
+            "cb394573-c45f-4059-8a8e-459e95a8513b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 11,
+          "query": "What safety checks does the new censor with ID 7e49ca32 require before listing capabilities?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "abc54fb9-b4a2-408f-9972-255cdf8097e5"
+          ],
+          "retrieved_ids": [
+            "abc54fb9-b4a2-408f-9972-255cdf8097e5",
+            "851d547d-20da-4ed4-9c4c-89751809df17",
+            "be263bf6-4ab5-4f51-9f5a-4d81eee68145",
+            "2a8c339e-ba06-45e8-8b85-9697bc6de33c",
+            "41884380-d5be-42e4-abaf-4d3978626309",
+            "e376cfbd-9c98-4100-b21b-8cd73d625ad3",
+            "6ad14415-fc2e-459a-a7ae-1d185409ec89",
+            "1fae04c0-f613-404f-aa79-378d5a1eaca2",
+            "908a3ac9-0729-4f6f-8b9e-b3a520bf7b87",
+            "00a59c71-7732-4cfe-b8dc-1584d2fcc7af",
+            "3fba50c9-4bac-4312-b93c-5dcd5aef8243",
+            "d098e7a2-895e-4004-bae8-6a41a3afbbec"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 12,
+          "query": "What are the five types of memory in the Nous memory architecture?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "b2e6e29a-2d50-4d92-9562-e556ebd12520"
+          ],
+          "retrieved_ids": [
+            "b2e6e29a-2d50-4d92-9562-e556ebd12520",
+            "7a01c812-7da4-45d6-b605-620af916fc37",
+            "9a4ac166-a264-4aa1-83a2-48ae2b554354",
+            "13197eaa-6f83-4616-8924-e2d6f9d67a00",
+            "6c67cb87-ab91-4a71-9d22-7844aa508b66",
+            "595d6819-ddf8-43ea-95d9-bde50867129d",
+            "908380fc-2465-482d-a718-e6ea9d024f30",
+            "312c5c1f-7807-455e-ac7a-836fdd61b1f3",
+            "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+            "f39c4430-8098-45a4-99d5-791e0f8ad14c",
+            "07110505-38e7-414d-8044-a65abe83f55e"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 13,
+          "query": "What are the main security vulnerabilities in AI agents and how can decision layers help mitigate them?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bf6cebcb-892b-4ba1-ba5b-3f93963ee3b5"
+          ],
+          "retrieved_ids": [
+            "bf6cebcb-892b-4ba1-ba5b-3f93963ee3b5",
+            "8d515336-cc54-499c-8560-ff3c68680db7",
+            "2725136f-e714-4cb8-86c4-72233cc2f8ca",
+            "bf03a866-1b14-4f8b-ab8e-58d684b81af6",
+            "26a82274-955c-4b39-8b00-50e917351b22",
+            "8a5c0861-b43c-4912-a398-15289689f14f",
+            "f9e0e027-3a33-4930-8ffe-49745f864b0a",
+            "7d379127-24be-4da1-b323-fc17e1de3655",
+            "3ddf0712-1195-4b02-a715-ef72f232dea3",
+            "4bd6dcad-cc0d-4a39-9459-d0faa7e3cca3"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 14,
+          "query": "What framework should guide decisions about delegating tasks to AI agents?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bdc950e7-5137-4835-acb9-4d2becadc4d6"
+          ],
+          "retrieved_ids": [
+            "bdc950e7-5137-4835-acb9-4d2becadc4d6",
+            "51836cc4-0846-40a4-9b3c-0896e5bca713",
+            "26a82274-955c-4b39-8b00-50e917351b22",
+            "df56f249-f954-4177-9b00-a1a5b9fb9676",
+            "4bd6dcad-cc0d-4a39-9459-d0faa7e3cca3",
+            "d38d15d0-e5e4-4906-93a7-10afbbc18b10",
+            "89b742fc-dc0c-4f91-9d2e-0f4362d2ad56",
+            "22199176-9012-4fa9-80ad-ac328e379353",
+            "38bca60b-51fc-42f6-8ae0-2ed121d0d4d4",
+            "d1b933bf-21cf-4979-a912-b8c9d40e335c"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 15,
+          "query": "When I ask you to fact-check something, what protocol automatically kicks in?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "08bed397-7363-4662-abfe-1ca32caba5c1"
+          ],
+          "retrieved_ids": [
+            "08bed397-7363-4662-abfe-1ca32caba5c1",
+            "12a8a663-4074-428b-9fbc-4b84deec99e5",
+            "9b09ba38-eefd-4812-a25d-f81ff454db47",
+            "81c642ee-accc-4e63-9bd1-7826d1222463",
+            "5174e57a-a6de-42ba-a0db-36f1cdd97f98",
+            "f30c7156-296e-4cc5-ba75-cc11688243c4",
+            "ceab7b28-3279-43f9-af1e-e9f2ae2e6299",
+            "315ee54e-8177-4d2e-849a-87ecadd001f9",
+            "9975e1a0-3211-4960-a483-dd6935fe46a2",
+            "5018bccd-a95e-4149-96db-cf0127d025da",
+            "f8364b5c-fc50-4631-9284-bffda3fc2f47",
+            "8f5b1f9c-b280-4aaa-befb-cddad927a988",
+            "70a965ea-e022-4149-a2f8-da81d642d7bd",
+            "1ae4af59-9c83-493c-8abf-b89ab82503a9"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 16,
+          "query": "What were the approximate prices of gold, the S&P 500, and oil in late March 2025?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "161078e1-4673-4329-abae-01cb60d171bb"
+          ],
+          "retrieved_ids": [
+            "161078e1-4673-4329-abae-01cb60d171bb",
+            "1f3ce762-1032-4192-ab1b-615dc366ddbd",
+            "91a716a7-397a-411c-9cf3-33e6d8c3653a",
+            "1e68e3dd-f40e-40ba-91c8-5af5c57c82e4",
+            "52b3612e-257d-41c4-bd2b-c181c11da710",
+            "39ec5b03-879c-447c-9e8d-c58bcf40e25b",
+            "8323a8da-3ff9-4ceb-8769-162452737502",
+            "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+            "f5a0e176-a148-4ed3-8128-9901e0236053",
+            "db9e175d-aeac-4c82-9ab1-39598e4e35a2"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 17,
+          "query": "How do I efficiently load a skill when I can see the source file path in metadata?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "acbf1234-a693-48b8-9c13-31a077bd2be1"
+          ],
+          "retrieved_ids": [
+            "acbf1234-a693-48b8-9c13-31a077bd2be1",
+            "1f4c7421-3a95-4995-a068-6eaad70f3508",
+            "78e23f89-134f-4864-a1dd-85d5746fddd5",
+            "66a0db96-cc78-428a-9e0c-46f43362f7d2",
+            "bc8772c4-c278-4989-83b8-02b621eb0dbc",
+            "09ec6c87-0271-4b8a-9d03-17fb98acb6bd",
+            "0740bfc7-92a2-4f7d-9b75-b7ad3f27dd87",
+            "b0569262-5a52-4db7-84f4-19e3d6a119fe",
+            "538015fe-81c8-466d-8406-9a481d4bfd51",
+            "27578b00-9953-4368-a28b-ba410d7105c4"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 18,
+          "query": "How are LLM calls organized in the system architecture?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "70345186-423e-482b-a38b-5a4fa14c8a6a"
+          ],
+          "retrieved_ids": [
+            "70345186-423e-482b-a38b-5a4fa14c8a6a",
+            "2a4befbf-701f-47b6-ad86-87631e778ed4",
+            "a4e664c0-3bad-46fb-a5a8-ed25b1070ce1",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "b3446e6b-5428-496b-b313-43b5e5f616da",
+            "a891a8ce-153d-4e0c-b7cd-c717bd9d002f",
+            "fa8f4944-11cd-4004-9613-7157ba6485d3",
+            "017ec96c-8d50-457d-8b73-ec35e28f8e0a",
+            "e6313618-890a-4226-98b1-9ccb66cdf8f1",
+            "4652c753-67a9-4df8-8e8a-8260a731d019"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 19,
+          "query": "What recent Anthropic API features are you interested in learning about?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "df079b98-1c84-4298-b1b3-ea4760efdafd"
+          ],
+          "retrieved_ids": [
+            "df079b98-1c84-4298-b1b3-ea4760efdafd",
+            "c7d272e7-48a8-4cae-9dfb-f22ff2f36af3",
+            "59b2d5b2-756a-4e23-a948-984c6e77f64e",
+            "8c4348e2-f5d1-4817-bacb-661098cad792",
+            "64c54d63-c4a5-4abd-b4df-39053891532b",
+            "6f97cf49-ffe0-4614-9bc7-5096193729f4",
+            "02388b5c-0471-4bdd-9306-4999e8fdc55a",
+            "3e7017a4-4737-492b-86ac-4cca21157b9f",
+            "ce525b9c-167c-4b3d-a854-11ccb99c8029",
+            "5940f204-6686-4d9f-b67a-c971ed2eb9b3"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 20,
+          "query": "Can I scrape LinkedIn profiles without logging in first?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b"
+          ],
+          "retrieved_ids": [
+            "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+            "6ec6cf9e-715d-4a31-b45a-bd3247f04085",
+            "82858793-01f3-4fc1-892b-1d127a86d552",
+            "986c5c61-919f-4181-8e29-fbf220ff4ea1",
+            "9bc0fbc2-12ee-4cf7-8866-876a08fc1b2a",
+            "cd02caa0-94b2-4ea9-abc7-394235fdb77a",
+            "34fdc44e-177e-4c6b-96ab-2e26d997e2fe",
+            "dfd6f962-3c26-46c8-a12d-08b17d8b8160",
+            "658765da-dc0d-4968-bfd1-3b68ce10688f",
+            "831122e7-0406-46ef-a642-c31d89ff41a5"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 21,
+          "query": "When does your longevity research summary get sent out each week?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "35dff053-9f07-41d5-8cab-dc0e9d1c5863"
+          ],
+          "retrieved_ids": [
+            "35dff053-9f07-41d5-8cab-dc0e9d1c5863",
+            "cf5ee1f7-64cd-4373-808f-25578c633219",
+            "10950d55-22b2-4a17-ae14-b1f0b64f3e88",
+            "631aae8c-6f77-431e-95fa-faa3bf262dcf",
+            "fe934301-1cbd-4ac4-830c-5be123df1f1d",
+            "4201d7b2-6b1a-4262-84fd-37f6b46613df",
+            "27dfb986-7e7a-43c2-bab3-54fb7dcd6113",
+            "50fe9d7b-4c82-4f77-81c0-4b0e44e84765",
+            "aedd2e68-45d4-43ab-9c4e-38c133ab22ea",
+            "026102f3-d956-47a4-bf96-151946f605f7",
+            "066e096f-63be-40eb-85f2-0bdaa5171490"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 22,
+          "query": "What was the title of that article about graph diagnosis and AI agent memory?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "cb191523-8066-4d2c-b8dd-952090d453c2"
+          ],
+          "retrieved_ids": [
+            "d51f2759-a073-48f3-9e1f-29b575119120",
+            "cb191523-8066-4d2c-b8dd-952090d453c2",
+            "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+            "95dff4ab-8393-45a2-a1cc-1b52b18bf12a",
+            "a2af46f2-e6dc-4140-aad1-7706ef5c0c1c",
+            "afcbfb02-dac4-4bcf-a58b-0c7b9b7bf89e",
+            "84698311-efcc-4e9f-8dcf-bbd8ed4de427",
+            "15f33c8e-68c4-4945-8244-7904c6e05302",
+            "93fb707c-a13d-4219-92b4-18eb33875305",
+            "8a5c0861-b43c-4912-a398-15289689f14f"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 2,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 23,
+          "query": "How should I handle workspace boundary violations in tool calls?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "979224bc-4379-4149-a059-3a1f92528478"
+          ],
+          "retrieved_ids": [
+            "979224bc-4379-4149-a059-3a1f92528478",
+            "9803b2b3-c2d2-429a-a498-683db710ee82",
+            "55f1988d-aea6-4178-92d9-54439b163e57",
+            "446aa423-b873-469d-9447-b0d3a53712d1",
+            "47bfbb9f-895b-4b25-8896-ee8a66e59cad",
+            "7a8d10d8-b221-4522-97e2-c761b40775fc",
+            "adfc1c30-9dac-46ac-89dc-b228ce4386e6",
+            "1cfd4ba8-aeea-4a35-8b78-bfd22f0d2356",
+            "df6b95a5-8ddc-4a27-a9ae-6bcad9d3aaec",
+            "ded5eee1-3239-416d-bb7d-8ab54e244b97",
+            "1d4b1a9a-d4f1-40a4-91cc-caee28c896ac",
+            "aa8e6ca2-14ce-436b-a5e4-d60ea564e9de",
+            "302b0bc9-521f-403c-91c2-b498fed4fcc1"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 24,
+          "query": "How do I avoid assigning duplicate feature numbers when adding new features?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "1a3561ce-d4b8-4415-899a-8a492f0dc805"
+          ],
+          "retrieved_ids": [
+            "1a3561ce-d4b8-4415-899a-8a492f0dc805",
+            "a3441039-56d3-4c95-9ab6-7ea45e407f19",
+            "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+            "d11fa37f-8a26-4e0d-8e7d-43aa3fccbf8a",
+            "591c7d14-6a4b-4501-b235-405059636973",
+            "1fae04c0-f613-404f-aa79-378d5a1eaca2",
+            "998f2511-ad3f-4078-b4ea-f0cae04841b6",
+            "67bad243-3109-47e0-928c-bed83c4c55aa",
+            "686467f2-3893-4961-89bd-5a886ad02bf4",
+            "102dc7ff-656a-47c1-9b13-b720f0517a4f"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 25,
+          "query": "Why does Nous keep marking tasks completed before they actually finish executing?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9a262960-d1fb-441b-9df8-1a088861b375"
+          ],
+          "retrieved_ids": [
+            "9a262960-d1fb-441b-9df8-1a088861b375",
+            "ec87214c-54a1-4431-b6d4-2417f4150d32",
+            "8fa6a33a-3fa4-48ed-9c8e-24b99e078ca4",
+            "77fc8aa9-ce4d-4717-ae64-bf53a167092a",
+            "51319964-6224-4831-91ce-e10452bf9fe1",
+            "331e109b-b7a6-43d7-b4ee-4b0db47ae709",
+            "c980de11-30ee-4b28-b4af-f0bbbb828381",
+            "3757f670-4f39-4761-92c8-348714e18b11",
+            "b73e3464-5123-45a5-8fcf-c1385a6dd5cf",
+            "321ea6e7-92fb-4837-8bd6-4b5571830deb",
+            "b517546d-305f-4584-97a4-87320b6e34be",
+            "2a8c339e-ba06-45e8-8b85-9697bc6de33c",
+            "446aa423-b873-469d-9447-b0d3a53712d1",
+            "64115f0f-0a3a-41e8-854a-925ef4011fa1",
+            "5621a55a-1d75-4844-a1f8-c121c188e14b",
+            "4afc22d4-f4a9-4df7-9f09-6d9d9a03c1dc",
+            "143ec509-b627-4ab1-959d-7bbfac02d3b7",
+            "410df5f1-6ee6-4da9-89b4-894d26ca53c5",
+            "e39362fa-226e-4849-9986-7bfad6edc7b4",
+            "841e5723-397d-4e15-a875-fb092e14361f"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 26,
+          "query": "Where is the dataset file located and what bug did you identify in the script?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "397933a9-43ff-43ea-bdf6-04c931fdb807"
+          ],
+          "retrieved_ids": [
+            "397933a9-43ff-43ea-bdf6-04c931fdb807",
+            "e0801dc0-d91a-467d-b9fe-9a78e2fd3962",
+            "d68fca03-be91-4aee-9192-150d31aa9601",
+            "bf688c08-8abd-45a3-9698-c2995e8de67d",
+            "a890af6f-62c5-4b5f-80b5-83bf059c4504",
+            "d44685f9-d044-41e9-9834-f6808e54dda2",
+            "217fbf92-4196-4b35-8bbb-c3310791eaed",
+            "30e0710f-863d-4197-91b8-ee0742277c00",
+            "aa8e6ca2-14ce-436b-a5e4-d60ea564e9de",
+            "bdabd8bb-27bc-44c0-ac68-2901e8170d05",
+            "88766ceb-a5ba-45fc-9b57-8cdb30885139",
+            "a19b3cdc-da2c-4e1f-9119-e8cce2781c98",
+            "ddf94b4c-2741-4920-a503-3799f78a2894",
+            "bcfc8bd8-492a-4a0c-8973-92809b1229ae"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 27,
+          "query": "Which procedures are missing their goals and trigger phrases after the skills audit?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "f4ba9ba7-9fe3-4408-afbc-a60f880d7cca"
+          ],
+          "retrieved_ids": [
+            "f4ba9ba7-9fe3-4408-afbc-a60f880d7cca",
+            "9f452c5f-8565-483d-8929-70d865a4270a",
+            "bb731216-681e-4cab-a1f1-f105a64e6ec7",
+            "5f76dff1-3eed-4042-b4fe-6fc52d4ec8f7",
+            "ec2fa95f-c2c7-4edd-9caa-adf34cb5187a",
+            "412753c3-1f2f-49b5-be24-534dff0af6ad",
+            "48e529ed-1f76-4952-836b-39b4d7dceff9",
+            "8122ccef-9f46-4404-b753-d9f79e0c1984",
+            "6f000d9e-22f2-48bf-9cde-e6610a2d37a2",
+            "bed45e31-ad97-4716-a9b6-60ee57ce51a7",
+            "85fc5064-5d04-41ce-bdb8-05e3e2503216",
+            "1841e950-e1a3-4da6-9c7b-f2f5d8eca381",
+            "4226216a-119f-48ba-9b7f-88bfc1b4913c",
+            "a1227c78-9a37-45c9-94f5-42be310bbad9",
+            "b019999e-f926-4a5b-96e5-5e6f3fb28410",
+            "da71a7d2-06a5-412b-91fe-89180189cd67"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "procedure",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 28,
+          "query": "Should I use batching or sequential calls when handling multiple recalls in one turn?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ef2fbccc-fff1-4324-82af-b2d8d859c0b5"
+          ],
+          "retrieved_ids": [
+            "ef2fbccc-fff1-4324-82af-b2d8d859c0b5",
+            "7b4ff70d-b4d3-419a-9a2e-47472a653b24",
+            "e97f2790-a383-454c-b3a8-aaa860b36627",
+            "e71b7c86-d78f-4562-a203-0861c59edb1a",
+            "6d4266fa-0f71-4749-b110-4ff785306ce6",
+            "e1476089-a307-4e65-bd35-41ba5216d0dd",
+            "bb7eda7b-79f0-4728-9859-3591bee7c7f5",
+            "d2620188-354e-44d3-838b-04e29d6eab19",
+            "e62d3efc-5ea0-43c9-9edb-b63cd8088b45",
+            "e2132eb9-eb7e-400b-8fc4-9f772edc4610",
+            "0451bb44-6c7e-4fa2-b4fa-713a45a938ba",
+            "67ae1205-f050-44bc-9008-e16cca2b24be",
+            "41b1e708-97ca-42c6-82c0-3a1830305eeb",
+            "b150af87-b1f3-4bec-ab44-4a54542faf23",
+            "1b19d7ab-dad6-42e2-9cc1-ae17328386e9",
+            "bdaf8423-c23b-47de-94a8-12004d0d53d4"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 29,
+          "query": "What feature spec did we create based on the semi-formal reasoning templates paper?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9b70e923-06f3-4aae-8d4e-24c7d39f37af"
+          ],
+          "retrieved_ids": [
+            "9b70e923-06f3-4aae-8d4e-24c7d39f37af",
+            "3a3870b7-583a-47b5-8f91-189713eb3937",
+            "a4fc179c-3a3a-4367-b69b-2907bd644c22",
+            "eb4a113b-f7fc-40e7-82ab-2bac663b4d3b",
+            "e37744ad-7b7b-4cba-9f6f-1e4ec98df86a",
+            "07984d23-162e-4091-8df6-f5761e041e56",
+            "e97f2790-a383-454c-b3a8-aaa860b36627",
+            "b196d362-76f6-4f50-932d-1f1cacecd8e0",
+            "aab87890-0156-47d1-8929-402e09eb208a",
+            "db7a3e20-f5b5-44e5-acad-1d66a8fed102",
+            "5deef45d-c151-4bb6-97c9-b72dd637027a",
+            "533095b1-1654-4d5e-8655-dcf6600d96c3",
+            "dba97f2d-613b-4c6d-8cff-c5566e4f48d1",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "3b1d5d9b-cce1-40c0-a88c-fe6a46ad4015",
+            "b63fc8f1-35cd-4a12-bd26-daadc26c530e",
+            "d1280779-2d25-4108-9afb-daafe1219949",
+            "d2620188-354e-44d3-838b-04e29d6eab19"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 30,
+          "query": "How did I rate my performance on the EvoSkill paper and skill creation session?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "1d69b430-ef64-4e26-b6a3-e27f5a53a540"
+          ],
+          "retrieved_ids": [
+            "1d69b430-ef64-4e26-b6a3-e27f5a53a540",
+            "61e03aa2-bceb-4e6e-a05d-60ba5fe570a8",
+            "9911fa92-68aa-44c3-9241-29773071cbc4",
+            "5f76dff1-3eed-4042-b4fe-6fc52d4ec8f7",
+            "bb731216-681e-4cab-a1f1-f105a64e6ec7",
+            "cecf137f-ef46-4561-8cb4-ebe04c6472c6",
+            "aaf3ff4e-5926-43f3-a5b7-bcfa697baaaf",
+            "1a89fc56-96a1-4e52-9df7-fd12c5357c5b",
+            "8122ccef-9f46-4404-b753-d9f79e0c1984",
+            "c4064b04-77fd-4491-89bd-74bc146f6d90",
+            "b33da2a9-b3c9-4958-a226-170d9ff6fa59",
+            "741fe5f1-0d8e-45e1-a86a-f1943518ca71",
+            "e7bee491-b4f7-4a1c-811c-104e5ff4c632",
+            "156d4926-ee26-4c71-8cd2-555df3a9ba1a",
+            "8223a0fb-6371-45a8-ae4b-b8a2eca2bb96",
+            "a1227c78-9a37-45c9-94f5-42be310bbad9",
+            "ec2fa95f-c2c7-4edd-9caa-adf34cb5187a",
+            "da71a7d2-06a5-412b-91fe-89180189cd67",
+            "4226216a-119f-48ba-9b7f-88bfc1b4913c",
+            "b019999e-f926-4a5b-96e5-5e6f3fb28410"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "fact",
+            "decision",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 31,
+          "query": "Did you run concurrent Claude Code jobs to test worktree isolation and improve test coverage?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "60baa709-f2d5-48c7-8c02-25c8e434e091"
+          ],
+          "retrieved_ids": [
+            "60baa709-f2d5-48c7-8c02-25c8e434e091",
+            "9a4f5d9a-3de8-4c0b-aca7-fadc662331fa",
+            "b73e3464-5123-45a5-8fcf-c1385a6dd5cf",
+            "a18d9770-6faf-4eb7-9c7c-cddaa6c113bf",
+            "0c7d76b6-0cd3-420a-9fbe-71b2094ec476",
+            "e5cad81e-ff34-4e54-8e27-5b4e648c15aa",
+            "196db825-f1c5-4be1-a9e3-45fec62b2629",
+            "6b59081c-6366-4c8d-9c78-8d0dc25f5c73",
+            "3ecae8bb-2538-4e26-8697-81bd655a41fb",
+            "43439f60-fbec-4761-91a2-27a09b308b4f",
+            "874dfe76-4cbc-4b16-9098-969c4f41d5c3",
+            "9492cc8d-ddc8-49d0-92bb-21be17aac0bb",
+            "00cc596a-2d02-4751-a06a-122ac57cf66e",
+            "eca33f12-85da-448a-9947-31c8d133f5fd",
+            "e2e03a52-dac2-495d-a2fc-e9b2f9030b2e",
+            "cfd89d73-42c3-46f8-ab3a-635f5d3471fb",
+            "2c00a964-74af-4f26-a5e5-c0effc552b10",
+            "d67e4f76-5aef-4137-97dd-4700d7e12315",
+            "1ec8f3fe-725b-4bab-bfbe-b94ae60cc9f2"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "procedure",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 32,
+          "query": "Did I decide to use DORA 2025 findings in the AI-aligned leaders LinkedIn article?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "6ed91dbb-9329-4e79-bf6e-c3f5c685c34c"
+          ],
+          "retrieved_ids": [
+            "6ed91dbb-9329-4e79-bf6e-c3f5c685c34c",
+            "55233cf3-79e8-4c26-80dc-4ec01eb98f62",
+            "536783e7-9fb0-4877-a4e1-8a6b786edb3c",
+            "ce602127-7643-49be-a1ff-6748ec7045ae",
+            "5fefec7b-51b7-46d7-90ea-027a413cd06a",
+            "42e4aa96-8413-4c86-a5a7-0e119f82b373",
+            "f2811d14-3d79-4421-ba82-64132ff0a310",
+            "2da9e0c8-be8a-464a-9720-436238f7bec6",
+            "828b02a3-2b3a-4dac-a0c9-127227ec35ae",
+            "cc01fe16-7011-4ce2-9c0a-71ef61d441ef",
+            "4879b4d3-9bce-441d-a6b9-1a5c37f3c0b1",
+            "f0b2a25f-4d4f-4586-aec7-afa7b2a62f74",
+            "551d787a-a1bb-4334-a5ee-cf3c320fcffb",
+            "650c9ba1-e42f-4dcf-96bd-ca3f45e2f288"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 33,
+          "query": "What format changes did we make to the layoff report recently?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "4654a3ae-93cd-4c86-9353-aa65ea15ff75"
+          ],
+          "retrieved_ids": [
+            "4654a3ae-93cd-4c86-9353-aa65ea15ff75",
+            "f49fa17b-8130-45c5-8900-b6ce221c4a80",
+            "bd54946b-d789-49f9-9cf0-662d4eff0eb4",
+            "dd19f51f-fc16-4bfd-ae78-bc0cec1ecc85",
+            "2cfa840a-30ae-411f-bdc2-4412d5cde598",
+            "efcf9f83-d525-4ec3-ac04-d5fa1679b003",
+            "99350fcc-ed87-4d38-8f8c-3594789f0d02",
+            "25a04d5a-09f0-47c4-a629-4fe41cf14b3b",
+            "2dd392f5-8166-4a91-b2ac-3043b5561032",
+            "f2811d14-3d79-4421-ba82-64132ff0a310",
+            "026102f3-d956-47a4-bf96-151946f605f7",
+            "677a7375-65df-47a7-be1f-f36dc6001694",
+            "7191d728-640c-4053-9662-25e908177e0b",
+            "fe934301-1cbd-4ac4-830c-5be123df1f1d",
+            "355feaef-bf0f-4968-9ca4-309f3fae5748",
+            "7db16fb5-4b92-4090-b45c-1bb0db8f5ae0",
+            "3e102a7f-1530-479c-bd01-c623f46ea6d3"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 34,
+          "query": "What's the default workflow for sharing spec documents and feature drafts with the team?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "8146b85a-8776-491e-900a-48ceca9f0ce9"
+          ],
+          "retrieved_ids": [
+            "8146b85a-8776-491e-900a-48ceca9f0ce9",
+            "b5c48a60-9f51-48cc-8a65-c174359e2646",
+            "73701614-ade3-4b87-aaa8-bd910f1c06d1",
+            "fb5ce6ac-a334-4480-999d-034b0ce75b16",
+            "58619ec2-0dff-427f-94f3-c37aa79c5f06",
+            "8e05aca8-1189-42bd-86fc-7714cd1942f1",
+            "642cde4a-1187-4ae5-800d-83fa881e12b1",
+            "e37744ad-7b7b-4cba-9f6f-1e4ec98df86a",
+            "9a48f16b-6e2b-479d-aa53-4e5582f3a16c",
+            "aab87f9b-a99d-41b7-8026-95fafa3bc251",
+            "d47131b3-9ab8-4801-aefd-11454b2c981e",
+            "48658a18-2e17-4ac5-ac36-6d988e8fc7a2"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 35,
+          "query": "Why didn't the DAG-based task splitting work for generating the modified hippocampal memory paper?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bebbf383-5822-4b62-bb3d-5a1da3d2b6e9"
+          ],
+          "retrieved_ids": [
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 36,
+          "query": "What should a development manager's responsibilities include for our product management gap work?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "89176bfc-8064-4b08-9417-bdd19e220608"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 37,
+          "query": "What issues did you encounter when debugging the crypto research DAG pipeline?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "26da72eb-572b-47a8-934b-685dbfac0c38"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 38,
+          "query": "What dev.to article should I write comparing my AI agent's memory capabilities?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "f626e794-cdd0-46c9-af83-98be0573ef48"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 39,
+          "query": "Did we build a prototype for an LLM-powered team wiki system, and what was delivered?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ea0c915b-2dcf-48f8-8435-809ce16cd755"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "5583cd60-d010-4b27-b689-353feffb91b5"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        }
+      ]
+    },
+    {
+      "name": "ce_off",
+      "flags": {
+        "cross_encoder_enabled": false
+      },
+      "description": "Baseline with cross-encoder disabled \u2014 isolation control for f055_no_ce.",
+      "duration_seconds": 26.586725399829447,
+      "pipeline_stats_summary": {
+        "graph_expansion_used": 10,
+        "spreading_activation_used": 0,
+        "contradiction_checks_ran": 10
+      },
+      "metrics": {
+        "mrr": 0.8333333333333334,
+        "p_at_1": 0.8,
+        "p_at_5": 0.17500000000000002,
+        "p_at_10": 0.08750000000000001,
+        "r_at_1": 0.8,
+        "r_at_5": 0.875,
+        "r_at_10": 0.875,
+        "ndcg_at_10": 0.8440464876785729,
+        "n_qrels": 40,
+        "n_errored": 0
+      },
+      "per_qrel": [
+        {
+          "index": 0,
+          "query": "Why does Heartbeat keep triggering false alarms on the same issues?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9975e1a0-3211-4960-a483-dd6935fe46a2"
+          ],
+          "retrieved_ids": [
+            "9975e1a0-3211-4960-a483-dd6935fe46a2",
+            "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+            "fec94159-76d0-4472-9cb6-7c880b3bd6b2",
+            "21c30d1f-04fd-4dca-8abc-b1b50018bbf1",
+            "bdfcdb87-09d2-42db-a6c5-3e0395654153",
+            "627de62a-1a99-4e38-ab7c-7b4182f5f466",
+            "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+            "a5657fff-57b4-4632-8497-8ff73e1f6861",
+            "049423aa-afda-4579-a58c-01f3575f7e4b",
+            "531758de-825e-4183-a643-f88e36d87565",
+            "321ea6e7-92fb-4837-8bd6-4b5571830deb",
+            "a34ca9f1-8cb9-4d14-8161-91d33916da84"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 1,
+          "query": "What debugging approach worked well for the crypto DAG issues we encountered?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "c5ace100-84c4-48de-a12f-c39ff99a2c93"
+          ],
+          "retrieved_ids": [
+            "c5ace100-84c4-48de-a12f-c39ff99a2c93",
+            "9dd86fee-ff20-487b-9ff6-dc28b2049b25",
+            "adfc1c30-9dac-46ac-89dc-b228ce4386e6",
+            "a4e664c0-3bad-46fb-a5a8-ed25b1070ce1",
+            "9b51be3d-59c6-4504-a5c1-d13526d3a4d5",
+            "2bb2e150-7532-4160-b733-442fc91b884f",
+            "3fd361b0-82e3-44f7-9de3-c6532a5ca4bf",
+            "f4d86efa-df3b-42b8-8e22-221c766a42a4",
+            "14997220-7071-4c6b-9d49-ecb7c6d28dab",
+            "5a8ba993-a33e-46e7-b2a9-5cee7b320c65"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 2,
+          "query": "What is Tim currently working on for his tech blog?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "90a04637-9a70-4e68-8496-f0a0c3a3dad2"
+          ],
+          "retrieved_ids": [
+            "90a04637-9a70-4e68-8496-f0a0c3a3dad2",
+            "7d67fe09-279e-4e2a-a418-946101ba9bd9",
+            "670c753f-c3a8-4d51-ad4e-5c0bba1ce3dc",
+            "bca420f2-43cd-4f41-a5af-f81b6806f582",
+            "ac47f41d-9a9e-4a33-9b50-d1684c318369",
+            "986c5c61-919f-4181-8e29-fbf220ff4ea1",
+            "9bc0fbc2-12ee-4cf7-8866-876a08fc1b2a",
+            "dfd6f962-3c26-46c8-a12d-08b17d8b8160",
+            "62cd6387-9c3f-480a-bbbb-56e8c6e43848",
+            "9cfbba1c-88c8-4745-a55f-ee575ab37115"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 3,
+          "query": "What timeout value should I use for research nodes that make external API calls?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "cd100e3f-ce71-43fb-b17a-e78f51e7d164"
+          ],
+          "retrieved_ids": [
+            "cd100e3f-ce71-43fb-b17a-e78f51e7d164",
+            "2334b3be-8eb9-4ae0-8521-288402a7ae0d",
+            "8c42e04d-84a9-41c8-af27-b77f2fcb18bc",
+            "428ae1d3-91a6-418a-9f57-6d5f44555f77",
+            "631aae8c-6f77-431e-95fa-faa3bf262dcf",
+            "e2b9dff7-656c-4729-b833-65934f6bef61",
+            "5a5b08e7-01e6-49b1-8ae9-e9b05631dfa2",
+            "049423aa-afda-4579-a58c-01f3575f7e4b",
+            "b02149dc-3603-4270-9990-ad69eef9e0b1",
+            "a4e664c0-3bad-46fb-a5a8-ed25b1070ce1"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 4,
+          "query": "What is the three-layer architecture that Nous has developed for their AI stack?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "dc79f4da-4246-41cc-a914-98a03b37e254"
+          ],
+          "retrieved_ids": [
+            "f39c4430-8098-45a4-99d5-791e0f8ad14c",
+            "4dbe888f-05ed-4530-9775-79b3ddb64a32",
+            "dc79f4da-4246-41cc-a914-98a03b37e254",
+            "8267afb9-9039-4263-9a70-386367bceb42",
+            "46ec59dd-0227-4ff4-9b41-af27885a0707",
+            "35d61b5a-3b3b-41e0-b4e5-82e68952a621",
+            "2eeb2445-68bc-4e8e-bb84-4f7f2ed13737",
+            "e185c6f7-c9a6-44bf-aa46-7548db18b2e4",
+            "df56f249-f954-4177-9b00-a1a5b9fb9676",
+            "312c5c1f-7807-455e-ac7a-836fdd61b1f3",
+            "11665040-8a34-4e0f-b143-c30b34c0608b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 3,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 5,
+          "query": "When should I use graph structure instead of embeddings alone for retrieval?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "d8df346b-f812-457e-8d8f-ffe8e4bc3579"
+          ],
+          "retrieved_ids": [
+            "d8df346b-f812-457e-8d8f-ffe8e4bc3579",
+            "31fec06c-e306-43b9-ad02-7abffb1a13aa",
+            "ff06136f-03e6-45a8-8a16-3f44e8f0b628",
+            "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+            "1b19d7ab-dad6-42e2-9cc1-ae17328386e9",
+            "b150af87-b1f3-4bec-ab44-4a54542faf23",
+            "4b1726e0-98d0-4da4-9637-60863bffc5c4",
+            "7979811c-4273-4719-94ca-588f6f2643f3",
+            "2c5e2a86-4a8f-4041-ad18-4798b7249ec9",
+            "eafef282-9074-42de-99c2-1bd8cdb214f2"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 6,
+          "query": "Why do my emails keep failing to send in this agent environment?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a"
+          ],
+          "retrieved_ids": [
+            "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+            "0f55f0ce-dd9d-421d-b782-fb9f24e304e6",
+            "7ff9c4e4-cab6-49d2-ac76-bf7c6f0db501",
+            "0c710310-d991-40e1-b622-28b7094bc44f",
+            "b97df8d9-e426-485d-aebc-733a50eccc69",
+            "67161a14-62f1-456f-bad7-4cb95ce4093c",
+            "f2955e49-fc3f-42a8-9de8-357e166eb647",
+            "8ebf7f3e-e9f0-42de-9fbe-c18cf80af9f3",
+            "0aa6acf1-f343-4f0a-aaa5-0e2cb02b66bc",
+            "24b70b0a-d3d3-4242-ab16-75c316bc1bbb"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 7,
+          "query": "What does the ERL paper say about using heuristics versus raw trajectories for task performance?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc"
+          ],
+          "retrieved_ids": [
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc",
+            "3cc08206-dc24-444f-a7f3-a8c2ae44092d",
+            "ea63a82b-82c0-45d8-a626-2595458e1ca2",
+            "02ea7ed8-a6ff-4cf9-9a40-e17167378671",
+            "587de2c4-c6f2-4fb3-8b5d-17d3cc4b1e15",
+            "44484f2f-ce02-4ff7-9635-0e06fe60e383",
+            "498901ca-c4bb-489f-ae67-af9e4a81e77a",
+            "087d1a03-5188-44c7-87cc-27a121929e9e",
+            "66dad6cb-f5d1-4a1d-9938-3c8454785726",
+            "38a51c18-eb81-4ca1-bcc0-1d9ef5bfcf44"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 8,
+          "query": "What's that self-evolving framework from Sentient that automatically improves agent skills?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "6e2b6800-7adc-4092-bdc2-fee96219025d"
+          ],
+          "retrieved_ids": [
+            "6e2b6800-7adc-4092-bdc2-fee96219025d",
+            "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+            "f8ee6e05-7c90-4e92-b6eb-3ceb47b795da",
+            "fd71d00e-cd7c-4312-90e9-9f936a64e894",
+            "2c127fbe-ca24-4d9c-a499-0c9489eb6f6b",
+            "a01c2d34-9bee-4399-9467-1766789b8476",
+            "0f7a2531-491b-463a-9a7c-2d54b5c79ccf",
+            "74b1c4e3-d72b-4778-979e-f3680e972548",
+            "8f9cb589-0575-4d2c-8fe1-0acda6503f9f",
+            "bb8c1999-ae8b-4f95-b780-c20f1e5be841"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 9,
+          "query": "What changes were made to the F027 Supersession Detection spec recently?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "c7abd62b-579b-4040-814c-b8a858956266"
+          ],
+          "retrieved_ids": [
+            "c7abd62b-579b-4040-814c-b8a858956266",
+            "734bb2a9-79b0-4ea4-965f-a5f1800193f4",
+            "62cb5659-c183-4c00-bd2f-becdc092c748",
+            "dba97f2d-613b-4c6d-8cff-c5566e4f48d1",
+            "1fae04c0-f613-404f-aa79-378d5a1eaca2",
+            "fdfaeda6-a8bb-45ea-890f-f8bcbf13c6d4",
+            "cf7a9e01-444d-4272-9013-7c36118fe5b0",
+            "d8baaeb3-8fbe-4efc-b0d9-4b6ba1fa60b4",
+            "a3441039-56d3-4c95-9ab6-7ea45e407f19",
+            "e97957de-f8a7-4a06-bebc-b1d17f08b267",
+            "9a48f16b-6e2b-479d-aa53-4e5582f3a16c"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 10,
+          "query": "What material stack and dimensions does your memristor device use for switching?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "747b3279-3ea8-41b9-ab6c-976a446b0cda"
+          ],
+          "retrieved_ids": [
+            "747b3279-3ea8-41b9-ab6c-976a446b0cda",
+            "520d0125-b3d9-4709-a632-d8d6d12afcbb",
+            "4994020e-c424-4141-b7f4-5765c4c531a9",
+            "84f80956-43d4-44f0-ad07-3159a0ceb6d9",
+            "636785f1-363c-4593-a240-f298ac12286f",
+            "710a867a-f6ac-4874-8752-7a9f965e42cc",
+            "c14fa7d0-3975-4582-921d-7c9a0d897150",
+            "296945af-f4e2-4e25-b330-370746e59853",
+            "cb394573-c45f-4059-8a8e-459e95a8513b",
+            "40e8cc97-a325-4be1-a26b-68812f874836"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 11,
+          "query": "What safety checks does the new censor with ID 7e49ca32 require before listing capabilities?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "abc54fb9-b4a2-408f-9972-255cdf8097e5"
+          ],
+          "retrieved_ids": [
+            "abc54fb9-b4a2-408f-9972-255cdf8097e5",
+            "851d547d-20da-4ed4-9c4c-89751809df17",
+            "908a3ac9-0729-4f6f-8b9e-b3a520bf7b87",
+            "c19aca98-3dac-4269-a3a1-47fc5db53ad3",
+            "7f468513-ae0a-403a-acff-28f618bf39c4",
+            "00a59c71-7732-4cfe-b8dc-1584d2fcc7af",
+            "2a8c339e-ba06-45e8-8b85-9697bc6de33c",
+            "6ad14415-fc2e-459a-a7ae-1d185409ec89",
+            "10496ec0-2a6a-4296-97f5-53160b88d1b8",
+            "e376cfbd-9c98-4100-b21b-8cd73d625ad3",
+            "3fba50c9-4bac-4312-b93c-5dcd5aef8243",
+            "d098e7a2-895e-4004-bae8-6a41a3afbbec"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 12,
+          "query": "What are the five types of memory in the Nous memory architecture?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "b2e6e29a-2d50-4d92-9562-e556ebd12520"
+          ],
+          "retrieved_ids": [
+            "7a01c812-7da4-45d6-b605-620af916fc37",
+            "b2e6e29a-2d50-4d92-9562-e556ebd12520",
+            "6c67cb87-ab91-4a71-9d22-7844aa508b66",
+            "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+            "13197eaa-6f83-4616-8924-e2d6f9d67a00",
+            "9982f0a4-cf6e-4b4e-87eb-5ac38e1421e6",
+            "2c5e2a86-4a8f-4041-ad18-4798b7249ec9",
+            "f39c4430-8098-45a4-99d5-791e0f8ad14c",
+            "312c5c1f-7807-455e-ac7a-836fdd61b1f3",
+            "8b17124e-b936-499a-b692-7b16bb86665e",
+            "07110505-38e7-414d-8044-a65abe83f55e"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 2,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 13,
+          "query": "What are the main security vulnerabilities in AI agents and how can decision layers help mitigate them?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bf6cebcb-892b-4ba1-ba5b-3f93963ee3b5"
+          ],
+          "retrieved_ids": [
+            "bf6cebcb-892b-4ba1-ba5b-3f93963ee3b5",
+            "8d515336-cc54-499c-8560-ff3c68680db7",
+            "bf03a866-1b14-4f8b-ab8e-58d684b81af6",
+            "7d379127-24be-4da1-b323-fc17e1de3655",
+            "4bd6dcad-cc0d-4a39-9459-d0faa7e3cca3",
+            "26a82274-955c-4b39-8b00-50e917351b22",
+            "2725136f-e714-4cb8-86c4-72233cc2f8ca",
+            "8a5c0861-b43c-4912-a398-15289689f14f",
+            "38bca60b-51fc-42f6-8ae0-2ed121d0d4d4",
+            "bd6ccbc0-51c0-430e-8860-44e3577609a8"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 14,
+          "query": "What framework should guide decisions about delegating tasks to AI agents?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bdc950e7-5137-4835-acb9-4d2becadc4d6"
+          ],
+          "retrieved_ids": [
+            "bdc950e7-5137-4835-acb9-4d2becadc4d6",
+            "df56f249-f954-4177-9b00-a1a5b9fb9676",
+            "090eda5c-f7a8-4a8f-bb64-1baf980cf7ff",
+            "4bd6dcad-cc0d-4a39-9459-d0faa7e3cca3",
+            "9104faee-d57a-4378-b663-99a2550031cd",
+            "5b823bf2-9e29-4e63-a052-8cd8a45b6754",
+            "38bca60b-51fc-42f6-8ae0-2ed121d0d4d4",
+            "650c9ba1-e42f-4dcf-96bd-ca3f45e2f288",
+            "22199176-9012-4fa9-80ad-ac328e379353",
+            "d38d15d0-e5e4-4906-93a7-10afbbc18b10"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 15,
+          "query": "When I ask you to fact-check something, what protocol automatically kicks in?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "08bed397-7363-4662-abfe-1ca32caba5c1"
+          ],
+          "retrieved_ids": [
+            "9b09ba38-eefd-4812-a25d-f81ff454db47",
+            "08bed397-7363-4662-abfe-1ca32caba5c1",
+            "5174e57a-a6de-42ba-a0db-36f1cdd97f98",
+            "6a698745-73b1-47c0-9081-31b040365d9e",
+            "12a8a663-4074-428b-9fbc-4b84deec99e5",
+            "ceab7b28-3279-43f9-af1e-e9f2ae2e6299",
+            "9975e1a0-3211-4960-a483-dd6935fe46a2",
+            "0b847355-4239-4ecd-ac56-af287c9d9a7f",
+            "5018bccd-a95e-4149-96db-cf0127d025da",
+            "f30c7156-296e-4cc5-ba75-cc11688243c4",
+            "1ae4af59-9c83-493c-8abf-b89ab82503a9",
+            "f8364b5c-fc50-4631-9284-bffda3fc2f47",
+            "8f5b1f9c-b280-4aaa-befb-cddad927a988"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 2,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 16,
+          "query": "What were the approximate prices of gold, the S&P 500, and oil in late March 2025?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "161078e1-4673-4329-abae-01cb60d171bb"
+          ],
+          "retrieved_ids": [
+            "161078e1-4673-4329-abae-01cb60d171bb",
+            "1f3ce762-1032-4192-ab1b-615dc366ddbd",
+            "91a716a7-397a-411c-9cf3-33e6d8c3653a",
+            "1e68e3dd-f40e-40ba-91c8-5af5c57c82e4",
+            "8323a8da-3ff9-4ceb-8769-162452737502",
+            "39ec5b03-879c-447c-9e8d-c58bcf40e25b",
+            "3eb9e650-5413-4d12-bd63-22b2de6789ab",
+            "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+            "4a9b8be2-892f-46ac-9716-9caf7e034bbd",
+            "52b3612e-257d-41c4-bd2b-c181c11da710"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 17,
+          "query": "How do I efficiently load a skill when I can see the source file path in metadata?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "acbf1234-a693-48b8-9c13-31a077bd2be1"
+          ],
+          "retrieved_ids": [
+            "acbf1234-a693-48b8-9c13-31a077bd2be1",
+            "1f4c7421-3a95-4995-a068-6eaad70f3508",
+            "78e23f89-134f-4864-a1dd-85d5746fddd5",
+            "66a0db96-cc78-428a-9e0c-46f43362f7d2",
+            "b0569262-5a52-4db7-84f4-19e3d6a119fe",
+            "538015fe-81c8-466d-8406-9a481d4bfd51",
+            "7b6b1af7-8ee5-47eb-9faf-5ef55508aae9",
+            "09ec6c87-0271-4b8a-9d03-17fb98acb6bd",
+            "38899b62-24c0-4602-a5cd-46b9480ceb9f",
+            "bb8c1999-ae8b-4f95-b780-c20f1e5be841"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 18,
+          "query": "How are LLM calls organized in the system architecture?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "70345186-423e-482b-a38b-5a4fa14c8a6a"
+          ],
+          "retrieved_ids": [
+            "70345186-423e-482b-a38b-5a4fa14c8a6a",
+            "2a4befbf-701f-47b6-ad86-87631e778ed4",
+            "5bf77826-6fe7-4dad-a29d-f3946e6e96a2",
+            "e6313618-890a-4226-98b1-9ccb66cdf8f1",
+            "4e515895-b301-4bb3-9a25-230a5fe6c91e",
+            "4652c753-67a9-4df8-8e8a-8260a731d019",
+            "017ec96c-8d50-457d-8b73-ec35e28f8e0a",
+            "fa8f4944-11cd-4004-9613-7157ba6485d3",
+            "a4f92d03-f072-492e-8675-42f3d0319ae1",
+            "6cea2f41-3d78-4953-98a8-d2a1d10c3c9b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 19,
+          "query": "What recent Anthropic API features are you interested in learning about?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "df079b98-1c84-4298-b1b3-ea4760efdafd"
+          ],
+          "retrieved_ids": [
+            "df079b98-1c84-4298-b1b3-ea4760efdafd",
+            "8c4348e2-f5d1-4817-bacb-661098cad792",
+            "6f97cf49-ffe0-4614-9bc7-5096193729f4",
+            "db96314e-7f57-4c53-b350-42a30c229314",
+            "64c54d63-c4a5-4abd-b4df-39053891532b",
+            "a0a1d433-6b8e-45c1-9ef2-b3d98b0e7959",
+            "020a4417-90bb-49ae-8e03-95548c1b0cad",
+            "e884086f-ecac-4473-818d-619f9a6c3f5b",
+            "02388b5c-0471-4bdd-9306-4999e8fdc55a",
+            "2a4befbf-701f-47b6-ad86-87631e778ed4"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 20,
+          "query": "Can I scrape LinkedIn profiles without logging in first?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b"
+          ],
+          "retrieved_ids": [
+            "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+            "831122e7-0406-46ef-a642-c31d89ff41a5",
+            "6ec6cf9e-715d-4a31-b45a-bd3247f04085",
+            "658765da-dc0d-4968-bfd1-3b68ce10688f",
+            "cd02caa0-94b2-4ea9-abc7-394235fdb77a",
+            "371cd3a1-8917-4955-b2d2-c30d05ff761a",
+            "435f62e3-b491-4d50-bc1e-f8f62cc77731",
+            "62cd6387-9c3f-480a-bbbb-56e8c6e43848",
+            "49a0c2c8-1600-44ad-825d-d412d083135e",
+            "2dda1abf-7cb7-4f9f-b621-a7bef5a46121"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 21,
+          "query": "When does your longevity research summary get sent out each week?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "35dff053-9f07-41d5-8cab-dc0e9d1c5863"
+          ],
+          "retrieved_ids": [
+            "35dff053-9f07-41d5-8cab-dc0e9d1c5863",
+            "cf5ee1f7-64cd-4373-808f-25578c633219",
+            "10950d55-22b2-4a17-ae14-b1f0b64f3e88",
+            "27dfb986-7e7a-43c2-bab3-54fb7dcd6113",
+            "a9b56138-52a8-4a9a-a72f-58c468026b0c",
+            "e607a0c7-0783-49f9-b78b-922014bc3e66",
+            "db9e175d-aeac-4c82-9ab1-39598e4e35a2",
+            "4201d7b2-6b1a-4262-84fd-37f6b46613df",
+            "30be347f-7bf0-4eea-8dab-d39a9aa77e60",
+            "aedd2e68-45d4-43ab-9c4e-38c133ab22ea",
+            "066e096f-63be-40eb-85f2-0bdaa5171490"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 22,
+          "query": "What was the title of that article about graph diagnosis and AI agent memory?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "cb191523-8066-4d2c-b8dd-952090d453c2"
+          ],
+          "retrieved_ids": [
+            "cb191523-8066-4d2c-b8dd-952090d453c2",
+            "d51f2759-a073-48f3-9e1f-29b575119120",
+            "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+            "8a5c0861-b43c-4912-a398-15289689f14f",
+            "95dff4ab-8393-45a2-a1cc-1b52b18bf12a",
+            "d4bc2e01-3b09-46af-8721-0016915679df",
+            "15f33c8e-68c4-4945-8244-7904c6e05302",
+            "0851b6bc-2c43-49ee-b7f4-c101bf6c99ee",
+            "93fb707c-a13d-4219-92b4-18eb33875305",
+            "a2af46f2-e6dc-4140-aad1-7706ef5c0c1c"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 23,
+          "query": "How should I handle workspace boundary violations in tool calls?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "979224bc-4379-4149-a059-3a1f92528478"
+          ],
+          "retrieved_ids": [
+            "979224bc-4379-4149-a059-3a1f92528478",
+            "9803b2b3-c2d2-429a-a498-683db710ee82",
+            "bb4c4d5d-f008-4d3f-a27f-740a04404924",
+            "1cfd4ba8-aeea-4a35-8b78-bfd22f0d2356",
+            "446aa423-b873-469d-9447-b0d3a53712d1",
+            "16e95451-81a4-4795-a8ec-ff09421f271f",
+            "7a8d10d8-b221-4522-97e2-c761b40775fc",
+            "adfc1c30-9dac-46ac-89dc-b228ce4386e6",
+            "55f1988d-aea6-4178-92d9-54439b163e57",
+            "5a4cfa66-dfc6-4f36-9a8f-af1860344261",
+            "1d4b1a9a-d4f1-40a4-91cc-caee28c896ac",
+            "aa8e6ca2-14ce-436b-a5e4-d60ea564e9de",
+            "83aa0660-8fe4-4c72-831b-cf22d2b91b25"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 24,
+          "query": "How do I avoid assigning duplicate feature numbers when adding new features?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "1a3561ce-d4b8-4415-899a-8a492f0dc805"
+          ],
+          "retrieved_ids": [
+            "1a3561ce-d4b8-4415-899a-8a492f0dc805",
+            "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+            "102dc7ff-656a-47c1-9b13-b720f0517a4f",
+            "998f2511-ad3f-4078-b4ea-f0cae04841b6",
+            "1fae04c0-f613-404f-aa79-378d5a1eaca2",
+            "a3441039-56d3-4c95-9ab6-7ea45e407f19",
+            "686467f2-3893-4961-89bd-5a886ad02bf4",
+            "d8baaeb3-8fbe-4efc-b0d9-4b6ba1fa60b4",
+            "90deb988-c51a-49a7-9293-28f1de6e9734",
+            "d11fa37f-8a26-4e0d-8e7d-43aa3fccbf8a"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 25,
+          "query": "Why does Nous keep marking tasks completed before they actually finish executing?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9a262960-d1fb-441b-9df8-1a088861b375"
+          ],
+          "retrieved_ids": [
+            "9a262960-d1fb-441b-9df8-1a088861b375",
+            "ec87214c-54a1-4431-b6d4-2417f4150d32",
+            "8fa6a33a-3fa4-48ed-9c8e-24b99e078ca4",
+            "77fc8aa9-ce4d-4717-ae64-bf53a167092a",
+            "51319964-6224-4831-91ce-e10452bf9fe1",
+            "331e109b-b7a6-43d7-b4ee-4b0db47ae709",
+            "c980de11-30ee-4b28-b4af-f0bbbb828381",
+            "3757f670-4f39-4761-92c8-348714e18b11",
+            "b73e3464-5123-45a5-8fcf-c1385a6dd5cf",
+            "321ea6e7-92fb-4837-8bd6-4b5571830deb",
+            "b517546d-305f-4584-97a4-87320b6e34be",
+            "2a8c339e-ba06-45e8-8b85-9697bc6de33c",
+            "446aa423-b873-469d-9447-b0d3a53712d1",
+            "64115f0f-0a3a-41e8-854a-925ef4011fa1",
+            "5621a55a-1d75-4844-a1f8-c121c188e14b",
+            "4afc22d4-f4a9-4df7-9f09-6d9d9a03c1dc",
+            "143ec509-b627-4ab1-959d-7bbfac02d3b7",
+            "410df5f1-6ee6-4da9-89b4-894d26ca53c5",
+            "e39362fa-226e-4849-9986-7bfad6edc7b4",
+            "841e5723-397d-4e15-a875-fb092e14361f"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 26,
+          "query": "Where is the dataset file located and what bug did you identify in the script?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "397933a9-43ff-43ea-bdf6-04c931fdb807"
+          ],
+          "retrieved_ids": [
+            "397933a9-43ff-43ea-bdf6-04c931fdb807",
+            "e0801dc0-d91a-467d-b9fe-9a78e2fd3962",
+            "d68fca03-be91-4aee-9192-150d31aa9601",
+            "bf688c08-8abd-45a3-9698-c2995e8de67d",
+            "a890af6f-62c5-4b5f-80b5-83bf059c4504",
+            "d44685f9-d044-41e9-9834-f6808e54dda2",
+            "217fbf92-4196-4b35-8bbb-c3310791eaed",
+            "30e0710f-863d-4197-91b8-ee0742277c00",
+            "aa8e6ca2-14ce-436b-a5e4-d60ea564e9de",
+            "bdabd8bb-27bc-44c0-ac68-2901e8170d05",
+            "88766ceb-a5ba-45fc-9b57-8cdb30885139",
+            "a19b3cdc-da2c-4e1f-9119-e8cce2781c98",
+            "ddf94b4c-2741-4920-a503-3799f78a2894",
+            "bcfc8bd8-492a-4a0c-8973-92809b1229ae"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 27,
+          "query": "Which procedures are missing their goals and trigger phrases after the skills audit?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "f4ba9ba7-9fe3-4408-afbc-a60f880d7cca"
+          ],
+          "retrieved_ids": [
+            "f4ba9ba7-9fe3-4408-afbc-a60f880d7cca",
+            "9f452c5f-8565-483d-8929-70d865a4270a",
+            "bb731216-681e-4cab-a1f1-f105a64e6ec7",
+            "5f76dff1-3eed-4042-b4fe-6fc52d4ec8f7",
+            "ec2fa95f-c2c7-4edd-9caa-adf34cb5187a",
+            "412753c3-1f2f-49b5-be24-534dff0af6ad",
+            "48e529ed-1f76-4952-836b-39b4d7dceff9",
+            "8122ccef-9f46-4404-b753-d9f79e0c1984",
+            "6f000d9e-22f2-48bf-9cde-e6610a2d37a2",
+            "bed45e31-ad97-4716-a9b6-60ee57ce51a7",
+            "85fc5064-5d04-41ce-bdb8-05e3e2503216",
+            "1841e950-e1a3-4da6-9c7b-f2f5d8eca381",
+            "4226216a-119f-48ba-9b7f-88bfc1b4913c",
+            "a1227c78-9a37-45c9-94f5-42be310bbad9",
+            "b019999e-f926-4a5b-96e5-5e6f3fb28410",
+            "da71a7d2-06a5-412b-91fe-89180189cd67"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "procedure",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 28,
+          "query": "Should I use batching or sequential calls when handling multiple recalls in one turn?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ef2fbccc-fff1-4324-82af-b2d8d859c0b5"
+          ],
+          "retrieved_ids": [
+            "ef2fbccc-fff1-4324-82af-b2d8d859c0b5",
+            "7b4ff70d-b4d3-419a-9a2e-47472a653b24",
+            "e97f2790-a383-454c-b3a8-aaa860b36627",
+            "e71b7c86-d78f-4562-a203-0861c59edb1a",
+            "6d4266fa-0f71-4749-b110-4ff785306ce6",
+            "e1476089-a307-4e65-bd35-41ba5216d0dd",
+            "bb7eda7b-79f0-4728-9859-3591bee7c7f5",
+            "d2620188-354e-44d3-838b-04e29d6eab19",
+            "e62d3efc-5ea0-43c9-9edb-b63cd8088b45",
+            "e2132eb9-eb7e-400b-8fc4-9f772edc4610",
+            "0451bb44-6c7e-4fa2-b4fa-713a45a938ba",
+            "67ae1205-f050-44bc-9008-e16cca2b24be",
+            "41b1e708-97ca-42c6-82c0-3a1830305eeb",
+            "b150af87-b1f3-4bec-ab44-4a54542faf23",
+            "1b19d7ab-dad6-42e2-9cc1-ae17328386e9",
+            "bdaf8423-c23b-47de-94a8-12004d0d53d4"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 29,
+          "query": "What feature spec did we create based on the semi-formal reasoning templates paper?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9b70e923-06f3-4aae-8d4e-24c7d39f37af"
+          ],
+          "retrieved_ids": [
+            "9b70e923-06f3-4aae-8d4e-24c7d39f37af",
+            "3a3870b7-583a-47b5-8f91-189713eb3937",
+            "a4fc179c-3a3a-4367-b69b-2907bd644c22",
+            "eb4a113b-f7fc-40e7-82ab-2bac663b4d3b",
+            "e37744ad-7b7b-4cba-9f6f-1e4ec98df86a",
+            "07984d23-162e-4091-8df6-f5761e041e56",
+            "e97f2790-a383-454c-b3a8-aaa860b36627",
+            "b196d362-76f6-4f50-932d-1f1cacecd8e0",
+            "aab87890-0156-47d1-8929-402e09eb208a",
+            "db7a3e20-f5b5-44e5-acad-1d66a8fed102",
+            "5deef45d-c151-4bb6-97c9-b72dd637027a",
+            "533095b1-1654-4d5e-8655-dcf6600d96c3",
+            "dba97f2d-613b-4c6d-8cff-c5566e4f48d1",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "3b1d5d9b-cce1-40c0-a88c-fe6a46ad4015",
+            "b63fc8f1-35cd-4a12-bd26-daadc26c530e",
+            "d1280779-2d25-4108-9afb-daafe1219949",
+            "d2620188-354e-44d3-838b-04e29d6eab19"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 30,
+          "query": "How did I rate my performance on the EvoSkill paper and skill creation session?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "1d69b430-ef64-4e26-b6a3-e27f5a53a540"
+          ],
+          "retrieved_ids": [
+            "1d69b430-ef64-4e26-b6a3-e27f5a53a540",
+            "61e03aa2-bceb-4e6e-a05d-60ba5fe570a8",
+            "9911fa92-68aa-44c3-9241-29773071cbc4",
+            "5f76dff1-3eed-4042-b4fe-6fc52d4ec8f7",
+            "bb731216-681e-4cab-a1f1-f105a64e6ec7",
+            "cecf137f-ef46-4561-8cb4-ebe04c6472c6",
+            "aaf3ff4e-5926-43f3-a5b7-bcfa697baaaf",
+            "1a89fc56-96a1-4e52-9df7-fd12c5357c5b",
+            "8122ccef-9f46-4404-b753-d9f79e0c1984",
+            "c4064b04-77fd-4491-89bd-74bc146f6d90",
+            "b33da2a9-b3c9-4958-a226-170d9ff6fa59",
+            "741fe5f1-0d8e-45e1-a86a-f1943518ca71",
+            "e7bee491-b4f7-4a1c-811c-104e5ff4c632",
+            "156d4926-ee26-4c71-8cd2-555df3a9ba1a",
+            "8223a0fb-6371-45a8-ae4b-b8a2eca2bb96",
+            "a1227c78-9a37-45c9-94f5-42be310bbad9",
+            "ec2fa95f-c2c7-4edd-9caa-adf34cb5187a",
+            "da71a7d2-06a5-412b-91fe-89180189cd67",
+            "4226216a-119f-48ba-9b7f-88bfc1b4913c",
+            "b019999e-f926-4a5b-96e5-5e6f3fb28410"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "fact",
+            "decision",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 31,
+          "query": "Did you run concurrent Claude Code jobs to test worktree isolation and improve test coverage?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "60baa709-f2d5-48c7-8c02-25c8e434e091"
+          ],
+          "retrieved_ids": [
+            "60baa709-f2d5-48c7-8c02-25c8e434e091",
+            "9a4f5d9a-3de8-4c0b-aca7-fadc662331fa",
+            "b73e3464-5123-45a5-8fcf-c1385a6dd5cf",
+            "a18d9770-6faf-4eb7-9c7c-cddaa6c113bf",
+            "0c7d76b6-0cd3-420a-9fbe-71b2094ec476",
+            "e5cad81e-ff34-4e54-8e27-5b4e648c15aa",
+            "196db825-f1c5-4be1-a9e3-45fec62b2629",
+            "6b59081c-6366-4c8d-9c78-8d0dc25f5c73",
+            "3ecae8bb-2538-4e26-8697-81bd655a41fb",
+            "43439f60-fbec-4761-91a2-27a09b308b4f",
+            "874dfe76-4cbc-4b16-9098-969c4f41d5c3",
+            "9492cc8d-ddc8-49d0-92bb-21be17aac0bb",
+            "00cc596a-2d02-4751-a06a-122ac57cf66e",
+            "eca33f12-85da-448a-9947-31c8d133f5fd",
+            "e2e03a52-dac2-495d-a2fc-e9b2f9030b2e",
+            "cfd89d73-42c3-46f8-ab3a-635f5d3471fb",
+            "2c00a964-74af-4f26-a5e5-c0effc552b10",
+            "d67e4f76-5aef-4137-97dd-4700d7e12315",
+            "1ec8f3fe-725b-4bab-bfbe-b94ae60cc9f2"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "procedure",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 32,
+          "query": "Did I decide to use DORA 2025 findings in the AI-aligned leaders LinkedIn article?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "6ed91dbb-9329-4e79-bf6e-c3f5c685c34c"
+          ],
+          "retrieved_ids": [
+            "6ed91dbb-9329-4e79-bf6e-c3f5c685c34c",
+            "55233cf3-79e8-4c26-80dc-4ec01eb98f62",
+            "536783e7-9fb0-4877-a4e1-8a6b786edb3c",
+            "ce602127-7643-49be-a1ff-6748ec7045ae",
+            "5fefec7b-51b7-46d7-90ea-027a413cd06a",
+            "42e4aa96-8413-4c86-a5a7-0e119f82b373",
+            "f2811d14-3d79-4421-ba82-64132ff0a310",
+            "2da9e0c8-be8a-464a-9720-436238f7bec6",
+            "828b02a3-2b3a-4dac-a0c9-127227ec35ae",
+            "cc01fe16-7011-4ce2-9c0a-71ef61d441ef",
+            "4879b4d3-9bce-441d-a6b9-1a5c37f3c0b1",
+            "f0b2a25f-4d4f-4586-aec7-afa7b2a62f74",
+            "551d787a-a1bb-4334-a5ee-cf3c320fcffb",
+            "650c9ba1-e42f-4dcf-96bd-ca3f45e2f288"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 33,
+          "query": "What format changes did we make to the layoff report recently?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "4654a3ae-93cd-4c86-9353-aa65ea15ff75"
+          ],
+          "retrieved_ids": [
+            "4654a3ae-93cd-4c86-9353-aa65ea15ff75",
+            "f49fa17b-8130-45c5-8900-b6ce221c4a80",
+            "bd54946b-d789-49f9-9cf0-662d4eff0eb4",
+            "dd19f51f-fc16-4bfd-ae78-bc0cec1ecc85",
+            "2cfa840a-30ae-411f-bdc2-4412d5cde598",
+            "efcf9f83-d525-4ec3-ac04-d5fa1679b003",
+            "99350fcc-ed87-4d38-8f8c-3594789f0d02",
+            "25a04d5a-09f0-47c4-a629-4fe41cf14b3b",
+            "2dd392f5-8166-4a91-b2ac-3043b5561032",
+            "f2811d14-3d79-4421-ba82-64132ff0a310",
+            "026102f3-d956-47a4-bf96-151946f605f7",
+            "677a7375-65df-47a7-be1f-f36dc6001694",
+            "7191d728-640c-4053-9662-25e908177e0b",
+            "fe934301-1cbd-4ac4-830c-5be123df1f1d",
+            "355feaef-bf0f-4968-9ca4-309f3fae5748",
+            "7db16fb5-4b92-4090-b45c-1bb0db8f5ae0",
+            "3e102a7f-1530-479c-bd01-c623f46ea6d3"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 34,
+          "query": "What's the default workflow for sharing spec documents and feature drafts with the team?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "8146b85a-8776-491e-900a-48ceca9f0ce9"
+          ],
+          "retrieved_ids": [
+            "8146b85a-8776-491e-900a-48ceca9f0ce9",
+            "b5c48a60-9f51-48cc-8a65-c174359e2646",
+            "73701614-ade3-4b87-aaa8-bd910f1c06d1",
+            "fb5ce6ac-a334-4480-999d-034b0ce75b16",
+            "58619ec2-0dff-427f-94f3-c37aa79c5f06",
+            "8e05aca8-1189-42bd-86fc-7714cd1942f1",
+            "642cde4a-1187-4ae5-800d-83fa881e12b1",
+            "e37744ad-7b7b-4cba-9f6f-1e4ec98df86a",
+            "9a48f16b-6e2b-479d-aa53-4e5582f3a16c",
+            "aab87f9b-a99d-41b7-8026-95fafa3bc251",
+            "d47131b3-9ab8-4801-aefd-11454b2c981e",
+            "48658a18-2e17-4ac5-ac36-6d988e8fc7a2"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 35,
+          "query": "Why didn't the DAG-based task splitting work for generating the modified hippocampal memory paper?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bebbf383-5822-4b62-bb3d-5a1da3d2b6e9"
+          ],
+          "retrieved_ids": [
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 36,
+          "query": "What should a development manager's responsibilities include for our product management gap work?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "89176bfc-8064-4b08-9417-bdd19e220608"
+          ],
+          "retrieved_ids": [
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 37,
+          "query": "What issues did you encounter when debugging the crypto research DAG pipeline?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "26da72eb-572b-47a8-934b-685dbfac0c38"
+          ],
+          "retrieved_ids": [
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 38,
+          "query": "What dev.to article should I write comparing my AI agent's memory capabilities?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "f626e794-cdd0-46c9-af83-98be0573ef48"
+          ],
+          "retrieved_ids": [
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 39,
+          "query": "Did we build a prototype for an LLM-powered team wiki system, and what was delivered?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ea0c915b-2dcf-48f8-8435-809ce16cd755"
+          ],
+          "retrieved_ids": [
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        }
+      ]
+    },
+    {
+      "name": "ce_on",
+      "flags": {
+        "cross_encoder_enabled": true
+      },
+      "description": "F042 cross-encoder reranking enabled (retroactive A/B vs default-off).",
+      "duration_seconds": 35.07589229987934,
+      "pipeline_stats_summary": {
+        "graph_expansion_used": 10,
+        "spreading_activation_used": 0,
+        "contradiction_checks_ran": 10
+      },
+      "metrics": {
+        "mrr": 0.8333333333333334,
+        "p_at_1": 0.8,
+        "p_at_5": 0.17500000000000002,
+        "p_at_10": 0.08750000000000001,
+        "r_at_1": 0.8,
+        "r_at_5": 0.875,
+        "r_at_10": 0.875,
+        "ndcg_at_10": 0.8440464876785729,
+        "n_qrels": 40,
+        "n_errored": 0
+      },
+      "per_qrel": [
+        {
+          "index": 0,
+          "query": "Why does Heartbeat keep triggering false alarms on the same issues?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9975e1a0-3211-4960-a483-dd6935fe46a2"
+          ],
+          "retrieved_ids": [
+            "fec94159-76d0-4472-9cb6-7c880b3bd6b2",
+            "6c5eba67-24cf-4d53-a9da-ba8e16b14af8",
+            "9975e1a0-3211-4960-a483-dd6935fe46a2",
+            "21c30d1f-04fd-4dca-8abc-b1b50018bbf1",
+            "d0070ec0-ec4e-4df1-9e1c-80b8fd6eedd6",
+            "bdfcdb87-09d2-42db-a6c5-3e0395654153",
+            "049423aa-afda-4579-a58c-01f3575f7e4b",
+            "531758de-825e-4183-a643-f88e36d87565",
+            "87d83cf0-80e0-4b09-b39b-c6c62512b8cf",
+            "6b7f58c2-41f8-454a-996a-a3f2ffeebcaa",
+            "321ea6e7-92fb-4837-8bd6-4b5571830deb",
+            "a34ca9f1-8cb9-4d14-8161-91d33916da84"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 3,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 1,
+          "query": "What debugging approach worked well for the crypto DAG issues we encountered?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "c5ace100-84c4-48de-a12f-c39ff99a2c93"
+          ],
+          "retrieved_ids": [
+            "c5ace100-84c4-48de-a12f-c39ff99a2c93",
+            "9dd86fee-ff20-487b-9ff6-dc28b2049b25",
+            "6502ea9a-0824-4d8c-8bf8-6d30d964146d",
+            "11430ca5-939c-4826-8e3a-0b70aad53106",
+            "3fd361b0-82e3-44f7-9de3-c6532a5ca4bf",
+            "bfb52a00-979f-442b-b7b1-450c8e27d8ae",
+            "dd500b60-6f8a-48ad-9238-afd5143a88d8",
+            "5a8ba993-a33e-46e7-b2a9-5cee7b320c65",
+            "14997220-7071-4c6b-9d49-ecb7c6d28dab",
+            "9c6470f6-0e6a-436a-829a-54ef481fe1d0"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 2,
+          "query": "What is Tim currently working on for his tech blog?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "90a04637-9a70-4e68-8496-f0a0c3a3dad2"
+          ],
+          "retrieved_ids": [
+            "90a04637-9a70-4e68-8496-f0a0c3a3dad2",
+            "9cfbba1c-88c8-4745-a55f-ee575ab37115",
+            "ac47f41d-9a9e-4a33-9b50-d1684c318369",
+            "b6adefb4-e902-4d1d-822d-2cdf306d5761",
+            "670c753f-c3a8-4d51-ad4e-5c0bba1ce3dc",
+            "bc0a27f4-ebe8-4ce5-a73f-3f23dcdaec10",
+            "dfd6f962-3c26-46c8-a12d-08b17d8b8160",
+            "62cd6387-9c3f-480a-bbbb-56e8c6e43848",
+            "986c5c61-919f-4181-8e29-fbf220ff4ea1",
+            "9bc0fbc2-12ee-4cf7-8866-876a08fc1b2a"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 3,
+          "query": "What timeout value should I use for research nodes that make external API calls?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "cd100e3f-ce71-43fb-b17a-e78f51e7d164"
+          ],
+          "retrieved_ids": [
+            "cd100e3f-ce71-43fb-b17a-e78f51e7d164",
+            "2334b3be-8eb9-4ae0-8521-288402a7ae0d",
+            "a4e664c0-3bad-46fb-a5a8-ed25b1070ce1",
+            "428ae1d3-91a6-418a-9f57-6d5f44555f77",
+            "631aae8c-6f77-431e-95fa-faa3bf262dcf",
+            "8c42e04d-84a9-41c8-af27-b77f2fcb18bc",
+            "049423aa-afda-4579-a58c-01f3575f7e4b",
+            "5a5b08e7-01e6-49b1-8ae9-e9b05631dfa2",
+            "40efaab2-0c9b-4f2c-a168-47304df400b8",
+            "dd500b60-6f8a-48ad-9238-afd5143a88d8"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 4,
+          "query": "What is the three-layer architecture that Nous has developed for their AI stack?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "dc79f4da-4246-41cc-a914-98a03b37e254"
+          ],
+          "retrieved_ids": [
+            "f39c4430-8098-45a4-99d5-791e0f8ad14c",
+            "dc79f4da-4246-41cc-a914-98a03b37e254",
+            "647eb29b-244e-4ed0-ae84-45952c5bfa02",
+            "bf03a866-1b14-4f8b-ab8e-58d684b81af6",
+            "4dbe888f-05ed-4530-9775-79b3ddb64a32",
+            "46ec59dd-0227-4ff4-9b41-af27885a0707",
+            "e185c6f7-c9a6-44bf-aa46-7548db18b2e4",
+            "f8080826-981d-4846-8364-667d5aecbaf4",
+            "8267afb9-9039-4263-9a70-386367bceb42",
+            "35d61b5a-3b3b-41e0-b4e5-82e68952a621",
+            "11665040-8a34-4e0f-b143-c30b34c0608b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 2,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 5,
+          "query": "When should I use graph structure instead of embeddings alone for retrieval?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "d8df346b-f812-457e-8d8f-ffe8e4bc3579"
+          ],
+          "retrieved_ids": [
+            "d8df346b-f812-457e-8d8f-ffe8e4bc3579",
+            "31fec06c-e306-43b9-ad02-7abffb1a13aa",
+            "1b19d7ab-dad6-42e2-9cc1-ae17328386e9",
+            "f84997a7-ceea-49f8-9c6a-f53ba553388d",
+            "98602c2c-432e-49f5-ad4a-7c5f4e057d58",
+            "89aa7188-9aae-41ed-865f-82a2b3ddd5b6",
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc",
+            "eafef282-9074-42de-99c2-1bd8cdb214f2",
+            "7979811c-4273-4719-94ca-588f6f2643f3",
+            "b150af87-b1f3-4bec-ab44-4a54542faf23",
+            "e97f2790-a383-454c-b3a8-aaa860b36627"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 6,
+          "query": "Why do my emails keep failing to send in this agent environment?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a"
+          ],
+          "retrieved_ids": [
+            "b088bbcd-8382-4a8b-9be8-7b06a2de3b9a",
+            "7ff9c4e4-cab6-49d2-ac76-bf7c6f0db501",
+            "0f55f0ce-dd9d-421d-b782-fb9f24e304e6",
+            "b97df8d9-e426-485d-aebc-733a50eccc69",
+            "0c710310-d991-40e1-b622-28b7094bc44f",
+            "f2955e49-fc3f-42a8-9de8-357e166eb647",
+            "67161a14-62f1-456f-bad7-4cb95ce4093c",
+            "7976dd2f-bec6-4c0a-a277-3f5ea6e05105",
+            "bb90c5db-ce0d-4927-8fbc-396f799804c4",
+            "0aa6acf1-f343-4f0a-aaa5-0e2cb02b66bc"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 7,
+          "query": "What does the ERL paper say about using heuristics versus raw trajectories for task performance?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc"
+          ],
+          "retrieved_ids": [
+            "e4a53bb1-b1d1-4a82-8173-c54d4ad87ccc",
+            "66dad6cb-f5d1-4a1d-9938-3c8454785726",
+            "a01c2d34-9bee-4399-9467-1766789b8476",
+            "44484f2f-ce02-4ff7-9635-0e06fe60e383",
+            "ea63a82b-82c0-45d8-a626-2595458e1ca2",
+            "587de2c4-c6f2-4fb3-8b5d-17d3cc4b1e15",
+            "c05bc214-8dc6-4c9a-98da-9bd84bf9a60e",
+            "d888041b-4141-4dfe-a358-4214bda11f96",
+            "4a3bae81-165c-4320-a8ff-620824a00252",
+            "b1e6f63b-3f09-4014-9748-fa78115a6e4b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 8,
+          "query": "What's that self-evolving framework from Sentient that automatically improves agent skills?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "6e2b6800-7adc-4092-bdc2-fee96219025d"
+          ],
+          "retrieved_ids": [
+            "6e2b6800-7adc-4092-bdc2-fee96219025d",
+            "2c127fbe-ca24-4d9c-a499-0c9489eb6f6b",
+            "75603d91-350b-4e0f-9dcf-c27ba8ee1a6d",
+            "0f7a2531-491b-463a-9a7c-2d54b5c79ccf",
+            "a01c2d34-9bee-4399-9467-1766789b8476",
+            "fd71d00e-cd7c-4312-90e9-9f936a64e894",
+            "05b7d7a6-5353-4a93-b098-6960e8daa32f",
+            "f8ee6e05-7c90-4e92-b6eb-3ceb47b795da",
+            "48b70c96-614b-439e-8e89-1fa78fb12a3f",
+            "8596dac7-4244-4860-b8bb-ab5a0d58cf53"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 9,
+          "query": "What changes were made to the F027 Supersession Detection spec recently?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "c7abd62b-579b-4040-814c-b8a858956266"
+          ],
+          "retrieved_ids": [
+            "c7abd62b-579b-4040-814c-b8a858956266",
+            "734bb2a9-79b0-4ea4-965f-a5f1800193f4",
+            "dba97f2d-613b-4c6d-8cff-c5566e4f48d1",
+            "62cb5659-c183-4c00-bd2f-becdc092c748",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "e97957de-f8a7-4a06-bebc-b1d17f08b267",
+            "f85f27e5-ac26-49de-a6e6-ca3ed1c6944f",
+            "6c464269-a9f7-41d1-bee3-b88bc2f28f54",
+            "cf7a9e01-444d-4272-9013-7c36118fe5b0",
+            "fdfaeda6-a8bb-45ea-890f-f8bcbf13c6d4",
+            "3a3870b7-583a-47b5-8f91-189713eb3937"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 10,
+          "query": "What material stack and dimensions does your memristor device use for switching?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "747b3279-3ea8-41b9-ab6c-976a446b0cda"
+          ],
+          "retrieved_ids": [
+            "747b3279-3ea8-41b9-ab6c-976a446b0cda",
+            "520d0125-b3d9-4709-a632-d8d6d12afcbb",
+            "636785f1-363c-4593-a240-f298ac12286f",
+            "4994020e-c424-4141-b7f4-5765c4c531a9",
+            "8f5bad3b-17ce-4bae-acab-961656972534",
+            "46f883b7-1b8c-4063-8281-54583ff97732",
+            "84f80956-43d4-44f0-ad07-3159a0ceb6d9",
+            "710a867a-f6ac-4874-8752-7a9f965e42cc",
+            "c14fa7d0-3975-4582-921d-7c9a0d897150",
+            "cb394573-c45f-4059-8a8e-459e95a8513b"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 11,
+          "query": "What safety checks does the new censor with ID 7e49ca32 require before listing capabilities?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "abc54fb9-b4a2-408f-9972-255cdf8097e5"
+          ],
+          "retrieved_ids": [
+            "abc54fb9-b4a2-408f-9972-255cdf8097e5",
+            "851d547d-20da-4ed4-9c4c-89751809df17",
+            "be263bf6-4ab5-4f51-9f5a-4d81eee68145",
+            "2a8c339e-ba06-45e8-8b85-9697bc6de33c",
+            "41884380-d5be-42e4-abaf-4d3978626309",
+            "e376cfbd-9c98-4100-b21b-8cd73d625ad3",
+            "6ad14415-fc2e-459a-a7ae-1d185409ec89",
+            "1fae04c0-f613-404f-aa79-378d5a1eaca2",
+            "908a3ac9-0729-4f6f-8b9e-b3a520bf7b87",
+            "00a59c71-7732-4cfe-b8dc-1584d2fcc7af",
+            "3fba50c9-4bac-4312-b93c-5dcd5aef8243",
+            "d098e7a2-895e-4004-bae8-6a41a3afbbec"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 12,
+          "query": "What are the five types of memory in the Nous memory architecture?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "b2e6e29a-2d50-4d92-9562-e556ebd12520"
+          ],
+          "retrieved_ids": [
+            "b2e6e29a-2d50-4d92-9562-e556ebd12520",
+            "7a01c812-7da4-45d6-b605-620af916fc37",
+            "9a4ac166-a264-4aa1-83a2-48ae2b554354",
+            "13197eaa-6f83-4616-8924-e2d6f9d67a00",
+            "6c67cb87-ab91-4a71-9d22-7844aa508b66",
+            "595d6819-ddf8-43ea-95d9-bde50867129d",
+            "908380fc-2465-482d-a718-e6ea9d024f30",
+            "312c5c1f-7807-455e-ac7a-836fdd61b1f3",
+            "e9cf97b2-c664-44ce-bf38-d57446e719b7",
+            "f39c4430-8098-45a4-99d5-791e0f8ad14c",
+            "07110505-38e7-414d-8044-a65abe83f55e"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 13,
+          "query": "What are the main security vulnerabilities in AI agents and how can decision layers help mitigate them?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bf6cebcb-892b-4ba1-ba5b-3f93963ee3b5"
+          ],
+          "retrieved_ids": [
+            "bf6cebcb-892b-4ba1-ba5b-3f93963ee3b5",
+            "8d515336-cc54-499c-8560-ff3c68680db7",
+            "2725136f-e714-4cb8-86c4-72233cc2f8ca",
+            "bf03a866-1b14-4f8b-ab8e-58d684b81af6",
+            "26a82274-955c-4b39-8b00-50e917351b22",
+            "8a5c0861-b43c-4912-a398-15289689f14f",
+            "f9e0e027-3a33-4930-8ffe-49745f864b0a",
+            "7d379127-24be-4da1-b323-fc17e1de3655",
+            "3ddf0712-1195-4b02-a715-ef72f232dea3",
+            "4bd6dcad-cc0d-4a39-9459-d0faa7e3cca3"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 14,
+          "query": "What framework should guide decisions about delegating tasks to AI agents?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bdc950e7-5137-4835-acb9-4d2becadc4d6"
+          ],
+          "retrieved_ids": [
+            "bdc950e7-5137-4835-acb9-4d2becadc4d6",
+            "51836cc4-0846-40a4-9b3c-0896e5bca713",
+            "26a82274-955c-4b39-8b00-50e917351b22",
+            "df56f249-f954-4177-9b00-a1a5b9fb9676",
+            "4bd6dcad-cc0d-4a39-9459-d0faa7e3cca3",
+            "d38d15d0-e5e4-4906-93a7-10afbbc18b10",
+            "89b742fc-dc0c-4f91-9d2e-0f4362d2ad56",
+            "22199176-9012-4fa9-80ad-ac328e379353",
+            "38bca60b-51fc-42f6-8ae0-2ed121d0d4d4",
+            "d1b933bf-21cf-4979-a912-b8c9d40e335c"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 15,
+          "query": "When I ask you to fact-check something, what protocol automatically kicks in?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "08bed397-7363-4662-abfe-1ca32caba5c1"
+          ],
+          "retrieved_ids": [
+            "08bed397-7363-4662-abfe-1ca32caba5c1",
+            "12a8a663-4074-428b-9fbc-4b84deec99e5",
+            "9b09ba38-eefd-4812-a25d-f81ff454db47",
+            "81c642ee-accc-4e63-9bd1-7826d1222463",
+            "5174e57a-a6de-42ba-a0db-36f1cdd97f98",
+            "f30c7156-296e-4cc5-ba75-cc11688243c4",
+            "ceab7b28-3279-43f9-af1e-e9f2ae2e6299",
+            "315ee54e-8177-4d2e-849a-87ecadd001f9",
+            "9975e1a0-3211-4960-a483-dd6935fe46a2",
+            "5018bccd-a95e-4149-96db-cf0127d025da",
+            "f8364b5c-fc50-4631-9284-bffda3fc2f47",
+            "8f5b1f9c-b280-4aaa-befb-cddad927a988",
+            "70a965ea-e022-4149-a2f8-da81d642d7bd",
+            "1ae4af59-9c83-493c-8abf-b89ab82503a9"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 16,
+          "query": "What were the approximate prices of gold, the S&P 500, and oil in late March 2025?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "161078e1-4673-4329-abae-01cb60d171bb"
+          ],
+          "retrieved_ids": [
+            "161078e1-4673-4329-abae-01cb60d171bb",
+            "1f3ce762-1032-4192-ab1b-615dc366ddbd",
+            "91a716a7-397a-411c-9cf3-33e6d8c3653a",
+            "1e68e3dd-f40e-40ba-91c8-5af5c57c82e4",
+            "52b3612e-257d-41c4-bd2b-c181c11da710",
+            "39ec5b03-879c-447c-9e8d-c58bcf40e25b",
+            "8323a8da-3ff9-4ceb-8769-162452737502",
+            "0afd97f1-4fe2-4e09-b822-a3c21f2c1be6",
+            "f5a0e176-a148-4ed3-8128-9901e0236053",
+            "db9e175d-aeac-4c82-9ab1-39598e4e35a2"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 17,
+          "query": "How do I efficiently load a skill when I can see the source file path in metadata?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "acbf1234-a693-48b8-9c13-31a077bd2be1"
+          ],
+          "retrieved_ids": [
+            "acbf1234-a693-48b8-9c13-31a077bd2be1",
+            "1f4c7421-3a95-4995-a068-6eaad70f3508",
+            "78e23f89-134f-4864-a1dd-85d5746fddd5",
+            "66a0db96-cc78-428a-9e0c-46f43362f7d2",
+            "bc8772c4-c278-4989-83b8-02b621eb0dbc",
+            "09ec6c87-0271-4b8a-9d03-17fb98acb6bd",
+            "0740bfc7-92a2-4f7d-9b75-b7ad3f27dd87",
+            "b0569262-5a52-4db7-84f4-19e3d6a119fe",
+            "538015fe-81c8-466d-8406-9a481d4bfd51",
+            "27578b00-9953-4368-a28b-ba410d7105c4"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 18,
+          "query": "How are LLM calls organized in the system architecture?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "70345186-423e-482b-a38b-5a4fa14c8a6a"
+          ],
+          "retrieved_ids": [
+            "70345186-423e-482b-a38b-5a4fa14c8a6a",
+            "2a4befbf-701f-47b6-ad86-87631e778ed4",
+            "a4e664c0-3bad-46fb-a5a8-ed25b1070ce1",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "b3446e6b-5428-496b-b313-43b5e5f616da",
+            "a891a8ce-153d-4e0c-b7cd-c717bd9d002f",
+            "fa8f4944-11cd-4004-9613-7157ba6485d3",
+            "017ec96c-8d50-457d-8b73-ec35e28f8e0a",
+            "e6313618-890a-4226-98b1-9ccb66cdf8f1",
+            "4652c753-67a9-4df8-8e8a-8260a731d019"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 19,
+          "query": "What recent Anthropic API features are you interested in learning about?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "df079b98-1c84-4298-b1b3-ea4760efdafd"
+          ],
+          "retrieved_ids": [
+            "df079b98-1c84-4298-b1b3-ea4760efdafd",
+            "c7d272e7-48a8-4cae-9dfb-f22ff2f36af3",
+            "59b2d5b2-756a-4e23-a948-984c6e77f64e",
+            "8c4348e2-f5d1-4817-bacb-661098cad792",
+            "64c54d63-c4a5-4abd-b4df-39053891532b",
+            "6f97cf49-ffe0-4614-9bc7-5096193729f4",
+            "02388b5c-0471-4bdd-9306-4999e8fdc55a",
+            "3e7017a4-4737-492b-86ac-4cca21157b9f",
+            "ce525b9c-167c-4b3d-a854-11ccb99c8029",
+            "5940f204-6686-4d9f-b67a-c971ed2eb9b3"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 20,
+          "query": "Can I scrape LinkedIn profiles without logging in first?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b"
+          ],
+          "retrieved_ids": [
+            "ded7c4f2-7fdf-4d4b-932d-de3545b8ab1b",
+            "6ec6cf9e-715d-4a31-b45a-bd3247f04085",
+            "82858793-01f3-4fc1-892b-1d127a86d552",
+            "986c5c61-919f-4181-8e29-fbf220ff4ea1",
+            "9bc0fbc2-12ee-4cf7-8866-876a08fc1b2a",
+            "cd02caa0-94b2-4ea9-abc7-394235fdb77a",
+            "34fdc44e-177e-4c6b-96ab-2e26d997e2fe",
+            "dfd6f962-3c26-46c8-a12d-08b17d8b8160",
+            "658765da-dc0d-4968-bfd1-3b68ce10688f",
+            "831122e7-0406-46ef-a642-c31d89ff41a5"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 21,
+          "query": "When does your longevity research summary get sent out each week?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "35dff053-9f07-41d5-8cab-dc0e9d1c5863"
+          ],
+          "retrieved_ids": [
+            "35dff053-9f07-41d5-8cab-dc0e9d1c5863",
+            "cf5ee1f7-64cd-4373-808f-25578c633219",
+            "10950d55-22b2-4a17-ae14-b1f0b64f3e88",
+            "631aae8c-6f77-431e-95fa-faa3bf262dcf",
+            "fe934301-1cbd-4ac4-830c-5be123df1f1d",
+            "4201d7b2-6b1a-4262-84fd-37f6b46613df",
+            "27dfb986-7e7a-43c2-bab3-54fb7dcd6113",
+            "50fe9d7b-4c82-4f77-81c0-4b0e44e84765",
+            "aedd2e68-45d4-43ab-9c4e-38c133ab22ea",
+            "026102f3-d956-47a4-bf96-151946f605f7",
+            "066e096f-63be-40eb-85f2-0bdaa5171490"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 22,
+          "query": "What was the title of that article about graph diagnosis and AI agent memory?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "cb191523-8066-4d2c-b8dd-952090d453c2"
+          ],
+          "retrieved_ids": [
+            "d51f2759-a073-48f3-9e1f-29b575119120",
+            "cb191523-8066-4d2c-b8dd-952090d453c2",
+            "58d7b0af-9fbd-4a8d-b1b4-1958b1da42e2",
+            "95dff4ab-8393-45a2-a1cc-1b52b18bf12a",
+            "a2af46f2-e6dc-4140-aad1-7706ef5c0c1c",
+            "afcbfb02-dac4-4bcf-a58b-0c7b9b7bf89e",
+            "84698311-efcc-4e9f-8dcf-bbd8ed4de427",
+            "15f33c8e-68c4-4945-8244-7904c6e05302",
+            "93fb707c-a13d-4219-92b4-18eb33875305",
+            "8a5c0861-b43c-4912-a398-15289689f14f"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 2,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 23,
+          "query": "How should I handle workspace boundary violations in tool calls?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "979224bc-4379-4149-a059-3a1f92528478"
+          ],
+          "retrieved_ids": [
+            "979224bc-4379-4149-a059-3a1f92528478",
+            "9803b2b3-c2d2-429a-a498-683db710ee82",
+            "55f1988d-aea6-4178-92d9-54439b163e57",
+            "446aa423-b873-469d-9447-b0d3a53712d1",
+            "47bfbb9f-895b-4b25-8896-ee8a66e59cad",
+            "7a8d10d8-b221-4522-97e2-c761b40775fc",
+            "adfc1c30-9dac-46ac-89dc-b228ce4386e6",
+            "1cfd4ba8-aeea-4a35-8b78-bfd22f0d2356",
+            "df6b95a5-8ddc-4a27-a9ae-6bcad9d3aaec",
+            "ded5eee1-3239-416d-bb7d-8ab54e244b97",
+            "1d4b1a9a-d4f1-40a4-91cc-caee28c896ac",
+            "aa8e6ca2-14ce-436b-a5e4-d60ea564e9de",
+            "302b0bc9-521f-403c-91c2-b498fed4fcc1"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 24,
+          "query": "How do I avoid assigning duplicate feature numbers when adding new features?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "1a3561ce-d4b8-4415-899a-8a492f0dc805"
+          ],
+          "retrieved_ids": [
+            "1a3561ce-d4b8-4415-899a-8a492f0dc805",
+            "a3441039-56d3-4c95-9ab6-7ea45e407f19",
+            "2749b9a3-22e8-4880-9afe-0066848a9fa7",
+            "d11fa37f-8a26-4e0d-8e7d-43aa3fccbf8a",
+            "591c7d14-6a4b-4501-b235-405059636973",
+            "1fae04c0-f613-404f-aa79-378d5a1eaca2",
+            "998f2511-ad3f-4078-b4ea-f0cae04841b6",
+            "67bad243-3109-47e0-928c-bed83c4c55aa",
+            "686467f2-3893-4961-89bd-5a886ad02bf4",
+            "102dc7ff-656a-47c1-9b13-b720f0517a4f"
+          ],
+          "retrieved_types": [
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 25,
+          "query": "Why does Nous keep marking tasks completed before they actually finish executing?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9a262960-d1fb-441b-9df8-1a088861b375"
+          ],
+          "retrieved_ids": [
+            "9a262960-d1fb-441b-9df8-1a088861b375",
+            "ec87214c-54a1-4431-b6d4-2417f4150d32",
+            "8fa6a33a-3fa4-48ed-9c8e-24b99e078ca4",
+            "77fc8aa9-ce4d-4717-ae64-bf53a167092a",
+            "51319964-6224-4831-91ce-e10452bf9fe1",
+            "331e109b-b7a6-43d7-b4ee-4b0db47ae709",
+            "c980de11-30ee-4b28-b4af-f0bbbb828381",
+            "3757f670-4f39-4761-92c8-348714e18b11",
+            "b73e3464-5123-45a5-8fcf-c1385a6dd5cf",
+            "321ea6e7-92fb-4837-8bd6-4b5571830deb",
+            "b517546d-305f-4584-97a4-87320b6e34be",
+            "2a8c339e-ba06-45e8-8b85-9697bc6de33c",
+            "446aa423-b873-469d-9447-b0d3a53712d1",
+            "64115f0f-0a3a-41e8-854a-925ef4011fa1",
+            "5621a55a-1d75-4844-a1f8-c121c188e14b",
+            "4afc22d4-f4a9-4df7-9f09-6d9d9a03c1dc",
+            "143ec509-b627-4ab1-959d-7bbfac02d3b7",
+            "410df5f1-6ee6-4da9-89b4-894d26ca53c5",
+            "e39362fa-226e-4849-9986-7bfad6edc7b4",
+            "841e5723-397d-4e15-a875-fb092e14361f"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 26,
+          "query": "Where is the dataset file located and what bug did you identify in the script?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "397933a9-43ff-43ea-bdf6-04c931fdb807"
+          ],
+          "retrieved_ids": [
+            "397933a9-43ff-43ea-bdf6-04c931fdb807",
+            "e0801dc0-d91a-467d-b9fe-9a78e2fd3962",
+            "d68fca03-be91-4aee-9192-150d31aa9601",
+            "bf688c08-8abd-45a3-9698-c2995e8de67d",
+            "a890af6f-62c5-4b5f-80b5-83bf059c4504",
+            "d44685f9-d044-41e9-9834-f6808e54dda2",
+            "217fbf92-4196-4b35-8bbb-c3310791eaed",
+            "30e0710f-863d-4197-91b8-ee0742277c00",
+            "aa8e6ca2-14ce-436b-a5e4-d60ea564e9de",
+            "bdabd8bb-27bc-44c0-ac68-2901e8170d05",
+            "88766ceb-a5ba-45fc-9b57-8cdb30885139",
+            "a19b3cdc-da2c-4e1f-9119-e8cce2781c98",
+            "ddf94b4c-2741-4920-a503-3799f78a2894",
+            "bcfc8bd8-492a-4a0c-8973-92809b1229ae"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 27,
+          "query": "Which procedures are missing their goals and trigger phrases after the skills audit?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "f4ba9ba7-9fe3-4408-afbc-a60f880d7cca"
+          ],
+          "retrieved_ids": [
+            "f4ba9ba7-9fe3-4408-afbc-a60f880d7cca",
+            "9f452c5f-8565-483d-8929-70d865a4270a",
+            "bb731216-681e-4cab-a1f1-f105a64e6ec7",
+            "5f76dff1-3eed-4042-b4fe-6fc52d4ec8f7",
+            "ec2fa95f-c2c7-4edd-9caa-adf34cb5187a",
+            "412753c3-1f2f-49b5-be24-534dff0af6ad",
+            "48e529ed-1f76-4952-836b-39b4d7dceff9",
+            "8122ccef-9f46-4404-b753-d9f79e0c1984",
+            "6f000d9e-22f2-48bf-9cde-e6610a2d37a2",
+            "bed45e31-ad97-4716-a9b6-60ee57ce51a7",
+            "85fc5064-5d04-41ce-bdb8-05e3e2503216",
+            "1841e950-e1a3-4da6-9c7b-f2f5d8eca381",
+            "4226216a-119f-48ba-9b7f-88bfc1b4913c",
+            "a1227c78-9a37-45c9-94f5-42be310bbad9",
+            "b019999e-f926-4a5b-96e5-5e6f3fb28410",
+            "da71a7d2-06a5-412b-91fe-89180189cd67"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "procedure",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 28,
+          "query": "Should I use batching or sequential calls when handling multiple recalls in one turn?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ef2fbccc-fff1-4324-82af-b2d8d859c0b5"
+          ],
+          "retrieved_ids": [
+            "ef2fbccc-fff1-4324-82af-b2d8d859c0b5",
+            "7b4ff70d-b4d3-419a-9a2e-47472a653b24",
+            "e97f2790-a383-454c-b3a8-aaa860b36627",
+            "e71b7c86-d78f-4562-a203-0861c59edb1a",
+            "6d4266fa-0f71-4749-b110-4ff785306ce6",
+            "e1476089-a307-4e65-bd35-41ba5216d0dd",
+            "bb7eda7b-79f0-4728-9859-3591bee7c7f5",
+            "d2620188-354e-44d3-838b-04e29d6eab19",
+            "e62d3efc-5ea0-43c9-9edb-b63cd8088b45",
+            "e2132eb9-eb7e-400b-8fc4-9f772edc4610",
+            "0451bb44-6c7e-4fa2-b4fa-713a45a938ba",
+            "67ae1205-f050-44bc-9008-e16cca2b24be",
+            "41b1e708-97ca-42c6-82c0-3a1830305eeb",
+            "b150af87-b1f3-4bec-ab44-4a54542faf23",
+            "1b19d7ab-dad6-42e2-9cc1-ae17328386e9",
+            "bdaf8423-c23b-47de-94a8-12004d0d53d4"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 29,
+          "query": "What feature spec did we create based on the semi-formal reasoning templates paper?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "9b70e923-06f3-4aae-8d4e-24c7d39f37af"
+          ],
+          "retrieved_ids": [
+            "9b70e923-06f3-4aae-8d4e-24c7d39f37af",
+            "3a3870b7-583a-47b5-8f91-189713eb3937",
+            "a4fc179c-3a3a-4367-b69b-2907bd644c22",
+            "eb4a113b-f7fc-40e7-82ab-2bac663b4d3b",
+            "e37744ad-7b7b-4cba-9f6f-1e4ec98df86a",
+            "07984d23-162e-4091-8df6-f5761e041e56",
+            "e97f2790-a383-454c-b3a8-aaa860b36627",
+            "b196d362-76f6-4f50-932d-1f1cacecd8e0",
+            "aab87890-0156-47d1-8929-402e09eb208a",
+            "db7a3e20-f5b5-44e5-acad-1d66a8fed102",
+            "5deef45d-c151-4bb6-97c9-b72dd637027a",
+            "533095b1-1654-4d5e-8655-dcf6600d96c3",
+            "dba97f2d-613b-4c6d-8cff-c5566e4f48d1",
+            "13d5f7c0-f93c-4b1d-a101-8672514e65f4",
+            "3b1d5d9b-cce1-40c0-a88c-fe6a46ad4015",
+            "b63fc8f1-35cd-4a12-bd26-daadc26c530e",
+            "d1280779-2d25-4108-9afb-daafe1219949",
+            "d2620188-354e-44d3-838b-04e29d6eab19"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 30,
+          "query": "How did I rate my performance on the EvoSkill paper and skill creation session?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "1d69b430-ef64-4e26-b6a3-e27f5a53a540"
+          ],
+          "retrieved_ids": [
+            "1d69b430-ef64-4e26-b6a3-e27f5a53a540",
+            "61e03aa2-bceb-4e6e-a05d-60ba5fe570a8",
+            "9911fa92-68aa-44c3-9241-29773071cbc4",
+            "5f76dff1-3eed-4042-b4fe-6fc52d4ec8f7",
+            "bb731216-681e-4cab-a1f1-f105a64e6ec7",
+            "cecf137f-ef46-4561-8cb4-ebe04c6472c6",
+            "aaf3ff4e-5926-43f3-a5b7-bcfa697baaaf",
+            "1a89fc56-96a1-4e52-9df7-fd12c5357c5b",
+            "8122ccef-9f46-4404-b753-d9f79e0c1984",
+            "c4064b04-77fd-4491-89bd-74bc146f6d90",
+            "b33da2a9-b3c9-4958-a226-170d9ff6fa59",
+            "741fe5f1-0d8e-45e1-a86a-f1943518ca71",
+            "e7bee491-b4f7-4a1c-811c-104e5ff4c632",
+            "156d4926-ee26-4c71-8cd2-555df3a9ba1a",
+            "8223a0fb-6371-45a8-ae4b-b8a2eca2bb96",
+            "a1227c78-9a37-45c9-94f5-42be310bbad9",
+            "ec2fa95f-c2c7-4edd-9caa-adf34cb5187a",
+            "da71a7d2-06a5-412b-91fe-89180189cd67",
+            "4226216a-119f-48ba-9b7f-88bfc1b4913c",
+            "b019999e-f926-4a5b-96e5-5e6f3fb28410"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "fact",
+            "decision",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 31,
+          "query": "Did you run concurrent Claude Code jobs to test worktree isolation and improve test coverage?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "60baa709-f2d5-48c7-8c02-25c8e434e091"
+          ],
+          "retrieved_ids": [
+            "60baa709-f2d5-48c7-8c02-25c8e434e091",
+            "9a4f5d9a-3de8-4c0b-aca7-fadc662331fa",
+            "b73e3464-5123-45a5-8fcf-c1385a6dd5cf",
+            "a18d9770-6faf-4eb7-9c7c-cddaa6c113bf",
+            "0c7d76b6-0cd3-420a-9fbe-71b2094ec476",
+            "e5cad81e-ff34-4e54-8e27-5b4e648c15aa",
+            "196db825-f1c5-4be1-a9e3-45fec62b2629",
+            "6b59081c-6366-4c8d-9c78-8d0dc25f5c73",
+            "3ecae8bb-2538-4e26-8697-81bd655a41fb",
+            "43439f60-fbec-4761-91a2-27a09b308b4f",
+            "874dfe76-4cbc-4b16-9098-969c4f41d5c3",
+            "9492cc8d-ddc8-49d0-92bb-21be17aac0bb",
+            "00cc596a-2d02-4751-a06a-122ac57cf66e",
+            "eca33f12-85da-448a-9947-31c8d133f5fd",
+            "e2e03a52-dac2-495d-a2fc-e9b2f9030b2e",
+            "cfd89d73-42c3-46f8-ab3a-635f5d3471fb",
+            "2c00a964-74af-4f26-a5e5-c0effc552b10",
+            "d67e4f76-5aef-4137-97dd-4700d7e12315",
+            "1ec8f3fe-725b-4bab-bfbe-b94ae60cc9f2"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "decision",
+            "decision",
+            "procedure",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 32,
+          "query": "Did I decide to use DORA 2025 findings in the AI-aligned leaders LinkedIn article?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "6ed91dbb-9329-4e79-bf6e-c3f5c685c34c"
+          ],
+          "retrieved_ids": [
+            "6ed91dbb-9329-4e79-bf6e-c3f5c685c34c",
+            "55233cf3-79e8-4c26-80dc-4ec01eb98f62",
+            "536783e7-9fb0-4877-a4e1-8a6b786edb3c",
+            "ce602127-7643-49be-a1ff-6748ec7045ae",
+            "5fefec7b-51b7-46d7-90ea-027a413cd06a",
+            "42e4aa96-8413-4c86-a5a7-0e119f82b373",
+            "f2811d14-3d79-4421-ba82-64132ff0a310",
+            "2da9e0c8-be8a-464a-9720-436238f7bec6",
+            "828b02a3-2b3a-4dac-a0c9-127227ec35ae",
+            "cc01fe16-7011-4ce2-9c0a-71ef61d441ef",
+            "4879b4d3-9bce-441d-a6b9-1a5c37f3c0b1",
+            "f0b2a25f-4d4f-4586-aec7-afa7b2a62f74",
+            "551d787a-a1bb-4334-a5ee-cf3c320fcffb",
+            "650c9ba1-e42f-4dcf-96bd-ca3f45e2f288"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 33,
+          "query": "What format changes did we make to the layoff report recently?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "4654a3ae-93cd-4c86-9353-aa65ea15ff75"
+          ],
+          "retrieved_ids": [
+            "4654a3ae-93cd-4c86-9353-aa65ea15ff75",
+            "f49fa17b-8130-45c5-8900-b6ce221c4a80",
+            "bd54946b-d789-49f9-9cf0-662d4eff0eb4",
+            "dd19f51f-fc16-4bfd-ae78-bc0cec1ecc85",
+            "2cfa840a-30ae-411f-bdc2-4412d5cde598",
+            "efcf9f83-d525-4ec3-ac04-d5fa1679b003",
+            "99350fcc-ed87-4d38-8f8c-3594789f0d02",
+            "25a04d5a-09f0-47c4-a629-4fe41cf14b3b",
+            "2dd392f5-8166-4a91-b2ac-3043b5561032",
+            "f2811d14-3d79-4421-ba82-64132ff0a310",
+            "026102f3-d956-47a4-bf96-151946f605f7",
+            "677a7375-65df-47a7-be1f-f36dc6001694",
+            "7191d728-640c-4053-9662-25e908177e0b",
+            "fe934301-1cbd-4ac4-830c-5be123df1f1d",
+            "355feaef-bf0f-4968-9ca4-309f3fae5748",
+            "7db16fb5-4b92-4090-b45c-1bb0db8f5ae0",
+            "3e102a7f-1530-479c-bd01-c623f46ea6d3"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact",
+            "fact"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 34,
+          "query": "What's the default workflow for sharing spec documents and feature drafts with the team?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "8146b85a-8776-491e-900a-48ceca9f0ce9"
+          ],
+          "retrieved_ids": [
+            "8146b85a-8776-491e-900a-48ceca9f0ce9",
+            "b5c48a60-9f51-48cc-8a65-c174359e2646",
+            "73701614-ade3-4b87-aaa8-bd910f1c06d1",
+            "fb5ce6ac-a334-4480-999d-034b0ce75b16",
+            "58619ec2-0dff-427f-94f3-c37aa79c5f06",
+            "8e05aca8-1189-42bd-86fc-7714cd1942f1",
+            "642cde4a-1187-4ae5-800d-83fa881e12b1",
+            "e37744ad-7b7b-4cba-9f6f-1e4ec98df86a",
+            "9a48f16b-6e2b-479d-aa53-4e5582f3a16c",
+            "aab87f9b-a99d-41b7-8026-95fafa3bc251",
+            "d47131b3-9ab8-4801-aefd-11454b2c981e",
+            "48658a18-2e17-4ac5-ac36-6d988e8fc7a2"
+          ],
+          "retrieved_types": [
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision",
+            "decision"
+          ],
+          "rank_of_first_gold": 1,
+          "n_gold_in_top_k": 1,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 35,
+          "query": "Why didn't the DAG-based task splitting work for generating the modified hippocampal memory paper?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "bebbf383-5822-4b62-bb3d-5a1da3d2b6e9"
+          ],
+          "retrieved_ids": [
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 36,
+          "query": "What should a development manager's responsibilities include for our product management gap work?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "89176bfc-8064-4b08-9417-bdd19e220608"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 37,
+          "query": "What issues did you encounter when debugging the crypto research DAG pipeline?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "26da72eb-572b-47a8-934b-685dbfac0c38"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 38,
+          "query": "What dev.to article should I write comparing my AI agent's memory capabilities?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "f626e794-cdd0-46c9-af83-98be0573ef48"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "5583cd60-d010-4b27-b689-353feffb91b5",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        },
+        {
+          "index": 39,
+          "query": "Did we build a prototype for an LLM-powered team wiki system, and what was delivered?",
+          "source": "nous_prod",
+          "gold_ids": [
+            "ea0c915b-2dcf-48f8-8435-809ce16cd755"
+          ],
+          "retrieved_ids": [
+            "a39df4d8-9190-4b90-8613-233dba9384f0",
+            "ef09d479-89a7-4801-b32a-bd9b840449f4",
+            "692dde0b-6497-4a4d-be2c-6d01199bb910",
+            "a5ea0a12-fc47-446d-be76-3bc1829f140e",
+            "5583cd60-d010-4b27-b689-353feffb91b5"
+          ],
+          "retrieved_types": [
+            "episode",
+            "episode",
+            "episode",
+            "episode",
+            "episode"
+          ],
+          "rank_of_first_gold": null,
+          "n_gold_in_top_k": 0,
+          "n_gold_total": 1,
+          "error": null
+        }
+      ]
+    }
+  ]
+}

@@ -93,8 +93,13 @@ def mock_cognitive():
 
 @pytest.fixture
 def mock_settings():
-    """Settings with a fake API key for testing."""
+    """Settings with a fake API key for testing.
+
+    _env_file=None makes the fixture hermetic against a developer's local .env
+    (e.g., NOUS_THINKING_MODE=adaptive there would shadow our defaults).
+    """
     return Settings(
+        _env_file=None,
         ANTHROPIC_API_KEY="test-key-123",
         agent_id="test-agent",
         model="claude-sonnet-4-5-20250514",
@@ -507,6 +512,7 @@ async def test_start_credentials_api_key(mock_cognitive):
     brain = MockBrain()
     heart = MockHeart()
     settings = Settings(
+        _env_file=None,
         ANTHROPIC_API_KEY="test-api-key-abc",
         agent_id="test-agent",
         api_backend="httpx",
@@ -555,7 +561,7 @@ async def test_start_credentials_none(mock_cognitive, caplog):
     """start() with no credentials logs a warning but doesn't raise."""
     brain = MockBrain()
     heart = MockHeart()
-    settings = Settings(agent_id="test-agent", api_backend="httpx")
+    settings = Settings(_env_file=None, agent_id="test-agent", api_backend="httpx")
     r = AgentRunner(mock_cognitive, brain, heart, settings)
 
     with caplog.at_level(logging.WARNING, logger="nous.api.anthropic_client"):
@@ -610,7 +616,7 @@ async def test_lru_eviction(mock_cognitive, mock_settings):
 
 def test_thinking_mode_defaults():
     """Default settings: thinking off, budget=10000, effort=high."""
-    s = Settings(ANTHROPIC_API_KEY="test-key")
+    s = Settings(_env_file=None, ANTHROPIC_API_KEY="test-key")
     assert s.thinking_mode == "off"
     assert s.thinking_budget == 10000
     assert s.effort == "high"
