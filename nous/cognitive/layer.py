@@ -69,26 +69,94 @@ def _is_recap_query(user_input: str) -> bool:
 
 
 def _format_subtask_results(subtasks: list) -> str:
-    """Format undelivered subtask results for context injection."""
+    """Format undelivered subtask results for context injection.
+
+    F061: report_jsonb-aware. Renders three distinct sections:
+
+    - "Completed Subtask" — final_outcome='completed'; uses report_jsonb
+      when available, falls back to legacy ``result`` for pre-flag rows.
+    - "Blocked Subtask" — final_outcome='incomplete_blocked'; surfaces
+      ``blocked_reason`` so the parent / DAG can react. NOTE: status is
+      'completed' on these rows but the outcome is a soft-fail.
+    - "Failed Subtask" — status='failed'; surfaces ``final_outcome`` and
+      ``error``.
+
+    Empty/None ``result`` rows with no ``report_jsonb`` are skipped silently
+    — but the caller MUST mark them delivered anyway, or the same row reloads
+    on every parent turn forever.
+    """
     if not subtasks:
         return ""
 
     lines: list[str] = []
-    completed = [s for s in subtasks if s.status == "completed"]
-    failed = [s for s in subtasks if s.status == "failed"]
+    for s in subtasks:
+        outcome = getattr(s, "final_outcome", None)
+        report = getattr(s, "report_jsonb", None)
+        # Defense-in-depth: report_jsonb is JSONB; today _persist_outcome
+        # always writes a dict, but a future migration / corrupt row could
+        # land a list/str/int. Treat anything non-dict as no-report so the
+        # legacy `result` fallback path still renders.
+        if report is not None and not isinstance(report, dict):
+            logger.warning(
+                "Subtask %s has non-dict report_jsonb (type=%s); ignoring",
+                getattr(s, "id", "<unknown>"), type(report).__name__,
+            )
+            report = None
 
-    if completed:
-        for s in completed:
-            lines.append("=== Completed Subtask ===")
+        # Branch 1: blocked. status=='completed' but outcome surfaces the block.
+        if s.status == "completed" and outcome == "incomplete_blocked":
+            blocked_reason = (report or {}).get("blocked_reason") or "no_reason_given"
+            lines.append("=== Blocked Subtask ===")
             lines.append(f"[subtask-{s.id.hex[:8]}] Task: {s.task}")
-            lines.append(f"Result: {s.result}")
+            lines.append(f"Blocked: {blocked_reason}")
+            partial = (report or {}).get("summary") if report else None
+            if not partial and s.result and s.result.strip():
+                partial = s.result
+            if partial:
+                lines.append(f"Partial summary: {partial}")
             lines.append("")
+            continue
 
-    if failed:
-        for s in failed:
+        # Branch 2: completed (validated F061 row OR legacy row).
+        if s.status == "completed":
+            if report and (report.get("summary") or "").strip():
+                lines.append("=== Completed Subtask ===")
+                lines.append(f"[subtask-{s.id.hex[:8]}] Task: {s.task}")
+                lines.append(f"Summary: {report['summary']}")
+                if report.get("findings"):
+                    lines.append("Findings:")
+                    for f in report["findings"][:5]:
+                        lines.append(f"  - {f}")
+                if report.get("next_actions"):
+                    lines.append("Recommended next actions:")
+                    for a in report["next_actions"][:3]:
+                        lines.append(f"  - {a}")
+                conf = report.get("confidence")
+                if isinstance(conf, (int, float)):
+                    lines.append(f"Confidence: {float(conf):.2f}")
+                lines.append("")
+            elif s.result and s.result.strip():
+                # Legacy / pre-flag row.
+                lines.append("=== Completed Subtask ===")
+                lines.append(f"[subtask-{s.id.hex[:8]}] Task: {s.task}")
+                lines.append(f"Result: {s.result}")
+                lines.append("")
+            # else: empty completed row — skip silently. Caller still marks
+            # it delivered so it doesn't reload on every parent turn.
+            continue
+
+        # Branch 3: failed. Preserve legacy "Error: ..." line when no
+        # final_outcome is set (pre-flag rows); F061 rows get richer
+        # "Outcome: ... / Reason: ..." lines.
+        if s.status == "failed":
             lines.append("=== Failed Subtask ===")
             lines.append(f"[subtask-{s.id.hex[:8]}] Task: {s.task}")
-            lines.append(f"Error: {s.error}")
+            if outcome is not None:
+                lines.append(f"Outcome: {outcome}")
+                if s.error:
+                    lines.append(f"Reason: {s.error}")
+            elif s.error:
+                lines.append(f"Error: {s.error}")
             lines.append("")
 
     return "\n".join(lines).strip()
@@ -561,16 +629,37 @@ class CognitiveLayer:
             undelivered = await self._heart.subtasks.get_undelivered(session_id)
             if undelivered:
                 subtask_context = _format_subtask_results(undelivered)
+                # F061: mark ALL undelivered as delivered, even when the
+                # formatted context is empty. Otherwise legacy empty-result
+                # rows would reload on every parent turn forever
+                # (architecture review P1-2 finding from spec stage).
+                # Nested try so a mark_delivered failure (DB unavailable, FK
+                # violation) doesn't masquerade as a format failure in logs.
+                delivered_ids = [s.id for s in undelivered]
+                try:
+                    await self._heart.subtasks.mark_delivered(delivered_ids)
+                except Exception:
+                    logger.warning(
+                        "mark_delivered failed for %d subtask rows in session %s "
+                        "— they will reload next turn",
+                        len(delivered_ids), session_id, exc_info=True,
+                    )
                 if subtask_context:
                     system_prompt = system_prompt + "\n\n" + subtask_context
-                    delivered_ids = [s.id for s in undelivered]
-                    await self._heart.subtasks.mark_delivered(delivered_ids)
                     logger.info(
                         "Injected %d subtask results into session %s",
                         len(undelivered), session_id,
                     )
+                else:
+                    logger.debug(
+                        "Skipped %d empty subtask rows (still marked delivered)",
+                        len(undelivered),
+                    )
         except Exception:
-            logger.warning("Failed to inject subtask results for session %s", session_id)
+            logger.warning(
+                "Failed to inject subtask results for session %s",
+                session_id, exc_info=True,
+            )
 
         # 4. DELIBERATE — start if frame warrants it
         decision_id: str | None = None

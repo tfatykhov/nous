@@ -729,6 +729,10 @@ class TestSubtaskWorkerPool:
             subtask_default_timeout=120,
             subtask_max_concurrent=3,
             subtask_tool_call_limit=20,  # hermetic against ambient NOUS_SUBTASK_TOOL_CALL_LIMIT
+            # F061: pin flag-off so these legacy-path tests don't silently
+            # branch-flip when the default flips in PR-5. Tests that
+            # exercise the hardened path build their own Settings.
+            subtask_hardening_enabled=False,
             telegram_bot_token=None,
             telegram_chat_id=None,
         )
@@ -1173,12 +1177,20 @@ class TestFormatSubtaskResults:
     """Tests for _format_subtask_results helper."""
 
     def _make_subtask(self, *, task, status, result=None, error=None, id_hex="abcdef01"):
-        """Create a mock subtask for formatting tests."""
+        """Create a mock subtask for formatting tests.
+
+        F061: explicitly sets final_outcome=None and report_jsonb=None so
+        these legacy-shape rows route through the formatter's pre-flag /
+        legacy branch (which uses ``Result:`` / ``Error:`` lines), not the
+        F061 branch. MagicMock auto-children would otherwise be truthy.
+        """
         s = MagicMock()
         s.task = task
         s.status = status
         s.result = result
         s.error = error
+        s.final_outcome = None
+        s.report_jsonb = None
         s.id = MagicMock()
         s.id.hex = id_hex + "0000000000000000000000000000"  # pad to full UUID hex
         return s
@@ -1221,22 +1233,20 @@ class TestFormatSubtaskResults:
         # Completed should come before failed
         assert output.index("Completed") < output.index("Failed")
 
-    @pytest.mark.xfail(
-        reason=(
-            "F061 PR-2 will rewrite _format_subtask_results to skip empty/None "
-            "results silently (instead of injecting 'Result: None' as garbage). "
-            "This test documents legacy behavior — re-enable as a regression "
-            "guard after PR-2 lands by inverting the assertion to "
-            "'\"Result:\" not in output'."
-        ),
-        strict=False,
-    )
-    def test_none_result_and_error(self):
+    def test_empty_completed_skipped_not_injected_as_garbage(self):
+        """Regression guard: F061 PR-2 fixed the silent-empty injection.
+
+        Pre-F061 code rendered 'Result: None' for completed-but-empty rows,
+        injecting garbage into the parent's system prompt. PR-2 skips empty
+        completed rows silently (caller still marks them delivered so they
+        don't reload forever). Inverted from the previous xfail.
+        """
         s = self._make_subtask(
             task="Task C", status="completed", result=None,
         )
         output = _format_subtask_results([s])
-        assert "Result: None" in output
+        assert "Result:" not in output
+        assert "Task C" not in output  # row was fully skipped, not just trimmed
 
 
 # ---------------------------------------------------------------------------

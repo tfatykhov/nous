@@ -131,7 +131,12 @@ class SubtaskWorkerPool:
             await self._notify_telegram(subtask, error=error_msg)
 
     async def _execute_subtask(self, subtask: Subtask) -> None:
-        """Run the subtask as an agent turn via AgentRunner."""
+        """Run the subtask as an agent turn via AgentRunner.
+
+        F061: routes to ``execute_hardened`` (with forced terminal tool +
+        validator + retry) when ``subtask_hardening_enabled``; otherwise
+        runs the legacy path unchanged.
+        """
         session_id = f"subtask-{subtask.id.hex[:8]}"
         logger.info(
             "Executing subtask %s: %s",
@@ -139,45 +144,58 @@ class SubtaskWorkerPool:
             subtask.task[:80],
         )
 
-        # 012.2: Use shared prefix builder for frame-aware context
-        from nous.api.tools import build_subtask_prefix
-
-        system_prefix = build_subtask_prefix(subtask.task, subtask.frame_type)
-
         try:
-            try:
-                response_text, _turn_ctx, _usage = await self._runner.run_turn(
-                    session_id=session_id,
-                    user_message=subtask.task,
-                    agent_id=self._settings.agent_id,
-                    system_prompt_prefix=system_prefix,
-                    skip_episode=True,
-                    is_subtask=True,
-                    max_tool_calls=self._settings.subtask_tool_call_limit,
-                    model_override=subtask.model or self._settings.background_model,
-                    is_background=True,
-                )
+            if self._settings.subtask_hardening_enabled:
+                # Late import: nous.handlers.subtask_executor imports
+                # build_subtask_prefix from nous.api.tools, which imports
+                # this module — top-level import would deadlock at startup.
+                from nous.handlers.subtask_executor import execute_hardened
 
-                # F061 PR-1: record outcome on legacy path so dashboard rows
-                # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
-                await self._heart.subtasks.complete(
-                    subtask.id, response_text, final_outcome="completed",
-                )
-                await self._emit_event("subtask_completed", subtask, result=response_text)
-                await self._notify_telegram(subtask, result=response_text)
-
-                logger.info("Subtask %s completed", subtask.id.hex[:8])
-
-            except asyncio.CancelledError:
-                raise  # Propagate cancellation
-            except Exception as exc:
-                error_msg = f"{type(exc).__name__}: {exc}"
-                logger.exception("Subtask %s failed", subtask.id.hex[:8])
-                await self._heart.subtasks.fail(
-                    subtask.id, error_msg, final_outcome="errored",
-                )
-                await self._emit_event("subtask_failed", subtask, error=error_msg)
-                await self._notify_telegram(subtask, error=error_msg)
+                try:
+                    final_text, _result = await execute_hardened(
+                        subtask, session_id,
+                        runner=self._runner,
+                        heart=self._heart,
+                        settings=self._settings,
+                    )
+                    # Telemetry parity with the legacy path. Persistence is
+                    # already done inside execute_hardened.
+                    if _result.ok:
+                        await self._emit_event(
+                            "subtask_completed", subtask, result=final_text,
+                        )
+                        await self._notify_telegram(subtask, result=final_text)
+                    else:
+                        await self._emit_event(
+                            "subtask_failed", subtask,
+                            error=f"{_result.outcome}: {_result.reason}",
+                        )
+                        await self._notify_telegram(
+                            subtask,
+                            error=f"{_result.outcome}: {_result.reason}",
+                        )
+                    logger.info(
+                        "Subtask %s done outcome=%s",
+                        subtask.id.hex[:8], _result.outcome,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # execute_hardened catches per-attempt exceptions, but
+                    # defensive: a programmer error in execute_hardened itself
+                    # must still surface visibly.
+                    error_msg = f"{type(exc).__name__}: {exc}"
+                    logger.exception(
+                        "Subtask %s hardened-path errored",
+                        subtask.id.hex[:8],
+                    )
+                    await self._heart.subtasks.fail(
+                        subtask.id, error_msg, final_outcome="errored",
+                    )
+                    await self._emit_event("subtask_failed", subtask, error=error_msg)
+                    await self._notify_telegram(subtask, error=error_msg)
+            else:
+                await self._execute_legacy(subtask, session_id)
         finally:
             # F049 Mechanism B: guarantee session teardown on every exit path.
             cleanup_timeout = self._settings.subtask_cleanup_timeout_seconds
@@ -204,6 +222,43 @@ class SubtaskWorkerPool:
                     "Subtask cleanup failed for session %s — end_conversation raised",
                     session_id,
                 )
+
+    async def _execute_legacy(self, subtask: Subtask, session_id: str) -> None:
+        """Pre-F061 execution path. Removed in PR-6 once flag is locked on."""
+        from nous.api.tools import build_subtask_prefix
+
+        system_prefix = build_subtask_prefix(subtask.task, subtask.frame_type)
+
+        try:
+            response_text, _turn_ctx, _usage = await self._runner.run_turn(
+                session_id=session_id,
+                user_message=subtask.task,
+                agent_id=self._settings.agent_id,
+                system_prompt_prefix=system_prefix,
+                skip_episode=True,
+                is_subtask=True,
+                max_tool_calls=self._settings.subtask_tool_call_limit,
+                model_override=subtask.model or self._settings.background_model,
+                is_background=True,
+            )
+            # F061 PR-1: record outcome on legacy path so dashboard rows
+            # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+            await self._heart.subtasks.complete(
+                subtask.id, response_text, final_outcome="completed",
+            )
+            await self._emit_event("subtask_completed", subtask, result=response_text)
+            await self._notify_telegram(subtask, result=response_text)
+            logger.info("Subtask %s completed", subtask.id.hex[:8])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            logger.exception("Subtask %s failed", subtask.id.hex[:8])
+            await self._heart.subtasks.fail(
+                subtask.id, error_msg, final_outcome="errored",
+            )
+            await self._emit_event("subtask_failed", subtask, error=error_msg)
+            await self._notify_telegram(subtask, error=error_msg)
 
     # ------------------------------------------------------------------
     # Event emission

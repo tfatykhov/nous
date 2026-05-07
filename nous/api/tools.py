@@ -1066,24 +1066,92 @@ def register_cache_retrieve_tool(
 # ---------------------------------------------------------------------------
 
 
-def build_subtask_prefix(task: str, frame_type: str | None = None) -> str:
+_F061_DEFAULT_SUCCESS_CRITERIA = (
+    "The summary directly addresses the task and is internally consistent."
+)
+_F061_DEFAULT_BOUNDARIES = (
+    "Do not spawn further subtasks. Do not modify files unless the task "
+    "explicitly requires it. Cap tool calls per the runner limit."
+)
+_F061_FRAME_OUTPUT_FORMATS = {
+    "task":         "Concise summary of what was done + verification of success.",
+    "research":     "Synthesis of findings, with key facts in `findings[]` and sources in `evidence_refs[]`.",
+    "decision":     "Decision recommendation + reasoning + confidence; record the decision via record_decision and reference its ID in `evidence_refs[]`.",
+    "debug":        "Root cause + fix suggestion + verification steps.",
+    "conversation": "Direct natural-language answer to the question.",
+}
+
+
+def _f061_default_output_format(frame_type: str | None) -> str:
+    return _F061_FRAME_OUTPUT_FORMATS.get(
+        frame_type or "", "Free-form summary appropriate to the task."
+    )
+
+
+def build_subtask_prefix(
+    task: str,
+    frame_type: str | None = None,
+    *,
+    output_format: str | None = None,
+    success_criteria: str | None = None,
+    boundaries: str | None = None,
+    hardening_enabled: bool = False,
+) -> str:
     """Build a system prompt prefix for subtask execution.
 
     Used by both inline (await_result) and background worker subtask execution
     to ensure consistent frame-aware context assembly.
+
+    When ``hardening_enabled=False`` (default), emits the legacy text —
+    byte-identical to pre-F061. PR-6 will remove this branch once the flag
+    is locked on. When ``hardening_enabled=True``, emits the F061 four-part
+    brief + termination contract (objective + output_format + success_criteria
+    + boundaries) and instructs the agent to terminate via the
+    ``submit_final_report`` tool.
     """
     from nous.api.runner import FRAME_TOOLS
 
-    base = (
-        "You are executing a background subtask.\n"
-        "Deliver a clear, complete result. Do not ask questions."
+    if not hardening_enabled:
+        # LEGACY — DO NOT MODIFY. PR-6 deletes this branch.
+        base = (
+            "You are executing a background subtask.\n"
+            "Deliver a clear, complete result. Do not ask questions."
+        )
+        frame_instruction = ""
+        if frame_type and frame_type in FRAME_TOOLS:
+            frame_instruction = (
+                f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate "
+                "reasoning and tool usage."
+            )
+        return f"{base}{frame_instruction}\n\nTask: {task}"
+
+    of = output_format or _f061_default_output_format(frame_type)
+    sc = success_criteria or _F061_DEFAULT_SUCCESS_CRITERIA
+    bd = boundaries or _F061_DEFAULT_BOUNDARIES
+    # Render the Frame block for any non-empty frame name (including
+    # 'research' which is not in FRAME_TOOLS). The Frame block is
+    # informational; FRAME_TOOLS gates only tool availability.
+    frame_block = ""
+    if frame_type:
+        frame_block = (
+            f"\n# Frame\n{frame_type} — apply {frame_type}-appropriate "
+            "reasoning and tool usage.\n"
+        )
+    return (
+        "You are a Nous subtask agent. Your ONLY way to terminate is to call "
+        "the submit_final_report tool with a schema-valid payload.\n\n"
+        f"# Objective\n{task}\n\n"
+        f"# Output format\n{of}\n\n"
+        f"# Success criteria\n{sc}\n\n"
+        f"# Boundaries\n{bd}\n"
+        f"{frame_block}\n"
+        "# Termination\n"
+        "When you are done — and ONLY when done — call submit_final_report. "
+        "Do not produce a final text-only response; the parent agent will "
+        "read only the report payload. If you genuinely cannot complete the "
+        "task, call submit_final_report with incomplete=true and a specific "
+        "blocked_reason."
     )
-
-    frame_instruction = ""
-    if frame_type and frame_type in FRAME_TOOLS:
-        frame_instruction = f"\n\nFrame: {frame_type} — apply {frame_type}-appropriate reasoning and tool usage."
-
-    return f"{base}{frame_instruction}\n\nTask: {task}"
 
 
 # ---------------------------------------------------------------------------
@@ -1106,6 +1174,13 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
         frame_type: str | None = None,
         await_result: bool = False,
         model: str | None = None,
+        # F061: 2 of 4 brief fields are persisted. ``boundaries`` is
+        # intentionally NOT a parameter — it has no DB column and would
+        # silently drop. Fold boundary constraints into ``task`` until a
+        # follow-up PR adds storage. Worker / executor synthesize frame-
+        # derived defaults at execute time when these are None.
+        output_format: str | None = None,
+        success_criteria: str | None = None,
         _session_id: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
@@ -1181,6 +1256,9 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                 parent_session_id=_session_id,
                 frame_type=frame_type,
                 model=effective_model,
+                # F061: persist the four-part brief for the executor.
+                output_format=output_format,
+                success_criteria=success_criteria,
             )
 
             if not await_result:
@@ -1213,6 +1291,77 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
             import asyncio as _asyncio
 
             subtask_session_id = f"subtask-{subtask.id.hex[:8]}"
+
+            # F061: route inline path through the SAME hardened executor as
+            # the worker pool when the flag is on. Closes the silent-failure
+            # gap (P1.1 from spec review): otherwise the new prompt would
+            # mention submit_final_report on a path where that tool isn't
+            # registered, relocating the exact failure F061 fixes.
+            if settings.subtask_hardening_enabled:
+                # Late import: nous.handlers.subtask_executor imports
+                # build_subtask_prefix from THIS module — top-level import
+                # would deadlock at startup.
+                from nous.handlers.subtask_executor import execute_hardened
+
+                # `executed` flag prevents double-persist on programming-
+                # error in the response-formatting code below: if any
+                # AttributeError leaks from the body builder after
+                # execute_hardened has already persisted via _persist_outcome,
+                # the outer `except Exception` below would overwrite the row
+                # with status='failed' even though it was already 'completed'.
+                executed = False
+                try:
+                    final_text, _result = await _asyncio.wait_for(
+                        execute_hardened(
+                            subtask, subtask_session_id,
+                            runner=runner, heart=heart, settings=settings,
+                        ),
+                        timeout=effective_timeout,
+                    )
+                    executed = True
+                    if _result.ok:
+                        body = (
+                            f"[Subtask {subtask.id.hex[:8]} completed]\n\n{final_text}"
+                        )
+                    elif _result.outcome == "incomplete_blocked":
+                        body = (
+                            f"[Subtask {subtask.id.hex[:8]} blocked: {_result.reason}]"
+                        )
+                    else:
+                        body = (
+                            f"[Subtask {subtask.id.hex[:8]} {_result.outcome}: "
+                            f"{_result.reason}]"
+                        )
+                    return {"content": [{"type": "text", "text": body}]}
+                except _asyncio.TimeoutError:
+                    if not executed:
+                        await heart.subtasks.fail(
+                            subtask.id, f"Timeout after {effective_timeout}s",
+                            final_outcome="timed_out", attempts=1,
+                        )
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"[Subtask {subtask.id.hex[:8]} timed out after {effective_timeout}s]",
+                            }
+                        ]
+                    }
+                except Exception as e:
+                    if not executed:
+                        await heart.subtasks.fail(
+                            subtask.id, str(e), final_outcome="errored", attempts=1,
+                        )
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"[Subtask {subtask.id.hex[:8]} failed: {e}]",
+                            }
+                        ]
+                    }
+
+            # Legacy inline path — bytewise unchanged from pre-F061.
             system_prefix = build_subtask_prefix(task, frame_type)
 
             try:
@@ -1500,6 +1649,19 @@ _SPAWN_TASK_SCHEMA: dict[str, Any] = {
         "model": {
             "type": "string",
             "description": "Model to use for this subtask. If omitted, uses default background model. Use a smaller model for fast lookup/summarization tasks.",
+        },
+        # F061: 2 of 4 brief fields exposed via schema (output_format,
+        # success_criteria). The 4th field "boundaries" is NOT exposed yet
+        # — it has no persistence path so would silently drop. Fold
+        # boundary constraints into the ``task`` string until a follow-up
+        # PR adds a column.
+        "output_format": {
+            "type": "string",
+            "description": "How the subtask should structure its final report. Optional; sensible default applied per frame_type.",
+        },
+        "success_criteria": {
+            "type": "string",
+            "description": "What 'done' looks like. Optional; default 'summary directly addresses the task and is internally consistent'.",
         },
     },
     "required": ["task"],

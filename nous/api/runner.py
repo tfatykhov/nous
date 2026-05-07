@@ -244,6 +244,12 @@ class AgentRunner:
         model_override: str | None = None,
         tool_filter: list[str] | None = None,  # F034.5: restrict available tools
         is_background: bool = False,
+        # F061: per-call tool injection + forced terminal tool. Used only by
+        # the hardened subtask executor; chat sessions leave both at default.
+        # Routed straight through to _tool_loop without affecting the global
+        # ToolDispatcher (so no leak risk on crash).
+        extra_tools: dict[str, tuple[dict, Any]] | None = None,
+        force_tool_on_penultimate: str | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -381,6 +387,8 @@ class AgentRunner:
                 ledger=ledger,
                 tool_filter=tool_filter,
                 is_background=is_background,
+                extra_tools=extra_tools,
+                force_tool_on_penultimate=force_tool_on_penultimate,
             )
             conversation.messages.append(Message(role="assistant", content=response_text))
         except Exception as e:
@@ -480,6 +488,7 @@ class AgentRunner:
         stream: bool = False,
         skip_thinking: bool = False,
         model_override: str | None = None,
+        tool_choice: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build Anthropic Messages API request payload.
 
@@ -605,6 +614,12 @@ class AgentRunner:
         }
         if tools:
             payload["tools"] = tools
+        if tool_choice is not None:
+            # F061: forced tool_choice on penultimate subtask turn. Anthropic
+            # docs require tool_choice in {"auto","none"} when extended thinking
+            # is on; the caller (_tool_loop) is responsible for not setting
+            # this when thinking is enabled for the effective model.
+            payload["tool_choice"] = tool_choice
         if stream:
             payload["stream"] = True
 
@@ -664,6 +679,7 @@ class AgentRunner:
         skip_thinking: bool = False,
         model_override: str | None = None,
         is_background: bool = False,
+        tool_choice: dict[str, Any] | None = None,
     ) -> ApiResponse:
         """Call Anthropic Messages API via configured backend.
 
@@ -672,6 +688,8 @@ class AgentRunner:
         F036: system_prompt may be str or dict[str, str] (tier split).
         F048: when is_background=True and feature flag enabled, routes through
         call_streaming_aggregated() to avoid idle-connection drops on long runs.
+        F061: tool_choice (None default) lets the subtask executor force a
+        terminal tool call on the penultimate turn.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
@@ -679,6 +697,7 @@ class AgentRunner:
         payload = self._build_api_payload(
             system_prompt, messages, tools,
             skip_thinking=skip_thinking, model_override=model_override,
+            tool_choice=tool_choice,
         )
         if is_background:
             if self._settings.api_background_streaming_enabled:
@@ -1175,6 +1194,9 @@ class AgentRunner:
         ledger: ExecutionLedger | None = None,
         tool_filter: list[str] | None = None,  # F034.5: restrict to named tools
         is_background: bool = False,
+        # F061: per-call tool injection + forced terminal tool gating.
+        extra_tools: dict[str, tuple[dict, Any]] | None = None,
+        force_tool_on_penultimate: str | None = None,
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1208,22 +1230,68 @@ class AgentRunner:
 
         all_tool_results: list[ToolResult] = []
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
-        total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        # F061: include tool_calls counter so the hardened executor's per-attempt
+        # accumulator can populate heart.subtasks.tool_calls_made (was missing).
+        total_usage: dict[str, int] = {
+            "input_tokens": 0, "output_tokens": 0, "tool_calls": 0,
+        }
         turns = 0
         total_tool_calls = 0
         max_turns = self._settings.max_turns
 
+        # F061: detect whether forced tool_choice is safe for this call. Forced
+        # tool_choice is incompatible with extended thinking — Anthropic only
+        # allows {"type":"auto"|"none"} when thinking is enabled. Detect off
+        # via global thinking_mode OR the haiku-family check the rest of the
+        # runner uses.
+        effective_model_for_force = (model_override or self._settings.model).lower()
+        thinking_off = (
+            self._settings.thinking_mode == "off"
+            or "haiku" in effective_model_for_force
+        )
+        force_enabled = bool(force_tool_on_penultimate) and thinking_off
+        terminate_after_tool_results = False  # set when submit_final_report fires
+
         while turns < max_turns:
             # F020: Rebuild tool list each iteration for dynamic cache_retrieve
             tools = list(base_tools)
+            # F061: append per-call extra tool schemas (NOT registered globally).
+            if extra_tools:
+                for _name, (_schema, _exec) in extra_tools.items():
+                    tools.append(_schema)
 
-            api_response = await self._call_api(
-                system_prompt=system_prompt,
-                messages=messages,
-                tools=tools if tools else None,
-                model_override=model_override,
-                is_background=is_background,
+            # F061: penultimate-turn force_tool_on_penultimate. Penultimate
+            # means the next call would be the last allowed iteration. Set
+            # tool_choice to require the named tool when thinking is off.
+            # ``turns > 0`` guard: never force on the very first turn even
+            # when max_turns=1 or max_tool_calls=1 — forcing immediately
+            # would make the model summarize before any work runs.
+            tool_choice_arg: dict[str, Any] | None = None
+            is_penultimate = (
+                force_enabled
+                and force_tool_on_penultimate is not None
+                and turns > 0
+                and (turns == max_turns - 1
+                     or (max_tool_calls is not None
+                         and total_tool_calls >= max_tool_calls - 1))
             )
+            if is_penultimate:
+                tool_choice_arg = {
+                    "type": "tool", "name": force_tool_on_penultimate,
+                }
+
+            # Only pass tool_choice when non-None so existing mocks of
+            # _call_api (which don't accept the new kwarg) continue to work.
+            _call_kwargs: dict[str, Any] = {
+                "system_prompt": system_prompt,
+                "messages": messages,
+                "tools": tools if tools else None,
+                "model_override": model_override,
+                "is_background": is_background,
+            }
+            if tool_choice_arg is not None:
+                _call_kwargs["tool_choice"] = tool_choice_arg
+            api_response = await self._call_api(**_call_kwargs)
 
             # F035.4: Update context log with response metadata
             if self._context_logger and self._last_context_entry_id and api_response.usage:
@@ -1311,9 +1379,26 @@ class AgentRunner:
 
                     if not gated:
                         start_time = time.monotonic()
-                        result_text, is_error = await self._dispatcher.dispatch(
-                            tool_name, tool_input, session_id=session_id
-                        )
+                        # F061: per-call dispatch override for extra_tools.
+                        # Routes submit_final_report (and any other per-run
+                        # tool) to the executor passed by the subtask harness
+                        # WITHOUT registering globally — no leak risk on crash.
+                        if extra_tools and tool_name in extra_tools:
+                            _schema, executor = extra_tools[tool_name]
+                            result_text, is_error = await executor(**tool_input)
+                            # Short-circuit: any successful extra_tools call
+                            # terminates the loop. F061's submit_final_report
+                            # is currently the only extra_tool and its
+                            # semantics are "I am done" — even when the
+                            # model voluntarily called it (force_tool was
+                            # None on this turn), we still want to exit
+                            # rather than make wasted follow-up API calls.
+                            if not is_error:
+                                terminate_after_tool_results = True
+                        else:
+                            result_text, is_error = await self._dispatcher.dispatch(
+                                tool_name, tool_input, session_id=session_id
+                            )
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch)
@@ -1371,6 +1456,19 @@ class AgentRunner:
             })
 
             total_tool_calls += len(tool_results_for_message)
+            total_usage["tool_calls"] += len(tool_results_for_message)
+
+            # F061: short-circuit on successful submit_final_report. Caller
+            # reads the validated payload from the collector — response_text
+            # is intentionally a thin marker since the contract is the tool
+            # input, not free-form prose.
+            if terminate_after_tool_results:
+                return (
+                    "Report submitted.",
+                    all_tool_results,
+                    total_usage,
+                    all_thinking_blocks,
+                )
 
             # 012.2: Enforce subtask tool call limit
             if max_tool_calls and total_tool_calls >= max_tool_calls:

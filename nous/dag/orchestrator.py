@@ -254,6 +254,36 @@ class DAGOrchestrator:
             node.status = "failed"
             return
 
+        # F061: outcome-aware branch. Inverse check (any non-"completed"
+        # outcome fails the DAG node) rather than a closed set of failure
+        # names — keeps the branch forward-compatible if a future PR adds
+        # outcome enum values like timed_out_bootstrap, censor_blocked, etc.
+        # ``final is None`` means a pre-flag row → falls through to legacy
+        # status-based branching below.
+        final = getattr(subtask, "final_outcome", None)
+        if final is not None and final != "completed":
+            report = getattr(subtask, "report_jsonb", None) or {}
+            blocked_reason = (
+                report.get("blocked_reason")
+                if final == "incomplete_blocked" and isinstance(report, dict)
+                else None
+            )
+            error_msg = (
+                f"subtask {final}: "
+                f"{subtask.error or blocked_reason or 'no reason'}"
+            )
+            await self._store.update_node(
+                node.id,
+                status="failed",
+                error=error_msg,
+                result=subtask.result,
+                completed_at=datetime.now(UTC),
+            )
+            node.status = "failed"
+            node.error = error_msg
+            node.result = subtask.result
+            return
+
         if subtask.status == "completed":
             if node.completion_check and node.completion_check.strip():
                 # Subtask done but external process may still be running
