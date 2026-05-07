@@ -660,12 +660,17 @@ class DAGOrchestrator:
         augmented = await self._build_predecessor_context(node, dag)
 
         try:
+            # F061 PR-3 Codex round 5: pass dag_node_id so the dashboard's
+            # dag_correlation card (which filters WHERE dag_node_id IS NOT NULL)
+            # actually shows DAG-created subtasks. Without this, the card
+            # stays empty in production even when DAGs are running.
             subtask = await self._subtask_mgr.create(
                 task=augmented,
                 frame_type=node.frame_type,
                 model=node.model,
                 timeout=self._effective_timeout(node),
                 metadata={"dag_id": str(dag.id), "node_name": node.name},
+                dag_node_id=node.id,
             )
             await self._store.update_node(
                 node.id,

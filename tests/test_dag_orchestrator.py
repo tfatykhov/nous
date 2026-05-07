@@ -1335,6 +1335,38 @@ class TestDAGOrchestratorTimeoutClamp:
         assert kwargs["timeout"] == settings.dag_node_max_timeout
 
     @pytest.mark.asyncio
+    async def test_launch_subtask_node_passes_dag_node_id(
+        self, orchestrator, subtask_mgr
+    ):
+        """F061 round 5 Codex review: DAG-created subtasks must have
+        ``dag_node_id`` set so the dashboard ``dag_correlation`` card
+        (which filters ``WHERE dag_node_id IS NOT NULL``) actually shows
+        them. Without this, the card stays empty in production.
+        """
+        node = DAGNode(
+            id=uuid.uuid4(),
+            dag_id=uuid.uuid4(),
+            name="n",
+            node_type="subtask",
+            status="ready",
+            timeout_seconds=600,
+            wave=0,
+            instructions="x",
+        )
+        dag = ExecutionDAG(
+            id=uuid.uuid4(), agent_id="test", name="t",
+            status="running", nodes=[node], edges=[],
+        )
+        await orchestrator._launch_subtask_node(node, dag)
+        subtask_mgr.create.assert_called_once()
+        kwargs = subtask_mgr.create.call_args.kwargs
+        assert kwargs.get("dag_node_id") == node.id, (
+            "F061 round 5: dag_node_id must be passed through to "
+            "subtask_mgr.create() so the dashboard dag_correlation card "
+            "can attribute outcomes to DAG nodes."
+        )
+
+    @pytest.mark.asyncio
     async def test_orchestrator_clamps_check_node_timeout_to_max(
         self, orchestrator, dynamic_loader
     ):
