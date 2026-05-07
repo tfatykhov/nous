@@ -168,6 +168,42 @@ async def test_execute_subtask_outer_timeout_ends_conversation():
     assert ended.is_set()
 
 
+async def test_process_subtask_timeout_persists_attempts_one():
+    """F061 PR-3 Codex review: worker outer-timeout path must pass
+    attempts=1 to heart.subtasks.fail() so the dashboard retry-rate
+    metric isn't skewed by timeout rows persisting attempts=0 (the
+    server default for the new column).
+    """
+    runner = AsyncMock()
+
+    # Block forever so the outer wait_for fires.
+    async def blocking_run_turn(**_kwargs):
+        await asyncio.Event().wait()
+
+    runner.run_turn = blocking_run_turn
+    runner.end_conversation = AsyncMock()
+
+    heart = _make_heart()
+    settings = _make_settings()
+    pool = SubtaskWorkerPool(runner=runner, heart=heart, settings=settings)
+
+    subtask = _make_subtask()
+    subtask.timeout_seconds = 0.05  # immediate
+
+    # _process_subtask wraps _execute_subtask in asyncio.wait_for(timeout=...).
+    await pool._process_subtask(subtask)
+
+    # The TimeoutError handler in _process_subtask must have called
+    # heart.subtasks.fail with final_outcome="timed_out" AND attempts=1.
+    heart.subtasks.fail.assert_awaited_once()
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs.get("final_outcome") == "timed_out"
+    assert kwargs.get("attempts") == 1, (
+        "timeout path must persist attempts=1; one execution attempt happened "
+        "before the timeout. attempts=0 would skew dashboard retry-rate metrics."
+    )
+
+
 async def test_cleanup_timeout_logs_error(caplog):
     """end_conversation hangs past cleanup timeout → TimeoutError branch hits with ERROR log."""
     runner = AsyncMock()

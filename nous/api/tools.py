@@ -1432,9 +1432,11 @@ def create_subtask_tools(
                 }
 
             except _asyncio.TimeoutError:
+                # F061 PR-3 Codex review: attempts=1 because one execution
+                # attempt definitely happened before the timeout.
                 await heart.subtasks.fail(
                     subtask.id, f"Timeout after {effective_timeout}s",
-                    final_outcome="timed_out",
+                    final_outcome="timed_out", attempts=1,
                 )
                 return {
                     "content": [
@@ -1446,7 +1448,7 @@ def create_subtask_tools(
                 }
             except Exception as e:
                 await heart.subtasks.fail(
-                    subtask.id, str(e), final_outcome="errored",
+                    subtask.id, str(e), final_outcome="errored", attempts=1,
                 )
                 return {
                     "content": [

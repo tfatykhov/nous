@@ -125,8 +125,12 @@ class SubtaskWorkerPool:
             )
             # F061 PR-1: record outcome on legacy path so dashboard rows
             # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+            # F061 PR-3 Codex review: attempts=1 because exactly one
+            # execution attempt definitely happened before the timeout fired.
+            # Without this, the row keeps the server default 0 and skews
+            # dashboard retry-rate metrics.
             await self._heart.subtasks.fail(
-                subtask.id, error_msg, final_outcome="timed_out",
+                subtask.id, error_msg, final_outcome="timed_out", attempts=1,
             )
             await self._emit_event("subtask_failed", subtask, error=error_msg)
             await self._notify_telegram(subtask, error=error_msg)

@@ -303,6 +303,66 @@ async def test_usage_tool_calls_initialized_zero_when_no_tool_use():
 
 
 @pytest.mark.asyncio
+async def test_force_fires_on_penultimate_AND_ultimate_max_turns():
+    """F061 PR-3 Codex follow-up: forced tool_choice now fires on the
+    last TWO allowed turns (penultimate + ultimate), not only the ultimate.
+
+    Previously force only fired when ``turns == max_turns - 1`` (ultimate),
+    leaving zero recovery if the model still missed submit_final_report
+    on that final forced turn. The fix uses ``turns >= max_turns - 2`` so
+    the model gets pushed on turn N-2 AND turn N-1.
+
+    With max_turns=4 (and large max_tool_calls so it doesn't trigger first):
+      turns=0 — no force (turns > 0 guard)
+      turns=1 — no force (1 < 2)
+      turns=2 — penultimate, force fires
+      turns=3 — ultimate, force fires too
+    """
+    runner, _settings = _make_runner(thinking_mode="off")
+    collector = SubtaskReportCollector()
+    extra = {
+        "submit_final_report": (
+            SUBMIT_FINAL_REPORT_SCHEMA,
+            make_submit_final_report_executor(collector),
+        ),
+    }
+    # 4 API responses, all noop tool_use. max_tool_calls high so it doesn't
+    # trigger the tool-call branch — only the turn-count branch.
+    runner._api.call = AsyncMock(side_effect=[
+        _api_response(content=[_tool_use("noop", {}, "tu0")], stop_reason="tool_use"),
+        _api_response(content=[_tool_use("noop", {}, "tu1")], stop_reason="tool_use"),
+        _api_response(content=[_tool_use("noop", {}, "tu2")], stop_reason="tool_use"),
+        _api_response(content=[_tool_use("noop", {}, "tu3")], stop_reason="tool_use"),
+    ])
+
+    # max_turns=4 from _make_runner default. Use very high max_tool_calls
+    # so only turn-count drives the force decision.
+    await runner._tool_loop(
+        system_prompt="sys",
+        conversation=_make_conversation(),
+        frame_id="task",
+        is_subtask=True,
+        max_tool_calls=100,
+        extra_tools=extra,
+        force_tool_on_penultimate="submit_final_report",
+    )
+
+    calls = runner._api.call.await_args_list
+    # Turn 0: not forced (turns > 0 guard)
+    assert calls[0].args[0].get("tool_choice") is None
+    # Turn 1: not yet penultimate (1 < 2)
+    assert calls[1].args[0].get("tool_choice") is None
+    # Turn 2: penultimate → forced
+    assert calls[2].args[0].get("tool_choice") == {
+        "type": "tool", "name": "submit_final_report",
+    }
+    # Turn 3: ultimate → still forced (last push before fallback branch)
+    assert calls[3].args[0].get("tool_choice") == {
+        "type": "tool", "name": "submit_final_report",
+    }
+
+
+@pytest.mark.asyncio
 async def test_subsequent_tools_skipped_after_submit_final_report():
     """F061 PR-3 Codex review P2: when the model emits multiple tool_use
     blocks in a single response and ``submit_final_report`` succeeds, the

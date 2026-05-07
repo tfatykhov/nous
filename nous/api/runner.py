@@ -1260,20 +1260,35 @@ class AgentRunner:
                 for _name, (_schema, _exec) in extra_tools.items():
                     tools.append(_schema)
 
-            # F061: penultimate-turn force_tool_on_penultimate. Penultimate
-            # means the next call would be the last allowed iteration. Set
-            # tool_choice to require the named tool when thinking is off.
-            # ``turns > 0`` guard: never force on the very first turn even
-            # when max_turns=1 or max_tool_calls=1 — forcing immediately
-            # would make the model summarize before any work runs.
+            # F061: force the terminal tool on the LAST TWO allowed turns
+            # (penultimate + ultimate) when force_tool_on_penultimate is set
+            # and thinking is off. Forcing on only the ultimate turn (the
+            # earlier ``turns - 1`` math) left no recovery if the model
+            # still failed to call submit_final_report — recoverable cases
+            # became ``incomplete_no_terminal``. Forcing on the penultimate
+            # turn AND the ultimate turn gives the model two pushed
+            # opportunities to terminate before the existing tool-call-limit
+            # fallback kicks in.
+            #
+            # Math (max_turns=4, max_tool_calls=20):
+            #   turns=0: skipped by ``turns > 0`` (never force first turn)
+            #   turns=1: not yet penultimate (1 < 2)
+            #   turns=2: penultimate — force fires; if model terminates,
+            #            short-circuit returns.
+            #   turns=3: ultimate — force still fires as last push.
+            #   ↳ If model still misses, the existing ``max_turns`` branch
+            #     makes a final no-tools summary call.
+            #
+            # ``>=`` (not ``==``) handles the case where the model dispatched
+            # multiple tools in one response and jumped past the boundary.
             tool_choice_arg: dict[str, Any] | None = None
             is_penultimate = (
                 force_enabled
                 and force_tool_on_penultimate is not None
                 and turns > 0
-                and (turns == max_turns - 1
+                and (turns >= max_turns - 2
                      or (max_tool_calls is not None
-                         and total_tool_calls >= max_tool_calls - 1))
+                         and total_tool_calls >= max_tool_calls - 2))
             )
             if is_penultimate:
                 tool_choice_arg = {
