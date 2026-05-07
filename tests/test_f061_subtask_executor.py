@@ -315,6 +315,72 @@ async def test_emit_failure_does_not_propagate():
 
 
 @pytest.mark.asyncio
+async def test_retry_message_uses_configured_min_summary_chars():
+    """F061 PR-3 Codex follow-up review: the retry prompt must reflect the
+    operator-configured ``NOUS_SUBTASK_REPORT_MIN_SUMMARY_CHARS`` rather
+    than the hardcoded 50-char baseline. Otherwise raising the threshold
+    to 100 would trap subtasks in a permanent retry loop because the model
+    obeys the stale 50-char instruction and gets rejected every time.
+    """
+    from nous.handlers.subtask_executor import _build_retry_message
+
+    # Default (50 chars)
+    msg = _build_retry_message(
+        task="t",
+        prior_payload={"summary": "x", "confidence": 0.5},
+        reason="summary_too_short: len=1 (min 50)",
+        min_summary_chars=50,
+    )
+    assert "summary >= 50 chars" in msg
+
+    # Operator-raised threshold
+    msg_custom = _build_retry_message(
+        task="t",
+        prior_payload={"summary": "x", "confidence": 0.5},
+        reason="summary_too_short: len=1 (min 100)",
+        min_summary_chars=100,
+    )
+    assert "summary >= 100 chars" in msg_custom
+    assert "summary >= 50 chars" not in msg_custom
+
+
+@pytest.mark.asyncio
+async def test_executor_passes_min_summary_to_retry_message():
+    """End-to-end: when settings.subtask_report_min_summary_chars=100 and
+    attempt 1 produces a too-short summary, the retry user_message must
+    instruct the model on the 100-char threshold, not the 50-char default.
+    """
+    runner = _scripted_runner(scripted_payloads=[
+        # Attempt 1: 60 chars — passes default 50 but fails custom 100
+        {
+            "summary": "x" * 60,
+            "confidence": 0.5,
+        },
+        # Attempt 2: 110 chars — passes
+        {
+            "summary": "y" * 110,
+            "confidence": 0.7,
+        },
+    ])
+    heart = _make_heart_mock()
+    settings = _make_settings()
+    settings.subtask_report_min_summary_chars = 100  # operator override
+    subtask = _make_subtask()
+
+    final, result = await execute_hardened(
+        subtask, "sess-thresh",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.ok is True
+
+    # Check that on the second run_turn invocation, the user_message included
+    # the 100-char threshold (i.e., retry message used the active min).
+    second_call_kwargs = runner.run_turn.call_args_list[1].kwargs
+    second_user_message = second_call_kwargs["user_message"]
+    assert "summary >= 100 chars" in second_user_message
+
+
+@pytest.mark.asyncio
 async def test_cancellation_does_not_persist_or_emit():
     """F061 PR-3 Codex review P1: the finally block MUST NOT persist or
     emit a 'cancelled' outcome on CancelledError, because the function

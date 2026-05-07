@@ -222,6 +222,7 @@ async def execute_hardened(
                 )
                 user_message = _build_retry_message(
                     subtask.task, last_payload, last_result.reason,
+                    min_summary_chars=min_summary,
                 )
                 continue
             # Either out of attempts or non-recoverable outcome — exit.
@@ -301,6 +302,8 @@ def _build_retry_message(
     task: str,
     prior_payload: dict | None,
     reason: str,
+    *,
+    min_summary_chars: int,
 ) -> str:
     """Plain prose retry message — NEVER embedded JSON.
 
@@ -312,6 +315,12 @@ def _build_retry_message(
     that just failed schema validation — it may contain non-string types
     (e.g., ``{"summary": 42, ...}``). Slicing an int raises ``TypeError``
     which would propagate out of execute_hardened and bypass _persist_outcome.
+
+    Codex review (PR #421 commit c4d2396 follow-up): ``min_summary_chars``
+    is now passed from the active runtime config rather than hardcoded so
+    that operators raising ``NOUS_SUBTASK_REPORT_MIN_SUMMARY_CHARS`` don't
+    cause the model to retry against a stale 50-char target and hit a
+    guaranteed ``validation_failed`` outcome.
 
     The ``task`` parameter is reserved — current message focuses on the
     payload-level rejection. Task echoing is a future tuning option.
@@ -326,8 +335,9 @@ def _build_retry_message(
         if prior_conf is not None:
             parts.append(f"Your previous confidence: {prior_conf}")
     parts.append(
-        "Try again. You MUST call submit_final_report with a schema-valid "
-        "payload (summary >= 50 chars, no placeholder text, confidence 0-1)."
+        f"Try again. You MUST call submit_final_report with a schema-valid "
+        f"payload (summary >= {min_summary_chars} chars, no placeholder text, "
+        f"confidence 0-1)."
     )
     msg = "\n\n".join(parts)
     return msg if len(msg) <= 2000 else msg[:1997] + "..."
