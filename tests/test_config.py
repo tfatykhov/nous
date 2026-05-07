@@ -22,9 +22,11 @@ class TestDAGTimeoutValidation:
         assert s.dag_node_default_timeout == 900
 
     def test_defaults(self, monkeypatch):
-        # Guard against ambient env leaking into defaults test.
+        # Guard against ambient env AND repo .env leaking into defaults test.
+        # pydantic-settings reads from .env via env_file= config; monkeypatch.delenv
+        # only clears os.environ. Pass _env_file=None to short-circuit .env loading.
         monkeypatch.delenv("NOUS_DAG_NODE_DEFAULT_TIMEOUT", raising=False)
         monkeypatch.delenv("NOUS_DAG_NODE_MAX_TIMEOUT", raising=False)
-        s = Settings()
+        s = Settings(_env_file=None)
         assert s.dag_node_default_timeout == 600
         assert s.dag_node_max_timeout == 7200

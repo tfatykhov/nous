@@ -162,6 +162,7 @@ class TestWorkerEnhancements:
             subtask_poll_interval=0.1,
             subtask_default_timeout=120,
             subtask_max_concurrent=3,
+            subtask_tool_call_limit=20,  # hermetic against ambient NOUS_SUBTASK_TOOL_CALL_LIMIT
             telegram_bot_token=None,
             telegram_chat_id=None,
         )
@@ -563,6 +564,112 @@ class TestSubtaskManager:
         assert counts["running"] == 1
 
 
+class TestSubtaskManagerF061:
+    """F061 PR-1: SubtaskManager API extensions."""
+
+    async def test_create_persists_new_optional_fields(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(
+            task="Research X",
+            output_format="JSON-style summary.",
+            success_criteria="Returns ≥3 candidates.",
+        )
+        assert subtask.output_format == "JSON-style summary."
+        assert subtask.success_criteria == "Returns ≥3 candidates."
+        assert subtask.dag_node_id is None  # not set
+
+    async def test_create_rejects_nonexistent_dag_node_id(self, subtask_mgr: SubtaskManager):
+        """Passing a random dag_node_id raises (FK constraint).
+
+        Catches future regressions where the kwarg is silently dropped or
+        the FK direction inverts. SubtaskManager.create commits its own
+        session, so the IntegrityError surfaces directly from session.commit().
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            await subtask_mgr.create(
+                task="should fail",
+                dag_node_id=uuid.uuid4(),  # no matching nous_system.dag_nodes row
+            )
+
+    async def test_create_without_new_fields_leaves_them_null(self, subtask_mgr: SubtaskManager):
+        """Backward-compat: legacy callers (task_scheduler, DAG) work unchanged."""
+        subtask = await subtask_mgr.create(task="legacy call")
+        assert subtask.output_format is None
+        assert subtask.success_criteria is None
+        assert subtask.dag_node_id is None
+        # And new counters default to 0
+        assert subtask.attempts == 0
+        assert subtask.tokens_in == 0
+        assert subtask.tokens_out == 0
+        assert subtask.tool_calls_made == 0
+        assert subtask.report_jsonb is None
+        assert subtask.final_outcome is None
+
+    async def test_complete_with_full_outcome_payload(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(task="t")
+        await subtask_mgr.dequeue("w-0")
+
+        report = {
+            "summary": "Done. Found 3 candidates.",
+            "findings": ["a", "b", "c"],
+            "next_actions": [],
+            "confidence": 0.9,
+            "evidence_refs": [],
+            "incomplete": False,
+            "blocked_reason": "",
+        }
+        await subtask_mgr.complete(
+            subtask.id,
+            "Done. Found 3 candidates.",
+            final_outcome="completed",
+            report_jsonb=report,
+            attempts=1,
+            tokens_in=1000,
+            tokens_out=400,
+            tool_calls_made=5,
+        )
+        updated = await subtask_mgr.get(subtask.id)
+        assert updated.status == "completed"
+        assert updated.final_outcome == "completed"
+        assert updated.report_jsonb == report
+        assert updated.attempts == 1
+        assert updated.tokens_in == 1000
+        assert updated.tokens_out == 400
+        assert updated.tool_calls_made == 5
+
+    async def test_complete_without_kwargs_preserves_defaults(self, subtask_mgr: SubtaskManager):
+        """Legacy complete(id, result) call leaves new columns at server defaults."""
+        subtask = await subtask_mgr.create(task="t")
+        await subtask_mgr.dequeue("w-0")
+        await subtask_mgr.complete(subtask.id, "legacy result")
+        updated = await subtask_mgr.get(subtask.id)
+        assert updated.status == "completed"
+        assert updated.result == "legacy result"
+        assert updated.final_outcome is None
+        assert updated.attempts == 0
+        assert updated.tokens_in == 0
+
+    async def test_fail_with_outcome_payload(self, subtask_mgr: SubtaskManager):
+        subtask = await subtask_mgr.create(task="t")
+        await subtask_mgr.dequeue("w-0")
+        await subtask_mgr.fail(
+            subtask.id,
+            "summary_too_short: len=12 (min 50)",
+            final_outcome="validation_failed",
+            attempts=2,
+            tokens_in=2000,
+            tokens_out=80,
+            tool_calls_made=3,
+        )
+        updated = await subtask_mgr.get(subtask.id)
+        assert updated.status == "failed"
+        assert updated.error.startswith("summary_too_short")
+        assert updated.final_outcome == "validation_failed"
+        assert updated.attempts == 2
+        assert updated.tokens_in == 2000
+
+
 # ---------------------------------------------------------------------------
 # Heart integration tests
 # ---------------------------------------------------------------------------
@@ -621,6 +728,7 @@ class TestSubtaskWorkerPool:
             subtask_poll_interval=0.1,
             subtask_default_timeout=120,
             subtask_max_concurrent=3,
+            subtask_tool_call_limit=20,  # hermetic against ambient NOUS_SUBTASK_TOOL_CALL_LIMIT
             telegram_bot_token=None,
             telegram_chat_id=None,
         )
@@ -1113,6 +1221,16 @@ class TestFormatSubtaskResults:
         # Completed should come before failed
         assert output.index("Completed") < output.index("Failed")
 
+    @pytest.mark.xfail(
+        reason=(
+            "F061 PR-2 will rewrite _format_subtask_results to skip empty/None "
+            "results silently (instead of injecting 'Result: None' as garbage). "
+            "This test documents legacy behavior — re-enable as a regression "
+            "guard after PR-2 lands by inverting the assertion to "
+            "'\"Result:\" not in output'."
+        ),
+        strict=False,
+    )
     def test_none_result_and_error(self):
         s = self._make_subtask(
             task="Task C", status="completed", result=None,
@@ -1129,9 +1247,17 @@ class TestFormatSubtaskResults:
 class TestSubtaskConfigDefaults:
     """012.2: Subtask constants are configurable via Settings."""
 
-    def test_defaults(self):
-        """Default values match the previously hardcoded constants."""
-        s = Settings()
+    def test_defaults(self, monkeypatch):
+        """Default values match the previously hardcoded constants.
+
+        Hermetic against BOTH process env AND repo .env — pydantic-settings
+        reads from .env via env_file= config. Disable both channels so the
+        test asserts the documented defaults regardless of local config.
+        """
+        monkeypatch.delenv("NOUS_SUBTASK_TOOL_CALL_LIMIT", raising=False)
+        monkeypatch.delenv("NOUS_INLINE_SUBTASK_TIMEOUT", raising=False)
+        monkeypatch.delenv("NOUS_FRAME_DEFAULT_MODELS", raising=False)
+        s = Settings(_env_file=None)
         assert s.subtask_tool_call_limit == 20
         assert s.inline_subtask_timeout == 90
         assert s.frame_default_models == {}

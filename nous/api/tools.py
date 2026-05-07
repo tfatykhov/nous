@@ -1231,7 +1231,11 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     timeout=effective_timeout,
                 )
 
-                await heart.subtasks.complete(subtask.id, response_text)
+                # F061 PR-1: record outcome on legacy path so dashboard rows
+                # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+                await heart.subtasks.complete(
+                    subtask.id, response_text, final_outcome="completed",
+                )
                 return {
                     "content": [
                         {
@@ -1242,7 +1246,10 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                 }
 
             except _asyncio.TimeoutError:
-                await heart.subtasks.fail(subtask.id, f"Timeout after {effective_timeout}s")
+                await heart.subtasks.fail(
+                    subtask.id, f"Timeout after {effective_timeout}s",
+                    final_outcome="timed_out",
+                )
                 return {
                     "content": [
                         {
@@ -1252,7 +1259,9 @@ def create_subtask_tools(heart: Heart, settings: "Settings", runner: object = No
                     ]
                 }
             except Exception as e:
-                await heart.subtasks.fail(subtask.id, str(e))
+                await heart.subtasks.fail(
+                    subtask.id, str(e), final_outcome="errored",
+                )
                 return {
                     "content": [
                         {

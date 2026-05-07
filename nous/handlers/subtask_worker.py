@@ -122,7 +122,11 @@ class SubtaskWorkerPool:
                 subtask.id.hex[:8],
                 timeout,
             )
-            await self._heart.subtasks.fail(subtask.id, error_msg)
+            # F061 PR-1: record outcome on legacy path so dashboard rows
+            # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+            await self._heart.subtasks.fail(
+                subtask.id, error_msg, final_outcome="timed_out",
+            )
             await self._emit_event("subtask_failed", subtask, error=error_msg)
             await self._notify_telegram(subtask, error=error_msg)
 
@@ -154,7 +158,11 @@ class SubtaskWorkerPool:
                     is_background=True,
                 )
 
-                await self._heart.subtasks.complete(subtask.id, response_text)
+                # F061 PR-1: record outcome on legacy path so dashboard rows
+                # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+                await self._heart.subtasks.complete(
+                    subtask.id, response_text, final_outcome="completed",
+                )
                 await self._emit_event("subtask_completed", subtask, result=response_text)
                 await self._notify_telegram(subtask, result=response_text)
 
@@ -165,7 +173,9 @@ class SubtaskWorkerPool:
             except Exception as exc:
                 error_msg = f"{type(exc).__name__}: {exc}"
                 logger.exception("Subtask %s failed", subtask.id.hex[:8])
-                await self._heart.subtasks.fail(subtask.id, error_msg)
+                await self._heart.subtasks.fail(
+                    subtask.id, error_msg, final_outcome="errored",
+                )
                 await self._emit_event("subtask_failed", subtask, error=error_msg)
                 await self._notify_telegram(subtask, error=error_msg)
         finally:

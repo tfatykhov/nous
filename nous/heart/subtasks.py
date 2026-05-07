@@ -34,6 +34,10 @@ class SubtaskManager:
         metadata: dict | None = None,
         frame_type: str | None = None,
         model: str | None = None,
+        # F061 additions — all optional; NULL persisted when None.
+        output_format: str | None = None,
+        success_criteria: str | None = None,
+        dag_node_id: UUID | None = None,
     ) -> Subtask:
         """Create a new pending subtask. Raises ValueError if pending limit reached."""
         pri_val = _PRIORITY_MAP.get(priority, 100)
@@ -61,6 +65,9 @@ class SubtaskManager:
                 metadata_=metadata or {},
                 frame_type=frame_type,
                 model=model,
+                output_format=output_format,
+                success_criteria=success_criteria,
+                dag_node_id=dag_node_id,
             )
             session.add(subtask)
             await session.commit()
@@ -94,35 +101,101 @@ class SubtaskManager:
             )
             return subtask
 
-    async def complete(self, subtask_id: UUID, result: str) -> None:
+    async def complete(
+        self,
+        subtask_id: UUID,
+        result: str,
+        *,
+        # F061 additions — when None, the column is left at its existing value.
+        final_outcome: str | None = None,
+        report_jsonb: dict | None = None,
+        attempts: int | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        tool_calls_made: int | None = None,
+    ) -> None:
         """Mark a subtask as completed with its result."""
-        async with self._db.session() as session:
-            await session.execute(
-                update(Subtask)
-                .where(Subtask.id == subtask_id)
-                .values(
-                    status="completed",
-                    result=result,
-                    completed_at=datetime.now(UTC),
-                )
-            )
-            await session.commit()
-            logger.info("Completed subtask %s", subtask_id.hex[:8])
+        values: dict = {
+            "status": "completed",
+            "result": result,
+            "completed_at": datetime.now(UTC),
+        }
+        if final_outcome is not None:
+            values["final_outcome"] = final_outcome
+        if report_jsonb is not None:
+            values["report_jsonb"] = report_jsonb
+        if attempts is not None:
+            values["attempts"] = attempts
+        if tokens_in is not None:
+            values["tokens_in"] = tokens_in
+        if tokens_out is not None:
+            values["tokens_out"] = tokens_out
+        if tool_calls_made is not None:
+            values["tool_calls_made"] = tool_calls_made
 
-    async def fail(self, subtask_id: UUID, error: str) -> None:
-        """Mark a subtask as failed with error message."""
         async with self._db.session() as session:
             await session.execute(
                 update(Subtask)
                 .where(Subtask.id == subtask_id)
-                .values(
-                    status="failed",
-                    error=error,
-                    completed_at=datetime.now(UTC),
-                )
+                .values(**values)
             )
             await session.commit()
-            logger.warning("Failed subtask %s: %s", subtask_id.hex[:8], error)
+            # F061: include outcome in log so operators can grep for the new
+            # 5-state enum (completed / incomplete_blocked / ...). Falls back
+            # to the legacy message when no outcome was supplied.
+            if final_outcome is not None:
+                logger.info(
+                    "Completed subtask %s outcome=%s", subtask_id.hex[:8], final_outcome,
+                )
+            else:
+                logger.info("Completed subtask %s", subtask_id.hex[:8])
+
+    async def fail(
+        self,
+        subtask_id: UUID,
+        error: str,
+        *,
+        # F061 additions — same semantics as complete().
+        final_outcome: str | None = None,
+        report_jsonb: dict | None = None,
+        attempts: int | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        tool_calls_made: int | None = None,
+    ) -> None:
+        """Mark a subtask as failed with error message."""
+        values: dict = {
+            "status": "failed",
+            "error": error,
+            "completed_at": datetime.now(UTC),
+        }
+        if final_outcome is not None:
+            values["final_outcome"] = final_outcome
+        if report_jsonb is not None:
+            values["report_jsonb"] = report_jsonb
+        if attempts is not None:
+            values["attempts"] = attempts
+        if tokens_in is not None:
+            values["tokens_in"] = tokens_in
+        if tokens_out is not None:
+            values["tokens_out"] = tokens_out
+        if tool_calls_made is not None:
+            values["tool_calls_made"] = tool_calls_made
+
+        async with self._db.session() as session:
+            await session.execute(
+                update(Subtask)
+                .where(Subtask.id == subtask_id)
+                .values(**values)
+            )
+            await session.commit()
+            if final_outcome is not None:
+                logger.warning(
+                    "Failed subtask %s outcome=%s: %s",
+                    subtask_id.hex[:8], final_outcome, error,
+                )
+            else:
+                logger.warning("Failed subtask %s: %s", subtask_id.hex[:8], error)
 
     async def cancel(self, subtask_id: UUID) -> bool:
         """Cancel a pending subtask. Returns False if not pending."""
