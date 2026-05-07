@@ -312,3 +312,39 @@ async def test_emit_failure_does_not_propagate():
     assert result.ok is True
     # Persistence still happened
     heart.subtasks.complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_does_not_persist_or_emit():
+    """F061 PR-3 Codex review P1: the finally block MUST NOT persist or
+    emit a 'cancelled' outcome on CancelledError, because the function
+    runs under asyncio.wait_for in both worker and inline paths — a normal
+    timeout arrives as cancellation FIRST, before the outer caller catches
+    TimeoutError and writes final_outcome='timed_out'. Persisting from
+    inside the finally would cause events to disagree with the DB.
+
+    Worker shutdown (pure cancel without wait_for timeout) is handled by
+    F049's reclaim_stale, which puts orphaned 'running' rows back to
+    'pending' for retry. So we trade a 'cancelled' telemetry row for
+    consistency with the eventual DB state.
+    """
+    import asyncio
+
+    runner = MagicMock()
+    runner.run_turn = AsyncMock(side_effect=asyncio.CancelledError())
+    heart = _make_heart_mock()
+    settings = _make_settings()
+    subtask = _make_subtask()
+    emit = AsyncMock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await execute_hardened(
+            subtask, "sess-cancel",
+            runner=runner, heart=heart, settings=settings,
+            emit_event=emit,
+        )
+
+    # Critical: NO persistence, NO emission on cancellation.
+    heart.subtasks.complete.assert_not_called()
+    heart.subtasks.fail.assert_not_called()
+    emit.assert_not_called()

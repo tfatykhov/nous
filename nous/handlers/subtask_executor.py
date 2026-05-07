@@ -180,14 +180,20 @@ async def execute_hardened(
                     force_tool_on_penultimate=force_tool,
                 )
             except asyncio.CancelledError:
-                # F061 PR-3 silent-failure review P1.1: persist + emit on
-                # cancellation so the dashboard never silently misses a
-                # subtask. The finally-block below handles the actual write
-                # under asyncio.shield.
+                # F061 PR-3 Codex review P1: do NOT classify CancelledError
+                # as final_outcome="cancelled" inside this finally — both
+                # worker and inline call sites wrap us in asyncio.wait_for
+                # which converts a normal timeout into CancelledError before
+                # re-raising as TimeoutError. If we persist+emit "cancelled"
+                # here, the outer caller's TimeoutError branch will then
+                # overwrite the DB row with "timed_out" but the EVENT row
+                # is already locked in as "cancelled" — events disagree
+                # with the DB. Instead: preserve last_result (sentinel or
+                # prior-attempt value), let the finally write that, and
+                # re-raise. The outer caller decides whether this was a
+                # timeout (writes "timed_out") or a real shutdown cancel
+                # (F049's reclaim_stale handles the orphaned "running" row).
                 cancelled = True
-                last_result = ValidationResult.failed(
-                    "cancelled", "Subtask cancelled (worker shutdown or external cancel).",
-                )
                 raise
             except Exception as exc:
                 error_msg = f"{type(exc).__name__}: {exc}"
@@ -221,33 +227,22 @@ async def execute_hardened(
             # Either out of attempts or non-recoverable outcome — exit.
             break
     finally:
-        # Always persist + emit, even on CancelledError. asyncio.shield
-        # protects the DB writes from being aborted by the same cancel
-        # tearing down the worker. Any persistence/emission failure is
-        # logged loudly via logger.exception, NEVER silently dropped.
-        try:
-            await asyncio.shield(_persist_outcome(
-                heart,
-                subtask,
-                last_result,
-                last_payload,
-                attempts=attempt or 1,
-                tokens_in=total_in,
-                tokens_out=total_out,
-                tool_calls_made=total_calls,
-            ))
-        except Exception:
-            logger.exception(
-                "Subtask %s _persist_outcome failed in finally (cancelled=%s)",
-                subtask.id.hex[:8], cancelled,
-            )
-
-        duration_ms = int((time.monotonic() - started_monotonic) * 1000)
-        if emit_event:
+        # Skip persist+emit on CancelledError. The outer caller wraps us in
+        # asyncio.wait_for and decides the correct final_outcome:
+        #   - wait_for timeout → outer catches TimeoutError → writes
+        #     final_outcome="timed_out" itself
+        #   - pure shutdown cancel → F049's reclaim_stale puts the orphaned
+        #     "running" row back to "pending" for retry on next worker boot
+        # Persisting from inside this finally on CancelledError would race
+        # with the outer caller's overwrite (DB ends up correct but the
+        # event is locked at the WRONG outcome — telemetry desyncs from DB).
+        if not cancelled:
             try:
-                await asyncio.shield(emit_event(
-                    subtask, last_result, last_payload,
-                    duration_ms=duration_ms,
+                await asyncio.shield(_persist_outcome(
+                    heart,
+                    subtask,
+                    last_result,
+                    last_payload,
                     attempts=attempt or 1,
                     tokens_in=total_in,
                     tokens_out=total_out,
@@ -255,9 +250,32 @@ async def execute_hardened(
                 ))
             except Exception:
                 logger.exception(
-                    "Subtask %s emit_event failed in finally (cancelled=%s)",
-                    subtask.id.hex[:8], cancelled,
+                    "Subtask %s _persist_outcome failed in finally",
+                    subtask.id.hex[:8],
                 )
+
+            duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+            if emit_event:
+                try:
+                    await asyncio.shield(emit_event(
+                        subtask, last_result, last_payload,
+                        duration_ms=duration_ms,
+                        attempts=attempt or 1,
+                        tokens_in=total_in,
+                        tokens_out=total_out,
+                        tool_calls_made=total_calls,
+                    ))
+                except Exception:
+                    logger.exception(
+                        "Subtask %s emit_event failed in finally",
+                        subtask.id.hex[:8],
+                    )
+        else:
+            logger.info(
+                "Subtask %s cancelled during execution; outer caller "
+                "(asyncio.wait_for) will classify the final outcome",
+                subtask.id.hex[:8],
+            )
     if notify_telegram:
         try:
             await notify_telegram(subtask, last_result, last_payload)

@@ -1449,6 +1449,14 @@ class AgentRunner:
                         duration_ms=duration_ms,
                     ))
 
+                    # F061 PR-3 Codex review P2: stop dispatching remaining
+                    # tool_use blocks once a successful submit_final_report
+                    # accepted the terminal payload. Subsequent tools in
+                    # the same assistant message would otherwise run with
+                    # side effects after termination has been declared.
+                    if terminate_after_tool_results:
+                        break
+
             # Append all tool results as single user message
             messages.append({
                 "role": "user",

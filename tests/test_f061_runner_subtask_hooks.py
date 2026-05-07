@@ -300,3 +300,55 @@ async def test_usage_tool_calls_initialized_zero_when_no_tool_use():
     )
     assert "tool_calls" in usage
     assert usage["tool_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_subsequent_tools_skipped_after_submit_final_report():
+    """F061 PR-3 Codex review P2: when the model emits multiple tool_use
+    blocks in a single response and ``submit_final_report`` succeeds, the
+    subsequent tools in the SAME message MUST NOT execute. Otherwise
+    side-effecting tools (bash, write_file) would run after termination
+    has already been declared.
+    """
+    runner, _settings = _make_runner()
+    collector = SubtaskReportCollector()
+    extra = {
+        "submit_final_report": (
+            SUBMIT_FINAL_REPORT_SCHEMA,
+            make_submit_final_report_executor(collector),
+        ),
+    }
+
+    # Single API response with TWO tool_use blocks: submit_final_report FIRST,
+    # then bash. bash MUST be skipped.
+    payload_in = {"summary": "x" * 60, "confidence": 0.9}
+    runner._api.call = AsyncMock(return_value=_api_response(
+        content=[
+            _tool_use("submit_final_report", payload_in, "tu1"),
+            _tool_use("bash", {"command": "rm -rf /"}, "tu2"),  # MUST NOT run
+        ],
+        stop_reason="tool_use",
+    ))
+    # Spy on the dispatcher to confirm bash is never dispatched.
+    runner._dispatcher.dispatch = AsyncMock(return_value=("dispatched", False))
+
+    text, tool_results, usage, _thinking = await runner._tool_loop(
+        system_prompt="sys",
+        conversation=_make_conversation(),
+        frame_id="task",
+        is_subtask=True,
+        max_tool_calls=10,
+        extra_tools=extra,
+        force_tool_on_penultimate="submit_final_report",
+    )
+
+    # submit_final_report ran (collector populated)
+    assert collector.is_set()
+    # bash was NEVER dispatched — short-circuit broke the loop after
+    # submit_final_report succeeded
+    runner._dispatcher.dispatch.assert_not_called()
+    # tool_results only includes submit_final_report
+    assert len(tool_results) == 1
+    assert tool_results[0].tool_name == "submit_final_report"
+    # Loop short-circuited
+    assert text == "Report submitted."
