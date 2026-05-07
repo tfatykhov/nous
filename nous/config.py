@@ -418,6 +418,19 @@ class Settings(BaseSettings):
         description="F049: max seconds to wait for end_conversation in subtask finally before logging ERROR",
     )
 
+    # F061: Subtask Hardening — forced terminal-tool contract + structural validator + bounded retry.
+    # All fields use plain names (no validation_alias); env_prefix="NOUS_" picks up NOUS_SUBTASK_*.
+    subtask_hardening_enabled: bool = False
+    subtask_max_attempts: int = Field(default=2, ge=1, le=3)
+    subtask_report_min_summary_chars: int = Field(default=50, ge=1)
+    # bootstrap/work timeouts are observability-only labels until PR-2 wires them
+    # into _execute_hardened. The outer asyncio.wait_for(timeout_seconds) in the
+    # worker is unchanged. Setting these in PR-1 has no runtime effect.
+    subtask_bootstrap_timeout: int = Field(default=30, ge=1)
+    subtask_work_timeout: int = Field(default=570, ge=1)
+    subtask_outcome_persistence_enabled: bool = True
+    subtask_force_tool_on_penultimate: bool = True
+
     # F049: WM TTL safety-net sweep
     working_memory_ttl_hours: int = Field(
         default=24,

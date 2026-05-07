@@ -1774,3 +1774,231 @@ async def get_density_data(session: AsyncSession, agent_id: str) -> dict:
         "edge_distribution": edge_distribution,
         "backfill_progress": backfill_progress,
     }
+
+
+# ── F061: Subtask Hardening Dashboard ──────────────────────────────────────
+
+
+async def get_subtask_dashboard_data(
+    session: AsyncSession, agent_id: str, hours: int = 24
+) -> dict[str, Any]:
+    """F061: subtask outcome metrics for the /dashboard/subtasks tab.
+
+    All cards are produced via SQL aggregations (no Python row loops). One
+    extra query against ``nous_system.events`` for the daily-trend card so
+    operators can see empty-rate evolving over time.
+
+    Cards:
+      - ``totals``         — counts grouped by ``final_outcome``
+      - ``empty_rate``     — (incomplete_no_terminal + validation_failed) / total
+      - ``retry_rate``     — fraction of subtasks where ``attempts > 1``
+      - ``tokens_by_outcome`` — mean ``tokens_in + tokens_out`` per outcome
+      - ``top_failing_tasks`` — group by ``task[:80]``, highest failure rate
+      - ``dag_correlation`` — counts of subtasks tied to DAG nodes
+      - ``recent_outcomes`` — last 50 terminal subtasks with their outcome
+      - ``daily_trend``    — daily counts grouped by outcome (window length)
+    """
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+
+    # Card 1: outcome counts
+    result = await session.execute(
+        text("""
+            SELECT
+                COALESCE(final_outcome, 'unknown') AS outcome,
+                COUNT(*) AS cnt
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+            GROUP BY COALESCE(final_outcome, 'unknown')
+            ORDER BY cnt DESC
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    by_outcome: dict[str, int] = {row.outcome: row.cnt for row in result}
+    total_terminal = sum(by_outcome.values())
+
+    # Card 2/3: derived rates
+    failed_outcomes = {"incomplete_no_terminal", "validation_failed"}
+    failure_count = sum(
+        cnt for outcome, cnt in by_outcome.items() if outcome in failed_outcomes
+    )
+    empty_rate = (failure_count / total_terminal) if total_terminal > 0 else 0.0
+
+    # Retry rate: completed_at-bounded rows where attempts > 1
+    result = await session.execute(
+        text("""
+            SELECT
+                COUNT(*) FILTER (WHERE attempts > 1) AS retried,
+                COUNT(*) AS total
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    row = result.first()
+    retried = row.retried or 0
+    retry_rate = (retried / row.total) if row.total else 0.0
+
+    # Card 4: tokens by outcome
+    result = await session.execute(
+        text("""
+            SELECT
+                COALESCE(final_outcome, 'unknown') AS outcome,
+                AVG(tokens_in + tokens_out)::INTEGER AS mean_total_tokens,
+                AVG(tool_calls_made)::FLOAT AS mean_tool_calls,
+                COUNT(*) AS n
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+            GROUP BY COALESCE(final_outcome, 'unknown')
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    tokens_by_outcome = {
+        r.outcome: {
+            "mean_total_tokens": r.mean_total_tokens or 0,
+            "mean_tool_calls": round(r.mean_tool_calls or 0, 2),
+            "n": r.n,
+        }
+        for r in result
+    }
+
+    # Card 5: top failing tasks (group by task[:80]).
+    # Sort by failure RATE first, then absolute failures — surfaces tasks
+    # that fail consistently even at low volume (e.g., a 100% failure rate
+    # template) rather than burying them under high-volume tasks with
+    # incidental failures (review P2-G).
+    result = await session.execute(
+        text("""
+            SELECT
+                LEFT(task, 80) AS task_prefix,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE final_outcome IN ('incomplete_no_terminal', 'validation_failed', 'errored', 'timed_out')
+                ) AS failures
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+            GROUP BY LEFT(task, 80)
+            HAVING COUNT(*) FILTER (
+                WHERE final_outcome IN ('incomplete_no_terminal', 'validation_failed', 'errored', 'timed_out')
+            ) > 0
+            ORDER BY (
+                COUNT(*) FILTER (
+                    WHERE final_outcome IN ('incomplete_no_terminal', 'validation_failed', 'errored', 'timed_out')
+                )::float / NULLIF(COUNT(*), 0)
+            ) DESC, failures DESC, total DESC
+            LIMIT 10
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    top_failing = [
+        {
+            "task_prefix": r.task_prefix,
+            "total": r.total,
+            "failures": r.failures,
+            "failure_rate": round(r.failures / r.total, 3) if r.total else 0.0,
+        }
+        for r in result
+    ]
+
+    # Card 6: DAG correlation
+    result = await session.execute(
+        text("""
+            SELECT
+                COALESCE(final_outcome, 'unknown') AS outcome,
+                COUNT(*) AS cnt
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND dag_node_id IS NOT NULL
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+            GROUP BY COALESCE(final_outcome, 'unknown')
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    dag_correlation = {row.outcome: row.cnt for row in result}
+
+    # Card 7: recent terminal subtasks (most recent 50)
+    result = await session.execute(
+        text("""
+            SELECT
+                id,
+                LEFT(task, 80) AS task,
+                final_outcome,
+                attempts,
+                tokens_in,
+                tokens_out,
+                tool_calls_made,
+                completed_at,
+                dag_node_id
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+            ORDER BY completed_at DESC
+            LIMIT 50
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    recent_outcomes = [
+        {
+            "id": str(r.id),
+            "task": r.task,
+            "final_outcome": r.final_outcome,
+            "attempts": r.attempts,
+            "tokens_in": r.tokens_in,
+            "tokens_out": r.tokens_out,
+            "tool_calls_made": r.tool_calls_made,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+            "dag_node_id": str(r.dag_node_id) if r.dag_node_id else None,
+        }
+        for r in result
+    ]
+
+    # Card 8: daily trend — uses the SAME `since` as the other cards so the
+    # window stays consistent (e.g., 30h window shows a 30h trend, not 48h).
+    result = await session.execute(
+        text("""
+            SELECT
+                DATE(completed_at) AS day,
+                COALESCE(final_outcome, 'unknown') AS outcome,
+                COUNT(*) AS cnt
+            FROM heart.subtasks
+            WHERE agent_id = :agent_id
+              AND completed_at IS NOT NULL
+              AND completed_at >= :since
+            GROUP BY DATE(completed_at), COALESCE(final_outcome, 'unknown')
+            ORDER BY day
+        """),
+        {"agent_id": agent_id, "since": since},
+    )
+    daily_buckets: dict[str, dict[str, int]] = {}
+    for r in result:
+        day_key = r.day.isoformat()
+        daily_buckets.setdefault(day_key, {})[r.outcome] = r.cnt
+    daily_trend = [
+        {"date": day, "by_outcome": buckets}
+        for day, buckets in sorted(daily_buckets.items())
+    ]
+
+    return {
+        "window_hours": hours,
+        "totals": {
+            "total_terminal": total_terminal,
+            "by_outcome": by_outcome,
+            "empty_rate": round(empty_rate, 4),
+            "retry_rate": round(retry_rate, 4),
+        },
+        "tokens_by_outcome": tokens_by_outcome,
+        "top_failing_tasks": top_failing,
+        "dag_correlation": dag_correlation,
+        "recent_outcomes": recent_outcomes,
+        "daily_trend": daily_trend,
+    }
