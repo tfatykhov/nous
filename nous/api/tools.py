@@ -1155,6 +1155,72 @@ def build_subtask_prefix(
     )
 
 
+async def _persist_and_emit_inline_outcome(
+    *,
+    heart: Heart,
+    bus: object,
+    settings: "Settings",
+    subtask: Any,
+    final_outcome: str,
+    error_msg: str,
+    state: Any,
+) -> None:
+    """F061 round 4: inline path's outer timeout/exception handler must
+    persist accurate attempts + token counts AND emit a subtask_outcome
+    event. Mirrors ``SubtaskWorkerPool._emit_outcome_from_outer`` for the
+    inline ``await_result=true`` path.
+    """
+    attempts = max(1, getattr(state, "attempts", 0) or 0)
+    tokens_in = getattr(state, "tokens_in", 0)
+    tokens_out = getattr(state, "tokens_out", 0)
+    tool_calls_made = getattr(state, "tool_calls_made", 0)
+
+    await heart.subtasks.fail(
+        subtask.id, error_msg,
+        final_outcome=final_outcome,
+        attempts=attempts,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        tool_calls_made=tool_calls_made,
+    )
+
+    if bus is None or not settings.subtask_outcome_persistence_enabled:
+        return
+    try:
+        from nous.events import Event
+        from nous.handlers.subtask_executor import SUBTASK_OUTCOME_EVENT_TYPE
+
+        data: dict[str, Any] = {
+            "subtask_id": str(subtask.id),
+            "agent_id": getattr(subtask, "agent_id", None),
+            "frame_type": getattr(subtask, "frame_type", None),
+            "final_outcome": final_outcome,
+            "ok": False,
+            "validator_reason": error_msg,
+            "attempts": attempts,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tool_calls_made": tool_calls_made,
+            "duration_ms": None,
+            "dag_node_id": (
+                str(subtask.dag_node_id)
+                if getattr(subtask, "dag_node_id", None) is not None
+                else None
+            ),
+        }
+        await bus.emit(Event(
+            type=SUBTASK_OUTCOME_EVENT_TYPE,
+            agent_id=getattr(subtask, "agent_id", "") or settings.agent_id,
+            session_id=f"subtask-{subtask.id.hex[:8]}",
+            data=data,
+        ))
+    except Exception:
+        logger.exception(
+            "Failed to emit subtask_outcome from inline outer handler for %s",
+            subtask.id.hex[:8],
+        )
+
+
 # ---------------------------------------------------------------------------
 # Subtask & Schedule tool closures (011.1)
 # ---------------------------------------------------------------------------
@@ -1327,6 +1393,7 @@ def create_subtask_tools(
                 # would deadlock at startup. (functools.partial is stdlib
                 # and circular-safe; imported at module top.)
                 from nous.handlers.subtask_executor import (
+                    HardenedRunState,
                     emit_outcome_event,
                     execute_hardened,
                 )
@@ -1338,6 +1405,13 @@ def create_subtask_tools(
                     partial(emit_outcome_event, bus, settings=settings)
                     if bus is not None else None
                 )
+
+                # F061 round 4: HardenedRunState side channel so the timeout
+                # / exception handlers below can read accurate attempts +
+                # token counts, persist them on the row, AND emit a
+                # subtask_outcome event (execute_hardened skips persist+emit
+                # on cancel — outer handler is the authoritative classifier).
+                state = HardenedRunState()
 
                 # `executed` flag prevents double-persist on programming-
                 # error in the response-formatting code below: if any
@@ -1352,6 +1426,7 @@ def create_subtask_tools(
                             subtask, subtask_session_id,
                             runner=runner, heart=heart, settings=settings,
                             emit_event=_outcome_emitter,
+                            state=state,
                         ),
                         timeout=effective_timeout,
                     )
@@ -1372,9 +1447,12 @@ def create_subtask_tools(
                     return {"content": [{"type": "text", "text": body}]}
                 except _asyncio.TimeoutError:
                     if not executed:
-                        await heart.subtasks.fail(
-                            subtask.id, f"Timeout after {effective_timeout}s",
-                            final_outcome="timed_out", attempts=1,
+                        await _persist_and_emit_inline_outcome(
+                            heart=heart, bus=bus, settings=settings,
+                            subtask=subtask,
+                            final_outcome="timed_out",
+                            error_msg=f"Timeout after {effective_timeout}s",
+                            state=state,
                         )
                     return {
                         "content": [
@@ -1386,8 +1464,12 @@ def create_subtask_tools(
                     }
                 except Exception as e:
                     if not executed:
-                        await heart.subtasks.fail(
-                            subtask.id, str(e), final_outcome="errored", attempts=1,
+                        await _persist_and_emit_inline_outcome(
+                            heart=heart, bus=bus, settings=settings,
+                            subtask=subtask,
+                            final_outcome="errored",
+                            error_msg=str(e),
+                            state=state,
                         )
                     return {
                         "content": [

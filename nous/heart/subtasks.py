@@ -198,13 +198,23 @@ class SubtaskManager:
                 logger.warning("Failed subtask %s: %s", subtask_id.hex[:8], error)
 
     async def cancel(self, subtask_id: UUID) -> bool:
-        """Cancel a pending subtask. Returns False if not pending."""
+        """Cancel a pending subtask. Returns False if not pending.
+
+        F061 round 4 P2-E: also sets ``final_outcome='cancelled'`` so the
+        dashboard's outcome card distinguishes user-cancelled rows from
+        legacy pre-flag NULL rows (which bucket as 'unknown'). Without
+        this, both classes blended together as 'unknown'.
+        """
         async with self._db.session() as session:
             result = await session.execute(
                 update(Subtask)
                 .where(Subtask.id == subtask_id)
                 .where(Subtask.status == "pending")
-                .values(status="cancelled", completed_at=datetime.now(UTC))
+                .values(
+                    status="cancelled",
+                    final_outcome="cancelled",
+                    completed_at=datetime.now(UTC),
+                )
             )
             await session.commit()
             return result.rowcount > 0

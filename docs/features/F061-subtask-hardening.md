@@ -287,6 +287,15 @@ Cap = 1 retry (so 2 total attempts). Configurable via `NOUS_SUBTASK_MAX_ATTEMPTS
 
 **No retry on:** `timed_out`, `errored` (httpx / API failure), `cancelled`. These already cost the full budget once; doubling spend on infrastructure failures is wasteful. Operators who want infrastructure retry should run a sibling subtask manually.
 
+### Cancellation handling (round 4 clarification)
+
+`execute_hardened` does NOT persist or emit `cancelled` on `CancelledError`. Two distinct cancellation sources are handled differently:
+
+- **`asyncio.wait_for` timeout** — the outer `_process_subtask` (worker) or `spawn_task` inline path catches `TimeoutError` and writes `final_outcome="timed_out"` via the authoritative outer handler, reading the `HardenedRunState` side channel for accurate attempts + tokens. This avoids the round-1 race where the inner `cancelled` write disagreed with the outer `timed_out` overwrite.
+- **Pure shutdown cancel** (`SubtaskWorkerPool.stop()`) — the row stays in `status='running'` until F049's `reclaim_stale` runs at next worker startup and resets to `pending` for retry.
+
+The `cancelled` outcome value is reserved for the user-cancel API path only.
+
 ### Mechanism 6 — Five-state outcome enum
 
 `final_outcome` column, NOT NULL after migration, values:
@@ -299,7 +308,7 @@ Cap = 1 retry (so 2 total attempts). Configurable via `NOUS_SUBTASK_MAX_ATTEMPTS
 | `validation_failed` | Tool was called, but payload failed schema/length/placeholder check on both attempts | `failed` |
 | `timed_out` | `asyncio.wait_for` expired | `failed` |
 | `errored` | Uncaught exception (API 5xx, network, etc.) | `failed` |
-| `cancelled` | `CancelledError` propagated (shutdown, user cancel) | `cancelled` |
+| `cancelled` | User-cancelled via `cancel()` API on a pending subtask. **Note:** `CancelledError` propagated mid-execution (worker shutdown / wait_for timeout) does NOT emit `cancelled` from the F061 path — see *Cancellation handling* below. | `cancelled` |
 
 The legacy `status` column is kept (DAG and external API consumers depend on it). `final_outcome` is the richer signal new consumers should read.
 

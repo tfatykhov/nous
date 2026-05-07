@@ -1251,6 +1251,13 @@ class AgentRunner:
         )
         force_enabled = bool(force_tool_on_penultimate) and thinking_off
         terminate_after_tool_results = False  # set when submit_final_report fires
+        # F061 round 4 P2-I: cap the number of force_tool_on_penultimate
+        # fires within a single run_turn. Without this cap, the >= math
+        # could fire force on multiple consecutive turns when the model
+        # keeps producing schema-invalid payloads — 3× token cost on the
+        # worst-case validator-fail path. Cap at 2 (penultimate + ultimate)
+        # which preserves the recovery benefit without unbounded retries.
+        _force_fires_remaining = 2
 
         while turns < max_turns:
             # F020: Rebuild tool list each iteration for dynamic cache_retrieve
@@ -1282,18 +1289,30 @@ class AgentRunner:
             # ``>=`` (not ``==``) handles the case where the model dispatched
             # multiple tools in one response and jumped past the boundary.
             tool_choice_arg: dict[str, Any] | None = None
+            # F061 round 4 P2-G: clamp the (limit - 2) thresholds to 1.
+            # Without the clamp, ``max_turns=2`` or ``max_tool_calls=2``
+            # produces a threshold of 0 — the ``>=`` test then matches on
+            # turn 1 / first tool call, forcing the model to terminate
+            # before any work has run. Clamping to 1 means force fires no
+            # earlier than the 2nd turn / 2nd tool call.
+            _turn_threshold = max(1, max_turns - 2)
+            _tool_threshold = (
+                max(1, max_tool_calls - 2) if max_tool_calls is not None else None
+            )
             is_penultimate = (
                 force_enabled
                 and force_tool_on_penultimate is not None
                 and turns > 0
-                and (turns >= max_turns - 2
-                     or (max_tool_calls is not None
-                         and total_tool_calls >= max_tool_calls - 2))
+                and _force_fires_remaining > 0
+                and (turns >= _turn_threshold
+                     or (_tool_threshold is not None
+                         and total_tool_calls >= _tool_threshold))
             )
             if is_penultimate:
                 tool_choice_arg = {
                     "type": "tool", "name": force_tool_on_penultimate,
                 }
+                _force_fires_remaining -= 1
 
             # Only pass tool_choice when non-None so existing mocks of
             # _call_api (which don't accept the new kwarg) continue to work.

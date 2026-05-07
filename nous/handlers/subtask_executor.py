@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from nous.api.subtask_tools import (
@@ -33,6 +34,30 @@ from nous.api.tools import build_subtask_prefix
 from nous.heart.subtask_validator import ValidationResult, validate_report
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HardenedRunState:
+    """Real-time state of an in-progress ``execute_hardened`` run.
+
+    Outer callers (``subtask_worker._process_subtask``,
+    ``tools.py::spawn_task`` inline path) construct one of these and pass
+    it via the ``state=`` kwarg. The executor mutates it in-place at every
+    attempt boundary so that — when the outer ``asyncio.wait_for`` fires
+    a timeout and ``execute_hardened``'s in-flight attempt is cancelled —
+    the outer caller can read accurate ``attempts``/token counts to
+    persist the row and emit the ``subtask_outcome`` event.
+
+    Without this side channel, the outer timeout handler had no way to
+    know how many attempts the executor consumed, and used a hardcoded
+    ``attempts=1`` that was wrong whenever attempt 2 was in progress.
+    """
+
+    attempts: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    tool_calls_made: int = 0
+    last_payload: dict[str, Any] | None = None
 
 
 # F061 PR-3: structured outcome event for /dashboard/subtasks. Emitted via
@@ -115,6 +140,7 @@ async def execute_hardened(
     settings,
     emit_event: EmitEventCallback = None,
     notify_telegram: NotifyCallback = None,
+    state: HardenedRunState | None = None,
 ) -> tuple[str, ValidationResult]:
     """Run a subtask under the F061 contract.
 
@@ -149,10 +175,20 @@ async def execute_hardened(
     last_result: ValidationResult = ValidationResult.failed(
         "errored", "no attempts ran",
     )
-    total_in = 0
-    total_out = 0
-    total_calls = 0
-    attempt = 0  # populated in the loop; survives no-iter case via initial 0
+    # F061 PR-3 round 4: HardenedRunState side channel. Outer caller
+    # mutates ``state`` in-place at every attempt boundary so that on
+    # outer wait_for timeout the timeout handler can read accurate
+    # attempts/token counts (it has no other access to local state in
+    # this coroutine after CancelledError).
+    if state is None:
+        state = HardenedRunState()
+    # Caller is expected to pass a fresh state (or None); we don't reset
+    # so the outer timeout handler can pre-seed values for testing or
+    # for resumed executions in a future PR.
+    total_in = state.tokens_in
+    total_out = state.tokens_out
+    total_calls = state.tool_calls_made
+    attempt = state.attempts  # 0 if fresh
     started_monotonic = time.monotonic()
 
     force_tool = (
@@ -164,6 +200,9 @@ async def execute_hardened(
     cancelled = False
     try:
         for attempt in range(1, max_attempts + 1):
+            # Mirror to state BEFORE the attempt runs so an outer wait_for
+            # timeout that fires during the run still sees attempt=N.
+            state.attempts = attempt
             collector.reset()
             try:
                 response_text, _ctx, usage = await runner.run_turn(
@@ -206,8 +245,13 @@ async def execute_hardened(
             total_in += usage.get("input_tokens", 0)
             total_out += usage.get("output_tokens", 0)
             total_calls += usage.get("tool_calls", 0)
+            # Mirror cumulative counts after each successful API call.
+            state.tokens_in = total_in
+            state.tokens_out = total_out
+            state.tool_calls_made = total_calls
 
             last_payload = collector.get()
+            state.last_payload = last_payload
             last_result = validate_report(last_payload, min_summary_chars=min_summary)
 
             if last_result.ok or last_result.outcome == "incomplete_blocked":
@@ -249,6 +293,21 @@ async def execute_hardened(
                     tokens_out=total_out,
                     tool_calls_made=total_calls,
                 ))
+            except asyncio.CancelledError:
+                # F061 PR-3 silent-failure review P1.1: CancelledError
+                # derives from BaseException, not Exception, so the bare
+                # ``except Exception`` would NOT catch it — and the
+                # subsequent emit_event call would be skipped. Catch
+                # explicitly, log loudly, then re-raise so cancellation
+                # actually terminates the worker.
+                logger.warning(
+                    "Subtask %s _persist_outcome cancelled mid-finally "
+                    "(shield preserves the inner Task; emit_event will "
+                    "NOT run; downstream telemetry consumers may miss "
+                    "this row's subtask_outcome event)",
+                    subtask.id.hex[:8],
+                )
+                raise
             except Exception:
                 logger.exception(
                     "Subtask %s _persist_outcome failed in finally",
@@ -266,6 +325,12 @@ async def execute_hardened(
                         tokens_out=total_out,
                         tool_calls_made=total_calls,
                     ))
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "Subtask %s emit_event cancelled mid-finally",
+                        subtask.id.hex[:8],
+                    )
+                    raise
                 except Exception:
                     logger.exception(
                         "Subtask %s emit_event failed in finally",
@@ -274,7 +339,8 @@ async def execute_hardened(
         else:
             logger.info(
                 "Subtask %s cancelled during execution; outer caller "
-                "(asyncio.wait_for) will classify the final outcome",
+                "(asyncio.wait_for) will classify the final outcome and "
+                "emit the subtask_outcome event using state=HardenedRunState",
                 subtask.id.hex[:8],
             )
     if notify_telegram:

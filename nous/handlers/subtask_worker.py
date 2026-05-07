@@ -14,6 +14,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from functools import partial
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nous.handlers.subtask_executor import HardenedRunState
 from datetime import UTC, datetime
 
 import httpx
@@ -49,6 +53,13 @@ class SubtaskWorkerPool:
         self._http = http_client
         self._workers: list[asyncio.Task] = []
         self._running = False
+        # F061 round 4: per-subtask HardenedRunState so the outer
+        # _process_subtask timeout handler can read accurate
+        # attempts/token counts after asyncio.wait_for cancels the
+        # in-flight execute_hardened. Keyed by subtask.id; populated
+        # in _execute_subtask, consumed in _process_subtask, cleared
+        # after every dispatch.
+        self._inflight_state: dict[Any, "HardenedRunState"] = {}
 
     async def start(self) -> None:
         """Spawn worker tasks and reclaim any stale subtasks from prior crash."""
@@ -117,23 +128,43 @@ class SubtaskWorkerPool:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
+            # F061 PR-3 round 4: read the HardenedRunState side channel
+            # (populated by execute_hardened in real time) so the timeout
+            # row reflects accurate attempt count + token usage rather
+            # than the previous hardcoded ``attempts=1`` (which was wrong
+            # whenever the executor was on attempt 2 when wait_for fired).
+            state = self._inflight_state.get(subtask.id)
             error_msg = f"Subtask timed out after {timeout}s"
             logger.warning(
                 "Subtask %s timed out after %ds",
-                subtask.id.hex[:8],
-                timeout,
+                subtask.id.hex[:8], timeout,
             )
-            # F061 PR-1: record outcome on legacy path so dashboard rows
-            # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
-            # F061 PR-3 Codex review: attempts=1 because exactly one
-            # execution attempt definitely happened before the timeout fired.
-            # Without this, the row keeps the server default 0 and skews
-            # dashboard retry-rate metrics.
+            attempts = max(1, state.attempts) if state else 1
+            tokens_in = state.tokens_in if state else 0
+            tokens_out = state.tokens_out if state else 0
+            tool_calls_made = state.tool_calls_made if state else 0
             await self._heart.subtasks.fail(
-                subtask.id, error_msg, final_outcome="timed_out", attempts=1,
+                subtask.id, error_msg, final_outcome="timed_out",
+                attempts=attempts, tokens_in=tokens_in,
+                tokens_out=tokens_out, tool_calls_made=tool_calls_made,
+            )
+            # F061 PR-3 Codex round 4: emit subtask_outcome event from
+            # the outer handler. execute_hardened skips persist+emit on
+            # CancelledError (avoids the round-1 race where it would
+            # write 'cancelled' before this handler overwrites with
+            # 'timed_out'); the outer handler is the authoritative
+            # classification site, so it must also emit the event or
+            # event-driven telemetry consumers (eval harness, audits)
+            # silently miss timeouts.
+            await self._emit_outcome_from_outer(
+                subtask, "timed_out", error_msg,
+                attempts=attempts, tokens_in=tokens_in,
+                tokens_out=tokens_out, tool_calls_made=tool_calls_made,
             )
             await self._emit_event("subtask_failed", subtask, error=error_msg)
             await self._notify_telegram(subtask, error=error_msg)
+        finally:
+            self._inflight_state.pop(subtask.id, None)
 
     async def _execute_subtask(self, subtask: Subtask) -> None:
         """Run the subtask as an agent turn via AgentRunner.
@@ -157,6 +188,7 @@ class SubtaskWorkerPool:
                 # (functools.partial is stdlib and circular-safe; imported
                 # at module top.)
                 from nous.handlers.subtask_executor import (
+                    HardenedRunState,
                     emit_outcome_event,
                     execute_hardened,
                 )
@@ -167,6 +199,18 @@ class SubtaskWorkerPool:
                     emit_outcome_event, self._bus, settings=self._settings,
                 )
 
+                # F061 round 4: HardenedRunState side channel for outer
+                # timeout handler in _process_subtask to read accurate
+                # attempts + tokens after wait_for cancels execute_hardened.
+                state = HardenedRunState()
+                self._inflight_state[subtask.id] = state
+
+                # F061 PR-3 round 4 P1-B: ``executed`` flag mirrors the
+                # inline-path pattern. If post-execute_hardened code
+                # (notify_telegram, response shaping) raises, the outer
+                # ``except Exception`` must NOT call fail() again — the row
+                # is already persisted by execute_hardened._persist_outcome.
+                executed = False
                 try:
                     final_text, _result = await execute_hardened(
                         subtask, session_id,
@@ -174,7 +218,9 @@ class SubtaskWorkerPool:
                         heart=self._heart,
                         settings=self._settings,
                         emit_event=_outcome_emitter,
+                        state=state,
                     )
+                    executed = True
                     # Telemetry parity with the legacy path. Persistence is
                     # already done inside execute_hardened.
                     if _result.ok:
@@ -200,15 +246,33 @@ class SubtaskWorkerPool:
                 except Exception as exc:
                     # execute_hardened catches per-attempt exceptions, but
                     # defensive: a programmer error in execute_hardened itself
-                    # must still surface visibly.
+                    # must still surface visibly. ``executed`` flag prevents
+                    # double-persist when the exception happened AFTER
+                    # execute_hardened's _persist_outcome already wrote the
+                    # row (e.g., post-finally response-formatting code).
                     error_msg = f"{type(exc).__name__}: {exc}"
                     logger.exception(
                         "Subtask %s hardened-path errored",
                         subtask.id.hex[:8],
                     )
-                    await self._heart.subtasks.fail(
-                        subtask.id, error_msg, final_outcome="errored",
-                    )
+                    if not executed:
+                        attempts = max(1, state.attempts)
+                        await self._heart.subtasks.fail(
+                            subtask.id, error_msg, final_outcome="errored",
+                            attempts=attempts,
+                            tokens_in=state.tokens_in,
+                            tokens_out=state.tokens_out,
+                            tool_calls_made=state.tool_calls_made,
+                        )
+                        # P1-D: emit outcome event from outer handler
+                        # since execute_hardened didn't reach its emit.
+                        await self._emit_outcome_from_outer(
+                            subtask, "errored", error_msg,
+                            attempts=attempts,
+                            tokens_in=state.tokens_in,
+                            tokens_out=state.tokens_out,
+                            tool_calls_made=state.tool_calls_made,
+                        )
                     await self._emit_event("subtask_failed", subtask, error=error_msg)
                     await self._notify_telegram(subtask, error=error_msg)
             else:
@@ -260,8 +324,11 @@ class SubtaskWorkerPool:
             )
             # F061 PR-1: record outcome on legacy path so dashboard rows
             # are never NULL between PR-1 ship and PR-2 hardened-executor ship.
+            # F061 round 4 P2-F: attempts=1 because legacy path runs
+            # exactly one run_turn invocation (no retry loop).
             await self._heart.subtasks.complete(
-                subtask.id, response_text, final_outcome="completed",
+                subtask.id, response_text,
+                final_outcome="completed", attempts=1,
             )
             await self._emit_event("subtask_completed", subtask, result=response_text)
             await self._notify_telegram(subtask, result=response_text)
@@ -272,7 +339,7 @@ class SubtaskWorkerPool:
             error_msg = f"{type(exc).__name__}: {exc}"
             logger.exception("Subtask %s failed", subtask.id.hex[:8])
             await self._heart.subtasks.fail(
-                subtask.id, error_msg, final_outcome="errored",
+                subtask.id, error_msg, final_outcome="errored", attempts=1,
             )
             await self._emit_event("subtask_failed", subtask, error=error_msg)
             await self._notify_telegram(subtask, error=error_msg)
@@ -280,6 +347,66 @@ class SubtaskWorkerPool:
     # ------------------------------------------------------------------
     # Event emission
     # ------------------------------------------------------------------
+
+    async def _emit_outcome_from_outer(
+        self,
+        subtask: Subtask,
+        final_outcome: str,
+        reason: str,
+        *,
+        attempts: int,
+        tokens_in: int,
+        tokens_out: int,
+        tool_calls_made: int,
+    ) -> None:
+        """Emit a ``subtask_outcome`` event from the outer timeout/exception
+        handler — needed because ``execute_hardened`` skips persist+emit on
+        CancelledError to avoid the round-1 race. Without this, event-driven
+        telemetry consumers (eval harness, audits) silently miss timeouts
+        and post-execute_hardened errors.
+
+        Inner ``try/except + logger.exception`` mirrors ``emit_outcome_event``
+        so a failed emit is loud, not silent. Skips when bus or persistence
+        flag is disabled.
+        """
+        if self._bus is None:
+            return
+        if not self._settings.subtask_outcome_persistence_enabled:
+            return
+        try:
+            from nous.handlers.subtask_executor import (
+                SUBTASK_OUTCOME_EVENT_TYPE,
+            )
+
+            data: dict[str, Any] = {
+                "subtask_id": str(subtask.id),
+                "agent_id": getattr(subtask, "agent_id", None),
+                "frame_type": getattr(subtask, "frame_type", None),
+                "final_outcome": final_outcome,
+                "ok": False,
+                "validator_reason": reason,
+                "attempts": attempts,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "tool_calls_made": tool_calls_made,
+                "duration_ms": None,  # outer handler doesn't have this
+                "dag_node_id": (
+                    str(subtask.dag_node_id)
+                    if getattr(subtask, "dag_node_id", None) is not None
+                    else None
+                ),
+            }
+            await self._bus.emit(Event(
+                type=SUBTASK_OUTCOME_EVENT_TYPE,
+                agent_id=getattr(subtask, "agent_id", "") or self._settings.agent_id,
+                session_id=f"subtask-{subtask.id.hex[:8]}",
+                data=data,
+            ))
+        except Exception:
+            logger.exception(
+                "Failed to emit subtask_outcome from outer handler for %s",
+                subtask.id.hex[:8],
+            )
 
     async def _emit_event(
         self,
