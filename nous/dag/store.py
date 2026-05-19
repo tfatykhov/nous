@@ -251,29 +251,45 @@ class DAGStore:
             )
             await session.commit()
 
-    async def count_running_subtasks_by_frame_type(self) -> dict[str, int]:
-        """F064.2: grouped count of agent-scoped IN-FLIGHT subtasks by frame_type.
+    async def count_running_subtasks_by_frame_type(
+        self, dag_id: UUID | None = None
+    ) -> dict[str, int]:
+        """F064.2: grouped count of IN-FLIGHT subtasks by frame_type.
 
         Returns a dict {frame_type: count} including the "_default" bucket for
         subtasks whose frame_type is NULL. Used by orchestrator dispatch gating
         to enforce per-frame caps without keeping in-memory state across ticks.
 
+        @codex P1 on aa3c739: caps are configured PER-DAG
+        (ExecutionDAG.max_concurrent_by_frame_type), so the count must also be
+        per-DAG. Otherwise a concurrent DAG's subtasks consume budget that
+        belongs to this DAG. When `dag_id` is set, the count joins through
+        DAGNode → ExecutionDAG and restricts to subtasks linked to nodes in
+        that DAG. When None (legacy path), counts agent-wide.
+
         Counts both `status='pending'` AND `status='running'` (@codex P1 on
-        c3a4fed): SubtaskManager.create inserts in 'pending', and the worker
-        only transitions to 'running' on dequeue. Between dispatch and pickup
-        a launched subtask is invisible to a 'running'-only count, so a
-        subsequent tick would over-dispatch through the cap.
+        c3a4fed): SubtaskManager.create inserts in 'pending'; only the worker
+        dequeue transitions to 'running'. Between dispatch and pickup a
+        launched subtask is invisible to a 'running'-only count.
 
         Single grouped SELECT — mirrors heart/subtasks.py:293 count_by_status
         pattern (verified equivalent at codex review time).
         """
         async with self._db.session() as session:
-            result = await session.execute(
+            stmt = (
                 select(Subtask.frame_type, func.count())
                 .where(Subtask.agent_id == self._agent_id)
                 .where(Subtask.status.in_(["pending", "running"]))
-                .group_by(Subtask.frame_type)
             )
+            if dag_id is not None:
+                # Scope to subtasks linked to nodes in THIS DAG via the
+                # F061 PR-3 FK (subtask.dag_node_id → dag_nodes.id).
+                stmt = (
+                    stmt.join(DAGNode, Subtask.dag_node_id == DAGNode.id)
+                    .where(DAGNode.dag_id == dag_id)
+                )
+            stmt = stmt.group_by(Subtask.frame_type)
+            result = await session.execute(stmt)
             out: dict[str, int] = {}
             for frame, count in result.all():
                 key = frame if frame is not None else "_default"

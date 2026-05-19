@@ -179,6 +179,94 @@ class TestStorePersistence:
         assert fetched.max_concurrent_by_frame_type is None
 
     @pytest.mark.asyncio
+    async def test_count_running_by_frame_type_dag_scoped(
+        self, store_caps_on, db
+    ):
+        """@codex P1 on aa3c739: count must be dag-scoped, not agent-wide.
+        Two concurrent DAGs with the same frame_type must NOT share slots —
+        the per-DAG cap should bound only sibling nodes in the same DAG.
+        """
+        from datetime import UTC, datetime
+
+        from nous.storage.models import DAGEdge, DAGNode as DAGNodeModel, ExecutionDAG, Subtask
+
+        # Two DAGs each with one debug node + one pending subtask linked
+        # via subtask.dag_node_id.
+        async with db.session() as session:
+            dag_a = ExecutionDAG(
+                agent_id=store_caps_on._agent_id, name="dag-a", source="conversation", status="running",
+            )
+            dag_b = ExecutionDAG(
+                agent_id=store_caps_on._agent_id, name="dag-b", source="conversation", status="running",
+            )
+            session.add_all([dag_a, dag_b])
+            await session.flush()
+            node_a = DAGNodeModel(
+                dag_id=dag_a.id, name="step-a", node_type="subtask",
+                frame_type="debug", status="running", wave=0,
+            )
+            node_b = DAGNodeModel(
+                dag_id=dag_b.id, name="step-b", node_type="subtask",
+                frame_type="debug", status="running", wave=0,
+            )
+            session.add_all([node_a, node_b])
+            await session.flush()
+            session.add_all([
+                Subtask(
+                    agent_id=store_caps_on._agent_id, task="a",
+                    status="pending", frame_type="debug",
+                    dag_node_id=node_a.id,
+                    created_at=datetime.now(UTC),
+                ),
+                Subtask(
+                    agent_id=store_caps_on._agent_id, task="b",
+                    status="running", frame_type="debug",
+                    dag_node_id=node_b.id,
+                    created_at=datetime.now(UTC),
+                ),
+            ])
+            await session.commit()
+
+        counts_a = await store_caps_on.count_running_subtasks_by_frame_type(dag_id=dag_a.id)
+        counts_b = await store_caps_on.count_running_subtasks_by_frame_type(dag_id=dag_b.id)
+        counts_global = await store_caps_on.count_running_subtasks_by_frame_type()
+
+        # Each DAG sees only its own subtask.
+        assert counts_a == {"debug": 1}
+        assert counts_b == {"debug": 1}
+        # Agent-wide (no dag_id) still sees both — the broader contract is
+        # preserved for callers that want it.
+        assert counts_global == {"debug": 2}
+
+    @pytest.mark.asyncio
+    async def test_concurrent_dags_do_not_share_cap_slots(
+        self, store_caps_on, subtask_mgr_running, dynamic_loader
+    ):
+        """Integration: two concurrent DAGs each with cap debug=1 + 1 debug
+        node — both DAGs' debug nodes should launch (different slots)."""
+        orchestrator = _orch(
+            store_caps_on, subtask_mgr_running, dynamic_loader, _settings_caps_on()
+        )
+        req_a = _multi_frame_dag(
+            frames_count={"debug": 1}, caps={"debug": 1},
+        )
+        req_b = _multi_frame_dag(
+            frames_count={"debug": 1}, caps={"debug": 1},
+        )
+        # Rename to avoid name collisions.
+        req_a.name = "dag-a"
+        req_b.name = "dag-b"
+        dag_a = await store_caps_on.create(req_a)
+        dag_b = await store_caps_on.create(req_b)
+        await orchestrator.start_dag(dag_a.id)
+        await orchestrator.start_dag(dag_b.id)
+        # Both DAGs should have their debug node running.
+        fa = await store_caps_on.get_dag(dag_a.id)
+        fb = await store_caps_on.get_dag(dag_b.id)
+        assert sum(1 for n in fa.nodes if n.status == "running") == 1
+        assert sum(1 for n in fb.nodes if n.status == "running") == 1
+
+    @pytest.mark.asyncio
     async def test_count_running_by_frame_type_groups_correctly(
         self, store_caps_on, db
     ):

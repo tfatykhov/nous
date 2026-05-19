@@ -743,7 +743,12 @@ class DAGOrchestrator:
                     )
             return
 
-        running_by_frame = await self._store.count_running_subtasks_by_frame_type()
+        # @codex P1 on aa3c739: scope to current DAG so concurrent DAGs don't
+        # consume each other's slots. Per-DAG cap semantics now align with
+        # per-DAG count semantics.
+        running_by_frame = await self._store.count_running_subtasks_by_frame_type(
+            dag_id=dag.id
+        )
         for node in ready_nodes:
             frame = node.frame_type if node.frame_type is not None else "_default"
             cap = caps.get(frame)
