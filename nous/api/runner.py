@@ -1902,15 +1902,23 @@ Rules:
         never blocks or raises because of telemetry.
 
         No-op when _dag_store hasn't been wired (chat path, tests without
-        DAG infra). Called from _tool_loop's two ping sites; the third
-        baseline ping fires from orchestrator._launch_subtask_node.
+        DAG infra) OR when NOUS_DAG_STALL_DETECTION_ENABLED=false (the
+        write would be wasted — the stall scan never reads it). Called
+        from _tool_loop's two ping sites; the third baseline ping fires
+        from orchestrator._launch_subtask_node.
 
         Fix per @codex review: asyncio.create_task requires a coroutine, but
         asyncio.shield returns a Future — passing shield() directly to
         create_task() raises TypeError. The async wrapper here is a
         coroutine factory, satisfying create_task while still letting the
         body await shield(...) so the write survives wait_for cancellation.
+
+        @codex P2 on d281ac6: gate behind the master flag so the per-tool
+        boundary doesn't generate unread DB writes when stall detection
+        is disabled (default state).
         """
+        if not self._settings.dag_stall_detection_enabled:
+            return
         store = getattr(self, "_dag_store", None)
         if store is None:
             return

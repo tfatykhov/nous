@@ -609,19 +609,40 @@ class TestPingHelper:
         from nous.api.runner import AgentRunner
 
         runner = MagicMock(spec=AgentRunner)
+        runner._settings = _settings_stall_on()
         runner._dag_store = None
         node_id = uuid.uuid4()
         # Should not raise.
         AgentRunner._ping_dag_node_activity(runner, node_id)
 
     @pytest.mark.asyncio
-    async def test_ping_helper_invokes_touch(self):
-        """When _dag_store is wired, ping schedules a touch_node_activity call."""
+    async def test_ping_helper_no_op_when_stall_detection_disabled(self):
+        """@codex P2 on d281ac6: ping must be gated by the master flag so
+        the per-tool-boundary writes don't fire when stall detection is
+        disabled (default state). Otherwise we generate unread DB writes."""
         import asyncio
 
         from nous.api.runner import AgentRunner
 
         runner = MagicMock(spec=AgentRunner)
+        runner._settings = _settings_stall_off()
+        runner._dag_store = MagicMock()
+        runner._dag_store.touch_node_activity = AsyncMock()
+        node_id = uuid.uuid4()
+        AgentRunner._ping_dag_node_activity(runner, node_id)
+        await asyncio.sleep(0.05)
+        runner._dag_store.touch_node_activity.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ping_helper_invokes_touch(self):
+        """When _dag_store is wired AND stall detection is enabled, ping
+        schedules a touch_node_activity call."""
+        import asyncio
+
+        from nous.api.runner import AgentRunner
+
+        runner = MagicMock(spec=AgentRunner)
+        runner._settings = _settings_stall_on()
         runner._dag_store = MagicMock()
         runner._dag_store.touch_node_activity = AsyncMock()
         node_id = uuid.uuid4()
@@ -685,6 +706,7 @@ class TestPingHelper:
         from nous.api.runner import AgentRunner
 
         runner = MagicMock(spec=AgentRunner)
+        runner._settings = _settings_stall_on()
         runner._dag_store = MagicMock()
         runner._dag_store.touch_node_activity = AsyncMock(side_effect=RuntimeError("db down"))
         node_id = uuid.uuid4()
