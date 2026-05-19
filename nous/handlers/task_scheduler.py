@@ -141,7 +141,17 @@ class TaskScheduler:
                 # so the runner re-uses the existing Episode. The LLM context
                 # itself is still fresh each fire — true thread continuity is
                 # deferred to F064.5-v2.
+                #
+                # @codex P2 on e119510: COMPUTE the planned session_id +
+                # cycle classification first, but DO NOT persist any state
+                # until AFTER subtasks.create succeeds. Otherwise a failed
+                # enqueue (queue full → ValueError) would leave the schedule
+                # pointing at a phantom continuation session that was never
+                # actually used. The post-success state-commit block below
+                # is gated on `_enqueued = True`.
                 continuation_metadata: dict = {"schedule_id": schedule.id.hex}
+                cycle_action: str | None = None  # 'reuse' | 'fresh' | None
+                planned_session: str | None = None
                 if (
                     self._settings.schedule_continuation_enabled
                     and schedule.continuation_turns > 0
@@ -155,50 +165,58 @@ class TaskScheduler:
                         and schedule.continuation_count < effective_cap
                     ):
                         # Mid-cycle: reuse session_id, bump count after dispatch.
-                        continuation_metadata["session_id"] = schedule.continuation_session_id
+                        planned_session = schedule.continuation_session_id
+                        cycle_action = "reuse"
                     else:
-                        # Cycle start (or reset): mint a fresh session_id and
-                        # pin it. The dispatch counts as fire #1.
-                        new_session = f"schedule-{schedule.id.hex[:8]}-{schedule.fire_count + 1}"
-                        await self._heart.schedules.set_continuation_session(
-                            schedule.id, new_session
+                        # Cycle start (or reset): mint a fresh session_id (do
+                        # not persist yet — wait for enqueue success).
+                        planned_session = (
+                            f"schedule-{schedule.id.hex[:8]}-{schedule.fire_count + 1}"
                         )
-                        continuation_metadata["session_id"] = new_session
+                        cycle_action = "fresh"
+                    continuation_metadata["session_id"] = planned_session
 
-                # Create a subtask from the schedule
-                await self._heart.subtasks.create(
-                    task=schedule.task,
-                    parent_session_id=schedule.created_by_session,
-                    priority="normal",
-                    timeout=schedule.timeout_seconds,
-                    notify=schedule.notify,
-                    model=schedule.model,
-                    frame_type=schedule.frame_type,
-                    metadata=continuation_metadata,
-                )
+                # Create a subtask from the schedule. This is the failure
+                # point — if it raises (queue full, transient DB error),
+                # the post-success state-commit below is skipped.
+                _enqueued = False
+                try:
+                    await self._heart.subtasks.create(
+                        task=schedule.task,
+                        parent_session_id=schedule.created_by_session,
+                        priority="normal",
+                        timeout=schedule.timeout_seconds,
+                        notify=schedule.notify,
+                        model=schedule.model,
+                        frame_type=schedule.frame_type,
+                        metadata=continuation_metadata,
+                    )
+                    _enqueued = True
+                except ValueError:
+                    # Queue-full path: re-raise so the outer except logs
+                    # warning + skips. Continuation state NOT touched —
+                    # phantom-session bug is closed.
+                    raise
 
-                # F064.5 v1: bump the count AFTER dispatch (counts dispatches,
-                # not successes). On cap-hit, reset for the next cycle.
-                if (
-                    self._settings.schedule_continuation_enabled
-                    and schedule.continuation_turns > 0
-                    and schedule.continuation_session_id is not None
-                ):
-                    # Note: set_continuation_session already initialized
-                    # count=1 for fresh cycles; we only bump on reuse.
-                    if "session_id" in continuation_metadata and \
-                            continuation_metadata["session_id"] == schedule.continuation_session_id:
-                        await self._heart.schedules.bump_continuation_count(schedule.id)
-                    # If we hit the cap on THIS dispatch, reset for next fire.
+                # F064.5 v1: state-commit only AFTER enqueue succeeded.
+                if _enqueued and cycle_action is not None:
+                    if cycle_action == "fresh":
+                        await self._heart.schedules.set_continuation_session(
+                            schedule.id, planned_session
+                        )
+                        # set_continuation_session resets count to 1, so the
+                        # cap-check below uses that explicit value.
+                        next_count = 1
+                    else:  # reuse
+                        await self._heart.schedules.bump_continuation_count(
+                            schedule.id
+                        )
+                        next_count = schedule.continuation_count + 1
+
+                    # If THIS dispatch hits the effective cap, reset for next fire.
                     effective_cap = min(
                         schedule.continuation_turns,
                         self._settings.schedule_max_continuation_turns,
-                    )
-                    # +1 because we just bumped (or set to 1 in fresh-cycle path)
-                    next_count = (
-                        schedule.continuation_count + 1
-                        if continuation_metadata.get("session_id") == schedule.continuation_session_id
-                        else 1
                     )
                     if next_count >= effective_cap:
                         await self._heart.schedules.reset_continuation(schedule.id)

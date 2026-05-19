@@ -177,6 +177,40 @@ class TestContinuationCycle:
 # ---------------------------------------------------------------------------
 
 
+class TestEnqueueFailureLeavesCycleClean:
+    @pytest.mark.asyncio
+    async def test_failed_enqueue_does_not_persist_continuation_state(self):
+        """@codex P2 on e119510: when subtasks.create raises (queue full,
+        DB hiccup), we must NOT have persisted set_continuation_session or
+        bump_continuation_count. Otherwise the schedule points at a
+        phantom session that was never actually dispatched."""
+        schedule = _make_schedule(continuation_turns=3)
+        heart = _mock_heart_with_schedule(schedule)
+        # Make create() raise the queue-full ValueError that task_scheduler
+        # explicitly catches in its outer except.
+        heart.subtasks.create = AsyncMock(side_effect=ValueError("queue full"))
+        scheduler = TaskScheduler(heart, _continuation_on())
+        await scheduler._fire_due_tasks()
+        heart.schedules.set_continuation_session.assert_not_called()
+        heart.schedules.bump_continuation_count.assert_not_called()
+        heart.schedules.reset_continuation.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_enqueue_does_not_bump_existing_cycle(self):
+        """Mid-cycle: existing session_id, count=1. Enqueue fails. Count
+        must STAY at 1 (no phantom bump)."""
+        schedule = _make_schedule(
+            continuation_turns=3,
+            continuation_session_id="schedule-aaaaaaaa-1",
+            continuation_count=1,
+        )
+        heart = _mock_heart_with_schedule(schedule)
+        heart.subtasks.create = AsyncMock(side_effect=ValueError("queue full"))
+        scheduler = TaskScheduler(heart, _continuation_on())
+        await scheduler._fire_due_tasks()
+        heart.schedules.bump_continuation_count.assert_not_called()
+
+
 class TestRunningSubtaskDebounce:
     @pytest.mark.asyncio
     async def test_debounce_skips_fire_when_active_subtask_exists(self):
