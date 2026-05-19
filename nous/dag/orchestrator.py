@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from nous.config import Settings
+from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.store import DAGStore
 from nous.storage.models import DAGNode, ExecutionDAG
 
@@ -482,16 +483,47 @@ class DAGOrchestrator:
             1 → failed (definitively)
             2 → pending (still running, keep polling)
         Any other exit code or error is treated as pending.
+
+        F064.3: subprocess runs with `cwd=workspace_path` so a relative
+        path inside the check command resolves under the node's workspace
+        rather than the orchestrator process's cwd. The workspace dir is
+        ensured to exist (mkdir parents) before the subprocess launch so
+        ``create_subprocess_shell`` doesn't FileNotFoundError on a fresh
+        node. Containment is asserted unconditionally as a security boundary.
         """
         cmd = node.completion_check
         if not cmd:
             return CheckResult("success")
+
+        # F064.3: derive the per-node workspace + assert containment. The
+        # dag attribute isn't on the node directly; we read it from the
+        # parent DAG row via the FK (the orchestrator owns this query but
+        # callers always invoke through _poll_awaiting_checks which has
+        # the DAG in scope). Falling back to the orchestrator process's
+        # cwd would be the legacy behavior and is preserved only when
+        # we fail to derive a workspace.
+        cwd_arg: str | None = None
+        try:
+            dag = await self._store.get_dag(node.dag_id)
+            if dag is not None:
+                root = self._settings.dag_workspace_root
+                workspace = compute_workspace_path(dag.id, node.name, root)
+                assert_inside_root(workspace, root)
+                workspace.mkdir(parents=True, exist_ok=True)
+                cwd_arg = str(workspace)
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "F064.3: completion_check workspace setup failed for node %s — %s; "
+                "falling back to inherited cwd",
+                node.name, e,
+            )
 
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd_arg,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -603,8 +635,25 @@ class DAGOrchestrator:
                 node.completed_at = now
 
     async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
-        """Read result from status file convention, fall back to node's existing result."""
-        status_dir = DAG_STATUS_BASE_DIR / dag.id.hex[:8] / node.name
+        """Read result from status file convention, fall back to node's existing result.
+
+        F064.3: routes through compute_workspace_path (lenient transformation
+        of legacy unsafe node names → safe path equivalents) and asserts
+        containment under the configured workspace root UNCONDITIONALLY,
+        regardless of dag_workspace_safety_enabled. Path traversal is a
+        security boundary, not a feature — even pre-flag rows must not
+        escape the root via symlink or naive ``..``.
+        """
+        root = self._settings.dag_workspace_root
+        try:
+            status_dir = compute_workspace_path(dag.id, node.name, root)
+            assert_inside_root(status_dir, root)
+        except ValueError as e:
+            logger.warning(
+                "F064.3: refusing to read result for node %s in DAG %s — %s",
+                node.name, dag.id, e,
+            )
+            return node.result
         result_file = status_dir / "result"
         try:
             if result_file.exists():

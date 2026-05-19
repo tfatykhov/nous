@@ -169,6 +169,19 @@ class DAGCreateRequest(BaseModel):
                         "values must be >= 1"
                     )
 
+        # F064.3: insert-time sanitize node names against the workspace
+        # safety regex. Loaded lazily to keep schema → settings layering
+        # one-directional (settings imports schemas, not the other way).
+        try:
+            from nous.config import Settings as _Settings
+            from nous.dag._workspace import sanitize_segment
+            _s = _Settings()
+            if _s.dag_workspace_safety_enabled:
+                for n in self.nodes:
+                    sanitize_segment(n.name)  # raises on unsafe — surfaced to caller
+        except ImportError:  # pragma: no cover — defensive
+            pass
+
         # --- max nodes ---
         if len(self.nodes) > MAX_NODES:
             raise ValueError(f"DAG cannot have more than {MAX_NODES} nodes (got {len(self.nodes)})")
