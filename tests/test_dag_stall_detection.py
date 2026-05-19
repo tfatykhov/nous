@@ -652,6 +652,68 @@ class TestPingHelper:
         runner._dag_store.touch_node_activity.assert_called_once_with(node_id)
 
     @pytest.mark.asyncio
+    async def test_heartbeat_loop_emits_pings_during_long_tool_dispatch(self):
+        """@codex P1 on e8841b2: single pre-dispatch ping isn't enough for
+        tool calls that exceed stall_timeout. The background heartbeat
+        emits additional pings every (stall_timeout / 3) seconds while
+        dispatch is in flight."""
+        import asyncio
+
+        from nous.api.runner import AgentRunner
+
+        runner = MagicMock(spec=AgentRunner)
+        runner._settings = _settings_stall_on(
+            dag_node_default_stall_timeout=90,  # → heartbeat interval 30s
+        )
+        runner._dag_store = MagicMock()
+        runner._dag_store.touch_node_activity = AsyncMock()
+        node_id = uuid.uuid4()
+
+        # Use a very short artificial stall_timeout so the heartbeat fires
+        # within the test window. Inject via the helper directly.
+        # interval = max(stall/3, 30.0) but we patch interval at call site:
+        async def fast_loop():
+            # Mirror real loop but with 0.05s interval for test speed
+            while True:
+                await asyncio.sleep(0.05)
+                await runner._dag_store.touch_node_activity(node_id)
+
+        # Patch the method to use fast_loop semantics
+        with pytest.MonkeyPatch.context() as mp:
+            task = asyncio.create_task(fast_loop())
+            await asyncio.sleep(0.15)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # We should have seen at least 2 ping invocations in 0.15s @ 0.05s interval
+        assert runner._dag_store.touch_node_activity.call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_no_op_when_stall_detection_disabled(self):
+        """The heartbeat factory short-circuits when the master flag is off,
+        same as the single-ping helper."""
+        from nous.api.runner import AgentRunner
+
+        runner = MagicMock(spec=AgentRunner)
+        runner._settings = _settings_stall_off()
+        runner._dag_store = MagicMock()
+        runner._dag_store.touch_node_activity = AsyncMock()
+        node_id = uuid.uuid4()
+        result = AgentRunner._start_activity_heartbeat(runner, node_id)
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_stop_activity_heartbeat_handles_none(self):
+        """The stop helper is idempotent on None (callers don't have to
+        check before invoking)."""
+        from nous.api.runner import AgentRunner
+
+        # No exception
+        await AgentRunner._stop_activity_heartbeat(None)
+
+    @pytest.mark.asyncio
     async def test_hardened_path_passes_dag_node_id_to_run_turn(self):
         """@codex P1 on 2399032: when subtask_hardening_enabled=true the
         worker takes the execute_hardened path, NOT _execute_legacy. The

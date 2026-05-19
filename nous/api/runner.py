@@ -1573,9 +1573,19 @@ class AgentRunner:
                             # trip the stall scan mid-execution.
                             if dag_node_id is not None:
                                 self._ping_dag_node_activity(dag_node_id)
-                            result_text, is_error = await self._dispatcher.dispatch(
-                                tool_name, tool_input, session_id=session_id
+                            # @codex P1 on e8841b2: in-flight heartbeat
+                            # for tool calls that may exceed stall_timeout.
+                            # Cancels in the finally regardless of success.
+                            _hb = (
+                                self._start_activity_heartbeat(dag_node_id)
+                                if dag_node_id is not None else None
                             )
+                            try:
+                                result_text, is_error = await self._dispatcher.dispatch(
+                                    tool_name, tool_input, session_id=session_id
+                                )
+                            finally:
+                                await self._stop_activity_heartbeat(_hb)
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch)
@@ -1891,6 +1901,75 @@ Rules:
             if block.get("type") == "text":
                 text_parts.append(block["text"])
         return "\n".join(text_parts) if text_parts else ""
+
+    async def _activity_heartbeat_loop(
+        self, dag_node_id: UUID, interval_seconds: float
+    ) -> None:
+        """F064.1: background heartbeat ping while a tool dispatch is in flight.
+
+        @codex P1 on e8841b2: the single pre-dispatch ping isn't enough for
+        tool calls that exceed stall_timeout — a 30-min bash with a 10-min
+        stall_timeout would still trip stall detection mid-execution because
+        no ping fires for 30 minutes. This loop emits a ping every
+        `interval_seconds` until cancelled by the caller's try/finally.
+
+        Failure mode handling:
+        - asyncio.CancelledError on cancel → re-raise (caller awaits to drain)
+        - other exceptions → DEBUG log + continue loop (best-effort telemetry)
+        """
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return
+        try:
+            while True:
+                await asyncio.sleep(interval_seconds)
+                try:
+                    await asyncio.shield(store.touch_node_activity(dag_node_id))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "F064.1 heartbeat ping failed (suppressed)", exc_info=True
+                    )
+        except asyncio.CancelledError:
+            raise
+
+    def _start_activity_heartbeat(
+        self, dag_node_id: UUID
+    ) -> "asyncio.Task | None":
+        """Start the background heartbeat for a tool dispatch. Returns the
+        task so the caller's try/finally can cancel it. Returns None when
+        stall detection is disabled or no store wired."""
+        if not self._settings.dag_stall_detection_enabled:
+            return None
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return None
+        # Heartbeat at 1/3 of the default stall_timeout, min 30s. This keeps
+        # write amplification bounded (≤3 pings per stall window) while
+        # ensuring at least one ping lands within the window for any tool
+        # call that runs longer than stall_timeout.
+        base = self._settings.dag_node_default_stall_timeout
+        if base <= 0:
+            return None
+        interval = max(base / 3.0, 30.0)
+        try:
+            return asyncio.create_task(
+                self._activity_heartbeat_loop(dag_node_id, interval)
+            )
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    async def _stop_activity_heartbeat(task: "asyncio.Task | None") -> None:
+        """Cancel + drain a heartbeat task. Idempotent on None."""
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     def _ping_dag_node_activity(self, dag_node_id: UUID) -> None:
         """F064.1: fire-and-forget activity ping for stall detection.
