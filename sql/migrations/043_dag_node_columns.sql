@@ -3,7 +3,7 @@
 --
 -- F064.1 adds last_activity_at on dag_nodes for stall-timeout enforcement.
 -- Updated by runner._tool_loop on every iteration boundary inside a subtask
--- (fire-and-forget under asyncio.shield); read by
+-- (fire-and-forget under asyncio.shield) and read by
 -- orchestrator._check_stalled_nodes once per tick.
 --
 -- F064.2 adds max_concurrent_by_frame_type JSONB on execution_dags for

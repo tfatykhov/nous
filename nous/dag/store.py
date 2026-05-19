@@ -71,7 +71,12 @@ class DAGStore:
                     self._settings.dag_node_max_timeout,
                 )
                 # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
-                # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT.
+                # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT and ALSO
+                # enforce stall <= resolved_timeout (codex P2-2 fix: the
+                # schema-level validator can't see the resolved default
+                # because it runs before store.create's clamp pipeline. We
+                # check against the resolved value here, raising before any
+                # row is inserted — same semantics, late but pre-commit).
                 resolved_stall: int | None
                 if spec.stall_timeout_seconds is None or spec.stall_timeout_seconds == 0:
                     resolved_stall = spec.stall_timeout_seconds  # preserve None vs 0
@@ -80,6 +85,14 @@ class DAGStore:
                         spec.stall_timeout_seconds,
                         self._settings.dag_node_max_stall_timeout,
                     )
+                    if resolved_stall > resolved_timeout:
+                        raise ValueError(
+                            f"Node '{spec.name}': stall_timeout_seconds="
+                            f"{spec.stall_timeout_seconds} exceeds effective "
+                            f"wall-clock timeout {resolved_timeout} — stall "
+                            "would never fire (silent dead config). Reduce "
+                            "stall_timeout_seconds or raise timeout_seconds."
+                        )
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,

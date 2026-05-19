@@ -1895,20 +1895,38 @@ Rules:
     def _ping_dag_node_activity(self, dag_node_id: UUID) -> None:
         """F064.1: fire-and-forget activity ping for stall detection.
 
-        Wrapped in asyncio.shield so a wait_for cancellation in the outer
-        subtask path can't cancel the in-flight UPDATE. A write failure is
-        absorbed by DAGStore.touch_node_activity (DEBUG log, swallowed) so
-        the tool loop never blocks or raises because of telemetry.
+        Wrapped in an async helper that internally awaits asyncio.shield so a
+        wait_for cancellation in the outer subtask path can't cancel the
+        in-flight UPDATE. A write failure is absorbed by
+        DAGStore.touch_node_activity (DEBUG log, swallowed) so the tool loop
+        never blocks or raises because of telemetry.
 
         No-op when _dag_store hasn't been wired (chat path, tests without
         DAG infra). Called from _tool_loop's two ping sites; the third
         baseline ping fires from orchestrator._launch_subtask_node.
+
+        Fix per @codex review: asyncio.create_task requires a coroutine, but
+        asyncio.shield returns a Future — passing shield() directly to
+        create_task() raises TypeError. The async wrapper here is a
+        coroutine factory, satisfying create_task while still letting the
+        body await shield(...) so the write survives wait_for cancellation.
         """
         store = getattr(self, "_dag_store", None)
         if store is None:
             return
+
+        async def _ping() -> None:
+            try:
+                await asyncio.shield(store.touch_node_activity(dag_node_id))
+            except asyncio.CancelledError:
+                # Cancellation is expected during shutdown / wait_for timeout.
+                # Re-raising would bubble into the task and log; we want silent.
+                raise
+            except Exception:  # noqa: BLE001 — best-effort telemetry
+                logger.debug("F064.1 ping failed (suppressed)", exc_info=True)
+
         try:
-            asyncio.create_task(asyncio.shield(store.touch_node_activity(dag_node_id)))
+            asyncio.create_task(_ping())
         except RuntimeError:
             # No running event loop — happens in some test paths. Silent
             # by design; the stall scan's NULL-fallback policy covers us.
