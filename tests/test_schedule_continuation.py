@@ -211,6 +211,41 @@ class TestEnqueueFailureLeavesCycleClean:
         heart.schedules.bump_continuation_count.assert_not_called()
 
 
+class TestLifecycleAdvanceSurvivesContinuationFailure:
+    @pytest.mark.asyncio
+    async def test_continuation_state_failure_still_advances_schedule(self):
+        """@codex P2 on a167217: if continuation-state writes (set_session
+        / bump_count / reset) raise, schedule.advance() MUST still run.
+        Otherwise the schedule's next_fire_at stays stale and the
+        scheduler re-fires forever."""
+        schedule = _make_schedule(continuation_turns=3)
+        heart = _mock_heart_with_schedule(schedule)
+        # Make set_continuation_session raise — this is the fresh-cycle path.
+        heart.schedules.set_continuation_session = AsyncMock(
+            side_effect=RuntimeError("simulated DB hiccup")
+        )
+        scheduler = TaskScheduler(heart, _continuation_on())
+        await scheduler._fire_due_tasks()
+        # advance MUST have been called despite the continuation-state failure
+        heart.schedules.advance.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_continuation_state_failure_on_reuse_still_advances(self):
+        schedule = _make_schedule(
+            continuation_turns=3,
+            continuation_session_id="schedule-aaaaaaaa-1",
+            continuation_count=1,
+        )
+        heart = _mock_heart_with_schedule(schedule)
+        # Mid-cycle: bump_continuation_count raises.
+        heart.schedules.bump_continuation_count = AsyncMock(
+            side_effect=RuntimeError("simulated DB hiccup")
+        )
+        scheduler = TaskScheduler(heart, _continuation_on())
+        await scheduler._fire_due_tasks()
+        heart.schedules.advance.assert_called_once()
+
+
 class TestRunningSubtaskDebounce:
     @pytest.mark.asyncio
     async def test_debounce_skips_fire_when_active_subtask_exists(self):

@@ -199,27 +199,41 @@ class TaskScheduler:
                     raise
 
                 # F064.5 v1: state-commit only AFTER enqueue succeeded.
+                # @codex P2 on a167217: each continuation state write is
+                # wrapped in its own try/except so a transient DB failure
+                # in (e.g.) bump_continuation_count doesn't skip the
+                # schedule.advance() call below — that would leave the
+                # schedule with stale next_fire_at and cause infinite
+                # re-fires. Continuation state is a soft observability
+                # channel, the lifecycle advance is the hard correctness
+                # invariant.
                 if _enqueued and cycle_action is not None:
-                    if cycle_action == "fresh":
-                        await self._heart.schedules.set_continuation_session(
-                            schedule.id, planned_session
-                        )
-                        # set_continuation_session resets count to 1, so the
-                        # cap-check below uses that explicit value.
-                        next_count = 1
-                    else:  # reuse
-                        await self._heart.schedules.bump_continuation_count(
-                            schedule.id
-                        )
-                        next_count = schedule.continuation_count + 1
+                    try:
+                        if cycle_action == "fresh":
+                            await self._heart.schedules.set_continuation_session(
+                                schedule.id, planned_session
+                            )
+                            next_count = 1
+                        else:  # reuse
+                            await self._heart.schedules.bump_continuation_count(
+                                schedule.id
+                            )
+                            next_count = schedule.continuation_count + 1
 
-                    # If THIS dispatch hits the effective cap, reset for next fire.
-                    effective_cap = min(
-                        schedule.continuation_turns,
-                        self._settings.schedule_max_continuation_turns,
-                    )
-                    if next_count >= effective_cap:
-                        await self._heart.schedules.reset_continuation(schedule.id)
+                        effective_cap = min(
+                            schedule.continuation_turns,
+                            self._settings.schedule_max_continuation_turns,
+                        )
+                        if next_count >= effective_cap:
+                            await self._heart.schedules.reset_continuation(
+                                schedule.id
+                            )
+                    except Exception:
+                        logger.exception(
+                            "Failed to update continuation state for schedule %s — "
+                            "lifecycle advance will proceed regardless",
+                            schedule.id.hex[:8],
+                        )
 
                 # Handle schedule lifecycle
                 if schedule.schedule_type == "once":
