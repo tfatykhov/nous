@@ -428,6 +428,154 @@ async def test_run_turn_safety_net_task_frame_debug(mock_cognitive, mock_setting
 # ---------------------------------------------------------------------------
 
 
+async def test_run_turn_touches_session_monitor(runner, mock_cognitive):
+    """run_turn synchronously touches the wired session_monitor at request start.
+
+    Pins the call-site that closes the mid-turn-closure race Codex flagged
+    on PR #424: without this call, a long in-flight turn for a session whose
+    _last_activity was already past threshold can be closed mid-stream by a
+    monitor tick, popping runner._conversations and orphaning the response.
+    """
+    from unittest.mock import MagicMock
+    monitor = MagicMock()
+    runner._session_monitor = monitor
+
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+
+    monitor.touch.assert_called_once_with(session_id, runner._settings.agent_id)
+
+
+async def test_run_turn_touch_failure_does_not_break_turn(runner, mock_cognitive):
+    """A monitor.touch() raise is swallowed; the turn still completes.
+
+    Touch is best-effort — a programming bug in the monitor (e.g., a future
+    refactor that lets touch raise) must not break a chat turn for users.
+    """
+    from unittest.mock import MagicMock
+    monitor = MagicMock()
+    monitor.touch.side_effect = RuntimeError("monitor exploded")
+    runner._session_monitor = monitor
+
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    response_text, turn_context, _usage = await runner.run_turn(session_id, "Hello!")
+
+    assert response_text == "Hello from Nous!"
+    monitor.touch.assert_called_once()
+
+
+async def test_run_turn_no_monitor_does_not_raise(runner):
+    """Unwired monitor (None) is a benign no-op — preserves backward compat."""
+    assert runner._session_monitor is None
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    response_text, _ctx, _usage = await runner.run_turn(session_id, "Hello!")
+    assert response_text == "Hello from Nous!"
+
+
+async def test_run_turn_and_end_conversation_serialize(runner, mock_cognitive):
+    """run_turn and end_conversation must NOT interleave for the same session.
+
+    Codex P1 #3 on PR #424: abort_if was a point-in-time check, but
+    cognitive.end_session has internal awaits during which a fresh run_turn
+    could start and modify state that end_conversation then popped. The
+    per-session lock makes the whole mutation block exclusive.
+
+    Test: start a slow run_turn (block on event), kick off end_conversation
+    concurrently, assert end_conversation does NOT touch cognitive.end_session
+    until run_turn has released the lock.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+
+    # Make _tool_loop block on a gate so we can race end_conversation against it.
+    gate = asyncio.Event()
+    timeline: list[str] = []
+
+    async def gated_tool_loop(*args, **kwargs):
+        timeline.append("run_turn.tool_loop.enter")
+        await gate.wait()
+        timeline.append("run_turn.tool_loop.exit")
+        return ("ok", [], {"input_tokens": 0, "output_tokens": 0}, [])
+
+    runner._tool_loop = _AsyncMock(side_effect=gated_tool_loop)
+
+    async def trace_end_session(*args, **kwargs):
+        timeline.append("end_conversation.cognitive.end_session")
+
+    mock_cognitive.end_session = trace_end_session
+
+    async def slow_turn():
+        await runner.run_turn(session_id, "hello")
+
+    async def parallel_close():
+        # Give run_turn a head start so it grabs the lock first.
+        await asyncio.sleep(0.05)
+        timeline.append("end_conversation.start")
+        await runner.end_conversation(session_id)
+        timeline.append("end_conversation.return")
+
+    async def release_after_delay():
+        await asyncio.sleep(0.15)
+        gate.set()
+
+    await asyncio.gather(slow_turn(), parallel_close(), release_after_delay())
+
+    # Run_turn must release the lock before end_conversation enters its
+    # critical section. Specifically, cognitive.end_session must execute
+    # AFTER run_turn.tool_loop.exit.
+    exit_idx = timeline.index("run_turn.tool_loop.exit")
+    cognitive_idx = timeline.index("end_conversation.cognitive.end_session")
+    assert cognitive_idx > exit_idx, timeline
+
+
+async def test_end_conversation_abort_if_skips_state_mutation(runner, mock_cognitive):
+    """abort_if=True after reflection prevents cognitive.end_session + _conversations pop.
+
+    Codex P1 #2 on PR #424: monitor passes abort_if so a user message that
+    lands during reflection (the 15-30s slow phase of close) pre-empts the
+    close before any state is mutated. Pins the contract.
+    """
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+    assert session_id in runner._conversations
+
+    closed = await runner.end_conversation(
+        session_id, abort_if=lambda: True
+    )
+
+    assert closed is False
+    # State preserved — session lives on, no end_session call.
+    assert session_id in runner._conversations
+    assert len(mock_cognitive.end_session_calls) == 0
+
+
+async def test_end_conversation_abort_if_false_proceeds(runner, mock_cognitive):
+    """abort_if=False (no activity resumed) still closes normally."""
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+
+    closed = await runner.end_conversation(
+        session_id, abort_if=lambda: False
+    )
+
+    assert closed is True
+    assert session_id not in runner._conversations
+    assert len(mock_cognitive.end_session_calls) == 1
+
+
+async def test_end_conversation_default_returns_true(runner, mock_cognitive):
+    """Manual /new path (no abort_if) still returns True and closes unconditionally."""
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+
+    closed = await runner.end_conversation(session_id)
+
+    assert closed is True
+    assert session_id not in runner._conversations
+
+
 async def test_end_conversation(runner, mock_cognitive):
     """Removes from dict, calls cognitive.end_session()."""
     session_id = f"test-{uuid.uuid4().hex[:8]}"

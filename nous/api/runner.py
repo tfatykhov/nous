@@ -13,7 +13,7 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Callable
 
 from nous.api.anthropic_client import (
     AnthropicClient,
@@ -103,6 +103,15 @@ class AgentRunner:
             )
         self._compaction_locks: dict[str, asyncio.Lock] = {}
 
+        # Per-session lock serializing run_turn / stream_chat against
+        # end_conversation. Prevents the race where the idle-close path
+        # mutates session state (cognitive.end_session pops _active_episodes
+        # at layer.py:1519-1520, runner pops _conversations) while a fresh
+        # run_turn coroutine has interleaved during one of cognitive's
+        # internal awaits. abort_if was only a point-in-time check; the
+        # lock makes the mutation block ACTUALLY exclusive.
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
         # F035.4: Context visibility
         self._context_logger: Any | None = None
         self._current_session_id: str = "unknown"
@@ -129,6 +138,12 @@ class AgentRunner:
         self._cache_break_detector: CacheBreakDetector | None = (
             CacheBreakDetector() if settings.cache_break_detection_enabled else None
         )
+
+        # SessionTimeoutMonitor back-reference for synchronous activity
+        # refresh at run_turn start. Late-bound in main.py because monitor
+        # is created earlier than runner. None disables the touch (e.g.,
+        # in unit tests that don't wire the monitor).
+        self._session_monitor: Any | None = None
 
     def _log_f026_decision(
         self, event_type: str, data: dict, session_id: str
@@ -176,6 +191,16 @@ class AgentRunner:
             model_override=self._settings.action_gating_model,
         )
         return self._extract_text(resp.content)
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Per-session lock for serializing run_turn / stream_chat against
+        end_conversation. Created on first use; popped on successful close.
+        """
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     def set_dispatcher(self, dispatcher: Any) -> None:
         """Set the tool dispatcher for tool loop execution."""
@@ -266,172 +291,209 @@ class AgentRunner:
         10. Return (response_text, turn_context)
         """
         _agent_id = agent_id or self._settings.agent_id
-        conversation = await self._get_or_create_conversation(session_id)
 
-        # 2. Pre-turn (F4: plumb conversation_messages for dedup)
-        # Filter to user messages first, then take last 8 (D7: window = user turns)
-        recent_messages = [
-            m.content for m in conversation.messages if m.role == "user"
-        ][-8:]
-        turn_context = await self._cognitive.pre_turn(
-            _agent_id,
-            session_id,
-            user_message,
-            conversation_messages=recent_messages or None,
-            user_id=user_id,
-            user_display_name=user_display_name,
-            skip_episode=skip_episode,
-            is_subtask=is_subtask,
-        )
+        # Refresh session activity synchronously BEFORE any long-running
+        # work. The event-bus path (turn_completed) only fires after the
+        # entire LLM+tool loop completes — a multi-minute turn for a
+        # session whose _last_activity was already past threshold would
+        # otherwise be closed mid-stream by a monitor tick. The bus is
+        # async-queued so emitting message_received here would leave a
+        # residual race; the synchronous touch eliminates it.
+        if self._session_monitor is not None:
+            try:
+                self._session_monitor.touch(session_id, _agent_id)
+            except Exception:
+                logger.debug("session_monitor.touch failed (suppressed)", exc_info=True)
 
-        # 3. Append user message
-        conversation.messages.append(Message(role="user", content=user_message))
-        usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        # Per-session lock: serializes the entire turn body against
+        # end_conversation. Without this, end_conversation could pop
+        # _conversations[sid] during one of cognitive.end_session's
+        # internal awaits while a fresh run_turn coroutine has interleaved
+        # and is mid-turn — the new turn would be orphaned. The lock is
+        # released automatically on every exit path (return, raise).
+        async with self._get_session_lock(session_id):
+            conversation = await self._get_or_create_conversation(session_id)
 
-        # 3b. Censor block check — skip LLM if input was blocked
-        if turn_context.censor_blocked:
-            response_text = turn_context.censor_block_reason or "I can't process that request."
-            conversation.messages.append(Message(role="assistant", content=response_text))
-            turn_result = TurnResult(response_text=response_text)
-            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
-            return response_text, turn_context, usage
-
-        # F026: Get/create execution ledger and set turn
-        ledger = self._get_or_create_ledger(session_id)
-        ledger.set_turn((len(conversation.messages) + 1) // 2)
-
-        # F035.4: Store current context for context logger
-        self._current_session_id = session_id
-        self._current_turn_number = (len(conversation.messages) + 1) // 2
-        self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
-        self._current_call_type = "subtask" if is_subtask else "chat"
-
-        # 4-6. Build system prompt and run tool loop
-        response_text = ""
-        tool_results: list[ToolResult] = []
-        error = None
-        try:
-            corrections = self._pending_corrections.pop(session_id, None)
-            system_prompt = self._build_system_prompt(
-                turn_context, platform=platform,
-                ledger=ledger, corrections=corrections,
+            # 2. Pre-turn (F4: plumb conversation_messages for dedup)
+            # Filter to user messages first, then take last 8 (D7: window = user turns)
+            recent_messages = [
+                m.content for m in conversation.messages if m.role == "user"
+            ][-8:]
+            turn_context = await self._cognitive.pre_turn(
+                _agent_id,
+                session_id,
+                user_message,
+                conversation_messages=recent_messages or None,
+                user_id=user_id,
+                user_display_name=user_display_name,
+                skip_episode=skip_episode,
+                is_subtask=is_subtask,
             )
-            # F036: Handle system_prompt_prefix for both str and dict paths
-            if system_prompt_prefix:
-                if isinstance(system_prompt, dict):
-                    # Prefix is stable across session — prepend to static tier
-                    existing = system_prompt.get("static", "")
-                    system_prompt["static"] = (
-                        system_prompt_prefix + "\n\n" + existing if existing
-                        else system_prompt_prefix
-                    )
+
+            # 3. Append user message
+            conversation.messages.append(Message(role="user", content=user_message))
+            usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+
+            # 3b. Censor block check — skip LLM if input was blocked
+            if turn_context.censor_blocked:
+                response_text = turn_context.censor_block_reason or "I can't process that request."
+                conversation.messages.append(Message(role="assistant", content=response_text))
+                turn_result = TurnResult(response_text=response_text)
+                await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                return response_text, turn_context, usage
+
+            # F026: Get/create execution ledger and set turn
+            ledger = self._get_or_create_ledger(session_id)
+            ledger.set_turn((len(conversation.messages) + 1) // 2)
+
+            # F035.4: Store current context for context logger
+            self._current_session_id = session_id
+            self._current_turn_number = (len(conversation.messages) + 1) // 2
+            self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
+            self._current_call_type = "subtask" if is_subtask else "chat"
+
+            # 4-6. Build system prompt and run tool loop
+            response_text = ""
+            tool_results: list[ToolResult] = []
+            error = None
+            try:
+                corrections = self._pending_corrections.pop(session_id, None)
+                system_prompt = self._build_system_prompt(
+                    turn_context, platform=platform,
+                    ledger=ledger, corrections=corrections,
+                )
+                # F036: Handle system_prompt_prefix for both str and dict paths
+                if system_prompt_prefix:
+                    if isinstance(system_prompt, dict):
+                        # Prefix is stable across session — prepend to static tier
+                        existing = system_prompt.get("static", "")
+                        system_prompt["static"] = (
+                            system_prompt_prefix + "\n\n" + existing if existing
+                            else system_prompt_prefix
+                        )
+                    else:
+                        system_prompt = system_prompt_prefix + "\n\n" + system_prompt
+
+                # Layer 2: History compaction (Spec 008.1)
+                messages = self._format_messages(conversation)
+                # F036: Compactor needs flat string for token estimation
+                _flat_prompt = (
+                    "\n\n".join(v for v in system_prompt.values() if v)
+                    if isinstance(system_prompt, dict) else system_prompt
+                )
+                if self._compactor and self._settings.compaction_enabled:
+                    system_tokens = self._compactor.estimator.estimate(_flat_prompt)
+                    history_tokens = self._compactor.estimator.estimate_messages(messages)
+                    if self._compactor.should_compact(system_tokens, history_tokens):
+                        lock = self._compaction_locks.setdefault(session_id, asyncio.Lock())
+                        async with lock:
+                            messages = self._format_messages(conversation)
+                            history_tokens = self._compactor.estimator.estimate_messages(messages)
+                            if self._compactor.should_compact(system_tokens, history_tokens):
+                                cut_point = self._compactor.find_cut_point(
+                                    messages, self._settings.effective_keep_recent
+                                )
+                                if cut_point > 0:
+                                    snapshot = messages[:cut_point]
+                                    await self._cognitive.pre_compaction(
+                                        agent_id=_agent_id,
+                                        session_id=session_id,
+                                        message_snapshot=snapshot,
+                                    )
+                                    await self._compactor.compact(
+                                        conversation, messages,
+                                        call_api=self._call_api,
+                                        cut_point=cut_point,
+                                    )
+                                    await self._save_conversation(
+                                        _agent_id, session_id, conversation
+                                    )
                 else:
-                    system_prompt = system_prompt_prefix + "\n\n" + system_prompt
+                    system_tokens = len(_flat_prompt) // 4
+                    history_tokens = sum(
+                        len(m.get("content", "")) // 4 for m in messages
+                    )
 
-            # Layer 2: History compaction (Spec 008.1)
-            messages = self._format_messages(conversation)
-            # F036: Compactor needs flat string for token estimation
-            _flat_prompt = (
-                "\n\n".join(v for v in system_prompt.values() if v)
-                if isinstance(system_prompt, dict) else system_prompt
-            )
-            if self._compactor and self._settings.compaction_enabled:
-                system_tokens = self._compactor.estimator.estimate(_flat_prompt)
-                history_tokens = self._compactor.estimator.estimate_messages(messages)
-                if self._compactor.should_compact(system_tokens, history_tokens):
-                    lock = self._compaction_locks.setdefault(session_id, asyncio.Lock())
-                    async with lock:
-                        messages = self._format_messages(conversation)
-                        history_tokens = self._compactor.estimator.estimate_messages(messages)
-                        if self._compactor.should_compact(system_tokens, history_tokens):
-                            cut_point = self._compactor.find_cut_point(
-                                messages, self._settings.effective_keep_recent
-                            )
-                            if cut_point > 0:
-                                snapshot = messages[:cut_point]
-                                await self._cognitive.pre_compaction(
-                                    agent_id=_agent_id,
-                                    session_id=session_id,
-                                    message_snapshot=snapshot,
-                                )
-                                await self._compactor.compact(
-                                    conversation, messages,
-                                    call_api=self._call_api,
-                                    cut_point=cut_point,
-                                )
-                                await self._save_conversation(
-                                    _agent_id, session_id, conversation
-                                )
-            else:
-                system_tokens = len(_flat_prompt) // 4
-                history_tokens = sum(
-                    len(m.get("content", "")) // 4 for m in messages
+                logger.info(
+                    "Context health: messages=%d, system_tokens~=%d, "
+                    "history_tokens~=%d, frame=%s",
+                    len(messages), system_tokens, history_tokens,
+                    turn_context.frame.frame_id if turn_context else "unknown",
                 )
 
-            logger.info(
-                "Context health: messages=%d, system_tokens~=%d, "
-                "history_tokens~=%d, frame=%s",
-                len(messages), system_tokens, history_tokens,
-                turn_context.frame.frame_id if turn_context else "unknown",
+                response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
+                    system_prompt=system_prompt,
+                    conversation=conversation,
+                    frame_id=turn_context.frame.frame_id,
+                    session_id=session_id,
+                    is_subtask=is_subtask,
+                    max_tool_calls=max_tool_calls,
+                    model_override=model_override,
+                    user_message=user_message,
+                    ledger=ledger,
+                    tool_filter=tool_filter,
+                    is_background=is_background,
+                    extra_tools=extra_tools,
+                    force_tool_on_penultimate=force_tool_on_penultimate,
+                )
+                conversation.messages.append(Message(role="assistant", content=response_text))
+            except Exception as e:
+                logger.error("API call error: %s", e)
+                error = str(e)
+                thinking_blocks = []
+                response_text = "I encountered an error processing your request. Please try again."
+                conversation.messages.append(Message(role="assistant", content=response_text))
+                _caught_exc = e
+            else:
+                _caught_exc = None
+
+            # F026: Post-response claim verification + ghost planning detection
+            if _caught_exc is None:
+                self._verify_claims(session_id, response_text, tool_results, ledger)
+
+            # 7. Post-turn (always called, even on error)
+            turn_result = TurnResult(
+                response_text=response_text,
+                tool_results=tool_results,
+                error=error,
+                thinking_blocks=thinking_blocks,
             )
+            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
 
-            response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
-                system_prompt=system_prompt,
-                conversation=conversation,
-                frame_id=turn_context.frame.frame_id,
-                session_id=session_id,
-                is_subtask=is_subtask,
-                max_tool_calls=max_tool_calls,
-                model_override=model_override,
-                user_message=user_message,
-                ledger=ledger,
-                tool_filter=tool_filter,
-                is_background=is_background,
-                extra_tools=extra_tools,
-                force_tool_on_penultimate=force_tool_on_penultimate,
-            )
-            conversation.messages.append(Message(role="assistant", content=response_text))
-        except Exception as e:
-            logger.error("API call error: %s", e)
-            error = str(e)
-            thinking_blocks = []
-            response_text = "I encountered an error processing your request. Please try again."
-            conversation.messages.append(Message(role="assistant", content=response_text))
-            _caught_exc = e
-        else:
-            _caught_exc = None
+            # 8. Safety net: warn if decision frame but record_decision not called
+            self._check_safety_net(turn_context, tool_results)
 
-        # F026: Post-response claim verification + ghost planning detection
-        if _caught_exc is None:
-            self._verify_claims(session_id, response_text, tool_results, ledger)
+            # Store context
+            conversation.turn_contexts.append(turn_context)
 
-        # 7. Post-turn (always called, even on error)
-        turn_result = TurnResult(
-            response_text=response_text,
-            tool_results=tool_results,
-            error=error,
-            thinking_blocks=thinking_blocks,
-        )
-        await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+            # Re-raise after cleanup so callers (e.g. subtask worker) see the real error
+            if _caught_exc is not None:
+                raise _caught_exc
 
-        # 8. Safety net: warn if decision frame but record_decision not called
-        self._check_safety_net(turn_context, tool_results)
+            return response_text, turn_context, usage
 
-        # Store context
-        conversation.turn_contexts.append(turn_context)
-
-        # Re-raise after cleanup so callers (e.g. subtask worker) see the real error
-        if _caught_exc is not None:
-            raise _caught_exc
-
-        return response_text, turn_context, usage
-
-    async def end_conversation(self, session_id: str, agent_id: str | None = None) -> None:
+    async def end_conversation(
+        self,
+        session_id: str,
+        agent_id: str | None = None,
+        *,
+        abort_if: Callable[[], bool] | None = None,
+    ) -> bool:
         """End a conversation with reflection.
 
         1. If conversation has >= 3 turns, generate reflection via LLM
-        2. Call cognitive.end_session(agent_id, session_id, reflection=...)
-        3. Remove from self._conversations
+        2. (Optional) Recheck ``abort_if`` — bail if activity resumed
+        3. Call cognitive.end_session(agent_id, session_id, reflection=...)
+        4. Remove from self._conversations
+
+        ``abort_if`` is a no-arg callable that returns True if the close
+        should be aborted (e.g., the user resumed activity while reflection
+        was running). Checked AFTER reflection (read-only, safe to discard)
+        but BEFORE any state mutation. Used by SessionTimeoutMonitor to
+        prevent orphaning an in-flight turn that landed mid-close.
+
+        Returns True if the conversation was closed, False if aborted.
+        Manual /new path passes ``abort_if=None`` and always returns True.
         """
         _agent_id = agent_id or self._settings.agent_id
         conversation = self._conversations.get(session_id)
@@ -459,22 +521,53 @@ class AgentRunner:
             except Exception as e:
                 logger.warning("Failed to generate reflection: %s", e)
 
-        await self._cognitive.end_session(_agent_id, session_id, reflection=reflection)
+        # Acquire the per-session lock BEFORE the abort_if recheck and the
+        # state-mutating cognitive.end_session call. Holding the lock here
+        # makes the entire mutation block exclusive with run_turn/stream_chat:
+        # any in-flight turn must release the lock before we can enter, and
+        # any new turn arriving during our cognitive.end_session awaits will
+        # block at the lock rather than racing through and orphaning state.
+        # Reflection above runs WITHOUT the lock because it's read-only
+        # (just generates a summary string) and slow — holding the lock
+        # during a 15-30s LLM call would needlessly block users.
+        async with self._get_session_lock(session_id):
+            # Pre-mutation recheck: if abort_if fires here (activity resumed
+            # during reflection or while we waited for the lock), bail
+            # before touching any state. Reflection is best-effort and
+            # discarding it is harmless.
+            if abort_if is not None:
+                try:
+                    if abort_if():
+                        logger.info(
+                            "Aborting end_conversation for %s — activity resumed during close",
+                            session_id,
+                        )
+                        return False
+                except Exception:
+                    logger.debug("abort_if check raised (suppressed)", exc_info=True)
 
-        # Remove conversation + persisted state (008.1 Phase 3)
-        self._conversations.pop(session_id, None)
-        self._compaction_locks.pop(session_id, None)
-        ledger = self._ledgers.pop(session_id, None)  # F026
-        if ledger and ledger.actions:
-            blocked = sum(1 for a in ledger.actions if a.status == "blocked")
-            logger.info(
-                "F026: Session %s ended — %d actions recorded, %d blocked",
-                session_id, len(ledger.actions), blocked,
-            )
-        self._pending_corrections.pop(session_id, None)  # F026
-        if self._cache_break_detector:  # F036
-            self._cache_break_detector.reset()
-        await self._delete_conversation_state(session_id)
+            await self._cognitive.end_session(_agent_id, session_id, reflection=reflection)
+
+            # Remove conversation + persisted state (008.1 Phase 3)
+            self._conversations.pop(session_id, None)
+            self._compaction_locks.pop(session_id, None)
+            ledger = self._ledgers.pop(session_id, None)  # F026
+            if ledger and ledger.actions:
+                blocked = sum(1 for a in ledger.actions if a.status == "blocked")
+                logger.info(
+                    "F026: Session %s ended — %d actions recorded, %d blocked",
+                    session_id, len(ledger.actions), blocked,
+                )
+            self._pending_corrections.pop(session_id, None)  # F026
+            if self._cache_break_detector:  # F036
+                self._cache_break_detector.reset()
+            await self._delete_conversation_state(session_id)
+
+        # Lock released — safe to pop the lock entry itself. Aborted closes
+        # (early return False above) intentionally retain the lock entry so
+        # the resumed run_turn keeps using the same mutex object.
+        self._session_locks.pop(session_id, None)
+        return True
 
     # ------------------------------------------------------------------
     # API call
@@ -748,434 +841,450 @@ class AgentRunner:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
         _agent_id = agent_id or self._settings.agent_id
-        conversation = await self._get_or_create_conversation(session_id)
 
-        # Pre-turn with conversation dedup (F4)
-        recent_messages = [
-            m.content for m in conversation.messages if m.role == "user"
-        ][-8:]
-        turn_context = await self._cognitive.pre_turn(
-            _agent_id,
-            session_id,
-            user_message,
-            conversation_messages=recent_messages or None,
-            user_id=user_id,
-            user_display_name=user_display_name,
-        )
+        # Sync activity refresh before any long-running work. See run_turn
+        # for rationale — the bus is queued, so message_received emission
+        # would leave a residual race against the monitor tick.
+        if self._session_monitor is not None:
+            try:
+                self._session_monitor.touch(session_id, _agent_id)
+            except Exception:
+                logger.debug("session_monitor.touch failed (suppressed)", exc_info=True)
 
-        conversation.messages.append(Message(role="user", content=user_message))
+        # Per-session lock: serializes the entire streaming turn against
+        # end_conversation. Held across all yields so end_conversation cannot
+        # pop _conversations[sid] mid-stream while a tool result is being
+        # awaited. The async generator keeps the lock until exhausted, so
+        # the consumer driving the for-loop also extends the protection.
+        async with self._get_session_lock(session_id):
+            conversation = await self._get_or_create_conversation(session_id)
 
-        # Censor block check — yield block message and return
-        if turn_context.censor_blocked:
-            block_msg = turn_context.censor_block_reason or "I can't process that request."
-            conversation.messages.append(Message(role="assistant", content=block_msg))
-            turn_result = TurnResult(response_text=block_msg)
-            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
-            yield StreamEvent(type="text", text=block_msg)
-            yield StreamEvent(type="done")
-            return
-
-        # F026: Get/create execution ledger and set turn
-        ledger = self._get_or_create_ledger(session_id)
-        ledger.set_turn((len(conversation.messages) + 1) // 2)
-
-        # F035.4: Store current context for context logger
-        self._current_session_id = session_id
-        self._current_turn_number = (len(conversation.messages) + 1) // 2
-        self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
-        self._current_call_type = "chat"
-
-        corrections = self._pending_corrections.pop(session_id, None)
-        system_prompt = self._build_system_prompt(
-            turn_context, platform=platform,
-            ledger=ledger, corrections=corrections,
-        )
-        # F036: Handle system_prompt_prefix for both str and dict paths
-        if system_prompt_prefix:
-            if isinstance(system_prompt, dict):
-                existing = system_prompt.get("static", "")
-                system_prompt["static"] = (
-                    system_prompt_prefix + "\n\n" + existing if existing
-                    else system_prompt_prefix
-                )
-            else:
-                system_prompt = system_prompt_prefix + "\n\n" + system_prompt
-        tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
-        messages = self._format_messages(conversation)
-
-        # F036: Compactor needs flat string for token estimation
-        _flat_prompt = (
-            "\n\n".join(v for v in system_prompt.values() if v)
-            if isinstance(system_prompt, dict) else system_prompt
-        )
-
-        # Layer 2: History compaction (Spec 008.1)
-        if self._compactor and self._settings.compaction_enabled:
-            system_tokens = self._compactor.estimator.estimate(_flat_prompt)
-            history_tokens = self._compactor.estimator.estimate_messages(messages)
-            if self._compactor.should_compact(system_tokens, history_tokens):
-                lock = self._compaction_locks.setdefault(session_id, asyncio.Lock())
-                async with lock:
-                    # Re-check under lock (double-check pattern)
-                    messages = self._format_messages(conversation)
-                    history_tokens = self._compactor.estimator.estimate_messages(messages)
-                    if self._compactor.should_compact(system_tokens, history_tokens):
-                        cut_point = self._compactor.find_cut_point(
-                            messages, self._settings.effective_keep_recent
-                        )
-                        if cut_point > 0:
-                            # 008.1 Phase 3: Snapshot for event handlers (decoupled from mutation)
-                            snapshot = messages[:cut_point]
-                            await self._cognitive.pre_compaction(
-                                agent_id=_agent_id,
-                                session_id=session_id,
-                                message_snapshot=snapshot,
-                            )
-                            await self._compactor.compact(
-                                conversation, messages,
-                                call_api=self._call_api,
-                                cut_point=cut_point,
-                            )
-                            # 008.1 Phase 3: Persist state after compaction
-                            await self._save_conversation(
-                                _agent_id, session_id, conversation
-                            )
-                            messages = self._format_messages(conversation)
-        else:
-            system_tokens = len(_flat_prompt) // 4
-            history_tokens = sum(
-                len(m.get("content", "")) // 4 for m in messages
+            # Pre-turn with conversation dedup (F4)
+            recent_messages = [
+                m.content for m in conversation.messages if m.role == "user"
+            ][-8:]
+            turn_context = await self._cognitive.pre_turn(
+                _agent_id,
+                session_id,
+                user_message,
+                conversation_messages=recent_messages or None,
+                user_id=user_id,
+                user_display_name=user_display_name,
             )
 
-        logger.info(
-            "Context health: messages=%d, system_tokens~=%d, "
-            "history_tokens~=%d, frame=%s",
-            len(messages), system_tokens, history_tokens,
-            turn_context.frame.frame_id if turn_context else "unknown",
-        )
+            conversation.messages.append(Message(role="user", content=user_message))
 
-        all_tool_results: list[ToolResult] = []
-        all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
-        total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
-        response_text = ""
-        error = None
+            # Censor block check — yield block message and return
+            if turn_context.censor_blocked:
+                block_msg = turn_context.censor_block_reason or "I can't process that request."
+                conversation.messages.append(Message(role="assistant", content=block_msg))
+                turn_result = TurnResult(response_text=block_msg)
+                await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                yield StreamEvent(type="text", text=block_msg)
+                yield StreamEvent(type="done")
+                return
 
-        try:
-            for turn in range(self._settings.max_turns):
-                # Unified block accumulator: keyed by block_index, preserves
-                # original order for thinking block preservation (007 Phase D).
-                all_blocks: dict[int, dict[str, Any]] = {}
-                text_parts: list[str] = []
-                tool_calls: list[dict[str, Any]] = []
-                stop_reason = ""
-                _segment_usage: dict[str, Any] = {}  # F036.1: per-segment usage
+            # F026: Get/create execution ledger and set turn
+            ledger = self._get_or_create_ledger(session_id)
+            ledger.set_turn((len(conversation.messages) + 1) // 2)
 
-                # Emit keepalives while waiting for Anthropic's first byte —
-                # large contexts + thinking can cause long waits (008.1)
-                async for event in self._stream_with_keepalive(
-                    system_prompt=system_prompt,
-                    messages=messages,
-                    tools=tools if tools else None,
-                ):
-                    if event.type == "error":
-                        error = event.text
-                        yield event
-                        return
+            # F035.4: Store current context for context logger
+            self._current_session_id = session_id
+            self._current_turn_number = (len(conversation.messages) + 1) // 2
+            self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
+            self._current_call_type = "chat"
 
-                    elif event.type == "message_start":
-                        if event.usage:
-                            total_usage["input_tokens"] += event.usage.get("input_tokens", 0)
-                        # F036.1: Capture per-segment usage for context logger
-                        _segment_usage = dict(event.usage) if event.usage else {}
-
-                    # -- Thinking blocks (yielded to client for thinking indicators) --
-                    elif event.type == "thinking_start":
-                        all_blocks[event.block_index] = {
-                            "type": "thinking",
-                            "thinking_parts": [],
-                            "signature": "",
-                        }
-                        yield event
-
-                    elif event.type == "redacted_thinking":
-                        # Complete block — data arrives in start event
-                        all_blocks[event.block_index] = {
-                            "type": "redacted_thinking",
-                            "data": event.text,
-                        }
-                        yield event
-
-                    elif event.type == "thinking_delta":
-                        block = all_blocks.get(event.block_index)
-                        if block and block["type"] == "thinking":
-                            block["thinking_parts"].append(event.text)
-                        yield event
-
-                    elif event.type == "signature_delta":
-                        block = all_blocks.get(event.block_index)
-                        if block and block["type"] == "thinking":
-                            block["signature"] = event.text
-
-                    # -- Text blocks --
-                    elif event.type == "text_block_start":
-                        all_blocks[event.block_index] = {
-                            "type": "text",
-                            "text_parts": [],
-                        }
-
-                    elif event.type == "text_delta":
-                        text_parts.append(event.text)
-                        # Also track in block for content reconstruction
-                        for idx in sorted(all_blocks, reverse=True):
-                            if all_blocks[idx]["type"] == "text":
-                                all_blocks[idx]["text_parts"].append(event.text)
-                                break
-                        yield event
-
-                    # -- Tool blocks --
-                    elif event.type == "tool_start":
-                        all_blocks[event.block_index] = {
-                            "type": "tool_use",
-                            "id": event.tool_id,
-                            "name": event.tool_name,
-                            "input_parts": [],
-                        }
-                        yield event
-
-                    elif event.type == "tool_input_delta":
-                        block = all_blocks.get(event.block_index)
-                        if block and block["type"] == "tool_use":
-                            block["input_parts"].append(event.text)
-
-                    elif event.type == "block_stop":
-                        block = all_blocks.get(event.block_index)
-                        if block and block["type"] == "tool_use":
-                            input_json = "".join(block["input_parts"])
-                            try:
-                                block["input"] = json.loads(input_json) if input_json else {}
-                            except json.JSONDecodeError:
-                                block["input"] = {}
-                            tool_calls.append(block)
-
-                    elif event.type == "done":
-                        stop_reason = event.stop_reason
-                        if event.usage:
-                            total_usage["input_tokens"] += event.usage.get("input_tokens", 0)
-                            total_usage["output_tokens"] += event.usage.get("output_tokens", 0)
-                            # F036.1: Merge output_tokens into segment usage
-                            _segment_usage["output_tokens"] = event.usage.get("output_tokens", 0)
-
-                # F036.1: Update context log with per-segment usage (not cumulative)
-                if self._context_logger and self._last_context_entry_id:
-                    self._context_logger.update_response(
-                        entry_id=self._last_context_entry_id,
-                        input_tokens=_segment_usage.get("input_tokens"),
-                        output_tokens=_segment_usage.get("output_tokens"),
-                        cache_creation=_segment_usage.get("cache_creation_input_tokens"),
-                        cache_read=_segment_usage.get("cache_read_input_tokens"),
-                        stop_reason=stop_reason or None,
+            corrections = self._pending_corrections.pop(session_id, None)
+            system_prompt = self._build_system_prompt(
+                turn_context, platform=platform,
+                ledger=ledger, corrections=corrections,
+            )
+            # F036: Handle system_prompt_prefix for both str and dict paths
+            if system_prompt_prefix:
+                if isinstance(system_prompt, dict):
+                    existing = system_prompt.get("static", "")
+                    system_prompt["static"] = (
+                        system_prompt_prefix + "\n\n" + existing if existing
+                        else system_prompt_prefix
                     )
-                    self._last_context_entry_id = None  # Consumed
+                else:
+                    system_prompt = system_prompt_prefix + "\n\n" + system_prompt
+            tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
+            messages = self._format_messages(conversation)
 
-                # Stream segment ended -- collect thinking blocks from this iteration
-                for idx in sorted(all_blocks):
-                    block = all_blocks[idx]
-                    if block["type"] == "thinking":
-                        thinking_text = "".join(block["thinking_parts"]).strip()
-                        if thinking_text:
-                            all_thinking_blocks.append(thinking_text)
+            # F036: Compactor needs flat string for token estimation
+            _flat_prompt = (
+                "\n\n".join(v for v in system_prompt.values() if v)
+                if isinstance(system_prompt, dict) else system_prompt
+            )
 
-                if stop_reason == "end_turn" or not tool_calls:
-                    response_text = "".join(text_parts)
-                    break
-
-                # Build assistant message preserving ALL blocks in index order
-                # (critical for thinking block preservation with interleaved thinking)
-                content_blocks: list[dict[str, Any]] = []
-                for idx in sorted(all_blocks):
-                    block = all_blocks[idx]
-                    if block["type"] == "thinking":
-                        content_blocks.append({
-                            "type": "thinking",
-                            "thinking": "".join(block["thinking_parts"]),
-                            "signature": block["signature"],
-                        })
-                    elif block["type"] == "redacted_thinking":
-                        content_blocks.append({
-                            "type": "redacted_thinking",
-                            "data": block["data"],
-                        })
-                    elif block["type"] == "text":
-                        content_blocks.append({
-                            "type": "text",
-                            "text": "".join(block["text_parts"]),
-                        })
-                    elif block["type"] == "tool_use":
-                        content_blocks.append({
-                            "type": "tool_use",
-                            "id": block["id"],
-                            "name": block["name"],
-                            "input": block.get("input", {}),
-                        })
-                messages.append({"role": "assistant", "content": content_blocks})
-
-                # Execute tools (P1-2: all results in single user message)
-                tool_results_for_message: list[dict[str, Any]] = []
-                for tc in tool_calls:
-                    # F022: Auto-inject source_episode_id into learn_fact.
-                    # Use a local variable (not tc["input"]) to avoid mutating the
-                    # shared block dict that content_blocks already references.
-                    dispatch_input = self._maybe_inject_episode_id(tc["name"], tc["input"], session_id)
-
-                    # F026: Action gating (pre-dispatch)
-                    gated = False
-                    if self._action_gate and ledger:
-                        gate_result = await self._action_gate.check(
-                            tc["name"], dispatch_input, ledger, user_message=user_message,
-                        )
-                        self._log_f026_decision(
-                            "f026_action_gate",
-                            {
-                                "tool_name": tc["name"],
-                                "approved": gate_result.approved,
-                                "reason": gate_result.reason,
-                                "mode": self._settings.action_gating_mode,
-                                "turn": ledger.current_turn,
-                            },
-                            session_id=session_id,
-                        )
-                        if gate_result.approved:
-                            logger.info("F026 gate: %s approved (%s)", tc["name"], gate_result.reason)
-                        else:
-                            if self._settings.action_gating_mode == "enforce":
-                                result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
-                                if gate_result.suggestion:
-                                    result_text += f"\n{gate_result.suggestion}"
-                                is_error = True
-                                gated = True
-                                ledger.record(tc["name"], dispatch_input, result_text, "blocked")
-                                logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
-                            elif self._settings.action_gating_mode == "warn":
-                                logger.warning("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
-                            else:
-                                logger.debug("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
-
-                    if not gated:
-                        start_time = time.monotonic()
-                        result_text, is_error = "", False
-                        async for item in self._dispatch_with_keepalive(
-                            tc["name"], dispatch_input, session_id=session_id
-                        ):
-                            if isinstance(item, StreamEvent):
-                                yield item
-                            else:
-                                result_text, is_error = item
-                        duration_ms = int((time.monotonic() - start_time) * 1000)
-
-                        # F026: Record in execution ledger (post-dispatch)
-                        if ledger:
-                            ledger.record(
-                                tc["name"], dispatch_input, result_text,
-                                "error" if is_error else "success",
+            # Layer 2: History compaction (Spec 008.1)
+            if self._compactor and self._settings.compaction_enabled:
+                system_tokens = self._compactor.estimator.estimate(_flat_prompt)
+                history_tokens = self._compactor.estimator.estimate_messages(messages)
+                if self._compactor.should_compact(system_tokens, history_tokens):
+                    lock = self._compaction_locks.setdefault(session_id, asyncio.Lock())
+                    async with lock:
+                        # Re-check under lock (double-check pattern)
+                        messages = self._format_messages(conversation)
+                        history_tokens = self._compactor.estimator.estimate_messages(messages)
+                        if self._compactor.should_compact(system_tokens, history_tokens):
+                            cut_point = self._compactor.find_cut_point(
+                                messages, self._settings.effective_keep_recent
                             )
-                    else:
-                        duration_ms = 0
-
-                    tool_results_for_message.append({
-                        "type": "tool_result",
-                        "tool_use_id": tc["id"],
-                        "content": result_text,
-                        "is_error": is_error,
-                    })
-
-                    all_tool_results.append(ToolResult(
-                        tool_name=tc["name"],
-                        arguments=tc["input"],
-                        result=result_text if not is_error else None,
-                        error=result_text if is_error else None,
-                        duration_ms=duration_ms,
-                    ))
-
-                    yield StreamEvent(type="tool_end", tool_name=tc["name"])
-
-                messages.append({"role": "user", "content": tool_results_for_message})
-
-                # Prune old tool results before next API call (Spec 008.1 Layer 1)
-                if self._compactor:
-                    extracted_facts = self._compactor.prune_tool_results(messages)
-                    if extracted_facts:
-                        for fact_text in extracted_facts:
-                            try:
-                                await self._heart.learn(FactInput(
-                                    content=fact_text,
-                                    category="technical",
-                                    confidence=0.3,
-                                    source="pre_prune_extraction",
-                                ))
-                            except Exception:
-                                logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
+                            if cut_point > 0:
+                                # 008.1 Phase 3: Snapshot for event handlers (decoupled from mutation)
+                                snapshot = messages[:cut_point]
+                                await self._cognitive.pre_compaction(
+                                    agent_id=_agent_id,
+                                    session_id=session_id,
+                                    message_snapshot=snapshot,
+                                )
+                                await self._compactor.compact(
+                                    conversation, messages,
+                                    call_api=self._call_api,
+                                    cut_point=cut_point,
+                                )
+                                # 008.1 Phase 3: Persist state after compaction
+                                await self._save_conversation(
+                                    _agent_id, session_id, conversation
+                                )
+                                messages = self._format_messages(conversation)
             else:
-                # Max turns reached -- final call without tools
-                logger.warning("Streaming tool loop reached max_turns=%d", self._settings.max_turns)
-                try:
-                    final = await self._call_api(
+                system_tokens = len(_flat_prompt) // 4
+                history_tokens = sum(
+                    len(m.get("content", "")) // 4 for m in messages
+                )
+
+            logger.info(
+                "Context health: messages=%d, system_tokens~=%d, "
+                "history_tokens~=%d, frame=%s",
+                len(messages), system_tokens, history_tokens,
+                turn_context.frame.frame_id if turn_context else "unknown",
+            )
+
+            all_tool_results: list[ToolResult] = []
+            all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
+            total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+            response_text = ""
+            error = None
+
+            try:
+                for turn in range(self._settings.max_turns):
+                    # Unified block accumulator: keyed by block_index, preserves
+                    # original order for thinking block preservation (007 Phase D).
+                    all_blocks: dict[int, dict[str, Any]] = {}
+                    text_parts: list[str] = []
+                    tool_calls: list[dict[str, Any]] = []
+                    stop_reason = ""
+                    _segment_usage: dict[str, Any] = {}  # F036.1: per-segment usage
+
+                    # Emit keepalives while waiting for Anthropic's first byte —
+                    # large contexts + thinking can cause long waits (008.1)
+                    async for event in self._stream_with_keepalive(
                         system_prompt=system_prompt,
                         messages=messages,
-                        tools=None,
-                    )
-                    response_text = self._extract_text(final.content)
-                except Exception:
-                    response_text = "I reached the maximum number of tool iterations."
+                        tools=tools if tools else None,
+                    ):
+                        if event.type == "error":
+                            error = event.text
+                            yield event
+                            return
 
-            # Store assistant response
-            conversation.messages.append(Message(role="assistant", content=response_text))
+                        elif event.type == "message_start":
+                            if event.usage:
+                                total_usage["input_tokens"] += event.usage.get("input_tokens", 0)
+                            # F036.1: Capture per-segment usage for context logger
+                            _segment_usage = dict(event.usage) if event.usage else {}
 
-        except Exception as e:
-            logger.error("Streaming error: %s", e)
-            error = str(e)
-            response_text = "I encountered an error processing your request."
-            conversation.messages.append(Message(role="assistant", content=response_text))
-            _caught_exc = e
-        except asyncio.CancelledError:
-            # Client disconnect — treat as clean exit, still run cleanup
-            logger.info("Stream cancelled (client disconnect) for session %s", session_id)
-            error = "cancelled"
-            _caught_exc = None
-        else:
-            _caught_exc = None
+                        # -- Thinking blocks (yielded to client for thinking indicators) --
+                        elif event.type == "thinking_start":
+                            all_blocks[event.block_index] = {
+                                "type": "thinking",
+                                "thinking_parts": [],
+                                "signature": "",
+                            }
+                            yield event
 
-            # F026: Post-response claim verification (streaming: warn+inject only)
-            self._verify_claims(session_id, response_text, all_tool_results, ledger)
-        finally:
-            # ALWAYS call post_turn (review P1: guaranteed cleanup).
-            # Shield from cancellation to prevent DB connection pool leaks —
-            # CancelledError during post_turn's DB ops leaves sessions checked
-            # out but never returned to the pool.
-            turn_result = TurnResult(
-                response_text=response_text,
-                tool_results=all_tool_results,
-                error=error,
-                thinking_blocks=all_thinking_blocks,
-            )
-            try:
-                await asyncio.shield(
-                    self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                        elif event.type == "redacted_thinking":
+                            # Complete block — data arrives in start event
+                            all_blocks[event.block_index] = {
+                                "type": "redacted_thinking",
+                                "data": event.text,
+                            }
+                            yield event
+
+                        elif event.type == "thinking_delta":
+                            block = all_blocks.get(event.block_index)
+                            if block and block["type"] == "thinking":
+                                block["thinking_parts"].append(event.text)
+                            yield event
+
+                        elif event.type == "signature_delta":
+                            block = all_blocks.get(event.block_index)
+                            if block and block["type"] == "thinking":
+                                block["signature"] = event.text
+
+                        # -- Text blocks --
+                        elif event.type == "text_block_start":
+                            all_blocks[event.block_index] = {
+                                "type": "text",
+                                "text_parts": [],
+                            }
+
+                        elif event.type == "text_delta":
+                            text_parts.append(event.text)
+                            # Also track in block for content reconstruction
+                            for idx in sorted(all_blocks, reverse=True):
+                                if all_blocks[idx]["type"] == "text":
+                                    all_blocks[idx]["text_parts"].append(event.text)
+                                    break
+                            yield event
+
+                        # -- Tool blocks --
+                        elif event.type == "tool_start":
+                            all_blocks[event.block_index] = {
+                                "type": "tool_use",
+                                "id": event.tool_id,
+                                "name": event.tool_name,
+                                "input_parts": [],
+                            }
+                            yield event
+
+                        elif event.type == "tool_input_delta":
+                            block = all_blocks.get(event.block_index)
+                            if block and block["type"] == "tool_use":
+                                block["input_parts"].append(event.text)
+
+                        elif event.type == "block_stop":
+                            block = all_blocks.get(event.block_index)
+                            if block and block["type"] == "tool_use":
+                                input_json = "".join(block["input_parts"])
+                                try:
+                                    block["input"] = json.loads(input_json) if input_json else {}
+                                except json.JSONDecodeError:
+                                    block["input"] = {}
+                                tool_calls.append(block)
+
+                        elif event.type == "done":
+                            stop_reason = event.stop_reason
+                            if event.usage:
+                                total_usage["input_tokens"] += event.usage.get("input_tokens", 0)
+                                total_usage["output_tokens"] += event.usage.get("output_tokens", 0)
+                                # F036.1: Merge output_tokens into segment usage
+                                _segment_usage["output_tokens"] = event.usage.get("output_tokens", 0)
+
+                    # F036.1: Update context log with per-segment usage (not cumulative)
+                    if self._context_logger and self._last_context_entry_id:
+                        self._context_logger.update_response(
+                            entry_id=self._last_context_entry_id,
+                            input_tokens=_segment_usage.get("input_tokens"),
+                            output_tokens=_segment_usage.get("output_tokens"),
+                            cache_creation=_segment_usage.get("cache_creation_input_tokens"),
+                            cache_read=_segment_usage.get("cache_read_input_tokens"),
+                            stop_reason=stop_reason or None,
+                        )
+                        self._last_context_entry_id = None  # Consumed
+
+                    # Stream segment ended -- collect thinking blocks from this iteration
+                    for idx in sorted(all_blocks):
+                        block = all_blocks[idx]
+                        if block["type"] == "thinking":
+                            thinking_text = "".join(block["thinking_parts"]).strip()
+                            if thinking_text:
+                                all_thinking_blocks.append(thinking_text)
+
+                    if stop_reason == "end_turn" or not tool_calls:
+                        response_text = "".join(text_parts)
+                        break
+
+                    # Build assistant message preserving ALL blocks in index order
+                    # (critical for thinking block preservation with interleaved thinking)
+                    content_blocks: list[dict[str, Any]] = []
+                    for idx in sorted(all_blocks):
+                        block = all_blocks[idx]
+                        if block["type"] == "thinking":
+                            content_blocks.append({
+                                "type": "thinking",
+                                "thinking": "".join(block["thinking_parts"]),
+                                "signature": block["signature"],
+                            })
+                        elif block["type"] == "redacted_thinking":
+                            content_blocks.append({
+                                "type": "redacted_thinking",
+                                "data": block["data"],
+                            })
+                        elif block["type"] == "text":
+                            content_blocks.append({
+                                "type": "text",
+                                "text": "".join(block["text_parts"]),
+                            })
+                        elif block["type"] == "tool_use":
+                            content_blocks.append({
+                                "type": "tool_use",
+                                "id": block["id"],
+                                "name": block["name"],
+                                "input": block.get("input", {}),
+                            })
+                    messages.append({"role": "assistant", "content": content_blocks})
+
+                    # Execute tools (P1-2: all results in single user message)
+                    tool_results_for_message: list[dict[str, Any]] = []
+                    for tc in tool_calls:
+                        # F022: Auto-inject source_episode_id into learn_fact.
+                        # Use a local variable (not tc["input"]) to avoid mutating the
+                        # shared block dict that content_blocks already references.
+                        dispatch_input = self._maybe_inject_episode_id(tc["name"], tc["input"], session_id)
+
+                        # F026: Action gating (pre-dispatch)
+                        gated = False
+                        if self._action_gate and ledger:
+                            gate_result = await self._action_gate.check(
+                                tc["name"], dispatch_input, ledger, user_message=user_message,
+                            )
+                            self._log_f026_decision(
+                                "f026_action_gate",
+                                {
+                                    "tool_name": tc["name"],
+                                    "approved": gate_result.approved,
+                                    "reason": gate_result.reason,
+                                    "mode": self._settings.action_gating_mode,
+                                    "turn": ledger.current_turn,
+                                },
+                                session_id=session_id,
+                            )
+                            if gate_result.approved:
+                                logger.info("F026 gate: %s approved (%s)", tc["name"], gate_result.reason)
+                            else:
+                                if self._settings.action_gating_mode == "enforce":
+                                    result_text = f"[BLOCKED by ActionGate] {gate_result.reason}"
+                                    if gate_result.suggestion:
+                                        result_text += f"\n{gate_result.suggestion}"
+                                    is_error = True
+                                    gated = True
+                                    ledger.record(tc["name"], dispatch_input, result_text, "blocked")
+                                    logger.info("F026 gate: %s BLOCKED (%s)", tc["name"], gate_result.reason)
+                                elif self._settings.action_gating_mode == "warn":
+                                    logger.warning("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
+                                else:
+                                    logger.debug("F026 gate: %s would block (%s)", tc["name"], gate_result.reason)
+
+                        if not gated:
+                            start_time = time.monotonic()
+                            result_text, is_error = "", False
+                            async for item in self._dispatch_with_keepalive(
+                                tc["name"], dispatch_input, session_id=session_id
+                            ):
+                                if isinstance(item, StreamEvent):
+                                    yield item
+                                else:
+                                    result_text, is_error = item
+                            duration_ms = int((time.monotonic() - start_time) * 1000)
+
+                            # F026: Record in execution ledger (post-dispatch)
+                            if ledger:
+                                ledger.record(
+                                    tc["name"], dispatch_input, result_text,
+                                    "error" if is_error else "success",
+                                )
+                        else:
+                            duration_ms = 0
+
+                        tool_results_for_message.append({
+                            "type": "tool_result",
+                            "tool_use_id": tc["id"],
+                            "content": result_text,
+                            "is_error": is_error,
+                        })
+
+                        all_tool_results.append(ToolResult(
+                            tool_name=tc["name"],
+                            arguments=tc["input"],
+                            result=result_text if not is_error else None,
+                            error=result_text if is_error else None,
+                            duration_ms=duration_ms,
+                        ))
+
+                        yield StreamEvent(type="tool_end", tool_name=tc["name"])
+
+                    messages.append({"role": "user", "content": tool_results_for_message})
+
+                    # Prune old tool results before next API call (Spec 008.1 Layer 1)
+                    if self._compactor:
+                        extracted_facts = self._compactor.prune_tool_results(messages)
+                        if extracted_facts:
+                            for fact_text in extracted_facts:
+                                try:
+                                    await self._heart.learn(FactInput(
+                                        content=fact_text,
+                                        category="technical",
+                                        confidence=0.3,
+                                        source="pre_prune_extraction",
+                                    ))
+                                except Exception:
+                                    logger.debug("Failed to store pre-prune fact: %s", fact_text[:50])
+                else:
+                    # Max turns reached -- final call without tools
+                    logger.warning("Streaming tool loop reached max_turns=%d", self._settings.max_turns)
+                    try:
+                        final = await self._call_api(
+                            system_prompt=system_prompt,
+                            messages=messages,
+                            tools=None,
+                        )
+                        response_text = self._extract_text(final.content)
+                    except Exception:
+                        response_text = "I reached the maximum number of tool iterations."
+
+                # Store assistant response
+                conversation.messages.append(Message(role="assistant", content=response_text))
+
+            except Exception as e:
+                logger.error("Streaming error: %s", e)
+                error = str(e)
+                response_text = "I encountered an error processing your request."
+                conversation.messages.append(Message(role="assistant", content=response_text))
+                _caught_exc = e
+            except asyncio.CancelledError:
+                # Client disconnect — treat as clean exit, still run cleanup
+                logger.info("Stream cancelled (client disconnect) for session %s", session_id)
+                error = "cancelled"
+                _caught_exc = None
+            else:
+                _caught_exc = None
+
+                # F026: Post-response claim verification (streaming: warn+inject only)
+                self._verify_claims(session_id, response_text, all_tool_results, ledger)
+            finally:
+                # ALWAYS call post_turn (review P1: guaranteed cleanup).
+                # Shield from cancellation to prevent DB connection pool leaks —
+                # CancelledError during post_turn's DB ops leaves sessions checked
+                # out but never returned to the pool.
+                turn_result = TurnResult(
+                    response_text=response_text,
+                    tool_results=all_tool_results,
+                    error=error,
+                    thinking_blocks=all_thinking_blocks,
                 )
-            except (asyncio.CancelledError, Exception):
-                logger.warning("post_turn cleanup interrupted for session %s", session_id)
-            self._check_safety_net(turn_context, all_tool_results)
-            conversation.turn_contexts.append(turn_context)
+                try:
+                    await asyncio.shield(
+                        self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                    )
+                except (asyncio.CancelledError, Exception):
+                    logger.warning("post_turn cleanup interrupted for session %s", session_id)
+                self._check_safety_net(turn_context, all_tool_results)
+                conversation.turn_contexts.append(turn_context)
 
-        # Re-raise after cleanup so callers see the real error
-        if _caught_exc is not None:
-            raise _caught_exc
+            # Re-raise after cleanup so callers see the real error
+            if _caught_exc is not None:
+                raise _caught_exc
 
-        # Note: streaming calibration skipped — accumulated total_usage across
-        # multiple tool iterations would bias the per-char ratio. The _tool_loop
-        # path calibrates per-call which is more accurate. Streaming-only turns
-        # (no tools) are typically short Telegram messages where chars/4 is fine.
+            # Note: streaming calibration skipped — accumulated total_usage across
+            # multiple tool iterations would bias the per-char ratio. The _tool_loop
+            # path calibrates per-call which is more accurate. Streaming-only turns
+            # (no tools) are typically short Telegram messages where chars/4 is fine.
 
-        yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
+            yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
 
     # ------------------------------------------------------------------
     # Tool loop
@@ -2094,11 +2203,22 @@ Rules:
             return None
 
     async def _delete_conversation_state(self, session_id: str) -> None:
-        """Remove persisted conversation state on session end."""
+        """Remove persisted conversation state on session end.
+
+        Logged at WARNING with stack trace on failure: a silently-leaked
+        conversation_state row will re-hydrate stale messages on the next
+        session use ("user comes back tomorrow and gets ghost messages"),
+        which is hard to diagnose after the fact. The idle-timeout path
+        newly exercises this code, so visibility matters more now.
+        """
         try:
             await self._heart.delete_conversation_state(
                 agent_id=self._settings.agent_id,
                 session_id=session_id,
             )
         except Exception:
-            logger.debug("Failed to delete conversation state for session %s", session_id)
+            logger.warning(
+                "Failed to delete conversation state for session %s",
+                session_id,
+                exc_info=True,
+            )

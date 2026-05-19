@@ -493,6 +493,19 @@ async def create_components(settings: Settings) -> dict:
     runner.set_api_client(api_client)
     await runner.start()
 
+    # Late-bind runner into SessionTimeoutMonitor so idle-timeout closures
+    # take the canonical runner.end_conversation path (full cleanup + reflection)
+    # rather than only cognitive.end_session. Mirrors the procedure_learner
+    # late-binding above. Safe no-op if monitor is unavailable.
+    if session_monitor is not None:
+        session_monitor._runner = runner
+        # Back-reference so runner.run_turn / stream_chat can synchronously
+        # touch _last_activity at request-receipt time, closing the race
+        # where a long in-flight turn would otherwise be closed mid-stream
+        # by a monitor tick (the bus path is queued and turn_completed
+        # only fires after the entire turn finishes).
+        runner._session_monitor = session_monitor
+
     # F035.4: Context Logger
     context_logger = None
     if settings.context_log_enabled:
