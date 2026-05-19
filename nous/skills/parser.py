@@ -304,11 +304,46 @@ class SkillParser:
                         f"'hooks.{k}' must be a string, got {type(v).__name__}"
                     )
                 hooks[k] = v
-        requires_human_review_raw = data.get("requires_human_review", False)
-        if isinstance(requires_human_review_raw, str):
-            requires_human_review = requires_human_review_raw.lower() in {"true", "yes", "1"}
+        # @codex P2 on dc914be: strict whitelist for requires_human_review.
+        # Previously a typo like "tru" coerced silently to False (silent-
+        # drop family). Now only documented truthy / falsy string forms
+        # parse cleanly; anything else raises ValueError. Bool values pass
+        # through; int 0/1 also accepted (YAML scalars). Absent or
+        # explicit-null = False.
+        requires_human_review_raw = data.get("requires_human_review")
+        _TRUTHY = {"true", "yes", "1", "on"}
+        _FALSY = {"false", "no", "0", "off"}
+        if requires_human_review_raw is None:
+            requires_human_review = False
+        elif isinstance(requires_human_review_raw, bool):
+            requires_human_review = requires_human_review_raw
+        elif isinstance(requires_human_review_raw, str):
+            lowered = requires_human_review_raw.strip().lower()
+            if lowered in _TRUTHY:
+                requires_human_review = True
+            elif lowered in _FALSY:
+                requires_human_review = False
+            else:
+                raise ValueError(
+                    f"'requires_human_review' must be one of "
+                    f"{sorted(_TRUTHY | _FALSY)} (case-insensitive); "
+                    f"got {requires_human_review_raw!r}"
+                )
+        elif isinstance(requires_human_review_raw, int):
+            if requires_human_review_raw == 0:
+                requires_human_review = False
+            elif requires_human_review_raw == 1:
+                requires_human_review = True
+            else:
+                raise ValueError(
+                    f"'requires_human_review' int must be 0 or 1, "
+                    f"got {requires_human_review_raw}"
+                )
         else:
-            requires_human_review = bool(requires_human_review_raw)
+            raise ValueError(
+                f"'requires_human_review' must be bool, str, or 0/1; "
+                f"got {type(requires_human_review_raw).__name__}"
+            )
 
         return SkillManifest(
             name=name,

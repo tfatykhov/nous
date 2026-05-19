@@ -81,8 +81,30 @@ class DAGStore:
                 # check against the resolved value here, raising before any
                 # row is inserted — same semantics, late but pre-commit).
                 resolved_stall: int | None
-                if spec.stall_timeout_seconds is None or spec.stall_timeout_seconds == 0:
-                    resolved_stall = spec.stall_timeout_seconds  # preserve None vs 0
+                if spec.stall_timeout_seconds == 0:
+                    # Explicitly disabled per-node — no inheritance, no check.
+                    resolved_stall = 0
+                elif spec.stall_timeout_seconds is None:
+                    # Per-node unset → inherits global default at runtime
+                    # (orchestrator._effective_stall_timeout). Persist None
+                    # to preserve the "inherit" semantic, but ALSO validate
+                    # the GLOBAL default against this node's wall-clock
+                    # timeout. Otherwise a node with timeout_seconds=60 and
+                    # global default_stall_timeout=600 silently never
+                    # stalls. @codex P2 on dc914be: skipped this check
+                    # previously when per-node stall was unset.
+                    resolved_stall = None
+                    if self._settings.dag_stall_detection_enabled:
+                        inherited = self._settings.dag_node_default_stall_timeout
+                        if inherited > 0 and inherited > resolved_timeout:
+                            raise ValueError(
+                                f"Node '{spec.name}': inherited global "
+                                f"stall_timeout={inherited} exceeds this node's "
+                                f"effective wall-clock timeout {resolved_timeout} — "
+                                "stall would never fire (silent dead config). Set "
+                                "stall_timeout_seconds=0 on this node to opt out, "
+                                "or raise timeout_seconds."
+                            )
                 else:
                     resolved_stall = min(
                         spec.stall_timeout_seconds,

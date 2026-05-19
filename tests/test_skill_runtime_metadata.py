@@ -96,6 +96,32 @@ b
         with pytest.raises(ValueError, match="timeout_override_seconds"):
             SkillParser().parse(md)
 
+    def test_parser_rejects_typo_in_requires_human_review(self):
+        """@codex P2 on dc914be: a typo like 'tru' previously coerced
+        silently to False. Now raises — closes the silent-drop hole."""
+        md = """---
+name: bad
+description: d
+domain: testing
+requires_human_review: tru
+---
+## U
+"""
+        with pytest.raises(ValueError, match="requires_human_review"):
+            SkillParser().parse(md)
+
+    def test_parser_rejects_invalid_int_for_requires_human_review(self):
+        md = """---
+name: bad
+description: d
+domain: testing
+requires_human_review: 42
+---
+## U
+"""
+        with pytest.raises(ValueError, match="requires_human_review"):
+            SkillParser().parse(md)
+
     def test_parser_rejects_hooks_as_list(self):
         """@codex P2 on 2399032: falsy non-dict hooks (empty list, empty
         string) previously bypassed validation and coerced to {}. Now they

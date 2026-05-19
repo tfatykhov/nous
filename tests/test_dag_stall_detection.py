@@ -194,6 +194,39 @@ class TestStoreLevelStallEnforcement:
             await store_stall_on.create(req)
 
     @pytest.mark.asyncio
+    async def test_store_rejects_inherited_global_default_above_node_timeout(
+        self, db
+    ):
+        """@codex P2 on dc914be: when stall_timeout_seconds is unset on the
+        spec but the inherited NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT exceeds
+        this node's wall-clock timeout, the store must raise. Otherwise
+        the global default would silently never fire for nodes with short
+        timeouts."""
+        # Settings with global stall default=300 but a node timeout of 60.
+        # Without the fix this silently inserts; with it, raises.
+        s = Settings(
+            dag_stall_detection_enabled=True,
+            dag_node_default_stall_timeout=300,
+            dag_node_max_stall_timeout=3600,
+            dag_node_default_timeout=600,
+            dag_node_max_timeout=7200,
+        )
+        store = DAGStore(db, f"test-stall-inherit-{uuid.uuid4().hex[:8]}", s)
+        req = DAGCreateRequest(
+            name="bad-inherit-dag",
+            nodes=[
+                DAGNodeSpec(
+                    name="short-node",
+                    type=DAGNodeType.subtask,
+                    timeout_seconds=60,
+                    # stall_timeout_seconds omitted → inherits global 300
+                ),
+            ],
+        )
+        with pytest.raises(ValueError, match="inherited global stall_timeout"):
+            await store.create(req)
+
+    @pytest.mark.asyncio
     async def test_store_rejects_stall_above_resolved_default(self, store_stall_on):
         """codex P2: when timeout_seconds is None, the resolved default applies.
         A stall above that default would never fire — the store catches it."""
