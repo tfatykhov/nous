@@ -1002,3 +1002,41 @@ class DAGEdge(Base):
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("edge_type", "dependency")
         super().__init__(**kwargs)
+
+
+class WorkQueueItem(Base):
+    """F064.6: per-agent record of an external work-queue item.
+
+    `dispatched_at IS NULL` is the "claimed but not yet linked to a DAG"
+    sentinel. The cross-tick reconciler queries this state to recover
+    orphan rows from partial-commit failures. See migration 046 for
+    column semantics.
+    """
+
+    __tablename__ = "work_queue_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "source", "external_id",
+            name="uq_work_queue_external",
+        ),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # NULL = claimed but not yet dispatched (reconciler sentinel)
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dag_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    terminal_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
