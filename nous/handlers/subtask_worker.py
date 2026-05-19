@@ -177,8 +177,9 @@ class SubtaskWorkerPool:
         # continuation pattern from task_scheduler) so the runner reuses
         # the existing Episode via Episode.session_id contract. Fallback
         # remains the per-subtask unique session_id for non-continuation
-        # paths.
-        meta = subtask.metadata_ or {}
+        # paths. getattr-with-default keeps existing test mocks
+        # (SimpleNamespace without metadata_) working.
+        meta = getattr(subtask, "metadata_", None) or {}
         override = meta.get("session_id") if isinstance(meta, dict) else None
         session_id = override if override else f"subtask-{subtask.id.hex[:8]}"
         logger.info(
