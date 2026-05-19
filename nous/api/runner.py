@@ -13,7 +13,7 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Callable
 
 from nous.api.anthropic_client import (
     AnthropicClient,
@@ -446,12 +446,28 @@ class AgentRunner:
 
         return response_text, turn_context, usage
 
-    async def end_conversation(self, session_id: str, agent_id: str | None = None) -> None:
+    async def end_conversation(
+        self,
+        session_id: str,
+        agent_id: str | None = None,
+        *,
+        abort_if: Callable[[], bool] | None = None,
+    ) -> bool:
         """End a conversation with reflection.
 
         1. If conversation has >= 3 turns, generate reflection via LLM
-        2. Call cognitive.end_session(agent_id, session_id, reflection=...)
-        3. Remove from self._conversations
+        2. (Optional) Recheck ``abort_if`` — bail if activity resumed
+        3. Call cognitive.end_session(agent_id, session_id, reflection=...)
+        4. Remove from self._conversations
+
+        ``abort_if`` is a no-arg callable that returns True if the close
+        should be aborted (e.g., the user resumed activity while reflection
+        was running). Checked AFTER reflection (read-only, safe to discard)
+        but BEFORE any state mutation. Used by SessionTimeoutMonitor to
+        prevent orphaning an in-flight turn that landed mid-close.
+
+        Returns True if the conversation was closed, False if aborted.
+        Manual /new path passes ``abort_if=None`` and always returns True.
         """
         _agent_id = agent_id or self._settings.agent_id
         conversation = self._conversations.get(session_id)
@@ -479,6 +495,20 @@ class AgentRunner:
             except Exception as e:
                 logger.warning("Failed to generate reflection: %s", e)
 
+        # Pre-mutation recheck: if abort_if fires here (activity resumed
+        # during reflection), bail before touching any state. Reflection
+        # is best-effort and discarding it is harmless.
+        if abort_if is not None:
+            try:
+                if abort_if():
+                    logger.info(
+                        "Aborting end_conversation for %s — activity resumed during close",
+                        session_id,
+                    )
+                    return False
+            except Exception:
+                logger.debug("abort_if check raised (suppressed)", exc_info=True)
+
         await self._cognitive.end_session(_agent_id, session_id, reflection=reflection)
 
         # Remove conversation + persisted state (008.1 Phase 3)
@@ -495,6 +525,7 @@ class AgentRunner:
         if self._cache_break_detector:  # F036
             self._cache_break_detector.reset()
         await self._delete_conversation_state(session_id)
+        return True
 
     # ------------------------------------------------------------------
     # API call

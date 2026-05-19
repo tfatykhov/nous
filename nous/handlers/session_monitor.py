@@ -144,31 +144,67 @@ class SessionTimeoutMonitor:
             except Exception:
                 logger.exception("Session monitor check failed")
 
-    async def _close_expired(self, session_id: str, agent_id: str) -> None:
+    async def _close_expired(
+        self,
+        session_id: str,
+        agent_id: str,
+        snapshot_idle_time: float,
+    ) -> bool:
         """Dispatch a single timed-out session closure on the canonical path.
 
         Used by _check_timeouts to fan out closures concurrently via gather.
         Exceptions propagate; the caller logs them per-future to keep error
         isolation (one stuck reflection cannot stop the others).
+
+        ``snapshot_idle_time`` is the value of ``_last_activity[session_id]``
+        captured when ``_check_timeouts`` decided to close. Passed as an
+        abort_if check into ``runner.end_conversation`` so a touch during the
+        slow reflection phase (15-30s LLM call) pre-empts the close before
+        any state mutation. Without this, a user resuming activity right as
+        the monitor is closing them would have their fresh in-flight turn
+        orphaned when reflection finishes and the close pops _conversations.
+
+        Returns True if the close went through, False if it was aborted by
+        resumed activity. Used by _check_timeouts to decide whether to drop
+        the session from tracking dicts.
         """
+        def _activity_resumed() -> bool:
+            current = self._last_activity.get(session_id)
+            if current is None:
+                return False
+            # Tolerance avoids floating-point equality issues; touch always
+            # bumps by at least a monotonic tick (orders of magnitude > 0.01).
+            return current > snapshot_idle_time + 0.01
+
         if self._runner is not None:
-            await self._runner.end_conversation(session_id, agent_id=agent_id)
-        elif self._cognitive is not None:
+            return await self._runner.end_conversation(
+                session_id, agent_id=agent_id, abort_if=_activity_resumed
+            )
+        if self._cognitive is not None:
+            # Fallback path (test fixtures / early startup) — no abort_if
+            # plumbing into cognitive.end_session, but the window is much
+            # smaller without the slow reflection LLM call.
+            if _activity_resumed():
+                logger.info(
+                    "Aborting fallback close of %s — activity resumed", session_id,
+                )
+                return False
             await self._cognitive.end_session(
                 agent_id=agent_id,
                 session_id=session_id,
                 reflection=None,
             )
-        else:
-            # Both unwired — should be unreachable in prod (main.py wires
-            # cognitive at construction and runner immediately after).
-            # Logged loudly so a future refactor that breaks the wiring
-            # surfaces a signal instead of silently leaking sessions.
-            logger.error(
-                "Session %s expired but no runner/cognitive available — "
-                "no cleanup performed (check main.py wiring)",
-                session_id,
-            )
+            return True
+        # Both unwired — should be unreachable in prod (main.py wires
+        # cognitive at construction and runner immediately after).
+        # Logged loudly so a future refactor that breaks the wiring
+        # surfaces a signal instead of silently leaking sessions.
+        logger.error(
+            "Session %s expired but no runner/cognitive available — "
+            "no cleanup performed (check main.py wiring)",
+            session_id,
+        )
+        return False
 
     async def _check_timeouts(self) -> None:
         """Check all tracked sessions for timeouts."""
@@ -186,7 +222,10 @@ class SessionTimeoutMonitor:
         # sweep + sleep_started detection — by the cumulative reflection
         # time when multiple sessions expire in the same tick. asyncio.gather
         # bounds the wait to the slowest single closure.
-        expired_pairs: list[tuple[str, str]] = []
+        # Each tuple carries the snapshot of _last_activity[sid] at decision
+        # time so the close path can detect a touch that landed mid-reflection
+        # and abort before mutating state.
+        expired: list[tuple[str, str, float]] = []
         for session_id, last in list(self._last_activity.items()):
             idle_seconds = now - last
             if idle_seconds > self._settings.session_idle_timeout:
@@ -198,13 +237,18 @@ class SessionTimeoutMonitor:
                     session_id,
                     int(idle_seconds),
                 )
-                expired_pairs.append((session_id, agent_id))
+                expired.append((session_id, agent_id, last))
 
-        if expired_pairs:
+        # Default: treat every expired session as eligible for tracking
+        # cleanup. Successful close confirms it; explicit abort or raise
+        # downgrades it (don't pop — let the resumed activity keep state).
+        closed: set[str] = {sid for sid, _, _ in expired}
+
+        if expired:
             results = await asyncio.gather(
                 *(
-                    self._close_expired(sid, aid)
-                    for sid, aid in expired_pairs
+                    self._close_expired(sid, aid, snap)
+                    for sid, aid, snap in expired
                 ),
                 return_exceptions=True,
             )
@@ -215,19 +259,22 @@ class SessionTimeoutMonitor:
             for result in results:
                 if isinstance(result, asyncio.CancelledError):
                     raise result
-            for (sid, _), result in zip(expired_pairs, results):
+            for (sid, _, _), result in zip(expired, results):
                 if isinstance(result, BaseException):
-                    # Failed closure: log + move on. Tracking-dict cleanup
-                    # below runs unconditionally — the F060 abandoned-episode
-                    # sleep phase is the backstop that recovers any episode
-                    # state that this raise left dangling.
+                    # Failed closure: log + drop from tracking. The F060
+                    # abandoned-episode sleep phase is the backstop that
+                    # recovers any episode state the raise left dangling.
                     logger.exception(
                         "Failed to end timed-out session %s",
                         sid,
                         exc_info=result,
                     )
+                elif result is False:
+                    # Aborted by resumed activity — session is live again,
+                    # leave tracking entry intact with the fresh touch.
+                    closed.discard(sid)
 
-        for sid, _ in expired_pairs:
+        for sid in closed:
             self._last_activity.pop(sid, None)
             self._last_agent.pop(sid, None)
 

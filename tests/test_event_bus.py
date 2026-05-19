@@ -1063,8 +1063,13 @@ class TestSessionTimeoutMonitor:
         # Runner.end_conversation is the canonical entry — assert it was
         # used and cognitive.end_session was NOT called directly (runner
         # invokes it internally, but the mocked runner doesn't, which is
-        # what makes this assertion meaningful).
-        runner.end_conversation.assert_called_once_with("sess-1", agent_id="agent-1")
+        # what makes this assertion meaningful). abort_if callback also
+        # passes through (Codex P1 #2 race fix).
+        runner.end_conversation.assert_called_once()
+        call = runner.end_conversation.call_args
+        assert call.args == ("sess-1",)
+        assert call.kwargs["agent_id"] == "agent-1"
+        assert callable(call.kwargs["abort_if"])
         cognitive.end_session.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1092,9 +1097,10 @@ class TestSessionTimeoutMonitor:
 
         await monitor._check_timeouts()
 
-        runner.end_conversation.assert_called_once_with(
-            "sess-late", agent_id="a-late"
-        )
+        runner.end_conversation.assert_called_once()
+        call = runner.end_conversation.call_args
+        assert call.args == ("sess-late",)
+        assert call.kwargs["agent_id"] == "a-late"
 
     @pytest.mark.asyncio
     async def test_idle_timeout_fans_out_concurrently(self):
@@ -1120,12 +1126,13 @@ class TestSessionTimeoutMonitor:
         gate = asyncio.Event()
         finish_order: list[str] = []
 
-        async def gated_close(session_id, agent_id=None):
+        async def gated_close(session_id, agent_id=None, abort_if=None):
             if session_id == "s1":
                 await asyncio.wait_for(gate.wait(), timeout=2.0)
             elif session_id == "s2":
                 gate.set()
             finish_order.append(session_id)
+            return True  # closed successfully
 
         runner = AsyncMock()
         runner.end_conversation.side_effect = gated_close
@@ -1145,6 +1152,10 @@ class TestSessionTimeoutMonitor:
         # s2 must finish before s1 — proves concurrency (s2 set the gate
         # that s1 was waiting on, so s2 returned before s1 unblocked).
         assert finish_order.index("s2") < finish_order.index("s1"), finish_order
+        # All sessions closed (gated_close returns None ≈ truthy from
+        # AsyncMock side_effect-perspective — but explicit confirmation:
+        # tracking should be empty since none of these sessions were touched
+        # during their close.
         assert monitor._last_activity == {}
         assert monitor._last_agent == {}
 
@@ -1164,9 +1175,10 @@ class TestSessionTimeoutMonitor:
         )
         runner = AsyncMock()
 
-        async def maybe_fail(session_id, agent_id=None):
+        async def maybe_fail(session_id, agent_id=None, abort_if=None):
             if session_id == "boom":
                 raise RuntimeError("simulated runner failure")
+            return True
 
         runner.end_conversation.side_effect = maybe_fail
 
@@ -1207,6 +1219,68 @@ class TestSessionTimeoutMonitor:
         assert monitor._last_agent["sess-touch"] == "agent-touch"
         # touch must also count as global activity (resets sleep timer).
         assert monitor._sleep_emitted is False
+
+    @pytest.mark.asyncio
+    async def test_close_aborts_when_touch_lands_during_reflection(self):
+        """28h-pre. Touch during _close_expired's reflection phase aborts the close.
+
+        Codex P1 #2 on PR #424: even with monitor.touch() at run_turn start,
+        a race remains inside runner.end_conversation itself — reflection is
+        a 15-30s LLM call, and a user message arriving during that window
+        sets _last_activity but the already-running close still pops
+        runner._conversations when reflection finishes.
+
+        Fix: _close_expired passes a snapshot of _last_activity at decision
+        time as an abort_if callback. The runner rechecks right before any
+        state mutation (post-reflection, pre-cognitive.end_session). On
+        abort, the close returns False and the monitor leaves tracking
+        entries intact (the fresh touch keeps the session live).
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=1, sleep_timeout=9999, sleep_check_interval=1
+        )
+
+        gate = asyncio.Event()
+        touch_complete = asyncio.Event()
+
+        async def slow_end_conversation(session_id, agent_id=None, abort_if=None):
+            # Simulate the reflection LLM call: park here while the test
+            # touches the session, then resume and consult abort_if exactly
+            # like the real runner does post-reflection.
+            await gate.wait()
+            assert abort_if is not None, "monitor must pass abort_if"
+            return not abort_if()
+
+        runner = AsyncMock()
+        runner.end_conversation.side_effect = slow_end_conversation
+
+        monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
+
+        # Stale session that will be selected as expired.
+        stale_time = time.monotonic() - 100
+        monitor._last_activity["live"] = stale_time
+        monitor._last_agent["live"] = "agent-1"
+
+        async def touch_then_release():
+            # Simulate the user resuming activity mid-reflection.
+            await asyncio.sleep(0.01)
+            monitor.touch("live", "agent-1")
+            touch_complete.set()
+            gate.set()  # release the parked close
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(monitor._check_timeouts())
+            tg.create_task(touch_then_release())
+
+        # Touch ran before close completed.
+        assert touch_complete.is_set()
+        # Close was aborted, so tracking still holds the session with the
+        # fresh touch timestamp.
+        assert "live" in monitor._last_activity
+        assert monitor._last_activity["live"] > stale_time
 
     @pytest.mark.asyncio
     async def test_touch_prevents_mid_turn_closure(self):
@@ -1300,9 +1374,10 @@ class TestSessionTimeoutMonitor:
 
         await monitor._check_timeouts()
 
-        runner.end_conversation.assert_called_once_with(
-            "orphan", agent_id="nous-default"
-        )
+        runner.end_conversation.assert_called_once()
+        call = runner.end_conversation.call_args
+        assert call.args == ("orphan",)
+        assert call.kwargs["agent_id"] == "nous-default"
 
     @pytest.mark.asyncio
     async def test_multiple_sessions_tracked_independently(self):

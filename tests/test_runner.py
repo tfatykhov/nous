@@ -472,6 +472,52 @@ async def test_run_turn_no_monitor_does_not_raise(runner):
     assert response_text == "Hello from Nous!"
 
 
+async def test_end_conversation_abort_if_skips_state_mutation(runner, mock_cognitive):
+    """abort_if=True after reflection prevents cognitive.end_session + _conversations pop.
+
+    Codex P1 #2 on PR #424: monitor passes abort_if so a user message that
+    lands during reflection (the 15-30s slow phase of close) pre-empts the
+    close before any state is mutated. Pins the contract.
+    """
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+    assert session_id in runner._conversations
+
+    closed = await runner.end_conversation(
+        session_id, abort_if=lambda: True
+    )
+
+    assert closed is False
+    # State preserved — session lives on, no end_session call.
+    assert session_id in runner._conversations
+    assert len(mock_cognitive.end_session_calls) == 0
+
+
+async def test_end_conversation_abort_if_false_proceeds(runner, mock_cognitive):
+    """abort_if=False (no activity resumed) still closes normally."""
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+
+    closed = await runner.end_conversation(
+        session_id, abort_if=lambda: False
+    )
+
+    assert closed is True
+    assert session_id not in runner._conversations
+    assert len(mock_cognitive.end_session_calls) == 1
+
+
+async def test_end_conversation_default_returns_true(runner, mock_cognitive):
+    """Manual /new path (no abort_if) still returns True and closes unconditionally."""
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+
+    closed = await runner.end_conversation(session_id)
+
+    assert closed is True
+    assert session_id not in runner._conversations
+
+
 async def test_end_conversation(runner, mock_cognitive):
     """Removes from dict, calls cognitive.end_session()."""
     session_id = f"test-{uuid.uuid4().hex[:8]}"
