@@ -810,6 +810,24 @@ class DAGOrchestrator:
             dag_id=dag.id
         )
         for node in ready_nodes:
+            # @codex P2 on 48589fd: count source (heart.subtasks) only sees
+            # subtask nodes — check/gate/callback nodes don't create a
+            # subtask row, so counting them against the cap would over-
+            # restrict and not counting them at all would let them bypass
+            # the cap. The conservative choice is to only ENFORCE the cap
+            # for subtask nodes: check/gate/callback always launch (they
+            # have no resource cost the cap is meant to bound).
+            if node.node_type != "subtask":
+                await self._store.update_node(node.id, status="ready")
+                node.status = "ready"
+                try:
+                    await self._launch_node(node, dag)
+                except Exception:
+                    logger.exception(
+                        "Failed to launch node %s in DAG %s", node.name, dag.id
+                    )
+                continue
+
             frame = node.frame_type if node.frame_type is not None else "_default"
             cap = caps.get(frame)
             if cap is not None and running_by_frame.get(frame, 0) >= cap:

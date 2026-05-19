@@ -521,6 +521,49 @@ class TestDispatchGating:
         assert statuses == ["completed", "running"]
 
     @pytest.mark.asyncio
+    async def test_check_nodes_bypass_frame_cap_enforcement(
+        self, store_caps_on, subtask_mgr_running, dynamic_loader
+    ):
+        """@codex P2 on 48589fd: cap enforcement applies only to subtask
+        nodes because the count source (heart.subtasks) doesn't see check/
+        gate/callback nodes. Check nodes always launch — they have no
+        resource cost the cap was meant to bound. Cap on the same frame
+        applies normally to subtask siblings."""
+        orchestrator = _orch(
+            store_caps_on, subtask_mgr_running, dynamic_loader, _settings_caps_on()
+        )
+        # 1 subtask + 2 check nodes, all frame=debug, cap debug=1.
+        # Subtask cap-enforces; both checks launch unconditionally.
+        nodes = [
+            DAGNodeSpec(
+                name="subtask-1", type=DAGNodeType.subtask,
+                instructions="work", frame_type="debug",
+            ),
+            DAGNodeSpec(
+                name="callback-1", type=DAGNodeType.callback,
+                instructions="callback work", frame_type="debug",
+            ),
+            DAGNodeSpec(
+                name="callback-2", type=DAGNodeType.callback,
+                instructions="more callback", frame_type="debug",
+            ),
+        ]
+        req = DAGCreateRequest(
+            name="mixed-frame-dag",
+            nodes=nodes,
+            max_concurrent_by_frame_type={"debug": 1},
+        )
+        dag = await store_caps_on.create(req)
+        await orchestrator.start_dag(dag.id)
+        fetched = await store_caps_on.get_dag(dag.id)
+        # The subtask runs (consumes the cap slot); both callbacks complete
+        # immediately (auto-complete in _launch_node) without affecting cap.
+        by_status = {n.name: n.status for n in fetched.nodes}
+        assert by_status["subtask-1"] == "running"
+        assert by_status["callback-1"] == "completed"
+        assert by_status["callback-2"] == "completed"
+
+    @pytest.mark.asyncio
     async def test_acceptance_scenario(
         self, store_caps_on, subtask_mgr_running, dynamic_loader
     ):
