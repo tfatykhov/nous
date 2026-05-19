@@ -448,6 +448,11 @@ class Procedure(Base):
     censor_ids = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=True)
     embedding = mapped_column(Vector(1536), nullable=True)
     tags = mapped_column(ARRAY(Text), nullable=True)
+    # F064.4: skill runtime hints (concurrency_cap, timeout_override_seconds,
+    # hooks, requires_human_review, schema_version). Always persisted when
+    # the SkillManifest declares any of the new fields; consumer wiring is
+    # deferred to F064.4-v2 gated by NOUS_SKILL_RUNTIME_METADATA_ENABLED.
+    runtime_metadata = mapped_column(JSONB, nullable=True)
     # search_tsv is GENERATED ALWAYS — do not map, read-only DB-side
     active: Mapped[bool | None] = mapped_column(Boolean, server_default="true")
     encoded_frame: Mapped[str | None] = mapped_column(String(100))

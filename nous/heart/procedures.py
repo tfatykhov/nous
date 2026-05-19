@@ -126,6 +126,10 @@ class ProcedureManager:
             tags=input.tags or None,
             embedding=embedding,
             active=input.active if input.active is not None else True,
+            # F064.4: always-persist semantic — runtime_metadata is None
+            # when the manifest didn't declare any of the new fields, but
+            # we don't gate on a flag at write time (silent-drop fix).
+            runtime_metadata=input.runtime_metadata,
         )
         session.add(procedure)
         await session.flush()
