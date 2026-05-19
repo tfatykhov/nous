@@ -355,6 +355,70 @@ class TestDispatchGating:
         assert len(running) == 2
 
     @pytest.mark.asyncio
+    async def test_deferred_wave_zero_node_relaunches_next_tick(
+        self, store_caps_on, dynamic_loader, db
+    ):
+        """@codex P1 on ab02178: wave-0 nodes arrive at dispatch in status='ready'.
+        If deferred, they MUST be requeued to 'pending' so _find_ready_nodes
+        picks them up on the next tick. Otherwise they're stuck in 'ready'
+        forever and the cap silently starves the bucket.
+        """
+        from datetime import UTC, datetime
+
+        from nous.storage.models import Subtask
+
+        # Use a fresh subtask manager whose subtasks transition completed
+        # so the deferred node can re-launch on tick 2.
+        completed_subtasks: dict = {}
+        subtask_mgr = AsyncMock()
+
+        async def _create(*args, **kwargs):
+            sid = uuid.uuid4()
+            completed_subtasks[sid] = "running"
+            return SimpleNamespace(id=sid, status="pending")
+
+        async def _get(subtask_id):
+            return SimpleNamespace(
+                id=subtask_id,
+                status=completed_subtasks.get(subtask_id, "running"),
+                result="ok",
+                error=None,
+                final_outcome=None,
+                report_jsonb=None,
+            )
+
+        subtask_mgr.create = _create
+        subtask_mgr.get = _get
+
+        orchestrator = _orch(
+            store_caps_on, subtask_mgr, dynamic_loader, _settings_caps_on()
+        )
+        req = _multi_frame_dag(
+            frames_count={"debug": 2},
+            caps={"debug": 1},
+        )
+        dag = await store_caps_on.create(req)
+        await orchestrator.start_dag(dag.id)
+
+        # After start_dag: 1 running, 1 deferred (must be pending, not ready)
+        fetched = await store_caps_on.get_dag(dag.id)
+        running_nodes = [n for n in fetched.nodes if n.status == "running"]
+        deferred_nodes = [n for n in fetched.nodes if n.status == "pending"]
+        assert len(running_nodes) == 1
+        assert len(deferred_nodes) == 1
+
+        # Complete the running subtask so its slot frees up.
+        first_subtask_id = running_nodes[0].subtask_id
+        completed_subtasks[first_subtask_id] = "completed"
+
+        # Tick again — deferred wave-0 node should now run.
+        await orchestrator.tick()
+        fetched = await store_caps_on.get_dag(dag.id)
+        # First node completed; second node is now running.
+        statuses = sorted(n.status for n in fetched.nodes)
+        assert statuses == ["completed", "running"]
+
+    @pytest.mark.asyncio
     async def test_acceptance_scenario(
         self, store_caps_on, subtask_mgr_running, dynamic_loader
     ):

@@ -748,8 +748,15 @@ class DAGOrchestrator:
             frame = node.frame_type if node.frame_type is not None else "_default"
             cap = caps.get(frame)
             if cap is not None and running_by_frame.get(frame, 0) >= cap:
-                # Defer to next tick. Node stays in 'pending' so it remains
-                # eligible to be picked by _find_ready_nodes on the next pass.
+                # @codex P1 on ab02178: wave-0 nodes arrive at this branch in
+                # status='ready' (set by store.create). _find_ready_nodes only
+                # picks up 'pending' nodes, so a deferred wave-0 node would be
+                # stuck in 'ready' forever. Demote the row to 'pending' on
+                # deferral — both wave-0 and wave-N use the same semantic
+                # afterward: deferred = pending, re-picked next tick.
+                if node.status == "ready":
+                    await self._store.update_node(node.id, status="pending")
+                    node.status = "pending"
                 logger.debug(
                     "F064.2: deferring node %s (frame=%s) — cap %d reached",
                     node.name, frame, cap,
