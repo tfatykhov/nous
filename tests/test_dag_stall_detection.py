@@ -598,6 +598,53 @@ class TestPingHelper:
         runner._dag_store.touch_node_activity.assert_called_once_with(node_id)
 
     @pytest.mark.asyncio
+    async def test_hardened_path_passes_dag_node_id_to_run_turn(self):
+        """@codex P1 on 2399032: when subtask_hardening_enabled=true the
+        worker takes the execute_hardened path, NOT _execute_legacy. The
+        dag_node_id kwarg must be plumbed through that path too — without
+        it, F064.1 stall pings never fire in production where hardening
+        is the default."""
+        from nous.config import Settings
+        from nous.handlers.subtask_executor import execute_hardened
+        from types import SimpleNamespace
+
+        node_id = uuid.uuid4()
+        captured: dict = {}
+
+        async def _spy_run_turn(**kwargs):
+            captured.update(kwargs)
+            # Return a tuple compatible with execute_hardened's expectation
+            return ("response", None, {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0})
+
+        runner_spy = SimpleNamespace(run_turn=_spy_run_turn)
+        heart_spy = SimpleNamespace()
+        settings = Settings(
+            agent_id="test-agent",
+            subtask_max_attempts=1,  # one attempt; spy returns text + no terminal
+        )
+        subtask = SimpleNamespace(
+            id=uuid.uuid4(),
+            task="do thing",
+            frame_type=None,
+            model=None,
+            output_format=None,
+            success_criteria=None,
+            dag_node_id=node_id,
+        )
+
+        try:
+            await execute_hardened(
+                subtask, "sess-x",
+                runner=runner_spy, heart=heart_spy, settings=settings,
+            )
+        except Exception:
+            # execute_hardened may raise downstream after the run_turn call;
+            # we only care that run_turn was invoked WITH dag_node_id.
+            pass
+
+        assert captured.get("dag_node_id") == node_id
+
+    @pytest.mark.asyncio
     async def test_ping_helper_swallows_store_error(self):
         """A write failure must NOT propagate — telemetry is best-effort."""
         import asyncio

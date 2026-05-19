@@ -96,6 +96,33 @@ b
         with pytest.raises(ValueError, match="timeout_override_seconds"):
             SkillParser().parse(md)
 
+    def test_parser_rejects_hooks_as_list(self):
+        """@codex P2 on 2399032: falsy non-dict hooks (empty list, empty
+        string) previously bypassed validation and coerced to {}. Now they
+        raise — no silent drop."""
+        md = """---
+name: bad-hooks
+description: d
+domain: testing
+hooks: [before_run, after_run]
+---
+## U
+"""
+        with pytest.raises(ValueError, match="hooks"):
+            SkillParser().parse(md)
+
+    def test_parser_rejects_hooks_as_string(self):
+        md = """---
+name: bad-hooks
+description: d
+domain: testing
+hooks: just a string
+---
+## U
+"""
+        with pytest.raises(ValueError, match="hooks"):
+            SkillParser().parse(md)
+
     def test_parser_accepts_requires_human_review_string_forms(self):
         for v in ["true", "True", "yes", "1"]:
             md = f"""---

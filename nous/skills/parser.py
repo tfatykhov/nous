@@ -284,13 +284,20 @@ class SkillParser:
             data.get("timeout_override_seconds"),
             field_name="timeout_override_seconds",
         )
-        raw_hooks = data.get("hooks", {})
-        if raw_hooks and not isinstance(raw_hooks, dict):
-            raise ValueError(
-                f"'hooks' must be a dict[str, str], got {type(raw_hooks).__name__}"
-            )
+        # @codex P2 on 2399032: validate hooks regardless of truthiness.
+        # Previously `if raw_hooks and not isinstance(raw_hooks, dict)`
+        # let falsy non-dict values (`hooks: []`, `hooks: ""`) bypass the
+        # type check and silently coerce to `{}` — reintroducing the
+        # silent-drop family the always-persist semantic was designed to
+        # close. Now: absent or explicit-None passes; everything else
+        # must be a dict.
+        raw_hooks = data.get("hooks")
         hooks: dict[str, str] = {}
-        if isinstance(raw_hooks, dict):
+        if raw_hooks is not None:
+            if not isinstance(raw_hooks, dict):
+                raise ValueError(
+                    f"'hooks' must be a dict[str, str], got {type(raw_hooks).__name__}"
+                )
             for k, v in raw_hooks.items():
                 if not isinstance(v, str):
                     raise ValueError(
