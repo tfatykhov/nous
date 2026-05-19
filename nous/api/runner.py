@@ -2009,7 +2009,15 @@ Rules:
             stall = await self._resolve_node_stall_timeout(dag_node_id)
             if stall <= 0:
                 return  # disabled for this node
-            interval = max(stall / 3.0, 30.0)
+            # @codex P1 on f967cb3: floor at 1.0s instead of 30s — the
+            # previous 30s floor made intervals too sparse for short
+            # per-node overrides (e.g. stall_timeout=10s → heartbeat
+            # every 30s never lands inside the 10s window). Now the
+            # cadence is always stall/3, with a 1s sanity floor to
+            # avoid pathological 0-interval loops. Write amplification
+            # is still bounded at ≤3 pings per stall window regardless
+            # of stall size.
+            interval = max(stall / 3.0, 1.0)
             await self._activity_heartbeat_loop(dag_node_id, interval)
 
         return loop.create_task(_bootstrap())
