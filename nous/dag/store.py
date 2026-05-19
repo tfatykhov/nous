@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from nous.config import Settings
 from nous.dag.schemas import DAGCreateRequest
 from nous.storage.database import Database
-from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG
+from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG, Subtask
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,9 @@ class DAGStore:
                 source=request.source,
                 original_request=request.original_request,
                 token_budget=request.token_budget,
+                # F064.2: per-DAG per-frame-type concurrency caps. NULL when
+                # the request omits the field — fully backward compatible.
+                max_concurrent_by_frame_type=request.max_concurrent_by_frame_type,
             )
             session.add(dag)
             await session.flush()  # Get dag.id
@@ -247,6 +250,29 @@ class DAGStore:
                 .values(**kwargs)
             )
             await session.commit()
+
+    async def count_running_subtasks_by_frame_type(self) -> dict[str, int]:
+        """F064.2: grouped count of agent-scoped running subtasks by frame_type.
+
+        Returns a dict {frame_type: count} including the "_default" bucket for
+        subtasks whose frame_type is NULL. Used by orchestrator dispatch gating
+        to enforce per-frame caps without keeping in-memory state across ticks.
+
+        Single grouped SELECT — mirrors heart/subtasks.py:293 count_by_status
+        pattern (verified equivalent at codex review time).
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(Subtask.frame_type, func.count())
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.status == "running")
+                .group_by(Subtask.frame_type)
+            )
+            out: dict[str, int] = {}
+            for frame, count in result.all():
+                key = frame if frame is not None else "_default"
+                out[key] = int(count)
+            return out
 
     async def touch_node_activity(self, node_id: UUID) -> None:
         """F064.1: Mark a DAGNode as recently active.

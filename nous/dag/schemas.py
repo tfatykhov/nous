@@ -133,6 +133,19 @@ class DAGCreateRequest(BaseModel):
     token_budget: int | None = Field(None, gt=0, description="Token budget for the entire DAG")
     nodes: list[DAGNodeSpec] = Field(..., min_length=1, description="Nodes in the DAG")
     edges: list[DAGEdgeSpec] = Field(default_factory=list, description="Edges between nodes")
+    # F064.2: per-DAG per-frame-type dispatch cap. None = no per-DAG cap
+    # (operators may still set NOUS_DAG_GLOBAL_MAX_CONCURRENT_BY_FRAME).
+    # Each value must be >= 1 — values < 1 would silently block the bucket.
+    max_concurrent_by_frame_type: dict[str, int] | None = Field(
+        None,
+        description=(
+            "Per-frame-type dispatch cap dict {frame_type: max_concurrent}. "
+            "When NOUS_DAG_FRAME_CONCURRENCY_ENABLED=true, the orchestrator "
+            "consults this dict (plus the env-var override) before launching "
+            "a wave. Missing frames are uncapped; nodes with frame_type=None "
+            "are bucketed under '_default'."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_dag(self) -> DAGCreateRequest:
@@ -146,6 +159,16 @@ class DAGCreateRequest(BaseModel):
         store-level check exclusively avoids a half-enforcement that misses
         the default-applies case.
         """
+        # F064.2: every per-frame cap must be a positive integer. A 0 would
+        # silently block all DAGs of that frame — fail fast at construction.
+        if self.max_concurrent_by_frame_type is not None:
+            for frame, cap in self.max_concurrent_by_frame_type.items():
+                if cap < 1:
+                    raise ValueError(
+                        f"max_concurrent_by_frame_type['{frame}']={cap} is invalid; "
+                        "values must be >= 1"
+                    )
+
         # --- max nodes ---
         if len(self.nodes) > MAX_NODES:
             raise ValueError(f"DAG cannot have more than {MAX_NODES} nodes (got {len(self.nodes)})")

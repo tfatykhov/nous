@@ -92,10 +92,13 @@ class DAGOrchestrator:
             if dag is None:
                 return
 
-            # Launch wave-0 ready nodes
-            for node in dag.nodes:
-                if node.status == "ready":
-                    await self._launch_node(node, dag)
+            # F064.2: route wave-0 launches through _dispatch_ready_nodes so
+            # per-frame-type concurrency caps apply on the very first tick.
+            # When the flag is off, the helper falls back to today's behavior
+            # (launch every ready node). Per-node try/except inside the helper
+            # also gives us the silent-failure P1-6 guarantee on this path.
+            wave_zero = [n for n in dag.nodes if n.status == "ready"]
+            await self._dispatch_ready_nodes(dag, wave_zero)
 
     async def cancel_dag(self, dag_id: UUID, reason: str = "cancelled") -> None:
         """Cancel a DAG and all non-terminal nodes."""
@@ -222,12 +225,10 @@ class DAGOrchestrator:
         # 3. Propagate failures
         await self._propagate_failures(dag)
 
-        # 4. Find and launch ready nodes
+        # 4. Find and launch ready nodes (F064.2 dispatch with optional per-
+        # frame caps; falls back to legacy behavior when flag is off).
         ready_nodes = self._find_ready_nodes(dag)
-        for node in ready_nodes:
-            await self._store.update_node(node.id, status="ready")
-            node.status = "ready"  # Update in-memory too
-            await self._launch_node(node, dag)
+        await self._dispatch_ready_nodes(dag, ready_nodes)
 
         # 5. Check if DAG is complete
         await self._check_dag_completion(dag)
@@ -676,6 +677,101 @@ class DAGOrchestrator:
                 node.id, status="blocked", error="Predecessor failed"
             )
             node.status = "blocked"
+
+    def _effective_frame_caps(self, dag: ExecutionDAG) -> dict[str, int]:
+        """F064.2: resolve the effective per-frame-type caps for this DAG.
+
+        Operator-level env override wins over per-DAG when set (matches
+        Symphony §8.3 "per-state limit takes precedence over global limit"
+        semantics, except here it's a hierarchical merge rather than
+        replacement so unset frames keep per-DAG caps).
+
+        Returns an empty dict when neither source has caps — caller skips
+        gating entirely and dispatches as before (today's behavior).
+        """
+        per_dag = dag.max_concurrent_by_frame_type or {}
+        env_override = self._settings.dag_global_max_concurrent_by_frame or {}
+        if not per_dag and not env_override:
+            return {}
+        # Env override takes precedence per-frame; per-DAG fills the rest.
+        merged = dict(per_dag)
+        merged.update(env_override)
+        return merged
+
+    async def _dispatch_ready_nodes(
+        self, dag: ExecutionDAG, ready_nodes: list[DAGNode]
+    ) -> None:
+        """F064.2: gated dispatch of ready nodes with per-frame-type concurrency caps.
+
+        Backward-compatible: when dag_frame_concurrency_enabled=False or no
+        caps are configured, dispatches every ready node in the same tick —
+        identical to pre-F064.2 behavior.
+
+        When caps are active, consults a single grouped SELECT on
+        heart.subtasks at the start of the tick, then accumulates in-memory
+        for each successful launch so we don't over-dispatch within one tick
+        (the DB count won't refresh between awaits inside the same tick).
+
+        Per-node try/except wraps _launch_node in both legacy and capped paths
+        (review silent-failure P1-6 / conventions P2-6) — a single failed
+        launch logs+continues so the remaining wave still dispatches.
+        """
+        # Backward-compat: flag off → legacy behavior, just with the new
+        # per-node error guard. No DB count, no caps.
+        if not self._settings.dag_frame_concurrency_enabled:
+            for node in ready_nodes:
+                await self._store.update_node(node.id, status="ready")
+                node.status = "ready"
+                try:
+                    await self._launch_node(node, dag)
+                except Exception:
+                    logger.exception(
+                        "Failed to launch node %s in DAG %s", node.name, dag.id
+                    )
+            return
+
+        caps = self._effective_frame_caps(dag)
+        if not caps:
+            for node in ready_nodes:
+                await self._store.update_node(node.id, status="ready")
+                node.status = "ready"
+                try:
+                    await self._launch_node(node, dag)
+                except Exception:
+                    logger.exception(
+                        "Failed to launch node %s in DAG %s", node.name, dag.id
+                    )
+            return
+
+        running_by_frame = await self._store.count_running_subtasks_by_frame_type()
+        for node in ready_nodes:
+            frame = node.frame_type if node.frame_type is not None else "_default"
+            cap = caps.get(frame)
+            if cap is not None and running_by_frame.get(frame, 0) >= cap:
+                # Defer to next tick. Node stays in 'pending' so it remains
+                # eligible to be picked by _find_ready_nodes on the next pass.
+                logger.debug(
+                    "F064.2: deferring node %s (frame=%s) — cap %d reached",
+                    node.name, frame, cap,
+                )
+                continue
+            await self._store.update_node(node.id, status="ready")
+            node.status = "ready"
+            try:
+                await self._launch_node(node, dag)
+            except Exception:
+                logger.exception(
+                    "Failed to launch node %s in DAG %s", node.name, dag.id
+                )
+                # Slot wasn't consumed — don't bump the accumulator.
+                continue
+            # _launch_subtask_node swallows its own exceptions internally and
+            # sets node.status="failed". Only bump the accumulator when the
+            # launch actually produced a 'running' subtask. Other terminal
+            # outcomes (callback/gate set status="completed", subtask launch
+            # error sets "failed") don't consume a running-slot.
+            if node.status == "running":
+                running_by_frame[frame] = running_by_frame.get(frame, 0) + 1
 
     def _find_ready_nodes(self, dag: ExecutionDAG) -> list[DAGNode]:
         """Find pending nodes whose all dependency/context_flow predecessors are completed."""
