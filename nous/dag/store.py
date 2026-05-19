@@ -70,6 +70,16 @@ class DAGStore:
                     spec.timeout_seconds if spec.timeout_seconds is not None else self._settings.dag_node_default_timeout,
                     self._settings.dag_node_max_timeout,
                 )
+                # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
+                # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT.
+                resolved_stall: int | None
+                if spec.stall_timeout_seconds is None or spec.stall_timeout_seconds == 0:
+                    resolved_stall = spec.stall_timeout_seconds  # preserve None vs 0
+                else:
+                    resolved_stall = min(
+                        spec.stall_timeout_seconds,
+                        self._settings.dag_node_max_stall_timeout,
+                    )
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,
@@ -86,6 +96,7 @@ class DAGStore:
                     completion_check=spec.completion_check,
                     completion_check_interval=spec.completion_check_interval,
                     max_check_attempts=spec.max_check_attempts,
+                    stall_timeout_seconds=resolved_stall,
                 )
                 session.add(node)
                 node_map[spec.name] = node
@@ -223,6 +234,32 @@ class DAGStore:
                 .values(**kwargs)
             )
             await session.commit()
+
+    async def touch_node_activity(self, node_id: UUID) -> None:
+        """F064.1: Mark a DAGNode as recently active.
+
+        Called by runner._tool_loop on every iteration boundary (top-of-loop,
+        before tool dispatch) and by orchestrator._launch_subtask_node at node
+        launch. Fire-and-forget — the caller wraps under asyncio.shield so a
+        wait_for timeout doesn't cancel an in-flight ping.
+
+        A write failure is logged at DEBUG and swallowed. Stall scan treats
+        NULL/stale last_activity_at as not-stalled (wall-clock is the fallback),
+        so a dropped ping cannot manufacture a false stall.
+
+        Single UPDATE keyed by primary key — write amplification is bounded
+        per the partial index on (last_activity_at) WHERE status='running'.
+        """
+        try:
+            async with self._db.session() as session:
+                await session.execute(
+                    update(DAGNode)
+                    .where(DAGNode.id == node_id)
+                    .values(last_activity_at=datetime.now(UTC))
+                )
+                await session.commit()
+        except Exception:
+            logger.debug("touch_node_activity failed for node %s", node_id, exc_info=True)
 
     async def update_dag_tokens(self, dag_id: UUID, tokens: int) -> None:
         """Increment tokens_consumed on a DAG."""

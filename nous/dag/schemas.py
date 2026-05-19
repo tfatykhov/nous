@@ -93,6 +93,20 @@ class DAGNodeSpec(BaseModel):
         None, ge=1,
         description="Max poll attempts before failure. Default: unlimited (timeout-based)."
     )
+    # F064.1: stall detection. None or 0 = disabled (today's behavior; matches
+    # Symphony §8.5 semantics for stall_timeout_ms <= 0). When > 0, the
+    # orchestrator marks the node failed if (now - last_activity_at) exceeds
+    # this many seconds. Must be <= the effective wall-clock timeout — see
+    # the cross-validator on DAGCreateRequest.
+    stall_timeout_seconds: int | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Stall timeout (seconds). None or 0 disables stall detection for this node. "
+            "When > 0, the orchestrator fails the node if no activity ping arrived within "
+            "this window. Clamped to NOUS_DAG_NODE_MAX_STALL_TIMEOUT at insert."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +131,25 @@ class DAGCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_dag(self) -> DAGCreateRequest:
-        """Validate DAG structure: unique names, valid edges, no cycles, wave/parallel limits."""
+        """Validate DAG structure: unique names, valid edges, no cycles, wave/parallel limits.
+
+        F064.1 addition: a node that sets stall_timeout_seconds AND timeout_seconds
+        must satisfy stall <= timeout. The stall scan is bounded by the wall-clock
+        timeout (which the existing _effective_timeout enforces), so a stall value
+        larger than the wall-clock would never actually fire — silent dead config.
+        Reject at insert time.
+        """
+        for n in self.nodes:
+            if (
+                n.stall_timeout_seconds is not None
+                and n.stall_timeout_seconds > 0
+                and n.timeout_seconds is not None
+                and n.stall_timeout_seconds > n.timeout_seconds
+            ):
+                raise ValueError(
+                    f"Node '{n.name}': stall_timeout_seconds={n.stall_timeout_seconds} "
+                    f"must be <= timeout_seconds={n.timeout_seconds}"
+                )
         # --- max nodes ---
         if len(self.nodes) > MAX_NODES:
             raise ValueError(f"DAG cannot have more than {MAX_NODES} nodes (got {len(self.nodes)})")

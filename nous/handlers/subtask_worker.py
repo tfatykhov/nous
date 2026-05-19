@@ -310,6 +310,11 @@ class SubtaskWorkerPool:
 
         system_prefix = build_subtask_prefix(subtask.task, subtask.frame_type)
 
+        # F064.1: surface dag_node_id (populated by F061 PR-3 from
+        # orchestrator._launch_subtask_node) so the runner can fire activity
+        # pings. None for non-DAG subtasks — the ping helper is no-op safe.
+        _dag_node_id = getattr(subtask, "dag_node_id", None)
+
         try:
             response_text, _turn_ctx, _usage = await self._runner.run_turn(
                 session_id=session_id,
@@ -321,6 +326,7 @@ class SubtaskWorkerPool:
                 max_tool_calls=self._settings.subtask_tool_call_limit,
                 model_override=subtask.model or self._settings.background_model,
                 is_background=True,
+                dag_node_id=_dag_node_id,
             )
             # F061 PR-1: record outcome on legacy path so dashboard rows
             # are never NULL between PR-1 ship and PR-2 hardened-executor ship.

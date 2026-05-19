@@ -683,6 +683,11 @@ async def create_components(settings: Settings) -> dict:
             from nous.api.tools import register_dag_tools
             register_dag_tools(dispatcher, dag_store, dag_orchestrator)
 
+            # F064.1: late-bind DAGStore so runner._tool_loop can fire
+            # activity pings to dag_nodes.last_activity_at for subtasks
+            # running under a DAG node.
+            runner.set_dag_store(dag_store)
+
             logger.info("F038: DAG orchestration enabled")
         except ImportError:
             logger.debug("F038: DAG module not available yet")

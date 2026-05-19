@@ -14,6 +14,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
+from uuid import UUID
 
 from nous.api.anthropic_client import (
     AnthropicClient,
@@ -89,6 +90,11 @@ class AgentRunner:
         self._api: AnthropicClient | None = None
         self._api_shared: bool = False  # True if client was externally provided
         self._dispatcher: Any | None = None  # ToolDispatcher, set via set_dispatcher()
+        # F064.1: DAGStore reference for fire-and-forget activity pings.
+        # Late-bound via set_dag_store() because DAGStore is built later in
+        # main.py wiring and not every consumer (chat session, tests) needs
+        # it. None disables pings — _ping_dag_node_activity short-circuits.
+        self._dag_store: Any | None = None
 
         # Compaction (Spec 008.1)
         self._compactor: ConversationCompactor | None = None
@@ -206,6 +212,15 @@ class AgentRunner:
         """Set the tool dispatcher for tool loop execution."""
         self._dispatcher = dispatcher
 
+    def set_dag_store(self, dag_store: Any) -> None:
+        """F064.1: late-bind the DAGStore for activity-ping writes.
+
+        Wired in main.py after DAGStore is constructed. None-safe — the
+        ping helper short-circuits when this isn't set, so chat sessions
+        and tests without DAG infra continue to work unchanged.
+        """
+        self._dag_store = dag_store
+
     def set_api_client(self, client: AnthropicClient) -> None:
         """Set a pre-initialized API client (shared with handlers)."""
         self._api = client
@@ -275,6 +290,11 @@ class AgentRunner:
         # ToolDispatcher (so no leak risk on crash).
         extra_tools: dict[str, tuple[dict, Any]] | None = None,
         force_tool_on_penultimate: str | None = None,
+        # F064.1: when the caller is the DAG-managed subtask worker, this
+        # carries the DAGNode.id so _tool_loop can fire activity pings to
+        # `dag_nodes.last_activity_at`. None on chat / non-DAG paths — ping
+        # site short-circuits.
+        dag_node_id: UUID | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -435,6 +455,7 @@ class AgentRunner:
                     is_background=is_background,
                     extra_tools=extra_tools,
                     force_tool_on_penultimate=force_tool_on_penultimate,
+                    dag_node_id=dag_node_id,
                 )
                 conversation.messages.append(Message(role="assistant", content=response_text))
             except Exception as e:
@@ -1306,6 +1327,7 @@ class AgentRunner:
         # F061: per-call tool injection + forced terminal tool gating.
         extra_tools: dict[str, tuple[dict, Any]] | None = None,
         force_tool_on_penultimate: str | None = None,
+        dag_node_id: UUID | None = None,  # F064.1: activity-ping target
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1369,6 +1391,12 @@ class AgentRunner:
         _force_fires_remaining = 2
 
         while turns < max_turns:
+            # F064.1 ping site 1 — top of every iteration. Fires for both
+            # tool-using and text-only turns. asyncio.shield prevents a
+            # wait_for cancellation from killing an in-flight ping write.
+            if dag_node_id is not None:
+                self._ping_dag_node_activity(dag_node_id)
+
             # F020: Rebuild tool list each iteration for dynamic cache_retrieve
             tools = list(base_tools)
             # F061: append per-call extra tool schemas (NOT registered globally).
@@ -1539,6 +1567,12 @@ class AgentRunner:
                             if not is_error:
                                 terminate_after_tool_results = True
                         else:
+                            # F064.1 ping site 2 — immediately before tool
+                            # dispatch. Pins last_activity_at to NOW so a long-
+                            # running tool (e.g. 45-min bash build) does not
+                            # trip the stall scan mid-execution.
+                            if dag_node_id is not None:
+                                self._ping_dag_node_activity(dag_node_id)
                             result_text, is_error = await self._dispatcher.dispatch(
                                 tool_name, tool_input, session_id=session_id
                             )
@@ -1857,6 +1891,28 @@ Rules:
             if block.get("type") == "text":
                 text_parts.append(block["text"])
         return "\n".join(text_parts) if text_parts else ""
+
+    def _ping_dag_node_activity(self, dag_node_id: UUID) -> None:
+        """F064.1: fire-and-forget activity ping for stall detection.
+
+        Wrapped in asyncio.shield so a wait_for cancellation in the outer
+        subtask path can't cancel the in-flight UPDATE. A write failure is
+        absorbed by DAGStore.touch_node_activity (DEBUG log, swallowed) so
+        the tool loop never blocks or raises because of telemetry.
+
+        No-op when _dag_store hasn't been wired (chat path, tests without
+        DAG infra). Called from _tool_loop's two ping sites; the third
+        baseline ping fires from orchestrator._launch_subtask_node.
+        """
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return
+        try:
+            asyncio.create_task(asyncio.shield(store.touch_node_activity(dag_node_id)))
+        except RuntimeError:
+            # No running event loop — happens in some test paths. Silent
+            # by design; the stall scan's NULL-fallback policy covers us.
+            pass
 
     def _check_safety_net(
         self,

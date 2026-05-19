@@ -194,12 +194,18 @@ class DAGOrchestrator:
     # ------------------------------------------------------------------
 
     async def _advance_dag(self, dag: ExecutionDAG) -> None:
-        """Core state machine: sync → budget → failures → launch → complete."""
+        """Core state machine: sync → stall → budget → failures → launch → complete."""
         # 1. Sync node statuses from underlying primitives
         await self._sync_node_statuses(dag)
 
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
+
+        # 1.7 F064.1: Stall detection. Runs after sync (so just-completed
+        # nodes are no longer 'running') and before failure-propagation
+        # (so a node marked stalled here cascades on the same tick).
+        if self._settings.dag_stall_detection_enabled:
+            await self._check_stalled_nodes(dag)
 
         # 2. Check token budget
         if dag.token_budget:
@@ -519,6 +525,65 @@ class DAGOrchestrator:
         """
         return min(node.timeout_seconds, self._settings.dag_node_max_timeout)
 
+    def _effective_stall_timeout(self, node: DAGNode) -> int | None:
+        """F064.1: resolve per-node stall timeout, applying defaults/clamps.
+
+        Returns None when stall detection should be skipped for this node.
+        - node.stall_timeout_seconds is None → fall back to settings default
+          (which may itself be 0 → disabled)
+        - node.stall_timeout_seconds is 0 → explicitly disabled per Symphony §8.5
+        - otherwise clamp to settings.dag_node_max_stall_timeout
+        """
+        per_node = node.stall_timeout_seconds
+        if per_node is None:
+            default = self._settings.dag_node_default_stall_timeout
+            return default if default > 0 else None
+        if per_node == 0:
+            return None
+        return min(per_node, self._settings.dag_node_max_stall_timeout)
+
+    async def _check_stalled_nodes(self, dag: ExecutionDAG) -> None:
+        """F064.1: mark running nodes failed when no activity ping arrived in time.
+
+        Policy (plan §4.3):
+        - Only inspects status='running' nodes (sync already moved completed ones)
+        - NULL last_activity_at → NOT flagged (wall-clock is the fallback). This
+          covers (a) brand-new nodes between launch and first ping and (b) the
+          legitimate case where all three ping sites failed silently.
+        - Cascade is left to the existing _propagate_failures call later in the
+          same tick — we just flip status to failed here.
+        """
+        now = datetime.now(UTC)
+        for node in dag.nodes:
+            if node.status != "running":
+                continue
+            stall = self._effective_stall_timeout(node)
+            if stall is None:
+                continue
+            last = node.last_activity_at
+            if last is None:
+                # No ping yet — treat as not-stalled. Wall-clock timeout is
+                # the fallback. See plan §4.3 NULL-fallback policy.
+                continue
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=UTC)
+            elapsed = (now - last).total_seconds()
+            if elapsed > stall:
+                error_msg = f"stalled: no activity for {elapsed:.0f}s (limit {stall}s)"
+                logger.warning(
+                    "F064.1: marking node %s (dag %s) failed — %s",
+                    node.name, dag.id, error_msg,
+                )
+                await self._store.update_node(
+                    node.id,
+                    status="failed",
+                    error=error_msg,
+                    completed_at=now,
+                )
+                node.status = "failed"
+                node.error = error_msg
+                node.completed_at = now
+
     async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
         """Read result from status file convention, fall back to node's existing result."""
         status_dir = DAG_STATUS_BASE_DIR / dag.id.hex[:8] / node.name
@@ -672,13 +737,20 @@ class DAGOrchestrator:
                 metadata={"dag_id": str(dag.id), "node_name": node.name},
                 dag_node_id=node.id,
             )
+            now = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="running",
                 subtask_id=subtask.id,
-                started_at=datetime.now(UTC),
+                started_at=now,
+                # F064.1: baseline activity ping at launch. Without this, the
+                # stall scan sees last_activity_at=NULL and never flags — but
+                # we want a node that fails before its first tool call (e.g.
+                # bootstrap error) to also surface via the stall path.
+                last_activity_at=now,
             )
             node.status = "running"
+            node.last_activity_at = now
             logger.info(
                 "Launched subtask %s for node %s in DAG %s",
                 subtask.id, node.name, dag.id,
