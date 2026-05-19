@@ -472,6 +472,64 @@ async def test_run_turn_no_monitor_does_not_raise(runner):
     assert response_text == "Hello from Nous!"
 
 
+async def test_run_turn_and_end_conversation_serialize(runner, mock_cognitive):
+    """run_turn and end_conversation must NOT interleave for the same session.
+
+    Codex P1 #3 on PR #424: abort_if was a point-in-time check, but
+    cognitive.end_session has internal awaits during which a fresh run_turn
+    could start and modify state that end_conversation then popped. The
+    per-session lock makes the whole mutation block exclusive.
+
+    Test: start a slow run_turn (block on event), kick off end_conversation
+    concurrently, assert end_conversation does NOT touch cognitive.end_session
+    until run_turn has released the lock.
+    """
+    import asyncio
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+
+    # Make _tool_loop block on a gate so we can race end_conversation against it.
+    gate = asyncio.Event()
+    timeline: list[str] = []
+
+    async def gated_tool_loop(*args, **kwargs):
+        timeline.append("run_turn.tool_loop.enter")
+        await gate.wait()
+        timeline.append("run_turn.tool_loop.exit")
+        return ("ok", [], {"input_tokens": 0, "output_tokens": 0}, [])
+
+    runner._tool_loop = _AsyncMock(side_effect=gated_tool_loop)
+
+    async def trace_end_session(*args, **kwargs):
+        timeline.append("end_conversation.cognitive.end_session")
+
+    mock_cognitive.end_session = trace_end_session
+
+    async def slow_turn():
+        await runner.run_turn(session_id, "hello")
+
+    async def parallel_close():
+        # Give run_turn a head start so it grabs the lock first.
+        await asyncio.sleep(0.05)
+        timeline.append("end_conversation.start")
+        await runner.end_conversation(session_id)
+        timeline.append("end_conversation.return")
+
+    async def release_after_delay():
+        await asyncio.sleep(0.15)
+        gate.set()
+
+    await asyncio.gather(slow_turn(), parallel_close(), release_after_delay())
+
+    # Run_turn must release the lock before end_conversation enters its
+    # critical section. Specifically, cognitive.end_session must execute
+    # AFTER run_turn.tool_loop.exit.
+    exit_idx = timeline.index("run_turn.tool_loop.exit")
+    cognitive_idx = timeline.index("end_conversation.cognitive.end_session")
+    assert cognitive_idx > exit_idx, timeline
+
+
 async def test_end_conversation_abort_if_skips_state_mutation(runner, mock_cognitive):
     """abort_if=True after reflection prevents cognitive.end_session + _conversations pop.
 
