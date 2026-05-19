@@ -1940,32 +1940,46 @@ Rules:
         stall_timeout=60 and global default=600 would get heartbeats every
         200s and trip stall mid-dispatch every time.
 
+        @codex P2 on d5e64ca: clamp per-node values to
+        NOUS_DAG_NODE_MAX_STALL_TIMEOUT to mirror what the orchestrator's
+        _effective_stall_timeout does. Without this, a legacy/manual row
+        with stall_timeout exceeding the current max ceiling would get
+        heartbeats based on the raw value, but the orchestrator scan uses
+        the clamped value — cadence would be too slow for the actual
+        enforced window.
+
         Reads the node's persisted stall_timeout_seconds; falls back to the
         global default (or to settings ceiling if the per-node is 0/None).
         On any error, returns the global default as a safe fallback.
         """
         global_default = self._settings.dag_node_default_stall_timeout
+        max_cap = self._settings.dag_node_max_stall_timeout
         store = getattr(self, "_dag_store", None)
         if store is None:
-            return global_default
+            return min(global_default, max_cap)
         try:
             from nous.storage.models import DAGNode
 
             async with store._db.session() as session:
                 row = await session.get(DAGNode, dag_node_id)
                 if row is None:
-                    return global_default
+                    return min(global_default, max_cap)
                 per_node = row.stall_timeout_seconds
                 if per_node is None:
-                    return global_default if global_default > 0 else 0
+                    if global_default <= 0:
+                        return 0
+                    return min(global_default, max_cap)
                 # Per-node 0 = explicitly disabled → return 0; caller skips.
-                return per_node
+                if per_node == 0:
+                    return 0
+                # Apply the same clamp the orchestrator uses.
+                return min(per_node, max_cap)
         except Exception:
             logger.debug(
                 "F064.1 stall-timeout lookup failed; using global default",
                 exc_info=True,
             )
-            return global_default
+            return min(global_default, max_cap)
 
     def _start_activity_heartbeat(
         self, dag_node_id: UUID

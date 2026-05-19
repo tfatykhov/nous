@@ -728,6 +728,62 @@ class TestPingHelper:
         assert resolved == 60  # global default
 
     @pytest.mark.asyncio
+    async def test_resolve_node_stall_timeout_clamps_per_node_to_max(
+        self, db, subtask_mgr, dynamic_loader
+    ):
+        """@codex P2 on d5e64ca: per-node stall above max ceiling must be
+        clamped to the ceiling — matches what the orchestrator's
+        _effective_stall_timeout does. Otherwise heartbeat cadence would
+        be slower than the actual enforced window."""
+        from nous.api.runner import AgentRunner
+
+        # Settings with default=120, max=300. Persist per-node=500 (above max).
+        # Orchestrator _effective_stall_timeout would clamp 500→300.
+        # The resolver must do the same.
+        s = Settings(
+            dag_stall_detection_enabled=True,
+            dag_node_default_stall_timeout=120,
+            dag_node_max_stall_timeout=300,
+            dag_node_default_timeout=600,  # leave room for the per-node
+            dag_node_max_timeout=7200,
+        )
+        store = DAGStore(db, f"test-clamp-{uuid.uuid4().hex[:8]}", s)
+        # We need to bypass the store's own clamp at create() — write the
+        # row with raw stall_timeout via the ORM directly to simulate a
+        # legacy / direct-DB-write row.
+        from nous.dag.schemas import DAGCreateRequest, DAGNodeSpec, DAGNodeType
+        req = DAGCreateRequest(
+            name="clamp-test",
+            nodes=[
+                DAGNodeSpec(
+                    name="step",
+                    type=DAGNodeType.subtask,
+                    timeout_seconds=600,  # leave headroom for the post-clamp value
+                    stall_timeout_seconds=250,  # store clamps to min(250, 300)=250 OK
+                ),
+            ],
+        )
+        dag = await store.create(req)
+        node = dag.nodes[0]
+        # Directly mutate to simulate a legacy out-of-range row.
+        async with db.session() as session:
+            from nous.storage.models import DAGNode
+            from sqlalchemy import update
+            await session.execute(
+                update(DAGNode).where(DAGNode.id == node.id).values(
+                    stall_timeout_seconds=500
+                )
+            )
+            await session.commit()
+
+        runner = MagicMock(spec=AgentRunner)
+        runner._dag_store = store
+        runner._settings = s
+        resolved = await AgentRunner._resolve_node_stall_timeout(runner, node.id)
+        # 500 must be clamped to max=300
+        assert resolved == 300
+
+    @pytest.mark.asyncio
     async def test_resolve_node_stall_timeout_handles_missing_node(self):
         """Bogus UUID → global default fallback (safe)."""
         from nous.api.runner import AgentRunner
