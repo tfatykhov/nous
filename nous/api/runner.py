@@ -1934,6 +1934,39 @@ Rules:
         except asyncio.CancelledError:
             raise
 
+    async def _resolve_node_stall_timeout(self, dag_node_id: UUID) -> int:
+        """@codex P1 on 93b8570: heartbeat cadence must respect the per-node
+        stall_timeout, not the global default. Otherwise a node with
+        stall_timeout=60 and global default=600 would get heartbeats every
+        200s and trip stall mid-dispatch every time.
+
+        Reads the node's persisted stall_timeout_seconds; falls back to the
+        global default (or to settings ceiling if the per-node is 0/None).
+        On any error, returns the global default as a safe fallback.
+        """
+        global_default = self._settings.dag_node_default_stall_timeout
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return global_default
+        try:
+            from nous.storage.models import DAGNode
+
+            async with store._db.session() as session:
+                row = await session.get(DAGNode, dag_node_id)
+                if row is None:
+                    return global_default
+                per_node = row.stall_timeout_seconds
+                if per_node is None:
+                    return global_default if global_default > 0 else 0
+                # Per-node 0 = explicitly disabled → return 0; caller skips.
+                return per_node
+        except Exception:
+            logger.debug(
+                "F064.1 stall-timeout lookup failed; using global default",
+                exc_info=True,
+            )
+            return global_default
+
     def _start_activity_heartbeat(
         self, dag_node_id: UUID
     ) -> "asyncio.Task | None":
@@ -1945,20 +1978,27 @@ Rules:
         store = getattr(self, "_dag_store", None)
         if store is None:
             return None
-        # Heartbeat at 1/3 of the default stall_timeout, min 30s. This keeps
-        # write amplification bounded (≤3 pings per stall window) while
-        # ensuring at least one ping lands within the window for any tool
-        # call that runs longer than stall_timeout.
-        base = self._settings.dag_node_default_stall_timeout
-        if base <= 0:
-            return None
-        interval = max(base / 3.0, 30.0)
+        # Heartbeat at 1/3 of the effective stall_timeout, min 30s. This
+        # keeps write amplification bounded (≤3 pings per stall window)
+        # while ensuring at least one ping lands within the window for
+        # ANY node — including short per-node overrides.
+        # @codex P1 on 93b8570: previous version used the global default
+        # which under-pinged per-node stall_timeout overrides shorter
+        # than that default. Now: resolve the effective per-node value
+        # at heartbeat start via async DB lookup, with safe fallback.
         try:
-            return asyncio.create_task(
-                self._activity_heartbeat_loop(dag_node_id, interval)
-            )
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             return None
+
+        async def _bootstrap() -> None:
+            stall = await self._resolve_node_stall_timeout(dag_node_id)
+            if stall <= 0:
+                return  # disabled for this node
+            interval = max(stall / 3.0, 30.0)
+            await self._activity_heartbeat_loop(dag_node_id, interval)
+
+        return loop.create_task(_bootstrap())
 
     @staticmethod
     async def _stop_activity_heartbeat(task: "asyncio.Task | None") -> None:

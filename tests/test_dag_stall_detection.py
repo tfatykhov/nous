@@ -691,6 +691,56 @@ class TestPingHelper:
         assert runner._dag_store.touch_node_activity.call_count >= 2
 
     @pytest.mark.asyncio
+    async def test_resolve_node_stall_timeout_returns_per_node_override(
+        self, store_stall_on, subtask_mgr, dynamic_loader
+    ):
+        """@codex P1 on 93b8570: heartbeat cadence must respect per-node
+        stall_timeout, not global default. _resolve_node_stall_timeout
+        returns the persisted per-node value when set."""
+        from nous.api.runner import AgentRunner
+
+        # Build a real DAG node with custom stall_timeout=45
+        req = _subtask_dag(stall_timeout=45)
+        dag = await store_stall_on.create(req)
+        node = dag.nodes[0]
+        # Build a runner with the store wired in
+        runner = MagicMock(spec=AgentRunner)
+        runner._dag_store = store_stall_on
+        runner._settings = _settings_stall_on()
+        resolved = await AgentRunner._resolve_node_stall_timeout(runner, node.id)
+        assert resolved == 45  # per-node override, NOT global default
+
+    @pytest.mark.asyncio
+    async def test_resolve_node_stall_timeout_falls_back_to_global(
+        self, store_stall_on, subtask_mgr, dynamic_loader
+    ):
+        """When per-node stall_timeout is None (inherit) → return global default."""
+        from nous.api.runner import AgentRunner
+
+        # _subtask_dag(stall_timeout=None) leaves per-node unset → inherits
+        req = _subtask_dag(stall_timeout=None)
+        dag = await store_stall_on.create(req)
+        node = dag.nodes[0]
+        runner = MagicMock(spec=AgentRunner)
+        runner._dag_store = store_stall_on
+        runner._settings = _settings_stall_on()  # default_stall_timeout=60
+        resolved = await AgentRunner._resolve_node_stall_timeout(runner, node.id)
+        assert resolved == 60  # global default
+
+    @pytest.mark.asyncio
+    async def test_resolve_node_stall_timeout_handles_missing_node(self):
+        """Bogus UUID → global default fallback (safe)."""
+        from nous.api.runner import AgentRunner
+
+        runner = MagicMock(spec=AgentRunner)
+        runner._dag_store = None  # also tests no-store branch
+        runner._settings = _settings_stall_on()
+        resolved = await AgentRunner._resolve_node_stall_timeout(
+            runner, uuid.uuid4()
+        )
+        assert resolved == 60
+
+    @pytest.mark.asyncio
     async def test_heartbeat_no_op_when_stall_detection_disabled(self):
         """The heartbeat factory short-circuits when the master flag is off,
         same as the single-ping helper."""
