@@ -183,32 +183,46 @@ class TestStorePersistence:
         self, store_caps_on, db
     ):
         """count_running_subtasks_by_frame_type groups by frame_type for
-        running rows scoped to agent_id."""
+        in-flight (pending + running) rows scoped to agent_id. Completed and
+        failed rows are excluded; @codex P1 on c3a4fed required including
+        pending so a just-dispatched-but-not-yet-dequeued subtask remains
+        visible to the cap check on the subsequent tick."""
         from datetime import UTC, datetime
 
         from nous.storage.models import Subtask
 
         async with db.session() as session:
-            for frame in ["debug", "debug", "research", None]:
+            # Mix of running and pending — both should be counted.
+            for status, frame in [
+                ("running", "debug"),
+                ("pending", "debug"),  # @codex P1: pending must count too
+                ("running", "research"),
+                ("pending", None),
+            ]:
                 session.add(
                     Subtask(
                         agent_id=store_caps_on._agent_id,
-                        task=f"task for {frame}",
-                        status="running",
+                        task=f"task {status}/{frame}",
+                        status=status,
                         frame_type=frame,
                         created_at=datetime.now(UTC),
                     )
                 )
-            # Also add one completed row to verify the WHERE status='running'
-            session.add(
-                Subtask(
-                    agent_id=store_caps_on._agent_id,
-                    task="done",
-                    status="completed",
-                    frame_type="debug",
-                    created_at=datetime.now(UTC),
+            # Terminal rows must NOT count.
+            for status, frame in [
+                ("completed", "debug"),
+                ("failed", "research"),
+                ("cancelled", "debug"),
+            ]:
+                session.add(
+                    Subtask(
+                        agent_id=store_caps_on._agent_id,
+                        task=f"terminal {status}",
+                        status=status,
+                        frame_type=frame,
+                        created_at=datetime.now(UTC),
+                    )
                 )
-            )
             await session.commit()
 
         counts = await store_caps_on.count_running_subtasks_by_frame_type()

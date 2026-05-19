@@ -252,11 +252,17 @@ class DAGStore:
             await session.commit()
 
     async def count_running_subtasks_by_frame_type(self) -> dict[str, int]:
-        """F064.2: grouped count of agent-scoped running subtasks by frame_type.
+        """F064.2: grouped count of agent-scoped IN-FLIGHT subtasks by frame_type.
 
         Returns a dict {frame_type: count} including the "_default" bucket for
         subtasks whose frame_type is NULL. Used by orchestrator dispatch gating
         to enforce per-frame caps without keeping in-memory state across ticks.
+
+        Counts both `status='pending'` AND `status='running'` (@codex P1 on
+        c3a4fed): SubtaskManager.create inserts in 'pending', and the worker
+        only transitions to 'running' on dequeue. Between dispatch and pickup
+        a launched subtask is invisible to a 'running'-only count, so a
+        subsequent tick would over-dispatch through the cap.
 
         Single grouped SELECT — mirrors heart/subtasks.py:293 count_by_status
         pattern (verified equivalent at codex review time).
@@ -265,7 +271,7 @@ class DAGStore:
             result = await session.execute(
                 select(Subtask.frame_type, func.count())
                 .where(Subtask.agent_id == self._agent_id)
-                .where(Subtask.status == "running")
+                .where(Subtask.status.in_(["pending", "running"]))
                 .group_by(Subtask.frame_type)
             )
             out: dict[str, int] = {}
