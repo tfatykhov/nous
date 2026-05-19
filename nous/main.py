@@ -493,6 +493,13 @@ async def create_components(settings: Settings) -> dict:
     runner.set_api_client(api_client)
     await runner.start()
 
+    # Late-bind runner into SessionTimeoutMonitor so idle-timeout closures
+    # take the canonical runner.end_conversation path (full cleanup + reflection)
+    # rather than only cognitive.end_session. Mirrors the procedure_learner
+    # late-binding above. Safe no-op if monitor is unavailable.
+    if session_monitor is not None:
+        session_monitor._runner = runner
+
     # F035.4: Context Logger
     context_logger = None
     if settings.context_log_enabled:

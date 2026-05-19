@@ -2094,11 +2094,22 @@ Rules:
             return None
 
     async def _delete_conversation_state(self, session_id: str) -> None:
-        """Remove persisted conversation state on session end."""
+        """Remove persisted conversation state on session end.
+
+        Logged at WARNING with stack trace on failure: a silently-leaked
+        conversation_state row will re-hydrate stale messages on the next
+        session use ("user comes back tomorrow and gets ghost messages"),
+        which is hard to diagnose after the fact. The idle-timeout path
+        newly exercises this code, so visibility matters more now.
+        """
         try:
             await self._heart.delete_conversation_state(
                 agent_id=self._settings.agent_id,
                 session_id=session_id,
             )
         except Exception:
-            logger.debug("Failed to delete conversation state for session %s", session_id)
+            logger.warning(
+                "Failed to delete conversation state for session %s",
+                session_id,
+                exc_info=True,
+            )

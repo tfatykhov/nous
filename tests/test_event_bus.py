@@ -1003,7 +1003,13 @@ class TestSessionTimeoutMonitor:
 
     @pytest.mark.asyncio
     async def test_session_ended_after_idle_timeout(self):
-        """28. session_ended triggered after idle timeout (calls cognitive.end_session, NOT raw event)."""
+        """28. Idle timeout falls back to cognitive.end_session when runner unwired.
+
+        With no runner attached (test fixture / early-startup case), the
+        monitor still calls cognitive.end_session directly — this preserves
+        the original P0-10 minimum behavior. The runner-wired path is
+        covered by test_idle_timeout_routes_through_runner below.
+        """
         monitor, bus, cognitive = self._make_monitor(
             settings=_mock_settings(session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1)
         )
@@ -1022,6 +1028,223 @@ class TestSessionTimeoutMonitor:
         call_kwargs = cognitive.end_session.call_args[1]
         assert call_kwargs["agent_id"] == "agent-1"
         assert call_kwargs["session_id"] == "sess-1"
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_routes_through_runner(self):
+        """28b. With runner wired, idle timeout routes through runner.end_conversation.
+
+        This is the canonical /new path — guarantees the idle close runs full
+        cleanup (reflection, _conversations pop, ledger pop, persisted
+        conversation_state delete) instead of only the cognitive.end_session
+        subset. Without this routing, /status memory.active_conversations stays
+        inflated and reflection-derived facts never land.
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1
+        )
+        cognitive = AsyncMock()
+        runner = AsyncMock()
+
+        monitor = SessionTimeoutMonitor(
+            bus, settings, cognitive=cognitive, runner=runner
+        )
+
+        # Record activity then force it stale
+        await monitor.on_activity(
+            _make_event("turn_completed", session_id="sess-1", agent_id="agent-1")
+        )
+        monitor._last_activity["sess-1"] = time.monotonic() - 10
+
+        await monitor._check_timeouts()
+
+        # Runner.end_conversation is the canonical entry — assert it was
+        # used and cognitive.end_session was NOT called directly (runner
+        # invokes it internally, but the mocked runner doesn't, which is
+        # what makes this assertion meaningful).
+        runner.end_conversation.assert_called_once_with("sess-1", agent_id="agent-1")
+        cognitive.end_session.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_late_bound_runner_works(self):
+        """28c. Late-bound runner (mirroring main.py wiring) is honored.
+
+        main.py constructs the monitor before the runner exists, then sets
+        ``session_monitor._runner = runner`` after. This test pins that
+        contract — the timeout path must read ``self._runner`` at call time,
+        not at construction time. A future refactor that captures the
+        kwarg in a closure or reads it once at __init__ would break this.
+        """
+        monitor, _bus, _cognitive = self._make_monitor(
+            settings=_mock_settings(
+                session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1
+            )
+        )
+        runner = AsyncMock()
+        monitor._runner = runner  # late-bind exactly as main.py does
+
+        await monitor.on_activity(
+            _make_event("turn_completed", session_id="sess-late", agent_id="a-late")
+        )
+        monitor._last_activity["sess-late"] = time.monotonic() - 10
+
+        await monitor._check_timeouts()
+
+        runner.end_conversation.assert_called_once_with(
+            "sess-late", agent_id="a-late"
+        )
+
+    @pytest.mark.asyncio
+    async def test_idle_timeout_fans_out_concurrently(self):
+        """28d. Multiple sessions expiring in one tick close CONCURRENTLY (not serially).
+
+        Each closure issues a reflection LLM call (~15-30s). Sequential
+        dispatch would stall the next tick, F049 WM sweep, and sleep_started
+        detection by the cumulative reflection time.
+
+        Pinning concurrency: s1's closure blocks on an event that s2's closure
+        sets. If dispatch is serial, s1 awaits forever (deadlock and timeout).
+        If concurrent, s2 runs while s1 is parked, sets the event, and s1
+        unblocks. A regression to a serial ``for sid, aid in pairs: await
+        self._close_expired(...)`` loop would hang this test.
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1
+        )
+
+        gate = asyncio.Event()
+        finish_order: list[str] = []
+
+        async def gated_close(session_id, agent_id=None):
+            if session_id == "s1":
+                await asyncio.wait_for(gate.wait(), timeout=2.0)
+            elif session_id == "s2":
+                gate.set()
+            finish_order.append(session_id)
+
+        runner = AsyncMock()
+        runner.end_conversation.side_effect = gated_close
+
+        monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
+
+        for sid, aid in [("s1", "a1"), ("s2", "a2"), ("s3", "a3")]:
+            await monitor.on_activity(
+                _make_event("turn_completed", session_id=sid, agent_id=aid)
+            )
+            monitor._last_activity[sid] = time.monotonic() - 10
+
+        # Bounded timeout — serial dispatch would hang on s1.wait() forever.
+        await asyncio.wait_for(monitor._check_timeouts(), timeout=3.0)
+
+        assert runner.end_conversation.call_count == 3
+        # s2 must finish before s1 — proves concurrency (s2 set the gate
+        # that s1 was waiting on, so s2 returned before s1 unblocked).
+        assert finish_order.index("s2") < finish_order.index("s1"), finish_order
+        assert monitor._last_activity == {}
+        assert monitor._last_agent == {}
+
+    @pytest.mark.asyncio
+    async def test_one_failing_closure_does_not_block_others(self):
+        """28e. A single runner.end_conversation failure must not lose other closures.
+
+        Without return_exceptions=True on gather, the first raise would
+        cancel the rest and they would silently stay in tracking dicts —
+        their next-cycle behavior would be undefined.
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1
+        )
+        runner = AsyncMock()
+
+        async def maybe_fail(session_id, agent_id=None):
+            if session_id == "boom":
+                raise RuntimeError("simulated runner failure")
+
+        runner.end_conversation.side_effect = maybe_fail
+
+        monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
+
+        for sid, aid in [("ok-1", "a"), ("boom", "a"), ("ok-2", "a")]:
+            await monitor.on_activity(
+                _make_event("turn_completed", session_id=sid, agent_id=aid)
+            )
+            monitor._last_activity[sid] = time.monotonic() - 10
+
+        await monitor._check_timeouts()
+
+        assert runner.end_conversation.call_count == 3
+        # All sessions cleared from tracking despite one raising —
+        # otherwise the failed session sticks around and re-fires every tick.
+        assert monitor._last_activity == {}
+
+    @pytest.mark.asyncio
+    async def test_cancelled_child_propagates_to_caller(self):
+        """28g. CancelledError raised inside a closure must NOT be swallowed.
+
+        ``asyncio.gather(..., return_exceptions=True)`` captures CancelledError
+        the same way it captures other exceptions. If the monitor task is
+        cancelled mid-closure (via stop() -> task.cancel()), each child gets
+        a CancelledError. Without explicit re-raise, _check_loop would not
+        see the cancel and shutdown would hang. This test pins the re-raise.
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=0, sleep_timeout=9999, sleep_check_interval=1
+        )
+        runner = AsyncMock()
+        runner.end_conversation.side_effect = asyncio.CancelledError()
+
+        monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
+        await monitor.on_activity(
+            _make_event("turn_completed", session_id="s", agent_id="a")
+        )
+        monitor._last_activity["s"] = time.monotonic() - 10
+
+        with pytest.raises(asyncio.CancelledError):
+            await monitor._check_timeouts()
+
+    @pytest.mark.asyncio
+    async def test_missing_last_agent_falls_back_to_settings_agent_id(self):
+        """28f. When _last_agent is missing, the call uses settings.agent_id (not "unknown").
+
+        ``on_activity`` only sets ``_last_agent[sid]`` if ``event.agent_id`` is
+        truthy, but always sets ``_last_activity[sid]``. The lookup must not
+        leak the prior "unknown" sentinel into downstream paths — wrong-tenant
+        risk. settings.agent_id is the right default for a single-agent
+        deployment.
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=0,
+            sleep_timeout=9999,
+            sleep_check_interval=1,
+            agent_id="nous-default",
+        )
+        runner = AsyncMock()
+
+        monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
+
+        # Populate _last_activity WITHOUT _last_agent (simulates an event with
+        # falsy agent_id slipping in).
+        monitor._last_activity["orphan"] = time.monotonic() - 10
+
+        await monitor._check_timeouts()
+
+        runner.end_conversation.assert_called_once_with(
+            "orphan", agent_id="nous-default"
+        )
 
     @pytest.mark.asyncio
     async def test_multiple_sessions_tracked_independently(self):
