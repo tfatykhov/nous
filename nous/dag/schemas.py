@@ -93,16 +93,21 @@ class DAGNodeSpec(BaseModel):
         None, ge=1,
         description="Max poll attempts before failure. Default: unlimited (timeout-based)."
     )
-    # F064.1: stall detection. None or 0 = disabled (today's behavior; matches
-    # Symphony §8.5 semantics for stall_timeout_ms <= 0). When > 0, the
-    # orchestrator marks the node failed if (now - last_activity_at) exceeds
-    # this many seconds. Must be <= the effective wall-clock timeout — see
-    # the cross-validator on DAGCreateRequest.
+    # F064.1: stall detection. Per-node override of the global default at
+    # NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT. Cascade (matches
+    # orchestrator._effective_stall_timeout):
+    #   - None → use global default (which may itself be 0 to globally disable)
+    #   - 0    → explicitly disabled for THIS node, regardless of global
+    #            (Symphony §8.5 stall_timeout_ms <= 0 semantics)
+    #   - >0   → use this value; clamped to NOUS_DAG_NODE_MAX_STALL_TIMEOUT
+    # Must be <= the effective wall-clock timeout — enforced in DAGStore.create()
+    # because it has access to Settings for the default-applies case.
     stall_timeout_seconds: int | None = Field(
         None,
         ge=0,
         description=(
-            "Stall timeout (seconds). None or 0 disables stall detection for this node. "
+            "Stall timeout (seconds). None = inherit the global default "
+            "(NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT). 0 = explicitly disabled for this node. "
             "When > 0, the orchestrator fails the node if no activity ping arrived within "
             "this window. Clamped to NOUS_DAG_NODE_MAX_STALL_TIMEOUT at insert."
         ),

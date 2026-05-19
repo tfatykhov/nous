@@ -416,6 +416,119 @@ class TestStallScan:
         assert node.status == "running"  # not flagged
 
     @pytest.mark.asyncio
+    async def test_stall_cancels_underlying_subtask(
+        self, store_stall_on, subtask_mgr, dynamic_loader
+    ):
+        """@codex P1 on 9ee630a: stall must tear down the underlying subtask,
+        not just mark the DAG node failed. Without this the subtask keeps
+        consuming tokens / a worker slot and _sync_node_statuses can never
+        observe it again."""
+        orchestrator = _orch(
+            store_stall_on, subtask_mgr, dynamic_loader, _settings_stall_on()
+        )
+        req = _subtask_dag(stall_timeout=30)
+        dag = await store_stall_on.create(req)
+        await orchestrator.start_dag(dag.id)
+        fetched = await store_stall_on.get_dag(dag.id)
+        node = fetched.nodes[0]
+        past = datetime.now(UTC) - timedelta(seconds=31)
+        await store_stall_on.update_node(
+            node.id, status="running", last_activity_at=past
+        )
+        subtask_id = uuid.uuid4()
+        await store_stall_on.update_node(node.id, subtask_id=subtask_id)
+        live_subtask = SimpleNamespace(
+            id=subtask_id,
+            status="running",
+            result=None,
+            error=None,
+            final_outcome=None,
+            report_jsonb=None,
+        )
+        subtask_mgr.get.return_value = live_subtask
+        subtask_mgr.cancel = AsyncMock()
+        await orchestrator.tick()
+        # Subtask cancel must have been requested before the row was marked failed.
+        subtask_mgr.cancel.assert_called_once_with(subtask_id)
+        fetched = await store_stall_on.get_dag(dag.id)
+        assert fetched.nodes[0].status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_unset_stall_timeout_inherits_global_default(
+        self, store_stall_on, subtask_mgr, dynamic_loader
+    ):
+        """@codex P1 on 9ee630a: clarified semantics — `stall_timeout_seconds=None`
+        on the spec INHERITS the global default; only 0 explicitly disables.
+        This test pins the cascade behavior."""
+        orchestrator = _orch(
+            store_stall_on, subtask_mgr, dynamic_loader, _settings_stall_on()
+        )
+        # _settings_stall_on() sets dag_node_default_stall_timeout=60.
+        # _subtask_dag(stall_timeout=None) leaves the per-node field unset.
+        req = _subtask_dag(stall_timeout=None)
+        dag = await store_stall_on.create(req)
+        await orchestrator.start_dag(dag.id)
+        fetched = await store_stall_on.get_dag(dag.id)
+        node = fetched.nodes[0]
+        # 90s elapsed > 60s global default → should flag stalled
+        past = datetime.now(UTC) - timedelta(seconds=90)
+        await store_stall_on.update_node(
+            node.id, status="running", last_activity_at=past
+        )
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id or uuid.uuid4(),
+            status="running",
+            result=None,
+            error=None,
+            final_outcome=None,
+            report_jsonb=None,
+        )
+        subtask_mgr.cancel = AsyncMock()
+        await orchestrator.tick()
+        fetched = await store_stall_on.get_dag(dag.id)
+        assert fetched.nodes[0].status == "failed"
+        assert "stalled" in (fetched.nodes[0].error or "")
+
+    @pytest.mark.asyncio
+    async def test_global_default_zero_disables_for_unset_nodes(
+        self, db, subtask_mgr, dynamic_loader
+    ):
+        """When NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT=0, nodes with `None` field
+        get NULL effective timeout → never flagged. Operator escape hatch for
+        rolling out stall detection without touching existing DAGNodeSpec rows."""
+        # Note: keeping the cross-validator happy (stall <= timeout)
+        settings = Settings(
+            dag_stall_detection_enabled=True,
+            dag_node_default_stall_timeout=0,
+            dag_node_max_stall_timeout=600,
+            dag_node_default_timeout=120,
+        )
+        store = DAGStore(db, f"test-stall-zero-{uuid.uuid4().hex[:8]}", settings)
+        orchestrator = _orch(store, subtask_mgr, dynamic_loader, settings)
+        req = _subtask_dag(stall_timeout=None)
+        dag = await store.create(req)
+        await orchestrator.start_dag(dag.id)
+        fetched = await store.get_dag(dag.id)
+        node = fetched.nodes[0]
+        ancient = datetime.now(UTC) - timedelta(hours=24)
+        await store.update_node(
+            node.id, status="running", last_activity_at=ancient
+        )
+        subtask_mgr.get.return_value = SimpleNamespace(
+            id=node.subtask_id or uuid.uuid4(),
+            status="running",
+            result=None,
+            error=None,
+            final_outcome=None,
+            report_jsonb=None,
+        )
+        subtask_mgr.cancel = AsyncMock()
+        await orchestrator.tick()
+        fetched = await store.get_dag(dag.id)
+        assert fetched.nodes[0].status == "running"
+        subtask_mgr.cancel.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_stall_cascades_via_dependency_propagation(
         self, store_stall_on, subtask_mgr, dynamic_loader
     ):

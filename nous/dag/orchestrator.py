@@ -529,10 +529,19 @@ class DAGOrchestrator:
         """F064.1: resolve per-node stall timeout, applying defaults/clamps.
 
         Returns None when stall detection should be skipped for this node.
-        - node.stall_timeout_seconds is None → fall back to settings default
-          (which may itself be 0 → disabled)
-        - node.stall_timeout_seconds is 0 → explicitly disabled per Symphony §8.5
-        - otherwise clamp to settings.dag_node_max_stall_timeout
+
+        Cascade semantics (matches DAGNodeSpec description):
+        - per-node `stall_timeout_seconds` is None  → fall back to the operator
+          default `NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT`. Setting the default to
+          0 globally disables for unset rows; this is how operators opt out of
+          stall detection for pre-existing data without touching the DAGNodeSpec
+          field. (Per @codex P1 on 9ee630a: docs+code were inconsistent — the
+          spec field description previously said "None disables" which was
+          wrong; corrected on DAGNodeSpec to read "None = use global default".)
+        - per-node `stall_timeout_seconds` is 0     → explicitly disabled
+          PER NODE, regardless of the global default. Mirrors Symphony §8.5
+          semantics for `stall_timeout_ms <= 0`.
+        - otherwise clamp to settings.dag_node_max_stall_timeout.
         """
         per_node = node.stall_timeout_seconds
         if per_node is None:
@@ -574,6 +583,14 @@ class DAGOrchestrator:
                     "F064.1: marking node %s (dag %s) failed — %s",
                     node.name, dag.id, error_msg,
                 )
+                # @codex P1 on 9ee630a: tear down the underlying primitive
+                # BEFORE marking the node failed. Without this, the subtask
+                # keeps running (consuming tokens, holding worker slots) and
+                # is no longer tracked by _sync_node_statuses (which only
+                # processes nodes still marked 'running'). _cancel_node is
+                # exception-safe — its own try/except absorbs "couldn't
+                # cancel" cases so stall handling never blocks on cleanup.
+                await self._cancel_node(node)
                 await self._store.update_node(
                     node.id,
                     status="failed",
