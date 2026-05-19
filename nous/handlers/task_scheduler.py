@@ -14,8 +14,11 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+from sqlalchemy import func, select
+
 from nous.config import Settings
 from nous.heart.heart import Heart
+from nous.storage.models import Subtask
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,40 @@ class TaskScheduler:
             except Exception:
                 logger.exception("Schedule check failed")
 
+    async def _has_active_subtask_for_schedule(self, schedule_id) -> bool:
+        """F064.5 (architecture P1-A): true when a pending/running subtask
+        already exists for this schedule. Used to debounce overlapping fires
+        when a previous subtask is slow.
+
+        Query keyed on heart.subtasks.metadata->>'schedule_id' = <hex>.
+
+        Fail-OPEN on DB error: if the check itself raises (mock, transient
+        DB hiccup, schema mismatch in a downstream test fixture), we treat
+        the schedule as having no active subtask. The schedule's own
+        next_fire_at gating already prevents trivial double-fires; this
+        check is a safety belt over that, not a correctness gate.
+        """
+        try:
+            async with self._heart.db.session() as session:
+                count = await session.scalar(
+                    select(func.count())
+                    .select_from(Subtask)
+                    .where(Subtask.agent_id == self._settings.agent_id)
+                    .where(Subtask.status.in_(["pending", "running"]))
+                    .where(Subtask.metadata_["schedule_id"].astext == schedule_id.hex)
+                )
+                if not isinstance(count, int):
+                    # Mock returned a non-int (e.g. AsyncMock object) — fail open.
+                    return False
+                return count > 0
+        except Exception:
+            logger.debug(
+                "_has_active_subtask_for_schedule failed (fail-open) for %s",
+                getattr(schedule_id, "hex", schedule_id),
+                exc_info=True,
+            )
+            return False
+
     async def _fire_due_tasks(self) -> int:
         """Check for due schedules, create subtasks, and advance/deactivate.
 
@@ -87,6 +124,47 @@ class TaskScheduler:
         fired = 0
         for schedule in due_schedules:
             try:
+                # F064.5 (architecture P1-A): running-subtask debounce guard.
+                # Skip this fire if a previous fire's subtask is still active
+                # for the same schedule. Without this, a slow continuation
+                # subtask could overlap with the next interval's fire and
+                # double up. Inline grouped count keeps the query cheap.
+                if await self._has_active_subtask_for_schedule(schedule.id):
+                    logger.info(
+                        "Skipping schedule %s fire — previous subtask still active",
+                        schedule.id.hex[:8],
+                    )
+                    continue
+
+                # F064.5 (v1 Episode reuse, architecture P1-B): if continuation
+                # is enabled AND we're mid-cycle, reuse the stable session_id
+                # so the runner re-uses the existing Episode. The LLM context
+                # itself is still fresh each fire — true thread continuity is
+                # deferred to F064.5-v2.
+                continuation_metadata: dict = {"schedule_id": schedule.id.hex}
+                if (
+                    self._settings.schedule_continuation_enabled
+                    and schedule.continuation_turns > 0
+                ):
+                    effective_cap = min(
+                        schedule.continuation_turns,
+                        self._settings.schedule_max_continuation_turns,
+                    )
+                    if (
+                        schedule.continuation_session_id is not None
+                        and schedule.continuation_count < effective_cap
+                    ):
+                        # Mid-cycle: reuse session_id, bump count after dispatch.
+                        continuation_metadata["session_id"] = schedule.continuation_session_id
+                    else:
+                        # Cycle start (or reset): mint a fresh session_id and
+                        # pin it. The dispatch counts as fire #1.
+                        new_session = f"schedule-{schedule.id.hex[:8]}-{schedule.fire_count + 1}"
+                        await self._heart.schedules.set_continuation_session(
+                            schedule.id, new_session
+                        )
+                        continuation_metadata["session_id"] = new_session
+
                 # Create a subtask from the schedule
                 await self._heart.subtasks.create(
                     task=schedule.task,
@@ -96,8 +174,34 @@ class TaskScheduler:
                     notify=schedule.notify,
                     model=schedule.model,
                     frame_type=schedule.frame_type,
-                    metadata={"schedule_id": schedule.id.hex},
+                    metadata=continuation_metadata,
                 )
+
+                # F064.5 v1: bump the count AFTER dispatch (counts dispatches,
+                # not successes). On cap-hit, reset for the next cycle.
+                if (
+                    self._settings.schedule_continuation_enabled
+                    and schedule.continuation_turns > 0
+                    and schedule.continuation_session_id is not None
+                ):
+                    # Note: set_continuation_session already initialized
+                    # count=1 for fresh cycles; we only bump on reuse.
+                    if "session_id" in continuation_metadata and \
+                            continuation_metadata["session_id"] == schedule.continuation_session_id:
+                        await self._heart.schedules.bump_continuation_count(schedule.id)
+                    # If we hit the cap on THIS dispatch, reset for next fire.
+                    effective_cap = min(
+                        schedule.continuation_turns,
+                        self._settings.schedule_max_continuation_turns,
+                    )
+                    # +1 because we just bumped (or set to 1 in fresh-cycle path)
+                    next_count = (
+                        schedule.continuation_count + 1
+                        if continuation_metadata.get("session_id") == schedule.continuation_session_id
+                        else 1
+                    )
+                    if next_count >= effective_cap:
+                        await self._heart.schedules.reset_continuation(schedule.id)
 
                 # Handle schedule lifecycle
                 if schedule.schedule_type == "once":

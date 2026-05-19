@@ -34,6 +34,8 @@ class ScheduleManager:
         metadata: dict | None = None,
         model: str | None = None,
         frame_type: str | None = None,
+        continuation_turns: int = 0,
+        continuation_prompt: str | None = None,
     ) -> Schedule:
         """Create a new schedule."""
         # Compute next_fire_at
@@ -64,6 +66,8 @@ class ScheduleManager:
                 metadata_=metadata or {},
                 model=model,
                 frame_type=frame_type,
+                continuation_turns=continuation_turns,
+                continuation_prompt=continuation_prompt,
             )
             session.add(schedule)
             await session.commit()
@@ -85,6 +89,50 @@ class ScheduleManager:
                 .order_by(Schedule.next_fire_at)
             )
             return list(result.scalars().all())
+
+    async def set_continuation_session(
+        self, schedule_id: UUID, session_id: str
+    ) -> None:
+        """F064.5 v1: pin a stable session_id for a continuation cycle.
+
+        Called at the START of a continuation cycle when previous fire had
+        no continuation_session_id. Resets continuation_count to 1 since
+        this fire is the first in the cycle.
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule_id)
+                .values(continuation_session_id=session_id, continuation_count=1)
+            )
+            await session.commit()
+
+    async def bump_continuation_count(self, schedule_id: UUID) -> None:
+        """F064.5 v1: increment continuation_count for an in-progress cycle.
+
+        Counts DISPATCHES (not successes) per plan §8.2 — a failed fire
+        still consumes its slot. Simpler invariant, less footgun than
+        success-counting.
+        """
+        async with self._db.session() as session:
+            schedule = await session.get(Schedule, schedule_id)
+            if schedule is None:
+                return
+            schedule.continuation_count += 1
+            await session.commit()
+
+    async def reset_continuation(self, schedule_id: UUID) -> None:
+        """F064.5 v1: end a continuation cycle. NULLs the session_id and
+        zeroes the count so the next fire starts a fresh cycle (or a
+        fresh single-shot if continuation_turns is 0).
+        """
+        async with self._db.session() as session:
+            await session.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule_id)
+                .values(continuation_session_id=None, continuation_count=0)
+            )
+            await session.commit()
 
     async def advance(self, schedule_id: UUID, fired_at: datetime) -> None:
         """Advance a recurring schedule after firing."""

@@ -741,6 +741,15 @@ class Schedule(Base):
     )
     model: Mapped[str | None] = mapped_column(String(100))
     frame_type: Mapped[str | None] = mapped_column(String(20))
+    # F064.5 v1 (Episode reuse). See migration 045 for column semantics.
+    continuation_turns: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    continuation_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
 
 class ToolCache(Base):

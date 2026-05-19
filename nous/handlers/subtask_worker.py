@@ -173,7 +173,14 @@ class SubtaskWorkerPool:
         validator + retry) when ``subtask_hardening_enabled``; otherwise
         runs the legacy path unchanged.
         """
-        session_id = f"subtask-{subtask.id.hex[:8]}"
+        # F064.5 v1: respect a caller-supplied session_id (e.g. the
+        # continuation pattern from task_scheduler) so the runner reuses
+        # the existing Episode via Episode.session_id contract. Fallback
+        # remains the per-subtask unique session_id for non-continuation
+        # paths.
+        meta = subtask.metadata_ or {}
+        override = meta.get("session_id") if isinstance(meta, dict) else None
+        session_id = override if override else f"subtask-{subtask.id.hex[:8]}"
         logger.info(
             "Executing subtask %s: %s",
             subtask.id.hex[:8],
