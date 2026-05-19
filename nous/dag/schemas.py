@@ -133,23 +133,14 @@ class DAGCreateRequest(BaseModel):
     def validate_dag(self) -> DAGCreateRequest:
         """Validate DAG structure: unique names, valid edges, no cycles, wave/parallel limits.
 
-        F064.1 addition: a node that sets stall_timeout_seconds AND timeout_seconds
-        must satisfy stall <= timeout. The stall scan is bounded by the wall-clock
-        timeout (which the existing _effective_timeout enforces), so a stall value
-        larger than the wall-clock would never actually fire — silent dead config.
-        Reject at insert time.
+        F064.1 note: stall_timeout_seconds <= effective wall-clock timeout is
+        enforced in DAGStore.create() (which has access to Settings and so
+        can compare against the resolved default when timeout_seconds is
+        omitted). The schema-level pure-data validator can't reach Settings
+        without breaking layering — addressing codex P2 by relying on the
+        store-level check exclusively avoids a half-enforcement that misses
+        the default-applies case.
         """
-        for n in self.nodes:
-            if (
-                n.stall_timeout_seconds is not None
-                and n.stall_timeout_seconds > 0
-                and n.timeout_seconds is not None
-                and n.stall_timeout_seconds > n.timeout_seconds
-            ):
-                raise ValueError(
-                    f"Node '{n.name}': stall_timeout_seconds={n.stall_timeout_seconds} "
-                    f"must be <= timeout_seconds={n.timeout_seconds}"
-                )
         # --- max nodes ---
         if len(self.nodes) > MAX_NODES:
             raise ValueError(f"DAG cannot have more than {MAX_NODES} nodes (got {len(self.nodes)})")
