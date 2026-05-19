@@ -243,10 +243,15 @@ class WorkQueueCheck(BaseCheck):
         cap = self._settings.work_queue_max_dags_per_tick
 
         for item in items:
-            if dispatched_this_tick >= cap:
-                break
+            # @codex P1 on 73f7e81: terminal-state items must be processed
+            # regardless of the per-tick dispatch cap. Otherwise a queue
+            # whose active items are listed first can starve closed-item
+            # cancellation forever, leaving DAGs running for items that
+            # were closed externally hours ago.
             if item.terminal:
                 await self._handle_terminal(item, findings)
+                continue
+            if dispatched_this_tick >= cap:
                 continue
             dispatched = await self._claim_and_dispatch(item, findings)
             if dispatched:
@@ -289,7 +294,17 @@ class WorkQueueCheck(BaseCheck):
         self, item: WorkItem, findings: list[Finding]
     ) -> bool:
         """Atomic claim + DAG create + mark_dispatched. Returns True iff
-        a new DAG was created for this item."""
+        a new DAG was created for this item.
+
+        @codex P1 on 73f7e81: dag_create and mark_dispatched can't share
+        a SQLAlchemy session because DAGStore.create owns its own. To
+        avoid the duplicate-dispatch race (mark_dispatched fails after
+        dag_create succeeds → reconciler picks up the orphan and creates
+        a SECOND DAG for the same item), we cancel the DAG when the link
+        fails. The unique-on-(agent_id, source, external_id) row is
+        already committed and prevents another claim, so the reconciler
+        will retry the link (not re-create) on its next pass.
+        """
         claimed = await self._items.claim_for_dispatch(
             source=self._adapter.source_name,
             external_id=item.external_id,
@@ -299,6 +314,7 @@ class WorkQueueCheck(BaseCheck):
             # Already seen (this tick or a prior tick). The reconciler
             # path handles orphan re-dispatch; nothing to do here.
             return False
+        dag = None
         try:
             request = self._request_factory(item)
             dag = await self._dag_store.create(request)
@@ -308,6 +324,21 @@ class WorkQueueCheck(BaseCheck):
                 "F064.6: create+dispatch failed for %s/%s",
                 self._adapter.source_name, item.external_id,
             )
+            # If dag_create succeeded but mark_dispatched raised, cancel
+            # the orphan DAG so it doesn't run unmoored. Best-effort —
+            # if cancel also fails we just leak the DAG; the reconciler
+            # eventually retries the mark_dispatched on this row.
+            if dag is not None:
+                try:
+                    await self._orchestrator.cancel_dag(
+                        dag.id,
+                        reason="F064.6: mark_dispatched failed; cancelling orphan",
+                    )
+                except Exception:
+                    logger.exception(
+                        "F064.6: cleanup cancel_dag failed for %s",
+                        dag.id,
+                    )
             findings.append(Finding(
                 source=self._adapter.source_name,
                 summary=f"Failed to dispatch work-queue item {item.external_id}: {e}",

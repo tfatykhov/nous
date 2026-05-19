@@ -50,38 +50,37 @@ class WorkQueueItemManager:
         @codex P1 on aa3c739 (plan §9.3): the bool ambiguity in the v1
         spec wording was closed by switching to RETURNING semantics.
         """
-        try:
-            async with self._db.session() as session:
-                stmt = (
-                    pg_insert(WorkQueueItem)
-                    .values(
-                        agent_id=self._agent_id,
-                        source=source,
-                        external_id=external_id,
-                        payload=payload,
-                        created_at=datetime.now(UTC),
-                        # dispatched_at left NULL: caller is now responsible
-                        # for the dag_create + mark_dispatched commit.
-                    )
-                    .on_conflict_do_nothing(
-                        index_elements=["agent_id", "source", "external_id"]
-                    )
-                    .returning(WorkQueueItem.id)
+        # @codex P2 on 73f7e81: do NOT swallow DB exceptions here.
+        # Returning None on both conflict and DB error makes
+        # _claim_and_dispatch unable to distinguish "already seen"
+        # (idempotent no-op) from "DB is on fire" (heartbeat circuit
+        # breaker should engage). Let exceptions propagate; the
+        # heartbeat layer's mark_failure tracks ingestion outages.
+        async with self._db.session() as session:
+            stmt = (
+                pg_insert(WorkQueueItem)
+                .values(
+                    agent_id=self._agent_id,
+                    source=source,
+                    external_id=external_id,
+                    payload=payload,
+                    created_at=datetime.now(UTC),
+                    # dispatched_at left NULL: caller is now responsible
+                    # for the dag_create + mark_dispatched commit.
                 )
-                result = await session.execute(stmt)
-                row = result.first()
-                if row is None:
-                    return None
-                await session.commit()
-                # Re-fetch the inserted row with all fields populated.
-                got = await session.get(WorkQueueItem, row[0])
-                return got
-        except Exception:
-            logger.exception(
-                "F064.6: claim_for_dispatch failed for %s/%s",
-                source, external_id,
+                .on_conflict_do_nothing(
+                    index_elements=["agent_id", "source", "external_id"]
+                )
+                .returning(WorkQueueItem.id)
             )
-            return None
+            result = await session.execute(stmt)
+            row = result.first()
+            if row is None:
+                return None
+            await session.commit()
+            # Re-fetch the inserted row with all fields populated.
+            got = await session.get(WorkQueueItem, row[0])
+            return got
 
     async def mark_dispatched(
         self, item_id: UUID, dag_id: UUID
@@ -132,7 +131,14 @@ class WorkQueueItemManager:
     ) -> list[WorkQueueItem]:
         """Reconciler query: rows that have been claimed (row exists) but
         never had mark_dispatched run on them, AND have aged past the
-        partial-commit grace window. Plan §9.3."""
+        partial-commit grace window. Plan §9.3.
+
+        @codex P1 on 73f7e81: exclude rows where terminal_state IS NOT
+        NULL. Those are placeholder rows from _handle_terminal that were
+        inserted JUST to record the closed state and were never meant
+        to dispatch — letting the reconciler pick them up would
+        re-create DAGs for items the source already closed.
+        """
         cutoff = datetime.now(UTC) - older_than
         async with self._db.session() as session:
             result = await session.execute(
@@ -140,6 +146,7 @@ class WorkQueueItemManager:
                 .where(WorkQueueItem.agent_id == self._agent_id)
                 .where(WorkQueueItem.source == source)
                 .where(WorkQueueItem.dispatched_at.is_(None))
+                .where(WorkQueueItem.terminal_state.is_(None))
                 .where(WorkQueueItem.created_at < cutoff)
             )
             return list(result.scalars().all())

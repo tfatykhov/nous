@@ -365,6 +365,131 @@ class TestWorkQueueCheckRun:
 # ---------------------------------------------------------------------------
 
 
+class TestCodexFixes:
+    @pytest.mark.asyncio
+    async def test_claim_propagates_db_errors(self, items_mgr, monkeypatch):
+        """@codex P2 on 73f7e81: a DB exception in claim_for_dispatch must
+        propagate (not return None) so the heartbeat circuit breaker
+        engages on real outages. None is reserved for the conflict path."""
+        def _bad_session(*args, **kwargs):
+            raise RuntimeError("simulated DB outage")
+        monkeypatch.setattr(items_mgr._db, "session", _bad_session)
+        with pytest.raises(RuntimeError, match="DB outage"):
+            await items_mgr.claim_for_dispatch("src", "ext-1", None)
+
+    @pytest.mark.asyncio
+    async def test_list_undispatched_excludes_terminal_placeholders(
+        self, items_mgr, db
+    ):
+        """@codex P1 on 73f7e81: rows marked terminal (no DAG dispatched)
+        must NOT be picked up by the reconciler. Otherwise the reconciler
+        re-creates DAGs for items the source already closed."""
+        from datetime import UTC, datetime, timedelta
+        from sqlalchemy import update
+
+        from nous.storage.models import WorkQueueItem
+
+        # Create a terminal-only placeholder row (mark_terminal set,
+        # dispatched_at still NULL). Backdate to be in reconciler window.
+        row = await items_mgr.claim_for_dispatch("src", "closed-item", None)
+        await items_mgr.mark_terminal(row.id, "closed")
+        async with db.session() as session:
+            await session.execute(
+                update(WorkQueueItem)
+                .where(WorkQueueItem.id == row.id)
+                .values(created_at=datetime.now(UTC) - timedelta(minutes=10))
+            )
+            await session.commit()
+        orphans = await items_mgr.list_undispatched("src", timedelta(minutes=5))
+        assert orphans == []
+
+    @pytest.mark.asyncio
+    async def test_terminal_items_processed_even_at_cap(
+        self, tmp_path, db
+    ):
+        """@codex P1 on 73f7e81: terminal items run REGARDLESS of the per-
+        tick dispatch cap. Otherwise a queue with active items listed
+        first starves cancellations forever."""
+        # 2 active items first (cap=1 means only 1 dispatches), then 1
+        # terminal item. Without the fix the terminal would be skipped.
+        path = tmp_path / "queue.jsonl"
+        # First seed: dispatch one active item so we have a DAG to cancel.
+        path.write_text(json.dumps({"external_id": "a1", "body": "task"}))
+        agent = f"test-wq-term-cap-{uuid.uuid4().hex[:8]}"
+        items_mgr = WorkQueueItemManager(db, agent)
+        s = Settings(
+            work_queue_enabled=True,
+            work_queue_source="file_jsonl",
+            work_queue_max_dags_per_tick=1,
+            work_queue_interval_seconds=300,
+        )
+        store = DAGStore(db, agent, s)
+        cancel_calls: list = []
+
+        class _SpyOrch:
+            async def cancel_dag(self, dag_id, reason="cancelled"):
+                cancel_calls.append((dag_id, reason))
+
+        check = _make_check(
+            FileJsonlAdapter(str(path)), items_mgr, store, _SpyOrch(), s,
+        )
+        await check.run()  # dispatch a1
+        # Now: an extra active item + a terminal item, cap=1. Without the
+        # fix the cap exhausts on the active item and the terminal is skipped.
+        path.write_text(
+            "\n".join([
+                json.dumps({"external_id": "a2", "body": "more active work"}),
+                json.dumps({
+                    "external_id": "a1", "body": "task",
+                    "state": "closed", "terminal": True,
+                }),
+            ])
+        )
+        await check.run()
+        # Terminal cancellation must have fired despite the cap.
+        assert len(cancel_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_mark_dispatched_failure_cancels_orphan_dag(
+        self, tmp_path, db
+    ):
+        """@codex P1 on 73f7e81: if mark_dispatched raises after dag_create
+        succeeded, the orphan DAG is cancelled to prevent it running
+        without a tracking row (which would otherwise produce a duplicate
+        on the reconciler's next pass)."""
+        path = tmp_path / "queue.jsonl"
+        path.write_text(json.dumps({"external_id": "a1", "body": "task"}))
+        agent = f"test-wq-orphan-{uuid.uuid4().hex[:8]}"
+        items_mgr = WorkQueueItemManager(db, agent)
+        # Mock mark_dispatched to raise.
+        items_mgr.mark_dispatched = AsyncMock(side_effect=RuntimeError("link fail"))
+        s = Settings(
+            work_queue_enabled=True,
+            work_queue_source="file_jsonl",
+            work_queue_max_dags_per_tick=5,
+            work_queue_interval_seconds=300,
+        )
+        store = DAGStore(db, agent, s)
+        cancel_calls: list = []
+
+        class _SpyOrch:
+            async def cancel_dag(self, dag_id, reason="cancelled"):
+                cancel_calls.append((dag_id, reason))
+
+        check = _make_check(
+            FileJsonlAdapter(str(path)), items_mgr, store, _SpyOrch(), s,
+        )
+        result = await check.run()
+        # The orphan DAG must have been cancelled.
+        assert len(cancel_calls) == 1
+        assert "mark_dispatched failed" in cancel_calls[0][1]
+        # A normal-urgency finding reports the dispatch failure.
+        assert any(
+            "Failed to dispatch" in f.summary and f.urgency == "normal"
+            for f in result.findings
+        )
+
+
 class TestTerminalState:
     @pytest.mark.asyncio
     async def test_terminal_item_cancels_dispatched_dag(
