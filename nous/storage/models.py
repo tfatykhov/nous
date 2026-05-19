@@ -848,6 +848,9 @@ class ExecutionDAG(Base):
     )
     result_summary: Mapped[str | None] = mapped_column(Text)
     postmortem: Mapped[dict | None] = mapped_column(JSONB)
+    # F064.2: per-DAG per-frame-type dispatch cap dict {frame_type: max}.
+    # NULL means no per-DAG cap (env override or unlimited).
+    max_concurrent_by_frame_type: Mapped[dict | None] = mapped_column(JSONB)
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",
@@ -921,6 +924,11 @@ class DAGNode(Base):
     )
     awaiting_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # F064.1: per-node activity timestamp updated by runner._tool_loop on
+    # every iteration boundary. NULL = no ping yet (wall-clock is fallback).
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # F064.1: per-node stall timeout. NULL or 0 disables. Clamped at insert.
+    stall_timeout_seconds: Mapped[int | None] = mapped_column(Integer)
     result: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     tokens_used: Mapped[int] = mapped_column(
