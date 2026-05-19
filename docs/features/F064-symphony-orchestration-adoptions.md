@@ -1,6 +1,6 @@
 # F064: Symphony Orchestration Adoptions
 
-**Status:** 📝 Draft
+**Status:** 🟡 v1 partial (PR #425). F064.1, .2, .3, .6 shipped; F064.4 and F064.5 ship a partial v1 with consumer/continuity deferred to v2. See `## v1 scope notes` at the end of this doc.
 **Proposed by:** Tim (via analysis of `openai/symphony` SPEC.md)
 **Date:** 2026-05-18
 **Depends on:** F038 (Unified DAG Orchestration — shipped), F038.1 (DAG Completion Check — shipped), F046 (Configurable DAG Node Timeouts — shipped), F011 (Skill Discovery — shipped), F034 (Heartbeat — shipped)
@@ -285,3 +285,35 @@ Discrepancies caught and corrected during fact-check:
 1. **F064.4 hook semantics:** should Nous skill hooks run as shell snippets (Symphony parity) or as Python callables (Nous-native)? Shell is more portable; Python is safer. Recommend Python callables registered via a decorator; reject shell for security.
 2. **F064.5 continuation prompt template:** should the continuation prompt be a per-schedule string, or derived from the schedule's frame_type? Recommend per-schedule string with a frame-type default fallback.
 3. **F064.6 adapter ordering:** ship all 3 adapters in v1, or start with `file_jsonl` only? Recommend `file_jsonl` first (zero external deps, full e2e demonstration), then `github_issues` (high practical value for Tim's own work), then `linear` (parity).
+
+---
+
+## v1 scope notes (PR #425)
+
+The implementation landed in PR #425 across F064.1 through F064.6, with two sub-features explicitly partial:
+
+### F064.4 — v1 partial: manifest persistence only
+
+- `SkillManifest` gains `concurrency_cap`, `timeout_override_seconds`, `hooks`, `requires_human_review`.
+- Fields are **always** parsed and **always** persisted on `procedures.runtime_metadata` (with `schema_version: 1`), regardless of `NOUS_SKILL_RUNTIME_METADATA_ENABLED`. This closes the silent-drop family — a skill author declaring `concurrency_cap: 1` never has the declaration lost.
+- **Deferred to F064.4-v2:** the orchestrator-side consumer. The `NOUS_SKILL_RUNTIME_METADATA_ENABLED` flag is reserved for v2's enforcement code path. Today, `_launch_node` does not consult `procedure.runtime_metadata` — that wiring requires `DAGNodeSpec.procedure_id` plus a multi-hop change set that was kept out of scope to keep the PR reviewable.
+
+### F064.5 — v1 partial: Episode reuse only
+
+- `Schedule` gains `continuation_turns`, `continuation_session_id`, `continuation_prompt`, `continuation_count`.
+- When `continuation_turns > 0` and the master flag is on, consecutive fires reuse a stable `session_id` so they all attach to the same `Episode` — calibration / outcome signals and the dashboard see them as one logical run.
+- **Deferred to F064.5-v2:** true LLM thread continuity. `runner.end_conversation` pops the in-memory `Conversation` between fires, so each fire still receives a fresh LLM context and the full task prompt. The `continuation_prompt` column is reserved but not consumed in v1. Implementing thread continuity properly requires explicit state serialization (compacted transcript → `working_memory` → re-inject) which was kept out of scope.
+
+### Shipped fully (default-off)
+
+- **F064.1:** `dag_nodes.last_activity_at` + 3-site activity ping (launch + top-of-iteration + tool-dispatch start) + background heartbeat loop during long tool dispatch + orchestrator scan with per-node clamp.
+- **F064.2:** per-frame-type concurrency caps with per-node try/except, accumulator increment only on real `running` status, DAG-scoped count via FK join, wave-0 deferred-to-pending requeue, cap-enforced only on subtask nodes.
+- **F064.3:** strict insert-time sanitize gate, lenient read-time transformation with hash-suffix collision protection, unconditional containment assertion (security boundary), completion-check `cwd=` + fail-on-escape.
+- **F064.6:** `file_jsonl` adapter (v2 stubs for github_issues / linear), `INSERT … ON CONFLICT DO NOTHING RETURNING` atomic claim, cross-tick reconciler with 5-minute grace window, terminal-state cancel-before-mark ordering.
+
+### Migrations 043 / 044 / 045 / 046
+
+- `043_dag_node_columns.sql` — `last_activity_at` + `stall_timeout_seconds` on `dag_nodes`, `max_concurrent_by_frame_type` on `execution_dags` (F064.1 + F064.2).
+- `044_procedure_runtime_metadata.sql` — `runtime_metadata` JSONB on `procedures` (F064.4).
+- `045_schedule_continuation.sql` — `continuation_*` columns on `schedules` (F064.5).
+- `046_work_queue_items.sql` — new `work_queue_items` table (F064.6).

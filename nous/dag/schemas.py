@@ -93,6 +93,25 @@ class DAGNodeSpec(BaseModel):
         None, ge=1,
         description="Max poll attempts before failure. Default: unlimited (timeout-based)."
     )
+    # F064.1: stall detection. Per-node override of the global default at
+    # NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT. Cascade (matches
+    # orchestrator._effective_stall_timeout):
+    #   - None → use global default (which may itself be 0 to globally disable)
+    #   - 0    → explicitly disabled for THIS node, regardless of global
+    #            (Symphony §8.5 stall_timeout_ms <= 0 semantics)
+    #   - >0   → use this value; clamped to NOUS_DAG_NODE_MAX_STALL_TIMEOUT
+    # Must be <= the effective wall-clock timeout — enforced in DAGStore.create()
+    # because it has access to Settings for the default-applies case.
+    stall_timeout_seconds: int | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Stall timeout (seconds). None = inherit the global default "
+            "(NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT). 0 = explicitly disabled for this node. "
+            "When > 0, the orchestrator fails the node if no activity ping arrived within "
+            "this window. Clamped to NOUS_DAG_NODE_MAX_STALL_TIMEOUT at insert."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -114,10 +133,55 @@ class DAGCreateRequest(BaseModel):
     token_budget: int | None = Field(None, gt=0, description="Token budget for the entire DAG")
     nodes: list[DAGNodeSpec] = Field(..., min_length=1, description="Nodes in the DAG")
     edges: list[DAGEdgeSpec] = Field(default_factory=list, description="Edges between nodes")
+    # F064.2: per-DAG per-frame-type dispatch cap. None = no per-DAG cap
+    # (operators may still set NOUS_DAG_GLOBAL_MAX_CONCURRENT_BY_FRAME).
+    # Each value must be >= 1 — values < 1 would silently block the bucket.
+    max_concurrent_by_frame_type: dict[str, int] | None = Field(
+        None,
+        description=(
+            "Per-frame-type dispatch cap dict {frame_type: max_concurrent}. "
+            "When NOUS_DAG_FRAME_CONCURRENCY_ENABLED=true, the orchestrator "
+            "consults this dict (plus the env-var override) before launching "
+            "a wave. Missing frames are uncapped; nodes with frame_type=None "
+            "are bucketed under '_default'."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_dag(self) -> DAGCreateRequest:
-        """Validate DAG structure: unique names, valid edges, no cycles, wave/parallel limits."""
+        """Validate DAG structure: unique names, valid edges, no cycles, wave/parallel limits.
+
+        F064.1 note: stall_timeout_seconds <= effective wall-clock timeout is
+        enforced in DAGStore.create() (which has access to Settings and so
+        can compare against the resolved default when timeout_seconds is
+        omitted). The schema-level pure-data validator can't reach Settings
+        without breaking layering — addressing codex P2 by relying on the
+        store-level check exclusively avoids a half-enforcement that misses
+        the default-applies case.
+        """
+        # F064.2: every per-frame cap must be a positive integer. A 0 would
+        # silently block all DAGs of that frame — fail fast at construction.
+        if self.max_concurrent_by_frame_type is not None:
+            for frame, cap in self.max_concurrent_by_frame_type.items():
+                if cap < 1:
+                    raise ValueError(
+                        f"max_concurrent_by_frame_type['{frame}']={cap} is invalid; "
+                        "values must be >= 1"
+                    )
+
+        # F064.3: insert-time sanitize node names against the workspace
+        # safety regex. Loaded lazily to keep schema → settings layering
+        # one-directional (settings imports schemas, not the other way).
+        try:
+            from nous.config import Settings as _Settings
+            from nous.dag._workspace import sanitize_segment
+            _s = _Settings()
+            if _s.dag_workspace_safety_enabled:
+                for n in self.nodes:
+                    sanitize_segment(n.name)  # raises on unsafe — surfaced to caller
+        except ImportError:  # pragma: no cover — defensive
+            pass
+
         # --- max nodes ---
         if len(self.nodes) > MAX_NODES:
             raise ValueError(f"DAG cannot have more than {MAX_NODES} nodes (got {len(self.nodes)})")

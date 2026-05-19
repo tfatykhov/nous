@@ -307,6 +307,22 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_API_SOCKET_KEEPALIVE_COUNT` | `3` | F048 number of failed keep-alive probes before dropping the connection (Linux `TCP_KEEPCNT`; ignored otherwise). |
 | `NOUS_DAG_NODE_DEFAULT_TIMEOUT` | `600` | Default timeout (s) for DAG nodes when node spec omits `timeout_seconds` (F046) |
 | `NOUS_DAG_NODE_MAX_TIMEOUT` | `7200` | Hard ceiling (s) for DAG node `timeout_seconds` — clamped at insert and at read sites (F046) |
+| `NOUS_DAG_STALL_DETECTION_ENABLED` | `false` | F064.1 master switch. When false, the orchestrator never reads `last_activity_at` and stall detection is a no-op. Opt-in. |
+| `NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT` | `600` | F064.1 default seconds without `last_activity_at` activity before a running node is marked failed with `error="stalled: no activity for {N}s"`. `0` disables per-node. |
+| `NOUS_DAG_NODE_MAX_STALL_TIMEOUT` | `3600` | F064.1 ceiling clamp on `DAGNodeSpec.stall_timeout_seconds`. Must be `<= NOUS_DAG_NODE_MAX_TIMEOUT` (cross-validated when stall detection is enabled). |
+| `NOUS_DAG_FRAME_CONCURRENCY_ENABLED` | `false` | F064.2 master switch for per-frame-type dispatch caps. When false, all ready nodes in a wave launch in the same tick (today's behavior). |
+| `NOUS_DAG_GLOBAL_MAX_CONCURRENT_BY_FRAME` | `{}` | F064.2 operator-level JSON dict (e.g. `{"debug": 1, "research": 3}`). Overrides per-DAG values when set. Values `< 1` fail Settings init. Missing frames are uncapped. |
+| `NOUS_DAG_WORKSPACE_SAFETY_ENABLED` | `false` | F064.3 master switch for **insert-time** sanitization. **Read-time containment-assert** runs unconditionally regardless of this flag (security boundary, not a feature). |
+| `NOUS_DAG_WORKSPACE_ROOT` | `$TMPDIR/nous-workspace/dag-status` | F064.3 resolved-absolute root every workspace path must be inside. Default computed via `tempfile.gettempdir()` — POSIX `/tmp/...`, Windows `%TEMP%\...`. |
+| `NOUS_SKILL_RUNTIME_METADATA_ENABLED` | `false` | F064.4 **consumer-side** flag only. SkillManifest fields (`concurrency_cap`, `timeout_override_seconds`, `hooks`, `requires_human_review`) are always parsed and always persisted on `procedures.runtime_metadata` regardless of this flag. The flag gates only the deferred-to-v2 orchestrator enforcement. |
+| `NOUS_SCHEDULE_CONTINUATION_ENABLED` | `false` | F064.5 master switch for scheduled-task Episode reuse. When false, every fire creates a fresh session_id (today's behavior). v1 ships Episode reuse only — no LLM thread continuity. |
+| `NOUS_SCHEDULE_MAX_CONTINUATION_TURNS` | `50` | F064.5 hard ceiling on `Schedule.continuation_turns`. Prevents unbounded Episode growth. |
+| `NOUS_SCHEDULE_CONTINUATION_DEFAULT_PROMPT` | `"Continue. The previous run completed at {last_fired_at}. Apply the same task to fresh context."` | F064.5 default continuation prompt. **Reserved for F064.5-v2** (LLM thread continuity); not consumed by v1. |
+| `NOUS_WORK_QUEUE_ENABLED` | `false` | F064.6 master switch. When true, a `WorkQueueCheck` polls the configured adapter every `interval_seconds` and emits a DAG per new item. |
+| `NOUS_WORK_QUEUE_SOURCE` | `file_jsonl` | F064.6 adapter name. v1 ships `file_jsonl`; `github_issues` and `linear` raise `NotImplementedError` until F064.6-v2. |
+| `NOUS_WORK_QUEUE_INTERVAL_SECONDS` | `300` | F064.6 polling cadence (`ge=30` to avoid hammering the queue/DB). |
+| `NOUS_WORK_QUEUE_FILE_JSONL_PATH` | `""` | F064.6 adapter-specific config — path to JSONL file when `source=file_jsonl`. |
+| `NOUS_WORK_QUEUE_MAX_DAGS_PER_TICK` | `5` | F064.6 per-tick admission cap. Bounded at 5 to match `MAX_ACTIVE_DAGS`; excess items wait for the next tick. |
 | `NOUS_ACTIONABILITY_ENABLED` | `true` | Enable F047 actionability classification at fact learn time |
 | `NOUS_ACTIONABILITY_LLM_ENABLED` | `true` | Use Haiku LLM for ambiguous actionability cases (tier 2) |
 | `NOUS_ACTIONABILITY_MODEL` | `claude-haiku-4-5-20251001` | LLM model for F047 actionability tier-2 classification |

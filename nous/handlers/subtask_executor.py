@@ -217,6 +217,12 @@ async def execute_hardened(
                     is_background=True,
                     extra_tools=extra_tools,
                     force_tool_on_penultimate=force_tool,
+                    # F064.1: plumb dag_node_id through the hardened path
+                    # too — without this, F064.1 stall pings never fire
+                    # in production where subtask_hardening_enabled=true.
+                    # @codex P1 on 2399032: only the legacy _execute_legacy
+                    # path was carrying dag_node_id previously.
+                    dag_node_id=getattr(subtask, "dag_node_id", None),
                 )
             except asyncio.CancelledError:
                 # F061 PR-3 Codex review P1: do NOT classify CancelledError

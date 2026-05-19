@@ -27,6 +27,15 @@ class SkillManifest:
     raw_content: str = ""
     first_section: str = ""
     warnings: list[str] = field(default_factory=list)
+    # F064.4 — workflow-as-code runtime hints. v1 ships manifest+
+    # persistence only; the orchestrator consumer is deferred to
+    # F064.4-v2 and gated by NOUS_SKILL_RUNTIME_METADATA_ENABLED.
+    # Always parsed (no flag gate at write time) so a skill author
+    # never has their declaration silently dropped.
+    concurrency_cap: int | None = None
+    timeout_override_seconds: int | None = None
+    hooks: dict[str, str] = field(default_factory=dict)
+    requires_human_review: bool = False
 
 
 # Regex for YAML frontmatter block
@@ -61,51 +70,78 @@ def _unquote(s: str) -> str:
     return s
 
 
-def _parse_frontmatter(text: str) -> dict[str, str | list[str]]:
+def _parse_frontmatter(text: str) -> dict[str, str | list[str] | dict[str, str]]:
     """Parse YAML frontmatter into a flat dict.
 
     Handles:
     - key: value (scalar)
     - key: [a, b, c] (inline list)
     - key:\\n  - a\\n  - b (block list)
+    - key:\\n  sub: val (block dict — added in F064.4 for `hooks:` etc.)
     """
-    result: dict[str, str | list[str]] = {}
+    result: dict[str, str | list[str] | dict[str, str]] = {}
     lines = text.split("\n")
     current_key: str | None = None
     current_list: list[str] | None = None
+    current_dict: dict[str, str] | None = None
+    # `current_pending` is True after we see `key:` with empty value but
+    # before we know if it's a list (`  - item`) or dict (`  sub: val`).
+    current_pending: bool = False
+
+    def _flush_block() -> None:
+        nonlocal current_key, current_list, current_dict, current_pending
+        if current_key is None:
+            return
+        if current_list is not None:
+            result[current_key] = current_list
+        elif current_dict is not None:
+            result[current_key] = current_dict
+        elif current_pending:
+            # Empty block — treat as empty list (most common YAML quirk).
+            result[current_key] = []
+        current_key = None
+        current_list = None
+        current_dict = None
+        current_pending = False
 
     for line in lines:
         # Block list continuation: "  - item"
-        if current_key and current_list is not None and re.match(r"^\s+-\s+", line):
-            item = re.sub(r"^\s+-\s+", "", line).strip()
-            current_list.append(_unquote(item))
+        list_match = re.match(r"^\s+-\s+(.*)", line)
+        if current_key and (current_list is not None or current_pending) and list_match:
+            if current_list is None:
+                current_list = []
+                current_pending = False
+            current_list.append(_unquote(list_match.group(1).strip()))
             continue
 
-        # If we were building a list, save it
-        if current_key and current_list is not None:
-            result[current_key] = current_list
-            current_key = None
-            current_list = None
+        # Block dict continuation: "  subkey: subvalue"
+        sub_match = re.match(r"^(\s+)(\w[\w_]*)\s*:\s*(.+)", line)
+        if current_key and (current_dict is not None or current_pending) and sub_match:
+            if current_dict is None:
+                current_dict = {}
+                current_pending = False
+            current_dict[sub_match.group(2)] = _unquote(sub_match.group(3).strip())
+            continue
 
-        # Key: value line
+        # End of block — flush and reset state before reading new top-level key.
+        _flush_block()
+
+        # Top-level key: value line (no leading whitespace)
         match = re.match(r"^(\w[\w_]*)\s*:\s*(.*)", line)
         if match:
             key = match.group(1)
             value = match.group(2).strip()
 
             if not value:
-                # Start of block list
+                # Start of a block — kind (list vs dict) determined by next line.
                 current_key = key
-                current_list = []
+                current_pending = True
             else:
                 parsed = _parse_yaml_value(value)
                 result[key] = parsed
-                current_key = None
-                current_list = None
 
-    # Flush trailing list
-    if current_key and current_list is not None:
-        result[current_key] = current_list
+    # Flush trailing block
+    _flush_block()
 
     return result
 
@@ -117,6 +153,36 @@ def _ensure_list(val: str | list[str] | None) -> list[str]:
     if isinstance(val, str):
         return [val] if val else []
     return val
+
+
+def _parse_optional_positive_int(val: object, *, field_name: str) -> int | None:
+    """F064.4: parse a manifest int field that must be > 0 when present.
+
+    Returns None when the field is absent or explicitly null. Raises
+    ValueError on a 0 / negative / non-integer value — failing loudly is
+    the always-persist counterpart: never silently coerce a malformed
+    declaration to the "absent" default.
+    """
+    if val is None:
+        return None
+    if isinstance(val, str):
+        try:
+            parsed = int(val)
+        except ValueError as e:
+            raise ValueError(
+                f"'{field_name}' must be a positive integer, got {val!r}"
+            ) from e
+    elif isinstance(val, int) and not isinstance(val, bool):
+        parsed = val
+    else:
+        raise ValueError(
+            f"'{field_name}' must be a positive integer, got {type(val).__name__}"
+        )
+    if parsed < 1:
+        raise ValueError(
+            f"'{field_name}' must be >= 1, got {parsed}"
+        )
+    return parsed
 
 
 class SkillParser:
@@ -206,6 +272,79 @@ class SkillParser:
         if isinstance(version, list):
             version = version[0] if version else None
 
+        # F064.4: parse new runtime hints. Each field has a defined default
+        # equivalent to "absent" so a manifest that doesn't declare them
+        # produces SkillManifest(...) with the default value. Parse errors
+        # raise ValueError to surface a malformed manifest to the caller
+        # (no silent drop — matches the always-persist semantic).
+        concurrency_cap = _parse_optional_positive_int(
+            data.get("concurrency_cap"), field_name="concurrency_cap"
+        )
+        timeout_override_seconds = _parse_optional_positive_int(
+            data.get("timeout_override_seconds"),
+            field_name="timeout_override_seconds",
+        )
+        # @codex P2 on 2399032: validate hooks regardless of truthiness.
+        # Previously `if raw_hooks and not isinstance(raw_hooks, dict)`
+        # let falsy non-dict values (`hooks: []`, `hooks: ""`) bypass the
+        # type check and silently coerce to `{}` — reintroducing the
+        # silent-drop family the always-persist semantic was designed to
+        # close. Now: absent or explicit-None passes; everything else
+        # must be a dict.
+        raw_hooks = data.get("hooks")
+        hooks: dict[str, str] = {}
+        if raw_hooks is not None:
+            if not isinstance(raw_hooks, dict):
+                raise ValueError(
+                    f"'hooks' must be a dict[str, str], got {type(raw_hooks).__name__}"
+                )
+            for k, v in raw_hooks.items():
+                if not isinstance(v, str):
+                    raise ValueError(
+                        f"'hooks.{k}' must be a string, got {type(v).__name__}"
+                    )
+                hooks[k] = v
+        # @codex P2 on dc914be: strict whitelist for requires_human_review.
+        # Previously a typo like "tru" coerced silently to False (silent-
+        # drop family). Now only documented truthy / falsy string forms
+        # parse cleanly; anything else raises ValueError. Bool values pass
+        # through; int 0/1 also accepted (YAML scalars). Absent or
+        # explicit-null = False.
+        requires_human_review_raw = data.get("requires_human_review")
+        _TRUTHY = {"true", "yes", "1", "on"}
+        _FALSY = {"false", "no", "0", "off"}
+        if requires_human_review_raw is None:
+            requires_human_review = False
+        elif isinstance(requires_human_review_raw, bool):
+            requires_human_review = requires_human_review_raw
+        elif isinstance(requires_human_review_raw, str):
+            lowered = requires_human_review_raw.strip().lower()
+            if lowered in _TRUTHY:
+                requires_human_review = True
+            elif lowered in _FALSY:
+                requires_human_review = False
+            else:
+                raise ValueError(
+                    f"'requires_human_review' must be one of "
+                    f"{sorted(_TRUTHY | _FALSY)} (case-insensitive); "
+                    f"got {requires_human_review_raw!r}"
+                )
+        elif isinstance(requires_human_review_raw, int):
+            if requires_human_review_raw == 0:
+                requires_human_review = False
+            elif requires_human_review_raw == 1:
+                requires_human_review = True
+            else:
+                raise ValueError(
+                    f"'requires_human_review' int must be 0 or 1, "
+                    f"got {requires_human_review_raw}"
+                )
+        else:
+            raise ValueError(
+                f"'requires_human_review' must be bool, str, or 0/1; "
+                f"got {type(requires_human_review_raw).__name__}"
+            )
+
         return SkillManifest(
             name=name,
             description=description,
@@ -219,6 +358,10 @@ class SkillParser:
             raw_content=body.strip(),
             first_section=first_section,
             warnings=warnings,
+            concurrency_cap=concurrency_cap,
+            timeout_override_seconds=timeout_override_seconds,
+            hooks=hooks,
+            requires_human_review=requires_human_review,
         )
 
     def to_procedure_input(self, manifest: SkillManifest) -> ProcedureInput:
@@ -245,6 +388,26 @@ class SkillParser:
         else:
             tags.append("local")
 
+        # F064.4: build runtime_metadata UNCONDITIONALLY when ANY of the new
+        # fields is non-default. The skill_runtime_metadata_enabled flag
+        # only gates the deferred-to-v2 orchestrator consumer; the parser
+        # never silently drops a declared field. `schema_version` lets v2
+        # detect drift if we ever change the dict shape.
+        runtime_metadata: dict | None = None
+        if (
+            manifest.concurrency_cap is not None
+            or manifest.timeout_override_seconds is not None
+            or manifest.hooks
+            or manifest.requires_human_review
+        ):
+            runtime_metadata = {
+                "schema_version": 1,
+                "concurrency_cap": manifest.concurrency_cap,
+                "timeout_override_seconds": manifest.timeout_override_seconds,
+                "hooks": dict(manifest.hooks),
+                "requires_human_review": manifest.requires_human_review,
+            }
+
         return ProcedureInput(
             name=manifest.name,
             domain=manifest.domain,
@@ -255,4 +418,5 @@ class SkillParser:
             core_concepts=[manifest.domain] + [f"requires:{r}" for r in manifest.requires],
             implementation_notes=impl_notes,
             tags=tags,
+            runtime_metadata=runtime_metadata,
         )

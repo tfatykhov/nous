@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from nous.config import Settings
 from nous.dag.schemas import DAGCreateRequest
 from nous.storage.database import Database
-from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG
+from nous.storage.models import DAGEdge, DAGNode, ExecutionDAG, Subtask
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,9 @@ class DAGStore:
                 source=request.source,
                 original_request=request.original_request,
                 token_budget=request.token_budget,
+                # F064.2: per-DAG per-frame-type concurrency caps. NULL when
+                # the request omits the field — fully backward compatible.
+                max_concurrent_by_frame_type=request.max_concurrent_by_frame_type,
             )
             session.add(dag)
             await session.flush()  # Get dag.id
@@ -70,6 +73,51 @@ class DAGStore:
                     spec.timeout_seconds if spec.timeout_seconds is not None else self._settings.dag_node_default_timeout,
                     self._settings.dag_node_max_timeout,
                 )
+                # F064.1: resolve + clamp per-node stall_timeout. None or 0 = disabled.
+                # When set, clamp to NOUS_DAG_NODE_MAX_STALL_TIMEOUT and ALSO
+                # enforce stall <= resolved_timeout (codex P2-2 fix: the
+                # schema-level validator can't see the resolved default
+                # because it runs before store.create's clamp pipeline. We
+                # check against the resolved value here, raising before any
+                # row is inserted — same semantics, late but pre-commit).
+                resolved_stall: int | None
+                if spec.stall_timeout_seconds == 0:
+                    # Explicitly disabled per-node — no inheritance, no check.
+                    resolved_stall = 0
+                elif spec.stall_timeout_seconds is None:
+                    # Per-node unset → inherits global default at runtime
+                    # (orchestrator._effective_stall_timeout). Persist None
+                    # to preserve the "inherit" semantic, but ALSO validate
+                    # the GLOBAL default against this node's wall-clock
+                    # timeout. Otherwise a node with timeout_seconds=60 and
+                    # global default_stall_timeout=600 silently never
+                    # stalls. @codex P2 on dc914be: skipped this check
+                    # previously when per-node stall was unset.
+                    resolved_stall = None
+                    if self._settings.dag_stall_detection_enabled:
+                        inherited = self._settings.dag_node_default_stall_timeout
+                        if inherited > 0 and inherited > resolved_timeout:
+                            raise ValueError(
+                                f"Node '{spec.name}': inherited global "
+                                f"stall_timeout={inherited} exceeds this node's "
+                                f"effective wall-clock timeout {resolved_timeout} — "
+                                "stall would never fire (silent dead config). Set "
+                                "stall_timeout_seconds=0 on this node to opt out, "
+                                "or raise timeout_seconds."
+                            )
+                else:
+                    resolved_stall = min(
+                        spec.stall_timeout_seconds,
+                        self._settings.dag_node_max_stall_timeout,
+                    )
+                    if resolved_stall > resolved_timeout:
+                        raise ValueError(
+                            f"Node '{spec.name}': stall_timeout_seconds="
+                            f"{spec.stall_timeout_seconds} exceeds effective "
+                            f"wall-clock timeout {resolved_timeout} — stall "
+                            "would never fire (silent dead config). Reduce "
+                            "stall_timeout_seconds or raise timeout_seconds."
+                        )
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,
@@ -86,6 +134,7 @@ class DAGStore:
                     completion_check=spec.completion_check,
                     completion_check_interval=spec.completion_check_interval,
                     max_check_attempts=spec.max_check_attempts,
+                    stall_timeout_seconds=resolved_stall,
                 )
                 session.add(node)
                 node_map[spec.name] = node
@@ -223,6 +272,77 @@ class DAGStore:
                 .values(**kwargs)
             )
             await session.commit()
+
+    async def count_running_subtasks_by_frame_type(
+        self, dag_id: UUID | None = None
+    ) -> dict[str, int]:
+        """F064.2: grouped count of IN-FLIGHT subtasks by frame_type.
+
+        Returns a dict {frame_type: count} including the "_default" bucket for
+        subtasks whose frame_type is NULL. Used by orchestrator dispatch gating
+        to enforce per-frame caps without keeping in-memory state across ticks.
+
+        @codex P1 on aa3c739: caps are configured PER-DAG
+        (ExecutionDAG.max_concurrent_by_frame_type), so the count must also be
+        per-DAG. Otherwise a concurrent DAG's subtasks consume budget that
+        belongs to this DAG. When `dag_id` is set, the count joins through
+        DAGNode → ExecutionDAG and restricts to subtasks linked to nodes in
+        that DAG. When None (legacy path), counts agent-wide.
+
+        Counts both `status='pending'` AND `status='running'` (@codex P1 on
+        c3a4fed): SubtaskManager.create inserts in 'pending'; only the worker
+        dequeue transitions to 'running'. Between dispatch and pickup a
+        launched subtask is invisible to a 'running'-only count.
+
+        Single grouped SELECT — mirrors heart/subtasks.py:293 count_by_status
+        pattern (verified equivalent at codex review time).
+        """
+        async with self._db.session() as session:
+            stmt = (
+                select(Subtask.frame_type, func.count())
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.status.in_(["pending", "running"]))
+            )
+            if dag_id is not None:
+                # Scope to subtasks linked to nodes in THIS DAG via the
+                # F061 PR-3 FK (subtask.dag_node_id → dag_nodes.id).
+                stmt = (
+                    stmt.join(DAGNode, Subtask.dag_node_id == DAGNode.id)
+                    .where(DAGNode.dag_id == dag_id)
+                )
+            stmt = stmt.group_by(Subtask.frame_type)
+            result = await session.execute(stmt)
+            out: dict[str, int] = {}
+            for frame, count in result.all():
+                key = frame if frame is not None else "_default"
+                out[key] = int(count)
+            return out
+
+    async def touch_node_activity(self, node_id: UUID) -> None:
+        """F064.1: Mark a DAGNode as recently active.
+
+        Called by runner._tool_loop on every iteration boundary (top-of-loop,
+        before tool dispatch) and by orchestrator._launch_subtask_node at node
+        launch. Fire-and-forget — the caller wraps under asyncio.shield so a
+        wait_for timeout doesn't cancel an in-flight ping.
+
+        A write failure is logged at DEBUG and swallowed. Stall scan treats
+        NULL/stale last_activity_at as not-stalled (wall-clock is the fallback),
+        so a dropped ping cannot manufacture a false stall.
+
+        Single UPDATE keyed by primary key — write amplification is bounded
+        per the partial index on (last_activity_at) WHERE status='running'.
+        """
+        try:
+            async with self._db.session() as session:
+                await session.execute(
+                    update(DAGNode)
+                    .where(DAGNode.id == node_id)
+                    .values(last_activity_at=datetime.now(UTC))
+                )
+                await session.commit()
+        except Exception:
+            logger.debug("touch_node_activity failed for node %s", node_id, exc_info=True)
 
     async def update_dag_tokens(self, dag_id: UUID, tokens: int) -> None:
         """Increment tokens_consumed on a DAG."""

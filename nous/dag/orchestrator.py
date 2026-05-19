@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from nous.config import Settings
+from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.store import DAGStore
 from nous.storage.models import DAGNode, ExecutionDAG
 
@@ -92,10 +93,13 @@ class DAGOrchestrator:
             if dag is None:
                 return
 
-            # Launch wave-0 ready nodes
-            for node in dag.nodes:
-                if node.status == "ready":
-                    await self._launch_node(node, dag)
+            # F064.2: route wave-0 launches through _dispatch_ready_nodes so
+            # per-frame-type concurrency caps apply on the very first tick.
+            # When the flag is off, the helper falls back to today's behavior
+            # (launch every ready node). Per-node try/except inside the helper
+            # also gives us the silent-failure P1-6 guarantee on this path.
+            wave_zero = [n for n in dag.nodes if n.status == "ready"]
+            await self._dispatch_ready_nodes(dag, wave_zero)
 
     async def cancel_dag(self, dag_id: UUID, reason: str = "cancelled") -> None:
         """Cancel a DAG and all non-terminal nodes."""
@@ -194,12 +198,18 @@ class DAGOrchestrator:
     # ------------------------------------------------------------------
 
     async def _advance_dag(self, dag: ExecutionDAG) -> None:
-        """Core state machine: sync → budget → failures → launch → complete."""
+        """Core state machine: sync → stall → budget → failures → launch → complete."""
         # 1. Sync node statuses from underlying primitives
         await self._sync_node_statuses(dag)
 
         # 1.5 Poll awaiting_check nodes
         await self._poll_awaiting_checks(dag)
+
+        # 1.7 F064.1: Stall detection. Runs after sync (so just-completed
+        # nodes are no longer 'running') and before failure-propagation
+        # (so a node marked stalled here cascades on the same tick).
+        if self._settings.dag_stall_detection_enabled:
+            await self._check_stalled_nodes(dag)
 
         # 2. Check token budget
         if dag.token_budget:
@@ -216,12 +226,10 @@ class DAGOrchestrator:
         # 3. Propagate failures
         await self._propagate_failures(dag)
 
-        # 4. Find and launch ready nodes
+        # 4. Find and launch ready nodes (F064.2 dispatch with optional per-
+        # frame caps; falls back to legacy behavior when flag is off).
         ready_nodes = self._find_ready_nodes(dag)
-        for node in ready_nodes:
-            await self._store.update_node(node.id, status="ready")
-            node.status = "ready"  # Update in-memory too
-            await self._launch_node(node, dag)
+        await self._dispatch_ready_nodes(dag, ready_nodes)
 
         # 5. Check if DAG is complete
         await self._check_dag_completion(dag)
@@ -475,16 +483,58 @@ class DAGOrchestrator:
             1 → failed (definitively)
             2 → pending (still running, keep polling)
         Any other exit code or error is treated as pending.
+
+        F064.3: subprocess runs with `cwd=workspace_path` so a relative
+        path inside the check command resolves under the node's workspace
+        rather than the orchestrator process's cwd. The workspace dir is
+        ensured to exist (mkdir parents) before the subprocess launch so
+        ``create_subprocess_shell`` doesn't FileNotFoundError on a fresh
+        node. Containment is asserted unconditionally as a security boundary.
         """
         cmd = node.completion_check
         if not cmd:
             return CheckResult("success")
+
+        # F064.3: derive the per-node workspace + assert containment. The
+        # dag attribute isn't on the node directly; we read it from the
+        # parent DAG row via the FK. The completion-check subprocess MUST
+        # run with cwd inside the workspace root — if we can't derive a
+        # safe workspace, FAIL the check rather than fall through to
+        # cwd=None (which would run in the orchestrator process's working
+        # directory and defeat the security boundary).
+        # @codex P2 on 37fc50f: previously this branch logged+fell through
+        # to cwd=None, which is the exact behavior the containment check
+        # is meant to prevent.
+        cwd_arg: str
+        try:
+            dag = await self._store.get_dag(node.dag_id)
+            if dag is None:
+                return CheckResult(
+                    "failed",
+                    f"workspace setup failed: DAG {node.dag_id} not found",
+                )
+            root = self._settings.dag_workspace_root
+            workspace = compute_workspace_path(dag.id, node.name, root)
+            assert_inside_root(workspace, root)
+            workspace.mkdir(parents=True, exist_ok=True)
+            cwd_arg = str(workspace)
+        except (ValueError, OSError) as e:
+            logger.warning(
+                "F064.3: completion_check workspace setup failed for node %s — %s; "
+                "failing the check (refusing to run with unsafe cwd)",
+                node.name, e,
+            )
+            return CheckResult(
+                "failed",
+                f"workspace containment failure: {e}",
+            )
 
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=cwd_arg,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -519,9 +569,102 @@ class DAGOrchestrator:
         """
         return min(node.timeout_seconds, self._settings.dag_node_max_timeout)
 
+    def _effective_stall_timeout(self, node: DAGNode) -> int | None:
+        """F064.1: resolve per-node stall timeout, applying defaults/clamps.
+
+        Returns None when stall detection should be skipped for this node.
+
+        Cascade semantics (matches DAGNodeSpec description):
+        - per-node `stall_timeout_seconds` is None  → fall back to the operator
+          default `NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT`. Setting the default to
+          0 globally disables for unset rows; this is how operators opt out of
+          stall detection for pre-existing data without touching the DAGNodeSpec
+          field. (Per @codex P1 on 9ee630a: docs+code were inconsistent — the
+          spec field description previously said "None disables" which was
+          wrong; corrected on DAGNodeSpec to read "None = use global default".)
+        - per-node `stall_timeout_seconds` is 0     → explicitly disabled
+          PER NODE, regardless of the global default. Mirrors Symphony §8.5
+          semantics for `stall_timeout_ms <= 0`.
+        - otherwise clamp to settings.dag_node_max_stall_timeout.
+        """
+        per_node = node.stall_timeout_seconds
+        if per_node is None:
+            default = self._settings.dag_node_default_stall_timeout
+            return default if default > 0 else None
+        if per_node == 0:
+            return None
+        return min(per_node, self._settings.dag_node_max_stall_timeout)
+
+    async def _check_stalled_nodes(self, dag: ExecutionDAG) -> None:
+        """F064.1: mark running nodes failed when no activity ping arrived in time.
+
+        Policy (plan §4.3):
+        - Only inspects status='running' nodes (sync already moved completed ones)
+        - NULL last_activity_at → NOT flagged (wall-clock is the fallback). This
+          covers (a) brand-new nodes between launch and first ping and (b) the
+          legitimate case where all three ping sites failed silently.
+        - Cascade is left to the existing _propagate_failures call later in the
+          same tick — we just flip status to failed here.
+        """
+        now = datetime.now(UTC)
+        for node in dag.nodes:
+            if node.status != "running":
+                continue
+            stall = self._effective_stall_timeout(node)
+            if stall is None:
+                continue
+            last = node.last_activity_at
+            if last is None:
+                # No ping yet — treat as not-stalled. Wall-clock timeout is
+                # the fallback. See plan §4.3 NULL-fallback policy.
+                continue
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=UTC)
+            elapsed = (now - last).total_seconds()
+            if elapsed > stall:
+                error_msg = f"stalled: no activity for {elapsed:.0f}s (limit {stall}s)"
+                logger.warning(
+                    "F064.1: marking node %s (dag %s) failed — %s",
+                    node.name, dag.id, error_msg,
+                )
+                # @codex P1 on 9ee630a: tear down the underlying primitive
+                # BEFORE marking the node failed. Without this, the subtask
+                # keeps running (consuming tokens, holding worker slots) and
+                # is no longer tracked by _sync_node_statuses (which only
+                # processes nodes still marked 'running'). _cancel_node is
+                # exception-safe — its own try/except absorbs "couldn't
+                # cancel" cases so stall handling never blocks on cleanup.
+                await self._cancel_node(node)
+                await self._store.update_node(
+                    node.id,
+                    status="failed",
+                    error=error_msg,
+                    completed_at=now,
+                )
+                node.status = "failed"
+                node.error = error_msg
+                node.completed_at = now
+
     async def _read_node_result(self, node: DAGNode, dag: ExecutionDAG) -> str | None:
-        """Read result from status file convention, fall back to node's existing result."""
-        status_dir = DAG_STATUS_BASE_DIR / dag.id.hex[:8] / node.name
+        """Read result from status file convention, fall back to node's existing result.
+
+        F064.3: routes through compute_workspace_path (lenient transformation
+        of legacy unsafe node names → safe path equivalents) and asserts
+        containment under the configured workspace root UNCONDITIONALLY,
+        regardless of dag_workspace_safety_enabled. Path traversal is a
+        security boundary, not a feature — even pre-flag rows must not
+        escape the root via symlink or naive ``..``.
+        """
+        root = self._settings.dag_workspace_root
+        try:
+            status_dir = compute_workspace_path(dag.id, node.name, root)
+            assert_inside_root(status_dir, root)
+        except ValueError as e:
+            logger.warning(
+                "F064.3: refusing to read result for node %s in DAG %s — %s",
+                node.name, dag.id, e,
+            )
+            return node.result
         result_file = status_dir / "result"
         try:
             if result_file.exists():
@@ -594,6 +737,131 @@ class DAGOrchestrator:
                 node.id, status="blocked", error="Predecessor failed"
             )
             node.status = "blocked"
+
+    def _effective_frame_caps(self, dag: ExecutionDAG) -> dict[str, int]:
+        """F064.2: resolve the effective per-frame-type caps for this DAG.
+
+        Operator-level env override wins over per-DAG when set (matches
+        Symphony §8.3 "per-state limit takes precedence over global limit"
+        semantics, except here it's a hierarchical merge rather than
+        replacement so unset frames keep per-DAG caps).
+
+        Returns an empty dict when neither source has caps — caller skips
+        gating entirely and dispatches as before (today's behavior).
+        """
+        per_dag = dag.max_concurrent_by_frame_type or {}
+        env_override = self._settings.dag_global_max_concurrent_by_frame or {}
+        if not per_dag and not env_override:
+            return {}
+        # Env override takes precedence per-frame; per-DAG fills the rest.
+        merged = dict(per_dag)
+        merged.update(env_override)
+        return merged
+
+    async def _dispatch_ready_nodes(
+        self, dag: ExecutionDAG, ready_nodes: list[DAGNode]
+    ) -> None:
+        """F064.2: gated dispatch of ready nodes with per-frame-type concurrency caps.
+
+        Backward-compatible: when dag_frame_concurrency_enabled=False or no
+        caps are configured, dispatches every ready node in the same tick —
+        identical to pre-F064.2 behavior.
+
+        When caps are active, consults a single grouped SELECT on
+        heart.subtasks at the start of the tick, then accumulates in-memory
+        for each successful launch so we don't over-dispatch within one tick
+        (the DB count won't refresh between awaits inside the same tick).
+
+        Per-node try/except wraps _launch_node in both legacy and capped paths
+        (review silent-failure P1-6 / conventions P2-6) — a single failed
+        launch logs+continues so the remaining wave still dispatches.
+        """
+        # Backward-compat: flag off → legacy behavior, just with the new
+        # per-node error guard. No DB count, no caps.
+        if not self._settings.dag_frame_concurrency_enabled:
+            for node in ready_nodes:
+                await self._store.update_node(node.id, status="ready")
+                node.status = "ready"
+                try:
+                    await self._launch_node(node, dag)
+                except Exception:
+                    logger.exception(
+                        "Failed to launch node %s in DAG %s", node.name, dag.id
+                    )
+            return
+
+        caps = self._effective_frame_caps(dag)
+        if not caps:
+            for node in ready_nodes:
+                await self._store.update_node(node.id, status="ready")
+                node.status = "ready"
+                try:
+                    await self._launch_node(node, dag)
+                except Exception:
+                    logger.exception(
+                        "Failed to launch node %s in DAG %s", node.name, dag.id
+                    )
+            return
+
+        # @codex P1 on aa3c739: scope to current DAG so concurrent DAGs don't
+        # consume each other's slots. Per-DAG cap semantics now align with
+        # per-DAG count semantics.
+        running_by_frame = await self._store.count_running_subtasks_by_frame_type(
+            dag_id=dag.id
+        )
+        for node in ready_nodes:
+            # @codex P2 on 48589fd: count source (heart.subtasks) only sees
+            # subtask nodes — check/gate/callback nodes don't create a
+            # subtask row, so counting them against the cap would over-
+            # restrict and not counting them at all would let them bypass
+            # the cap. The conservative choice is to only ENFORCE the cap
+            # for subtask nodes: check/gate/callback always launch (they
+            # have no resource cost the cap is meant to bound).
+            if node.node_type != "subtask":
+                await self._store.update_node(node.id, status="ready")
+                node.status = "ready"
+                try:
+                    await self._launch_node(node, dag)
+                except Exception:
+                    logger.exception(
+                        "Failed to launch node %s in DAG %s", node.name, dag.id
+                    )
+                continue
+
+            frame = node.frame_type if node.frame_type is not None else "_default"
+            cap = caps.get(frame)
+            if cap is not None and running_by_frame.get(frame, 0) >= cap:
+                # @codex P1 on ab02178: wave-0 nodes arrive at this branch in
+                # status='ready' (set by store.create). _find_ready_nodes only
+                # picks up 'pending' nodes, so a deferred wave-0 node would be
+                # stuck in 'ready' forever. Demote the row to 'pending' on
+                # deferral — both wave-0 and wave-N use the same semantic
+                # afterward: deferred = pending, re-picked next tick.
+                if node.status == "ready":
+                    await self._store.update_node(node.id, status="pending")
+                    node.status = "pending"
+                logger.debug(
+                    "F064.2: deferring node %s (frame=%s) — cap %d reached",
+                    node.name, frame, cap,
+                )
+                continue
+            await self._store.update_node(node.id, status="ready")
+            node.status = "ready"
+            try:
+                await self._launch_node(node, dag)
+            except Exception:
+                logger.exception(
+                    "Failed to launch node %s in DAG %s", node.name, dag.id
+                )
+                # Slot wasn't consumed — don't bump the accumulator.
+                continue
+            # _launch_subtask_node swallows its own exceptions internally and
+            # sets node.status="failed". Only bump the accumulator when the
+            # launch actually produced a 'running' subtask. Other terminal
+            # outcomes (callback/gate set status="completed", subtask launch
+            # error sets "failed") don't consume a running-slot.
+            if node.status == "running":
+                running_by_frame[frame] = running_by_frame.get(frame, 0) + 1
 
     def _find_ready_nodes(self, dag: ExecutionDAG) -> list[DAGNode]:
         """Find pending nodes whose all dependency/context_flow predecessors are completed."""
@@ -672,13 +940,20 @@ class DAGOrchestrator:
                 metadata={"dag_id": str(dag.id), "node_name": node.name},
                 dag_node_id=node.id,
             )
+            now = datetime.now(UTC)
             await self._store.update_node(
                 node.id,
                 status="running",
                 subtask_id=subtask.id,
-                started_at=datetime.now(UTC),
+                started_at=now,
+                # F064.1: baseline activity ping at launch. Without this, the
+                # stall scan sees last_activity_at=NULL and never flags — but
+                # we want a node that fails before its first tool call (e.g.
+                # bootstrap error) to also surface via the stall path.
+                last_activity_at=now,
             )
             node.status = "running"
+            node.last_activity_at = now
             logger.info(
                 "Launched subtask %s for node %s in DAG %s",
                 subtask.id, node.name, dag.id,

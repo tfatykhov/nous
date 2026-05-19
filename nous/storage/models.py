@@ -448,6 +448,11 @@ class Procedure(Base):
     censor_ids = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=True)
     embedding = mapped_column(Vector(1536), nullable=True)
     tags = mapped_column(ARRAY(Text), nullable=True)
+    # F064.4: skill runtime hints (concurrency_cap, timeout_override_seconds,
+    # hooks, requires_human_review, schema_version). Always persisted when
+    # the SkillManifest declares any of the new fields; consumer wiring is
+    # deferred to F064.4-v2 gated by NOUS_SKILL_RUNTIME_METADATA_ENABLED.
+    runtime_metadata = mapped_column(JSONB, nullable=True)
     # search_tsv is GENERATED ALWAYS — do not map, read-only DB-side
     active: Mapped[bool | None] = mapped_column(Boolean, server_default="true")
     encoded_frame: Mapped[str | None] = mapped_column(String(100))
@@ -736,6 +741,15 @@ class Schedule(Base):
     )
     model: Mapped[str | None] = mapped_column(String(100))
     frame_type: Mapped[str | None] = mapped_column(String(20))
+    # F064.5 v1 (Episode reuse). See migration 045 for column semantics.
+    continuation_turns: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    continuation_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    continuation_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
 
 class ToolCache(Base):
@@ -848,6 +862,9 @@ class ExecutionDAG(Base):
     )
     result_summary: Mapped[str | None] = mapped_column(Text)
     postmortem: Mapped[dict | None] = mapped_column(JSONB)
+    # F064.2: per-DAG per-frame-type dispatch cap dict {frame_type: max}.
+    # NULL means no per-DAG cap (env override or unlimited).
+    max_concurrent_by_frame_type: Mapped[dict | None] = mapped_column(JSONB)
 
     nodes: Mapped[list["DAGNode"]] = relationship(
         "DAGNode",
@@ -921,6 +938,11 @@ class DAGNode(Base):
     )
     awaiting_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # F064.1: per-node activity timestamp updated by runner._tool_loop on
+    # every iteration boundary. NULL = no ping yet (wall-clock is fallback).
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # F064.1: per-node stall timeout. NULL or 0 disables. Clamped at insert.
+    stall_timeout_seconds: Mapped[int | None] = mapped_column(Integer)
     result: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)
     tokens_used: Mapped[int] = mapped_column(
@@ -980,3 +1002,41 @@ class DAGEdge(Base):
     def __init__(self, **kwargs: object) -> None:
         kwargs.setdefault("edge_type", "dependency")
         super().__init__(**kwargs)
+
+
+class WorkQueueItem(Base):
+    """F064.6: per-agent record of an external work-queue item.
+
+    `dispatched_at IS NULL` is the "claimed but not yet linked to a DAG"
+    sentinel. The cross-tick reconciler queries this state to recover
+    orphan rows from partial-commit failures. See migration 046 for
+    column semantics.
+    """
+
+    __tablename__ = "work_queue_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "agent_id", "source", "external_id",
+            name="uq_work_queue_external",
+        ),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # NULL = claimed but not yet dispatched (reconciler sentinel)
+    dispatched_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    dag_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    terminal_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

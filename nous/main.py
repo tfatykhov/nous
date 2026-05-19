@@ -629,6 +629,7 @@ async def create_components(settings: Settings) -> dict:
                 registry.register(drift_check)
                 logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
 
+
             # F034.5: Create dynamic check loader
             from nous.heartbeat.dynamic import DynamicCheckLoader
             dynamic_loader = DynamicCheckLoader(
@@ -683,7 +684,43 @@ async def create_components(settings: Settings) -> dict:
             from nous.api.tools import register_dag_tools
             register_dag_tools(dispatcher, dag_store, dag_orchestrator)
 
+            # F064.1: late-bind DAGStore so runner._tool_loop can fire
+            # activity pings to dag_nodes.last_activity_at for subtasks
+            # running under a DAG node.
+            runner.set_dag_store(dag_store)
+
             logger.info("F038: DAG orchestration enabled")
+
+            # F064.6: work-queue ingress check. Lives inside the DAG-init
+            # block because the check needs dag_store + dag_orchestrator
+            # to dispatch DAGs for work items. Master flag default off.
+            if settings.work_queue_enabled and heartbeat_runner is not None:
+                try:
+                    from nous.heart.work_queue import WorkQueueItemManager
+                    from nous.heartbeat.work_queue import (
+                        WorkQueueCheck, build_adapter,
+                    )
+                    wq_items_mgr = WorkQueueItemManager(
+                        database, settings.agent_id,
+                    )
+                    wq_check = WorkQueueCheck(
+                        adapter=build_adapter(settings),
+                        items_mgr=wq_items_mgr,
+                        dag_store=dag_store,
+                        orchestrator=dag_orchestrator,
+                        settings=settings,
+                    )
+                    heartbeat_runner.registry.register(wq_check)
+                    logger.info(
+                        "F064.6: WorkQueueCheck registered (source=%s, interval=%ds)",
+                        settings.work_queue_source,
+                        settings.work_queue_interval_seconds,
+                    )
+                except Exception:
+                    logger.warning(
+                        "F064.6: WorkQueueCheck registration failed",
+                        exc_info=True,
+                    )
         except ImportError:
             logger.debug("F038: DAG module not available yet")
 

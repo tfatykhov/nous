@@ -14,6 +14,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from typing import Any, Callable
+from uuid import UUID
 
 from nous.api.anthropic_client import (
     AnthropicClient,
@@ -89,6 +90,11 @@ class AgentRunner:
         self._api: AnthropicClient | None = None
         self._api_shared: bool = False  # True if client was externally provided
         self._dispatcher: Any | None = None  # ToolDispatcher, set via set_dispatcher()
+        # F064.1: DAGStore reference for fire-and-forget activity pings.
+        # Late-bound via set_dag_store() because DAGStore is built later in
+        # main.py wiring and not every consumer (chat session, tests) needs
+        # it. None disables pings — _ping_dag_node_activity short-circuits.
+        self._dag_store: Any | None = None
 
         # Compaction (Spec 008.1)
         self._compactor: ConversationCompactor | None = None
@@ -206,6 +212,15 @@ class AgentRunner:
         """Set the tool dispatcher for tool loop execution."""
         self._dispatcher = dispatcher
 
+    def set_dag_store(self, dag_store: Any) -> None:
+        """F064.1: late-bind the DAGStore for activity-ping writes.
+
+        Wired in main.py after DAGStore is constructed. None-safe — the
+        ping helper short-circuits when this isn't set, so chat sessions
+        and tests without DAG infra continue to work unchanged.
+        """
+        self._dag_store = dag_store
+
     def set_api_client(self, client: AnthropicClient) -> None:
         """Set a pre-initialized API client (shared with handlers)."""
         self._api = client
@@ -275,6 +290,11 @@ class AgentRunner:
         # ToolDispatcher (so no leak risk on crash).
         extra_tools: dict[str, tuple[dict, Any]] | None = None,
         force_tool_on_penultimate: str | None = None,
+        # F064.1: when the caller is the DAG-managed subtask worker, this
+        # carries the DAGNode.id so _tool_loop can fire activity pings to
+        # `dag_nodes.last_activity_at`. None on chat / non-DAG paths — ping
+        # site short-circuits.
+        dag_node_id: UUID | None = None,
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn.
 
@@ -435,6 +455,7 @@ class AgentRunner:
                     is_background=is_background,
                     extra_tools=extra_tools,
                     force_tool_on_penultimate=force_tool_on_penultimate,
+                    dag_node_id=dag_node_id,
                 )
                 conversation.messages.append(Message(role="assistant", content=response_text))
             except Exception as e:
@@ -1306,6 +1327,7 @@ class AgentRunner:
         # F061: per-call tool injection + forced terminal tool gating.
         extra_tools: dict[str, tuple[dict, Any]] | None = None,
         force_tool_on_penultimate: str | None = None,
+        dag_node_id: UUID | None = None,  # F064.1: activity-ping target
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1369,6 +1391,12 @@ class AgentRunner:
         _force_fires_remaining = 2
 
         while turns < max_turns:
+            # F064.1 ping site 1 — top of every iteration. Fires for both
+            # tool-using and text-only turns. asyncio.shield prevents a
+            # wait_for cancellation from killing an in-flight ping write.
+            if dag_node_id is not None:
+                self._ping_dag_node_activity(dag_node_id)
+
             # F020: Rebuild tool list each iteration for dynamic cache_retrieve
             tools = list(base_tools)
             # F061: append per-call extra tool schemas (NOT registered globally).
@@ -1539,9 +1567,25 @@ class AgentRunner:
                             if not is_error:
                                 terminate_after_tool_results = True
                         else:
-                            result_text, is_error = await self._dispatcher.dispatch(
-                                tool_name, tool_input, session_id=session_id
+                            # F064.1 ping site 2 — immediately before tool
+                            # dispatch. Pins last_activity_at to NOW so a long-
+                            # running tool (e.g. 45-min bash build) does not
+                            # trip the stall scan mid-execution.
+                            if dag_node_id is not None:
+                                self._ping_dag_node_activity(dag_node_id)
+                            # @codex P1 on e8841b2: in-flight heartbeat
+                            # for tool calls that may exceed stall_timeout.
+                            # Cancels in the finally regardless of success.
+                            _hb = (
+                                self._start_activity_heartbeat(dag_node_id)
+                                if dag_node_id is not None else None
                             )
+                            try:
+                                result_text, is_error = await self._dispatcher.dispatch(
+                                    tool_name, tool_input, session_id=session_id
+                                )
+                            finally:
+                                await self._stop_activity_heartbeat(_hb)
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch)
@@ -1857,6 +1901,185 @@ Rules:
             if block.get("type") == "text":
                 text_parts.append(block["text"])
         return "\n".join(text_parts) if text_parts else ""
+
+    async def _activity_heartbeat_loop(
+        self, dag_node_id: UUID, interval_seconds: float
+    ) -> None:
+        """F064.1: background heartbeat ping while a tool dispatch is in flight.
+
+        @codex P1 on e8841b2: the single pre-dispatch ping isn't enough for
+        tool calls that exceed stall_timeout — a 30-min bash with a 10-min
+        stall_timeout would still trip stall detection mid-execution because
+        no ping fires for 30 minutes. This loop emits a ping every
+        `interval_seconds` until cancelled by the caller's try/finally.
+
+        Failure mode handling:
+        - asyncio.CancelledError on cancel → re-raise (caller awaits to drain)
+        - other exceptions → DEBUG log + continue loop (best-effort telemetry)
+        """
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return
+        try:
+            while True:
+                await asyncio.sleep(interval_seconds)
+                try:
+                    await asyncio.shield(store.touch_node_activity(dag_node_id))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "F064.1 heartbeat ping failed (suppressed)", exc_info=True
+                    )
+        except asyncio.CancelledError:
+            raise
+
+    async def _resolve_node_stall_timeout(self, dag_node_id: UUID) -> int:
+        """@codex P1 on 93b8570: heartbeat cadence must respect the per-node
+        stall_timeout, not the global default. Otherwise a node with
+        stall_timeout=60 and global default=600 would get heartbeats every
+        200s and trip stall mid-dispatch every time.
+
+        @codex P2 on d5e64ca: clamp per-node values to
+        NOUS_DAG_NODE_MAX_STALL_TIMEOUT to mirror what the orchestrator's
+        _effective_stall_timeout does. Without this, a legacy/manual row
+        with stall_timeout exceeding the current max ceiling would get
+        heartbeats based on the raw value, but the orchestrator scan uses
+        the clamped value — cadence would be too slow for the actual
+        enforced window.
+
+        Reads the node's persisted stall_timeout_seconds; falls back to the
+        global default (or to settings ceiling if the per-node is 0/None).
+        On any error, returns the global default as a safe fallback.
+        """
+        global_default = self._settings.dag_node_default_stall_timeout
+        max_cap = self._settings.dag_node_max_stall_timeout
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return min(global_default, max_cap)
+        try:
+            from nous.storage.models import DAGNode
+
+            async with store._db.session() as session:
+                row = await session.get(DAGNode, dag_node_id)
+                if row is None:
+                    return min(global_default, max_cap)
+                per_node = row.stall_timeout_seconds
+                if per_node is None:
+                    if global_default <= 0:
+                        return 0
+                    return min(global_default, max_cap)
+                # Per-node 0 = explicitly disabled → return 0; caller skips.
+                if per_node == 0:
+                    return 0
+                # Apply the same clamp the orchestrator uses.
+                return min(per_node, max_cap)
+        except Exception:
+            logger.debug(
+                "F064.1 stall-timeout lookup failed; using global default",
+                exc_info=True,
+            )
+            return min(global_default, max_cap)
+
+    def _start_activity_heartbeat(
+        self, dag_node_id: UUID
+    ) -> "asyncio.Task | None":
+        """Start the background heartbeat for a tool dispatch. Returns the
+        task so the caller's try/finally can cancel it. Returns None when
+        stall detection is disabled or no store wired."""
+        if not self._settings.dag_stall_detection_enabled:
+            return None
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return None
+        # Heartbeat at 1/3 of the effective stall_timeout, min 30s. This
+        # keeps write amplification bounded (≤3 pings per stall window)
+        # while ensuring at least one ping lands within the window for
+        # ANY node — including short per-node overrides.
+        # @codex P1 on 93b8570: previous version used the global default
+        # which under-pinged per-node stall_timeout overrides shorter
+        # than that default. Now: resolve the effective per-node value
+        # at heartbeat start via async DB lookup, with safe fallback.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+
+        async def _bootstrap() -> None:
+            stall = await self._resolve_node_stall_timeout(dag_node_id)
+            if stall <= 0:
+                return  # disabled for this node
+            # @codex P1 on f967cb3: floor at 1.0s instead of 30s — the
+            # previous 30s floor made intervals too sparse for short
+            # per-node overrides (e.g. stall_timeout=10s → heartbeat
+            # every 30s never lands inside the 10s window). Now the
+            # cadence is always stall/3, with a 1s sanity floor to
+            # avoid pathological 0-interval loops. Write amplification
+            # is still bounded at ≤3 pings per stall window regardless
+            # of stall size.
+            interval = max(stall / 3.0, 1.0)
+            await self._activity_heartbeat_loop(dag_node_id, interval)
+
+        return loop.create_task(_bootstrap())
+
+    @staticmethod
+    async def _stop_activity_heartbeat(task: "asyncio.Task | None") -> None:
+        """Cancel + drain a heartbeat task. Idempotent on None."""
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    def _ping_dag_node_activity(self, dag_node_id: UUID) -> None:
+        """F064.1: fire-and-forget activity ping for stall detection.
+
+        Wrapped in an async helper that internally awaits asyncio.shield so a
+        wait_for cancellation in the outer subtask path can't cancel the
+        in-flight UPDATE. A write failure is absorbed by
+        DAGStore.touch_node_activity (DEBUG log, swallowed) so the tool loop
+        never blocks or raises because of telemetry.
+
+        No-op when _dag_store hasn't been wired (chat path, tests without
+        DAG infra) OR when NOUS_DAG_STALL_DETECTION_ENABLED=false (the
+        write would be wasted — the stall scan never reads it). Called
+        from _tool_loop's two ping sites; the third baseline ping fires
+        from orchestrator._launch_subtask_node.
+
+        Fix per @codex review: asyncio.create_task requires a coroutine, but
+        asyncio.shield returns a Future — passing shield() directly to
+        create_task() raises TypeError. The async wrapper here is a
+        coroutine factory, satisfying create_task while still letting the
+        body await shield(...) so the write survives wait_for cancellation.
+
+        @codex P2 on d281ac6: gate behind the master flag so the per-tool
+        boundary doesn't generate unread DB writes when stall detection
+        is disabled (default state).
+        """
+        if not self._settings.dag_stall_detection_enabled:
+            return
+        store = getattr(self, "_dag_store", None)
+        if store is None:
+            return
+
+        async def _ping() -> None:
+            try:
+                await asyncio.shield(store.touch_node_activity(dag_node_id))
+            except asyncio.CancelledError:
+                # Cancellation is expected during shutdown / wait_for timeout.
+                # Re-raising would bubble into the task and log; we want silent.
+                raise
+            except Exception:  # noqa: BLE001 — best-effort telemetry
+                logger.debug("F064.1 ping failed (suppressed)", exc_info=True)
+
+        try:
+            asyncio.create_task(_ping())
+        except RuntimeError:
+            # No running event loop — happens in some test paths. Silent
+            # by design; the stall scan's NULL-fallback policy covers us.
+            pass
 
     def _check_safety_net(
         self,

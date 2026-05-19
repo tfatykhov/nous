@@ -5,9 +5,11 @@ env vars (DB_PASSWORD, DB_PORT, etc.) that docker-compose uses, so a single
 .env file drives both the container and the Python app.
 """
 
+import tempfile
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -700,6 +702,103 @@ class Settings(BaseSettings):
     # F038: DAG Orchestration
     dag_enabled: bool = True
 
+    # F064.1: DAG node stall detection. Off by default — opt-in feature flag
+    # for the stall-scan + activity-ping plumbing. When false, the orchestrator
+    # never reads `last_activity_at` and never marks nodes failed for stall.
+    dag_stall_detection_enabled: bool = False
+    dag_node_default_stall_timeout: int = Field(
+        600,
+        ge=0,
+        description="Seconds without activity before a running node is marked stalled. 0 disables per-node.",
+    )
+    dag_node_max_stall_timeout: int = Field(
+        3600,
+        ge=1,
+        description="Hard ceiling for per-DAGNodeSpec.stall_timeout_seconds.",
+    )
+
+    # F064.2: per-frame-type concurrency caps on DAG dispatch. Off by default.
+    # When false, the orchestrator dispatches all ready nodes in a tick as it
+    # always has. When true, `DAGCreateRequest.max_concurrent_by_frame_type`
+    # is consulted, with the global env override below taking precedence.
+    dag_frame_concurrency_enabled: bool = False
+    dag_global_max_concurrent_by_frame: dict[str, int] = Field(
+        default_factory=dict,
+        description="Operator-level cap dict {frame_type: max_concurrent}. Overrides per-DAG values when set.",
+    )
+
+    # F064.3: workspace safety invariants. Off by default. When false,
+    # insert-time sanitization is skipped (today's behavior). Read-time
+    # containment-assert runs unconditionally as a security boundary — see
+    # docs/plans/2026-05-19-f064-symphony-orchestration-adoptions.md §6.
+    dag_workspace_safety_enabled: bool = False
+    dag_workspace_root: Path = Field(
+        default_factory=lambda: Path(tempfile.gettempdir()) / "nous-workspace" / "dag-status",
+        description="Resolved-absolute root that every DAG workspace path must be inside. Platform-dependent default via tempfile.gettempdir().",
+    )
+
+    # F064.4: workflow-as-code skill manifest fields. The new SkillManifest
+    # fields (concurrency_cap, timeout_override_seconds, hooks,
+    # requires_human_review) are *always* parsed and *always* persisted on
+    # procedures.runtime_metadata — this flag gates only the deferred-to-v2
+    # consumer enforcement at the orchestrator level. Off by default until
+    # F064.4-v2 ships the consumer.
+    skill_runtime_metadata_enabled: bool = False
+
+    # F064.5: scheduled task continuation (v1 Episode reuse only). Off by
+    # default — every fire creates a fresh session_id, today's behavior. When
+    # true, schedules with continuation_turns > 0 reuse the prior fire's
+    # session_id up to the cap.
+    schedule_continuation_enabled: bool = False
+    schedule_max_continuation_turns: int = Field(
+        50,
+        ge=1,
+        description="Hard ceiling on Schedule.continuation_turns. Prevents unbounded Episode growth.",
+    )
+    schedule_continuation_default_prompt: str = Field(
+        "Continue. The previous run completed at {last_fired_at}. Apply the same task to fresh context.",
+        description="Reserved for F064.5-v2 (LLM thread continuity). Not consumed in v1.",
+    )
+
+    # F064.6: work-queue ingress heartbeat check. Off by default. When true,
+    # a WorkQueueCheck is registered that polls the configured adapter and
+    # emits DAGs for new items, reconciling terminal-state items by cancel-
+    # cascading the corresponding DAG.
+    work_queue_enabled: bool = False
+    work_queue_source: Literal["file_jsonl", "github_issues", "linear"] = "file_jsonl"
+    work_queue_interval_seconds: int = Field(
+        300,
+        ge=30,
+        description="Seconds between WorkQueueCheck runs. Sub-30s would hammer the queue/DB.",
+    )
+    work_queue_file_jsonl_path: str = Field(
+        "",
+        description="Adapter-specific config: path to JSONL file for file_jsonl source.",
+    )
+    work_queue_max_dags_per_tick: int = Field(
+        5,
+        ge=1,
+        le=5,
+        description="Per-tick admission cap to avoid flooding MAX_ACTIVE_DAGS (=5).",
+    )
+
+    @field_validator("dag_global_max_concurrent_by_frame")
+    @classmethod
+    def _validate_frame_caps(cls, v: dict[str, int]) -> dict[str, int]:
+        """F064.2: every per-frame cap must be a positive integer.
+
+        Setting a value to 0 would silently block all DAGs of that frame
+        type — exactly the silent-failure shape the reviewer P1 callout
+        warned about. Fail fast at Settings init instead.
+        """
+        for frame, cap in v.items():
+            if cap < 1:
+                raise ValueError(
+                    f"NOUS_DAG_GLOBAL_MAX_CONCURRENT_BY_FRAME['{frame}']={cap} is invalid; "
+                    "values must be >= 1"
+                )
+        return v
+
     # F039: Correction Learning Pipeline
     correction_extraction_enabled: bool = True
 
@@ -844,6 +943,28 @@ class Settings(BaseSettings):
         if self.dag_node_default_timeout > self.dag_node_max_timeout:
             raise ValueError(
                 f"dag_node_default_timeout ({self.dag_node_default_timeout}) must be <= "
+                f"dag_node_max_timeout ({self.dag_node_max_timeout})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dag_stall_timeouts(self) -> "Settings":
+        """F064.1: stall ≤ wall-clock invariant.
+
+        Only enforced when stall detection is opted in. Today's default
+        (stall=600, wall=600, max_stall=3600, max_wall=7200) is mutually
+        consistent so a fresh-DB startup with defaults passes.
+        """
+        if not self.dag_stall_detection_enabled:
+            return self
+        if self.dag_node_default_stall_timeout > self.dag_node_default_timeout:
+            raise ValueError(
+                f"dag_node_default_stall_timeout ({self.dag_node_default_stall_timeout}) must be <= "
+                f"dag_node_default_timeout ({self.dag_node_default_timeout})"
+            )
+        if self.dag_node_max_stall_timeout > self.dag_node_max_timeout:
+            raise ValueError(
+                f"dag_node_max_stall_timeout ({self.dag_node_max_stall_timeout}) must be <= "
                 f"dag_node_max_timeout ({self.dag_node_max_timeout})"
             )
         return self

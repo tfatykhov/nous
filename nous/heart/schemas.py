@@ -182,6 +182,11 @@ class ProcedureInput(BaseModel):
     implementation_notes: list[str] = []  # Lower fringe
     tags: list[str] = []
     active: bool | None = None  # None = use default (True), False = register as inactive
+    # F064.4: skill runtime hints surfaced from SkillManifest. Always
+    # persisted when any of {concurrency_cap, timeout_override_seconds,
+    # hooks, requires_human_review} is declared on the manifest. Consumer
+    # wiring deferred to F064.4-v2.
+    runtime_metadata: dict | None = None
 
 
 class ProcedureDetail(BaseModel):
