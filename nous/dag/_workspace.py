@@ -26,6 +26,7 @@ posture motivate this two-tier design.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from uuid import UUID
@@ -91,6 +92,13 @@ def compute_workspace_path(dag_id: UUID, node_name: str, root: Path) -> Path:
     ``node_name`` segment passes through the LENIENT transformation, not
     the strict gate — read-time of legacy data must not break.
 
+    @codex P1 on 37fc50f: when the transformation actually changes the
+    input (e.g. "step a" → "step_a"), append a stable 6-char hash of the
+    ORIGINAL name to keep distinct names from colliding on the same
+    workspace dir. Without this, "step a" and "step_a" would both write
+    to "step_a/result" and silently race. Hash is deterministic so reads
+    of the same legacy name always resolve to the same path.
+
     Args:
         dag_id: The owning DAG's UUID.
         node_name: The node name as stored on the row. May be a legacy
@@ -107,6 +115,12 @@ def compute_workspace_path(dag_id: UUID, node_name: str, root: Path) -> Path:
     """
     dag_segment = dag_id.hex[:8]
     safe_name = _sanitize_segment_lenient(node_name)
+    if safe_name != node_name:
+        # Transformation changed the input — disambiguate by appending a
+        # short hash of the original. Two distinct legacy names that map
+        # to the same sanitized form get different paths.
+        digest = hashlib.sha256(node_name.encode("utf-8")).hexdigest()[:6]
+        safe_name = f"{safe_name}-{digest}"
     return root / dag_segment / safe_name
 
 

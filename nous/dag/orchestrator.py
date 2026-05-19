@@ -497,25 +497,36 @@ class DAGOrchestrator:
 
         # F064.3: derive the per-node workspace + assert containment. The
         # dag attribute isn't on the node directly; we read it from the
-        # parent DAG row via the FK (the orchestrator owns this query but
-        # callers always invoke through _poll_awaiting_checks which has
-        # the DAG in scope). Falling back to the orchestrator process's
-        # cwd would be the legacy behavior and is preserved only when
-        # we fail to derive a workspace.
-        cwd_arg: str | None = None
+        # parent DAG row via the FK. The completion-check subprocess MUST
+        # run with cwd inside the workspace root — if we can't derive a
+        # safe workspace, FAIL the check rather than fall through to
+        # cwd=None (which would run in the orchestrator process's working
+        # directory and defeat the security boundary).
+        # @codex P2 on 37fc50f: previously this branch logged+fell through
+        # to cwd=None, which is the exact behavior the containment check
+        # is meant to prevent.
+        cwd_arg: str
         try:
             dag = await self._store.get_dag(node.dag_id)
-            if dag is not None:
-                root = self._settings.dag_workspace_root
-                workspace = compute_workspace_path(dag.id, node.name, root)
-                assert_inside_root(workspace, root)
-                workspace.mkdir(parents=True, exist_ok=True)
-                cwd_arg = str(workspace)
+            if dag is None:
+                return CheckResult(
+                    "failed",
+                    f"workspace setup failed: DAG {node.dag_id} not found",
+                )
+            root = self._settings.dag_workspace_root
+            workspace = compute_workspace_path(dag.id, node.name, root)
+            assert_inside_root(workspace, root)
+            workspace.mkdir(parents=True, exist_ok=True)
+            cwd_arg = str(workspace)
         except (ValueError, OSError) as e:
             logger.warning(
                 "F064.3: completion_check workspace setup failed for node %s — %s; "
-                "falling back to inherited cwd",
+                "failing the check (refusing to run with unsafe cwd)",
                 node.name, e,
+            )
+            return CheckResult(
+                "failed",
+                f"workspace containment failure: {e}",
             )
 
         try:

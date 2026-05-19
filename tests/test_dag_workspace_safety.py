@@ -87,15 +87,43 @@ class TestComputeWorkspacePath:
         assert result == tmp_path / dag_id.hex[:8] / "safe-step"
 
     def test_legacy_spaces_transformed_not_rejected(self, tmp_path: Path):
-        """Read-time path must keep working for pre-flag rows with unsafe names."""
+        """Read-time path must keep working for pre-flag rows with unsafe names.
+        Hash suffix is appended for collision protection (codex P1 on 37fc50f)."""
         dag_id = uuid.uuid4()
         result = compute_workspace_path(dag_id, "step with spaces", tmp_path)
-        assert result == tmp_path / dag_id.hex[:8] / "step_with_spaces"
+        assert result.parent == tmp_path / dag_id.hex[:8]
+        assert result.name.startswith("step_with_spaces-")
+        # Hash suffix is 6 hex chars
+        suffix = result.name.split("-")[-1]
+        assert len(suffix) == 6
+        assert all(c in "0123456789abcdef" for c in suffix)
 
     def test_legacy_unicode_transformed(self, tmp_path: Path):
         dag_id = uuid.uuid4()
         result = compute_workspace_path(dag_id, "α-step-β", tmp_path)
-        assert result.name == "_-step-_"
+        # Transformation yields "_-step-_" but hash suffix guarantees uniqueness
+        assert result.name.startswith("_-step-_-")
+
+    def test_distinct_legacy_names_get_distinct_paths(self, tmp_path: Path):
+        """@codex P1 on 37fc50f: 'step a' and 'step_a' must NOT collide.
+        The hash suffix disambiguates them when sanitization collapses them
+        to the same alphanumeric form."""
+        dag_id = uuid.uuid4()
+        path_a = compute_workspace_path(dag_id, "step a", tmp_path)
+        path_b = compute_workspace_path(dag_id, "step_a", tmp_path)
+        # Different inputs → different paths
+        assert path_a != path_b
+        # Sanitized stems match but suffixes differ
+        assert path_a.name.startswith("step_a-")  # "step a" → "step_a" + hash
+        # "step_a" passes through unchanged (already safe), no suffix
+        assert path_b.name == "step_a"
+
+    def test_same_legacy_name_resolves_deterministically(self, tmp_path: Path):
+        """Repeated reads of the same legacy name must hit the same path."""
+        dag_id = uuid.uuid4()
+        a = compute_workspace_path(dag_id, "step with spaces", tmp_path)
+        b = compute_workspace_path(dag_id, "step with spaces", tmp_path)
+        assert a == b
 
     def test_reserved_dotdot_still_rejected_at_read(self, tmp_path: Path):
         """Even at read time, '..' has no safe transformation — must reject."""
@@ -240,7 +268,8 @@ class TestOrchestratorReadContainment:
         self, store, subtask_mgr, dynamic_loader, tmp_path: Path, db
     ):
         """Legacy node with name 'step with spaces' should read from the
-        sanitized path 'step_with_spaces' (lenient transformation)."""
+        sanitized + hash-suffixed path (lenient transformation + codex P1
+        collision-protection)."""
         settings = Settings(dag_workspace_root=tmp_path)
         s = DAGStore(db, store._agent_id, settings)
         orch = DAGOrchestrator(
@@ -255,9 +284,46 @@ class TestOrchestratorReadContainment:
         node = dag.nodes[0]
         # Mutate in-memory to simulate a legacy row
         node.name = "step with spaces"
-        # Write a result file at the SANITIZED path
-        safe_dir = tmp_path / dag.id.hex[:8] / "step_with_spaces"
-        safe_dir.mkdir(parents=True)
-        (safe_dir / "result").write_text("legacy-content")
+        # Write a result file at the SANITIZED + HASH-SUFFIXED path
+        expected_path = compute_workspace_path(dag.id, node.name, tmp_path)
+        expected_path.mkdir(parents=True)
+        (expected_path / "result").write_text("legacy-content")
         result = await orch._read_node_result(node, dag)
         assert result == "legacy-content"
+
+    @pytest.mark.asyncio
+    async def test_completion_check_fails_when_workspace_escapes_root(
+        self, store, subtask_mgr, dynamic_loader, tmp_path: Path, db
+    ):
+        """@codex P2 on 37fc50f: when workspace containment fails, the
+        completion check must FAIL — not fall through to cwd=None
+        (orchestrator process cwd). That fallthrough would defeat the
+        security boundary in the exact case it's meant to protect.
+        """
+        from nous.dag.orchestrator import CheckResult
+
+        # Use a root that *can't* be escaped, then mutate node.name to '..'
+        # which forces compute_workspace_path to raise ValueError.
+        settings = Settings(dag_workspace_root=tmp_path)
+        s = DAGStore(db, store._agent_id, settings)
+        orch = DAGOrchestrator(
+            store=s, subtask_mgr=subtask_mgr,
+            dynamic_loader=dynamic_loader, settings=settings,
+        )
+        req = DAGCreateRequest(
+            name="check-fail-dag",
+            nodes=[
+                DAGNodeSpec(
+                    name="step",
+                    type=DAGNodeType.subtask,
+                    completion_check="echo ok",
+                ),
+            ],
+        )
+        dag = await s.create(req)
+        node = dag.nodes[0]
+        node.name = ".."  # forces ValueError in compute_workspace_path
+        result = await orch._run_completion_check(node)
+        assert isinstance(result, CheckResult)
+        assert result.status == "failed"
+        assert "workspace" in result.detail.lower()
