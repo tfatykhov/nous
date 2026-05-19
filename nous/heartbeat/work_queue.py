@@ -358,7 +358,15 @@ class WorkQueueCheck(BaseCheck):
         self, row_id, item: WorkItem, findings: list[Finding]
     ) -> bool:
         """Re-attempt dispatch for a row that committed claim but never
-        reached mark_dispatched (partial-commit / restart recovery)."""
+        reached mark_dispatched (partial-commit / restart recovery).
+
+        @codex P1 on 51c1f78: same atomicity story as _claim_and_dispatch.
+        If create() succeeds but mark_dispatched() raises, the new DAG
+        would run unmoored AND the next reconciler tick picks the row
+        again and creates another DAG. Cancel the orphan on
+        mark_dispatched failure to prevent the duplicate.
+        """
+        dag = None
         try:
             request = self._request_factory(item)
             dag = await self._dag_store.create(request)
@@ -368,6 +376,17 @@ class WorkQueueCheck(BaseCheck):
                 "F064.6: reconciler re-dispatch failed for orphan %s",
                 row_id,
             )
+            if dag is not None:
+                try:
+                    await self._orchestrator.cancel_dag(
+                        dag.id,
+                        reason="F064.6: reconciler mark_dispatched failed; cancelling orphan",
+                    )
+                except Exception:
+                    logger.exception(
+                        "F064.6: reconciler cleanup cancel_dag failed for %s",
+                        dag.id,
+                    )
             findings.append(Finding(
                 source=self._adapter.source_name,
                 summary=f"Reconciler failed for orphan {item.external_id}: {e}",
