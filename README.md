@@ -6,7 +6,7 @@
 
 **A cognitive architecture for AI agents, grounded in Minsky's Society of Mind.**
 
-Nous is a framework for building AI agents that think, learn, and grow — not just respond. It applies the decision intelligence principles proven by [Cognition Engines](https://github.com/tfatykhov/cognition-agent-decisions), and implements Marvin Minsky's Society of Mind principles as first-class architectural components.
+Nous is a framework for building AI agents that think, learn, and grow — not just respond. It applies the decision intelligence principles proven by [Cognition Engines](https://github.com/tfatykhov/cognition-agent-decisions), and implements Marvin Minsky's *Society of Mind* principles as first-class architectural components.
 
 > *"To explain the mind, we have to show how minds are built from mindless stuff."* — Marvin Minsky
 
@@ -21,6 +21,7 @@ Nous is different. It gives agents:
 - **Structured memory** that mirrors how minds actually work (not just vector search)
 - **Decision intelligence** that learns from past choices and calibrates confidence
 - **Self-monitoring** that catches mistakes before they happen
+- **Proactive autonomy** — agents notice things on their own, not only when prompted
 - **Administrative growth** — agents get smarter by managing themselves better, not just accumulating more knowledge
 
 ## Architecture Overview
@@ -50,6 +51,15 @@ graph TB
         E -.- PB[Parallel Bundles]
         G -.- BB[B-Brain Monitor]
     end
+
+    subgraph "Background Organs"
+        HB[Heartbeat<br/>Proactive Checks]
+        DAG[DAG Orchestrator<br/>Multi-Step Plans]
+        OBS[Observability<br/>Context Log · Drift · Snapshots]
+        HB -.- F
+        DAG -.- F
+        OBS -.- G
+    end
 ```
 
 ## Core Concepts
@@ -62,7 +72,7 @@ graph TB
 | Censors | Ch 9 | Guardrails that block actions, not modify them | ✅ Shipped |
 | Papert's Principle | Ch 10 | Administrative growth through detours, not replacements | ✅ Shipped |
 | Frames | Ch 25 | One active frame at a time; explicit frame-switching | ✅ Shipped |
-| B-Brains | Ch 6 | Self-monitoring layer that watches the agent think | 🔄 Planned |
+| B-Brains | Ch 6 | Self-monitoring layer that watches the agent think | 🔄 Phase 0 (Critic Agent) |
 | Parallel Bundles | Ch 18 | Multiple independent reasons > one logical chain | ✅ Shipped (decisions) |
 | Polynemes | Ch 19 | Tags as cross-agency activation signals | 🔄 Planned |
 | Nemes | Ch 20 | Micro-features that constrain search (bridge-definitions) | 🔄 Planned |
@@ -169,6 +179,8 @@ graph TB
 
 **Key principle:** Each layer learns to exploit the last, then stabilizes and becomes a foundation. Layers become substrates. The slowest-changing layers provide the most continuity.
 
+Memory is stored in PostgreSQL with pgvector across three schemas — `brain` (decisions, calibration, graph), `heart` (facts, procedures, episodes, censors, working memory, subtasks, schedules), and `nous_system` (agents, identity, events, DAGs, dynamic checks, config). Every row is `agent_id`-scoped so a single database can host many agents.
+
 ## Growth Model
 
 Nous agents grow through **Papert's Principle**: the most crucial steps in mental growth are based on acquiring new administrative ways to use what one already knows.
@@ -195,7 +207,7 @@ graph LR
     L4 -->|add administrative growth| L5
 ```
 
-Most AI agents operate at Level 1-2. Nous is currently at **Level 3** (learning from outcomes via calibration). Levels 4-5 require B-Brain (self-monitoring) and administrative growth, both planned.
+Most AI agents operate at Level 1-2. Nous is currently at **Level 3** (learning from outcomes via calibration). Levels 4-5 require a fully autonomous B-Brain and administrative growth — Phase 0 of the Critic Agent (F024) is shipped, the rest is planned.
 
 ## Confidence & Calibration
 
@@ -206,11 +218,13 @@ Nous agents track their confidence and learn from it:
 - **Brier scores** measure calibration accuracy over time
 - Agents that say "80% confident" should be right ~80% of the time
 
+A separate write-time **calibration scale** (F058) shrinks agent-recorded confidence toward observed accuracy — the default factor (`0.7627`) is derived empirically from a 401-decision audit and can be tuned per deployment via `NOUS_CONFIDENCE_CALIBRATION_FACTOR`. The pre-calibration value is preserved in `brain.decisions.confidence_raw`.
+
 **Fredkin's Paradox:** When two options seem equally good, the choice matters least. Stop agonizing at 0.50 confidence — pick one and move. Save deliberation energy for decisions where options are actually different.
 
 ## Frame-Splitting Protocol (🔄 Planned)
 
-For important decisions, Nous will support **parallel cognitive frames** via sub-agents. The subtask infrastructure is in place; the multi-frame synthesis protocol is planned:
+For important decisions, Nous will support **parallel cognitive frames** via sub-agents. The subtask infrastructure (and now a full DAG orchestrator) is in place; the multi-frame synthesis protocol is the remaining work:
 
 ```mermaid
 graph TB
@@ -223,7 +237,7 @@ graph TB
     MAIN -->|synthesize| DEC[Decision]
 ```
 
-Each sub-agent will be locked into a single interpretive frame. The main agent will synthesize their perspectives. This will overcome Minsky's "one frame at a time" limitation through parallel processing. The subtask spawning infrastructure (`spawn_task`) already exists — what's needed is the frame-locking and synthesis protocol on top.
+Each sub-agent will be locked into a single interpretive frame. The main agent will synthesize their perspectives. This will overcome Minsky's "one frame at a time" limitation through parallel processing. `spawn_task` and the DAG orchestrator already provide the spawning fabric — what's needed is the frame-locking and synthesis protocol on top.
 
 ## Relationship to Cognition Engines
 
@@ -235,7 +249,7 @@ Cognition Engines is a standalone server for any AI agent that needs decision me
 
 ```
 Cognition Engines  →  proved the ideas work (standalone server, MCP/JSON-RPC)
-Nous Brain       →  applies those ideas as an embedded organ (Python library, Postgres)
+Nous Brain         →  applies those ideas as an embedded organ (Python library, Postgres)
 ```
 
 Both projects evolve independently. The shared asset is the philosophy, not the codebase.
@@ -258,94 +272,95 @@ Both projects evolve independently. The shared asset is the philosophy, not the 
 
 ## Configuration
 
-Key environment variables (see the [Quickstart Guide](docs/quickstart.md) for the full list):
+Key environment variables. See the [Quickstart Guide](docs/quickstart.md) and [CLAUDE.md](CLAUDE.md) for the full list — Nous exposes 150+ env vars covering retrieval, calibration, heartbeat, DAGs, and the eval harness.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NOUS_IDENTITY_PROMPT` | Built-in default | **Agent identity.** Injected as the first section of every system prompt. This is how Nous knows who it is and how to behave. Override to customize personality. |
+| `NOUS_IDENTITY_PROMPT` | Built-in default | **Agent identity.** Injected as the first section of every system prompt. Override to customize personality. |
 | `NOUS_MODEL` | `claude-sonnet-4-6` | LLM model for the main agent loop |
-| `NOUS_MAX_TURNS` | `10` | Max tool-use iterations per turn. Increase for complex multi-step tasks. |
-| `NOUS_THINKING_MODE` | `off` | Extended thinking: `off`, `adaptive` (recommended for 4.6), or `manual` |
-| `NOUS_EFFORT` | `high` | Thinking depth for adaptive mode: `low`, `medium`, `high`, `max` |
-| `NOUS_EVENT_BUS_ENABLED` | `true` | Enable async event handlers (episode summarizer, fact extractor) |
-| `NOUS_WORKSPACE_DIR` | `/tmp/nous-workspace` | Agent workspace directory |
+| `NOUS_MAX_TURNS` | `10` | Max tool-use iterations per turn |
+| `NOUS_BACKGROUND_MODEL` | `claude-sonnet-4-6` | Model used for background tasks (subtasks, heartbeat, sleep) |
+| `NOUS_EVENT_BUS_ENABLED` | `true` | Enable async event handlers (episode summarizer, fact extractor, graph linker, etc.) |
+| `NOUS_HEARTBEAT_ENABLED` | `true` | Enable proactive monitoring tick loop (F034) |
+| `NOUS_DAG_ENABLED` | `true` | Enable DAG orchestrator for multi-step plans (F038/F046/F064) |
 
-**Context Quality (F016/F017):**
+**Retrieval & context quality:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NOUS_CONTEXT_WINDOW` | auto | Override model context window size in tokens (0 = auto-detect from model name) |
-| `NOUS_ANTI_HALLUCINATION_PROMPT` | `true` | Inject "don't guess, re-fetch" safety prompt into system context |
-| `NOUS_TOOL_PRUNING_ENABLED` | `true` | Enable 4-tier tool result pruning (full → soft-trim → metadata-degrade → hard-clear) |
-| `NOUS_TOOL_SOFT_TRIM_CHARS` | `4000` | Threshold above which tool results get soft-trimmed |
-| `NOUS_TOOL_SOFT_TRIM_HEAD` | `1500` | Chars to keep from start when soft-trimming |
-| `NOUS_TOOL_SOFT_TRIM_TAIL` | `1500` | Chars to keep from end when soft-trimming |
-| `NOUS_TOOL_METADATA_DEGRADE_AFTER` | `8` | Tool result age (in results) before metadata degradation |
-| `NOUS_TOOL_HARD_CLEAR_AFTER` | `12` | Tool result age before hard-clear replacement |
-| `NOUS_KEEP_LAST_TOOL_RESULTS` | `2` | Number of most recent tool results always protected |
-| `NOUS_COMPACTION_ENABLED` | `true` | Enable LLM-powered history compaction |
-| `NOUS_COMPACTION_THRESHOLD` | auto | Token count triggering compaction (auto-scales per model context window) |
-| `NOUS_KEEP_RECENT_TOKENS` | auto | Tokens to preserve during compaction (auto-scales per model) |
-| `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
-| `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
-| `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
-| `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame context budget defaults (see example below) |
-| `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
-| `NOUS_STALENESS_HALF_LIFE_DAYS` | `14` | Half-life in days for staleness decay |
-| `NOUS_TOOL_TIMEOUT` | `120` | Max seconds for any single tool execution |
-| `NOUS_KEEPALIVE_INTERVAL` | `10` | Seconds between keepalive events during tool execution |
+| `NOUS_CONTEXT_WINDOW` | auto | Override model context window in tokens (0 = auto-detect) |
+| `NOUS_TOOL_PRUNING_ENABLED` | `true` | 4-tier tool result pruning (full → soft-trim → metadata-degrade → hard-clear) (F016) |
+| `NOUS_COMPACTION_ENABLED` | `true` | LLM-powered history compaction with entity-substring hallucination guard (F059) |
+| `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Per-type minimum-score filter on memory retrieval (F017) |
+| `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Time-decay penalty on memory scores |
+| `NOUS_STALENESS_HALF_LIFE_DAYS` | `30` | Half-life for staleness decay |
+| `NOUS_MMR_ENABLED` | `false` | Maximal Marginal Relevance diversity re-ranking (F030) |
+| `NOUS_CROSS_ENCODER_ENABLED` | `false` | Cross-encoder reranking in `recall_deep` (F042; requires `sentence-transformers`) |
+| `NOUS_GRAPH_RECALL_ENABLED` | `true` | Spreading activation on the polymorphic graph during recall (F022) |
+| `NOUS_GRAPH_BACKFILL_ENABLED` | `true` | Sleep-cycle graph densification for orphan memories (F040) |
 
-**Context Budget Overrides Example:**
+**Decision intelligence:**
 
-Each cognitive frame (task, question, decision, etc.) has built-in budgets for context assembly. Use `NOUS_CONTEXT_BUDGET_OVERRIDES` to tune these globally:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NOUS_CONFIDENCE_CALIBRATION_FACTOR` | `0.7627` | Write-time scale on agent-recorded decision confidence (F058). Set to `1.0` to disable. |
+| `NOUS_ACTION_GATING_ENABLED` | `true` | Tiered action gating before write/external/irreversible tools (F026) |
+| `NOUS_CLAIM_VERIFICATION_ENABLED` | `true` | Post-turn claim verification against execution ledger (F026) |
+| `NOUS_RUBRIC_ENABLED` | `true` | Self-modifying decision-quality rubric (F024-3b) |
 
-```bash
-# Double the total budget and increase decision memory allocation
-NOUS_CONTEXT_BUDGET_OVERRIDES='{"total": 16000, "decisions": 4000, "facts": 3000}'
-```
-
-**Token budgets** (max estimated tokens per section): `total`, `identity`, `user_profile`, `censors`, `frame`, `working_memory`, `decisions`, `facts`, `procedures`, `episodes`.
-
-**Turn budget** (not tokens): `conversation_window` — number of recent user turns checked for dedup, so the context engine doesn't inject memories already visible in the conversation.
-
-Overrides apply on top of each frame's defaults — unspecified keys keep their per-frame values.
+For the full set — heartbeat tuning, DAG timeouts, sleep cycle, eval harness — see [CLAUDE.md](CLAUDE.md).
 
 ## Status
 
 🚀 **v0.1.0 — shipped and deployed.**
 
-All core architecture is implemented and running:
+All core architecture is implemented and running. Recent work focuses on retrieval quality, background reliability, and orchestration.
+
+### Core architecture
 
 | Component | Status | Description |
 |-----------|--------|-------------|
 | Brain (F001) | ✅ Shipped | Decision recording, deliberation traces, calibration, guardrails, graph |
 | Heart (F002) | ✅ Shipped | Episodes, facts, procedures, censors, working memory |
-| Cognitive Layer (F003) | ✅ Shipped | Frame selection, recall, deliberation, monitoring, reflection |
-| Runtime (F004) | ✅ Shipped | REST API (57 endpoints), MCP server (5 tools), Telegram bot |
-| Context Engine (F005) | ✅ Shipped | Tiered context (always-on identity + search thresholds), token budgets, dedup |
-| Event Bus (F006) | ✅ Shipped | In-process async bus with 13 automated handlers |
+| Cognitive Layer (F003) | ✅ Shipped | Frame selection, recall, deliberation, monitoring, end-of-session reflection |
+| Runtime (F004) | ✅ Shipped | REST API, MCP server, Telegram bot, Anthropic API client |
+| Context Engine (F005) | ✅ Shipped | Frame-adaptive context assembly, token budgets, dedup |
+| Event Bus (F006) | ✅ Shipped | In-process async bus with automated handlers |
+| Async Subtasks (F009) | ✅ Shipped | Background task queue, worker pool, scheduling, inline subtask execution |
 | Memory Improvements (F010) | ✅ Shipped | Episode summaries, fact extraction, user tagging |
-| Context Quality (006.2) | ✅ Shipped | Fact supersession, episode dedup, abandoned filtering |
-| Sleep Consolidation | ✅ Shipped | 5-phase biological sleep cycle: memory decay, consolidation, pattern extraction, optimization, integrity checks |
-| Extended Thinking (007) | ✅ Shipped | Adaptive thinking, interleaved reasoning, thinking indicators |
-| Context Recall (007.2-007.5) | ✅ Shipped | Topic-aware recall, informational detection, relevance thresholds |
-| Agent Identity (008/F018) | ✅ Shipped | DB-backed identity, initiation protocol, tiered context, REST API |
-| Conversation Compaction (008.1) | ✅ Shipped | Tool output pruning, history compaction, durable persistence (3 phases) |
-| Streaming & Reliability | ✅ Shipped | Keepalive during Anthropic wait, tool timeout, typing indicators |
-| Topic Persistence | ✅ Shipped | Follow-up detection, current_task preservation across turns |
-| Deliberation Capture | ✅ Shipped | Extended thinking blocks → deliberation traces, garbage cleanup |
-| Episode Summary Quality (008.3-008.4) | ✅ Shipped | Backfill + enhanced prompt, candidate_facts, smart truncation, decision context |
-| Context Pruning (F016) | ✅ Shipped | 4-tier tool pruning, anti-hallucination prompt, model-aware compaction, content-type decay profiles, pre-prune fact extraction |
-| Context Quality Gate (F017) | ✅ Shipped | Relevance floor, diminishing returns cutoff, staleness penalty, model-aware budget scaling, usage tracking |
+| Skill Discovery (F011) | ✅ Shipped | `learn_skill` tool, SkillParser, bootstrap, auto-activation via RECALL |
 | K-Line Learning (F012) | ✅ Shipped | Auto-create procedures from decision clusters, episode lessons, error recovery |
-| Skill Discovery (F011) | ✅ Shipped | learn_skill tool, SkillParser, bootstrap, auto-activation via RECALL |
-| Graph-Augmented Recall (F022) | ✅ Shipped | Polymorphic graph edges, cross-type linking, contradiction bridge, spreading activation |
-| Async Subtasks (F009) | ✅ Shipped | Background task queue, worker pool, scheduling, time parser, inline subtask execution |
+| Agent Identity (F018) | ✅ Shipped | DB-backed identity, initiation protocol, tiered context, REST API |
+| Tool Output Intelligence (F020) | ✅ Shipped | SmartCompress ingestion-time compression + Postgres-backed ReversibleCache |
+| Memory Dashboard (F021) | ✅ Shipped | SPA: overview, browser, graph, calibration, activity, health, admission |
+| Graph-Augmented Recall (F022) | ✅ Shipped | Polymorphic edges, cross-type linking, contradiction bridge, spreading activation |
 | Memory Admission Control (F023) | ✅ Shipped | 5-dimension scoring, LLM utility assessment, shadow mode |
 | Critic Agent (F024) | ✅ Phase 0 | Smart frame selector, LLM classification, 6 diagnostic critics |
-| Self-Modifying Rubrics (F024-3b) | ✅ Shipped | Outcome signals, dimension proposals, approval flow, rubric evolution, dashboard tab |
-| Execution Integrity (F026) | ✅ Shipped | Execution ledger, tiered action gating, claim verification, ghost planning detection |
-| MMR Diversity (F030) | ✅ Shipped | Maximal Marginal Relevance re-ranking in recall_deep |
+| Self-Modifying Rubrics (F024-3b) | ✅ Shipped | Outcome signals, dimension proposals, rubric evolution, dashboard tab |
+| Amnesia Prevention (F025) | ✅ Shipped | Staleness exemptions, budget scaling, 16K transcript, chunked summarization |
+| Execution Integrity (F026) | ✅ Shipped | Execution ledger, tiered action gating, claim verification, ghost-planning detection |
+| Context Pruning + Quality Gate (F016 / F017) | ✅ Shipped | 4-tier pruning, anti-hallucination prompt, relevance floor, staleness penalty |
+
+### Retrieval & memory quality
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| MMR Diversity (F030) | ✅ Shipped | Maximal Marginal Relevance re-ranking in `recall_deep`, per-consumer override (F030.2) |
+| Memory Quality Fixes (F038) | ✅ Shipped | Quality gate 0.55, fact 30-char min, procedure floor 0.40, episode recency, task synthesis |
+| Graph Densification (F040) | ✅ Shipped | Orphan backfill, reverse linking, per-relation thresholds, density dashboard |
+| Cross-Encoder Reranking (F042) | ✅ Shipped | Sigmoid-normalized CE rerank, async, head-truncation, feature-flagged |
+| CE Sleep Backfill (F043) | ✅ Shipped | CE precision pre-filter before cosine gate during graph densification |
+| CE-Aware Thresholds (F045 / F054) | ✅ Shipped | Relaxed per-relation thresholds + content guards, empirically validated |
+| Actionability Classification (F047) | ✅ Shipped | Learn-time `actionable: bool` on facts (tier-1 hard filter → heuristic → Haiku LLM) |
+| Multi-Query Expansion (F050) | 🌑 Dark | Haiku-driven query expansion; module shipped, flag-flip gated on F051 harness |
+| Retrieval Eval Harness (F051) | ✅ Shipped | Local-first eval pipeline, per-source qrels, paired A/B configs, persistent eval-DB image |
+| Sleep-Phase Cleanup (F053 / F054) | ✅ Shipped | Orphan-edge sweep + keyword-channel toggle, addresses density-eval findings |
+| Episode Re-Linker (F057) | ✅ Shipped | Sleep phase that backfills F022 links missed at write time |
+
+### Proactive autonomy & orchestration
+
+| Feature | Status | Description |
+|---------|--------|-------------|
 | Censor Middleware (F031) | ✅ Shipped | Censors execute read-only tools, conditional unblock, action payloads, update API |
 | Execution Ledger Dashboard (F032) | ✅ Shipped | Per-action visibility, status filtering, timeline view, side-effect classification |
 | Multi-Tier Search (F033) | ✅ Shipped | Tavily primary + Exa research + Brave fallback, query classification router |
@@ -353,11 +368,28 @@ All core architecture is implemented and running:
 | Finding Lifecycle (F034.1) | ✅ Shipped | Fingerprint dedup, state machine (new→ack→resolved), escalation, daily digest |
 | Intelligent Checks (F034.2) | ✅ Shipped | Embedding search, LLM email classification, tunable parameters |
 | Self-Tuning Heartbeat (F034.3) | ✅ Shipped | Outcome-driven parameter adjustment, cross-cycle rollback, pinned params |
-| Phase 1 Voice | ✅ Shipped | Email, Telegram notify, Emerson A2A — zero code changes via procedures |
+| Dynamic Heartbeat Checks (F034.5 / F034.6) | ✅ Shipped | Prompt-driven checks, conversational lifecycle, `on_complete` callback |
+| Prompt Cache Optimization (F036) | ✅ Shipped | 3-tier system prompt split, cache break detection, tool schema cache |
+| DAG Orchestration (F038 / F046 / F064) | ✅ Shipped | DAGStore + Orchestrator, env-driven node timeouts, stall detection, per-frame concurrency caps, workspace safety, scheduled-task continuation, work-queue ingress |
+| Background Streaming + TCP Keep-Alive (F048) | ✅ Shipped | Subtask/heartbeat turns stream via SSE; socket keep-alive on httpx transport |
+| Session & Memory Lifecycle Hygiene (F049) | ✅ Shipped | Bounded subtask cleanup, advisory-locked working-memory TTL sweep |
+| Compaction Hallucination Guard (F059) | ✅ Shipped | Entity-substring check on compaction summary; events persisted to `nous_system.events` |
+| Abandoned-Episode Recovery (F060) | ✅ Shipped | Three-path sleep phase: full transcript / summary fallback / mark abandoned |
+| Subtask Hardening (F061) | ✅ Shipped | Schema + contract + dashboard pieces for subtask reliability |
+| Symphony Orchestration Adoptions (F064) | 🟡 v1 partial | Stall detection, per-frame concurrency caps, workspace safety, work-queue ingress (v1 shipped); manifest enforcement + LLM thread continuity deferred to v2 |
 
-**Stats:** ~72,000 lines of Python (35K production + 37K tests) · 2,000+ tests across 106 files · 27 Postgres tables · 57 REST endpoints · 19 agent tools · Docker deployment
+See [Feature Index](docs/features/INDEX.md) for the full breakdown including planned and shelved work.
 
-See [Feature Index](docs/features/INDEX.md) for the full breakdown.
+### Stats
+
+Measured against the current `main` branch:
+
+- **~53,400 lines** of production Python (`nous/`, 129 modules across 12 sub-packages: `api`, `brain`, `cognitive`, `dag`, `handlers`, `heart`, `heartbeat`, `identity`, `integrations`, `observability`, `skills`, `storage`), plus a sibling `nous_eval/` retrieval-eval harness
+- **~75,900 lines** of tests (`tests/`, 227 files, 2,200+ top-level test functions)
+- **25 agent tools** registered in the dispatcher: `record_decision`, `learn_fact`, `recall_deep`, `recall_recent`, `learn_skill`, `get_procedure`, `create_censor`, `cache_retrieve`, `bash`, `read_file`, `write_file`, `web_search`, `web_fetch`, `run_python`, `spawn_task`, `schedule_task`, `list_tasks`, `cancel_task`, `send_file`, `store_identity`, `complete_initiation`, `heartbeat_check_create`, `heartbeat_check_manage`, `dag_create`, `dag_manage`
+- **81 REST endpoints** (`/chat`, `/decisions`, `/episodes`, `/facts`, `/identity`, `/heartbeat`, `/rubric`, `/dashboard/*`, …) + **5 MCP tools** (`nous_chat`, `nous_recall`, `nous_status`, `nous_teach`, `nous_decide`) + Telegram bot
+- **37 PostgreSQL tables** across 3 schemas (`brain`, `heart`, `nous_system`) with **38 migrations** in `sql/migrations/`
+- **Docker deployment**: PostgreSQL + pgvector container, Nous agent container, optional Telegram bot container, optional eval-DB container
 
 ## License
 
