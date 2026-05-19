@@ -499,6 +499,12 @@ async def create_components(settings: Settings) -> dict:
     # late-binding above. Safe no-op if monitor is unavailable.
     if session_monitor is not None:
         session_monitor._runner = runner
+        # Back-reference so runner.run_turn / stream_chat can synchronously
+        # touch _last_activity at request-receipt time, closing the race
+        # where a long in-flight turn would otherwise be closed mid-stream
+        # by a monitor tick (the bus path is queued and turn_completed
+        # only fires after the entire turn finishes).
+        runner._session_monitor = session_monitor
 
     # F035.4: Context Logger
     context_logger = None

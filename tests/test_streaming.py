@@ -608,6 +608,31 @@ class TestStreamChat:
         assert conv.messages[-1].role == "assistant"
 
     @pytest.mark.asyncio
+    async def test_stream_chat_touches_session_monitor(self, runner, mock_cognitive):
+        """stream_chat syncs activity at request start (Codex P1 on PR #424).
+
+        Mirrors test_run_turn_touches_session_monitor — without this call,
+        a long streaming turn for a session whose _last_activity was already
+        past threshold can be closed mid-stream by a monitor tick.
+        """
+        from unittest.mock import MagicMock as _MagicMock
+
+        async def fake_stream(*args, **kwargs):
+            yield StreamEvent(type="text_delta", text="Hi")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        monitor = _MagicMock()
+        runner._session_monitor = monitor
+
+        _events = [
+            e async for e in runner.stream_chat("s-stream", "Hello", agent_id="agent-x")
+        ]
+
+        monitor.touch.assert_called_once_with("s-stream", "agent-x")
+
+    @pytest.mark.asyncio
     async def test_agent_id_plumbed(self, runner, mock_cognitive):
         """agent_id passed to pre_turn and post_turn."""
         cognitive, _ = mock_cognitive

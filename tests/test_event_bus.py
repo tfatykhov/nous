@@ -1186,6 +1186,64 @@ class TestSessionTimeoutMonitor:
         assert monitor._last_activity == {}
 
     @pytest.mark.asyncio
+    async def test_touch_refreshes_activity_synchronously(self):
+        """28g-pre. monitor.touch() updates _last_activity without the event bus.
+
+        Codex caught that turn_completed only fires after the full turn,
+        while message_received is never emitted in production. A long
+        in-flight turn for a session whose _last_activity was already past
+        threshold would be closed mid-stream by a monitor tick. The bus is
+        queued, so emitting message_received at request-receipt would not
+        sync-update — a residual race would remain. monitor.touch() is the
+        synchronous escape hatch.
+        """
+        monitor, _bus, _cognitive = self._make_monitor()
+        before = time.monotonic()
+
+        monitor.touch("sess-touch", "agent-touch")
+
+        assert "sess-touch" in monitor._last_activity
+        assert monitor._last_activity["sess-touch"] >= before
+        assert monitor._last_agent["sess-touch"] == "agent-touch"
+        # touch must also count as global activity (resets sleep timer).
+        assert monitor._sleep_emitted is False
+
+    @pytest.mark.asyncio
+    async def test_touch_prevents_mid_turn_closure(self):
+        """28h. touch() called at run_turn start prevents the mid-turn race.
+
+        Pre-condition: session was already stale (idle past threshold).
+        At run_turn start, runner calls monitor.touch(sid, agent_id).
+        Monitor tick fires next. It MUST NOT close the session because the
+        sync touch refreshed _last_activity. Without the touch, the close
+        would pop runner._conversations mid-stream and the in-flight reply
+        would land in a closed/untracked session.
+        """
+        from nous.handlers.session_monitor import SessionTimeoutMonitor
+
+        bus = EventBus()
+        settings = _mock_settings(
+            session_idle_timeout=1, sleep_timeout=9999, sleep_check_interval=1
+        )
+        runner = AsyncMock()
+        monitor = SessionTimeoutMonitor(bus, settings, runner=runner)
+
+        # Seed a stale session as if a previous turn_completed had fired
+        # long ago and the session has been idle since.
+        monitor._last_activity["live"] = time.monotonic() - 100
+        monitor._last_agent["live"] = "agent-1"
+
+        # Runner starts a new turn — touches BEFORE doing any work.
+        monitor.touch("live", "agent-1")
+
+        # Monitor tick races against the in-flight turn.
+        await monitor._check_timeouts()
+
+        # The session must NOT be closed; touch reset the clock.
+        runner.end_conversation.assert_not_called()
+        assert "live" in monitor._last_activity
+
+    @pytest.mark.asyncio
     async def test_cancelled_child_propagates_to_caller(self):
         """28g. CancelledError raised inside a closure must NOT be swallowed.
 

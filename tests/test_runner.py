@@ -428,6 +428,50 @@ async def test_run_turn_safety_net_task_frame_debug(mock_cognitive, mock_setting
 # ---------------------------------------------------------------------------
 
 
+async def test_run_turn_touches_session_monitor(runner, mock_cognitive):
+    """run_turn synchronously touches the wired session_monitor at request start.
+
+    Pins the call-site that closes the mid-turn-closure race Codex flagged
+    on PR #424: without this call, a long in-flight turn for a session whose
+    _last_activity was already past threshold can be closed mid-stream by a
+    monitor tick, popping runner._conversations and orphaning the response.
+    """
+    from unittest.mock import MagicMock
+    monitor = MagicMock()
+    runner._session_monitor = monitor
+
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    await runner.run_turn(session_id, "Hello!")
+
+    monitor.touch.assert_called_once_with(session_id, runner._settings.agent_id)
+
+
+async def test_run_turn_touch_failure_does_not_break_turn(runner, mock_cognitive):
+    """A monitor.touch() raise is swallowed; the turn still completes.
+
+    Touch is best-effort — a programming bug in the monitor (e.g., a future
+    refactor that lets touch raise) must not break a chat turn for users.
+    """
+    from unittest.mock import MagicMock
+    monitor = MagicMock()
+    monitor.touch.side_effect = RuntimeError("monitor exploded")
+    runner._session_monitor = monitor
+
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    response_text, turn_context, _usage = await runner.run_turn(session_id, "Hello!")
+
+    assert response_text == "Hello from Nous!"
+    monitor.touch.assert_called_once()
+
+
+async def test_run_turn_no_monitor_does_not_raise(runner):
+    """Unwired monitor (None) is a benign no-op — preserves backward compat."""
+    assert runner._session_monitor is None
+    session_id = f"test-{uuid.uuid4().hex[:8]}"
+    response_text, _ctx, _usage = await runner.run_turn(session_id, "Hello!")
+    assert response_text == "Hello from Nous!"
+
+
 async def test_end_conversation(runner, mock_cognitive):
     """Removes from dict, calls cognitive.end_session()."""
     session_id = f"test-{uuid.uuid4().hex[:8]}"

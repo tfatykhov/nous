@@ -91,6 +91,23 @@ class SessionTimeoutMonitor:
         self._global_last_activity = now
         self._sleep_emitted = False  # Reset sleep flag on any activity
 
+    def touch(self, session_id: str, agent_id: str) -> None:
+        """Synchronously refresh activity for a session.
+
+        Called by AgentRunner at the START of run_turn so a long in-flight
+        turn cannot be closed mid-stream by a monitor tick. The event-bus
+        path (``on_activity``) is async-queued — by the time the
+        ``turn_completed`` handler runs the turn is already over, leaving a
+        wide race window where the monitor would close a session whose
+        request was received but whose turn hadn't completed. This direct
+        call closes the window.
+        """
+        now = time.monotonic()
+        self._last_activity[session_id] = now
+        self._last_agent[session_id] = agent_id
+        self._global_last_activity = now
+        self._sleep_emitted = False
+
     async def _on_session_ended(self, event: Event) -> None:
         """Clean up tracking when session ends (explicit or timeout). P1-4 fix."""
         if event.session_id:

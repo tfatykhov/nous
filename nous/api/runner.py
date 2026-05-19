@@ -130,6 +130,12 @@ class AgentRunner:
             CacheBreakDetector() if settings.cache_break_detection_enabled else None
         )
 
+        # SessionTimeoutMonitor back-reference for synchronous activity
+        # refresh at run_turn start. Late-bound in main.py because monitor
+        # is created earlier than runner. None disables the touch (e.g.,
+        # in unit tests that don't wire the monitor).
+        self._session_monitor: Any | None = None
+
     def _log_f026_decision(
         self, event_type: str, data: dict, session_id: str
     ) -> None:
@@ -266,6 +272,20 @@ class AgentRunner:
         10. Return (response_text, turn_context)
         """
         _agent_id = agent_id or self._settings.agent_id
+
+        # Refresh session activity synchronously BEFORE any long-running
+        # work. The event-bus path (turn_completed) only fires after the
+        # entire LLM+tool loop completes — a multi-minute turn for a
+        # session whose _last_activity was already past threshold would
+        # otherwise be closed mid-stream by a monitor tick. The bus is
+        # async-queued so emitting message_received here would leave a
+        # residual race; the synchronous touch eliminates it.
+        if self._session_monitor is not None:
+            try:
+                self._session_monitor.touch(session_id, _agent_id)
+            except Exception:
+                logger.debug("session_monitor.touch failed (suppressed)", exc_info=True)
+
         conversation = await self._get_or_create_conversation(session_id)
 
         # 2. Pre-turn (F4: plumb conversation_messages for dedup)
@@ -748,6 +768,16 @@ class AgentRunner:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
         _agent_id = agent_id or self._settings.agent_id
+
+        # Sync activity refresh before any long-running work. See run_turn
+        # for rationale — the bus is queued, so message_received emission
+        # would leave a residual race against the monitor tick.
+        if self._session_monitor is not None:
+            try:
+                self._session_monitor.touch(session_id, _agent_id)
+            except Exception:
+                logger.debug("session_monitor.touch failed (suppressed)", exc_info=True)
+
         conversation = await self._get_or_create_conversation(session_id)
 
         # Pre-turn with conversation dedup (F4)
