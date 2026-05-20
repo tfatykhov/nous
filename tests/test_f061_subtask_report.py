@@ -38,8 +38,10 @@ class TestSubtaskReportRoundTrip:
         assert r.findings == ["a", "b"]
         assert r.next_actions == ["next"]
         assert r.evidence_refs == ["fact-uuid-1"]
-        # Round-trip dump matches input
-        assert r.model_dump() == payload
+        # Round-trip dump matches input plus the F062 optional `payload` field
+        # (None by default — kept in the dump so the F062 contract is explicit).
+        expected = {**payload, "payload": None}
+        assert r.model_dump() == expected
 
     def test_incomplete_with_reason(self):
         r = SubtaskReport.model_validate({
@@ -124,4 +126,6 @@ class TestSubtaskReportDump:
         assert set(d.keys()) == {
             "summary", "findings", "next_actions", "confidence",
             "evidence_refs", "incomplete", "blocked_reason",
+            # F062: schema-typed payload field — None when absent.
+            "payload",
         }

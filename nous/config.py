@@ -433,6 +433,12 @@ class Settings(BaseSettings):
     subtask_outcome_persistence_enabled: bool = True
     subtask_force_tool_on_penultimate: bool = True
 
+    # F062: typed spawn_sync — flag gates both the exposed `payload_schema`
+    # property on _SPAWN_TASK_SCHEMA / submit_final_report AND the post-execution
+    # jsonschema.validate step inside execute_hardened. When false, F062 is
+    # entirely dormant — spawn_sync is not registered as a tool.
+    subtask_payload_schema_enabled: bool = False
+
     # F049: WM TTL safety-net sweep
     working_memory_ttl_hours: int = Field(
         default=24,

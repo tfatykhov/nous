@@ -25,9 +25,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+import jsonschema
+
 from nous.api.subtask_tools import (
-    SUBMIT_FINAL_REPORT_SCHEMA,
     SubtaskReportCollector,
+    build_submit_final_report_schema,
     make_submit_final_report_executor,
 )
 from nous.api.tools import build_subtask_prefix
@@ -152,20 +154,42 @@ async def execute_hardened(
     min_summary: int = settings.subtask_report_min_summary_chars
 
     collector = SubtaskReportCollector()
+    # F062: when the row has a payload_schema AND the flag is on, expose
+    # the optional `payload` property on submit_final_report so the model
+    # can transport its typed payload through the tool-use round trip.
+    # Otherwise stay byte-identical to F061's fail-closed schema. ``getattr``
+    # with default=False keeps test-fixture SimpleNamespace settings working
+    # (they don't carry the new flag) and prevents AttributeError on any
+    # custom Settings subclass that omits the field.
+    _payload_property_enabled = (
+        getattr(settings, "subtask_payload_schema_enabled", False)
+        and getattr(subtask, "payload_schema", None) is not None
+    )
     extra_tools: dict[str, tuple[dict, Callable]] = {
         "submit_final_report": (
-            SUBMIT_FINAL_REPORT_SCHEMA,
+            build_submit_final_report_schema(_payload_property_enabled),
             make_submit_final_report_executor(collector),
         ),
     }
     output_format = subtask.output_format
     success_criteria = subtask.success_criteria
+    # F062: pass caller-supplied payload_schema only when the flag is on.
+    # The settings gate is enforced again at validation time; this gate keeps
+    # the prompt clean when the executor is invoked with a stale row that
+    # already has payload_schema set but the operator has since disabled
+    # the flag. ``getattr`` keeps SimpleNamespace test fixtures working.
+    payload_schema_for_prompt = (
+        getattr(subtask, "payload_schema", None)
+        if getattr(settings, "subtask_payload_schema_enabled", False)
+        else None
+    )
     system_prefix = build_subtask_prefix(
         subtask.task,
         subtask.frame_type,
         output_format=output_format,
         success_criteria=success_criteria,
         hardening_enabled=True,
+        payload_schema=payload_schema_for_prompt,
     )
 
     user_message = subtask.task
@@ -189,6 +213,12 @@ async def execute_hardened(
     total_out = state.tokens_out
     total_calls = state.tool_calls_made
     attempt = state.attempts  # 0 if fresh
+    # F062: tri-state — None when no schema check ran, True/False otherwise.
+    # Reset at the start of EVERY attempt (Codex round-6 P2) so a False
+    # from attempt 1 cannot leak into a later runtime-error outcome —
+    # otherwise the persisted row would carry final_outcome='errored' with
+    # payload_schema_valid=False, contradictory state for telemetry.
+    payload_schema_valid: bool | None = None
     started_monotonic = time.monotonic()
 
     force_tool = (
@@ -204,6 +234,12 @@ async def execute_hardened(
             # timeout that fires during the run still sees attempt=N.
             state.attempts = attempt
             collector.reset()
+            # F062 (Codex round-6 P2): reset per-attempt so a False from
+            # the prior attempt cannot leak into a later non-schema
+            # terminal outcome (e.g. attempt 1 schema-mismatch, attempt 2
+            # API exception → row would otherwise be persisted with
+            # final_outcome='errored' AND payload_schema_valid=False).
+            payload_schema_valid = None
             try:
                 response_text, _ctx, usage = await runner.run_turn(
                     session_id=session_id,
@@ -258,7 +294,101 @@ async def execute_hardened(
 
             last_payload = collector.get()
             state.last_payload = last_payload
-            last_result = validate_report(last_payload, min_summary_chars=min_summary)
+            # F062: payload field is only accepted when BOTH the global
+            # flag is on AND the row was spawned with a payload_schema.
+            # Otherwise the runner's extra_tools dispatch would let a model-
+            # emitted payload through with no runtime validation, breaking
+            # the typed-contract guarantee (Codex round-13 P2).
+            _f062_payload_accepted = (
+                getattr(settings, "subtask_payload_schema_enabled", False)
+                and getattr(subtask, "payload_schema", None) is not None
+            )
+            last_result = validate_report(
+                last_payload,
+                min_summary_chars=min_summary,
+                payload_accepted=_f062_payload_accepted,
+            )
+
+            # F062: post-structural-validation JSON Schema check on the
+            # optional `payload` field of the report. Fires only when
+            # (a) F061's structural validator just returned ok, (b) the
+            # F062 master flag is on, and (c) the caller supplied a
+            # payload_schema at spawn_sync time. Failure rewrites
+            # last_result to validation_failed so F061's existing retry
+            # loop handles it identically to a structural failure —
+            # status-mirrors-final_outcome invariant preserved.
+            if (
+                last_result.ok
+                and getattr(settings, "subtask_payload_schema_enabled", False)
+                and getattr(subtask, "payload_schema", None) is not None
+            ):
+                # Codex round-4 P1: tool-call arguments are already parsed by
+                # the runner into native Python values. Calling json.loads on
+                # a string payload like "hello" (valid for {"type":"string"})
+                # would mis-fire as JSONDecodeError and force validation_failed
+                # on a legitimately schema-valid string/scalar value. Always
+                # validate the raw Python value directly.
+                #
+                # Codex round-7 P1: distinguish "model omitted the payload
+                # key entirely" from "model included payload: null". For
+                # schemas that allow null, .get returns None either way and
+                # validation would silently pass on a missing field that the
+                # F062 contract says is required. Require explicit presence
+                # of the key when a payload_schema is supplied.
+                _last = last_payload or {}
+                if "payload" not in _last:
+                    logger.warning(
+                        "Subtask %s attempt %d submit_final_report omitted "
+                        "required `payload` field (payload_schema was set)",
+                        subtask.id.hex[:8], attempt,
+                    )
+                    last_result = ValidationResult.failed(
+                        "validation_failed",
+                        "payload field missing from submit_final_report "
+                        "(required when payload_schema is supplied)",
+                    )
+                    payload_schema_valid = False
+                    # Drop through to the existing retry/break logic below.
+                    if (
+                        attempt < max_attempts
+                        and last_result.outcome in {"incomplete_no_terminal", "validation_failed"}
+                    ):
+                        user_message = _build_retry_message(
+                            subtask.task, last_payload, last_result.reason,
+                            min_summary_chars=min_summary,
+                        )
+                        continue
+                    break
+
+                raw_payload = _last["payload"]
+                try:
+                    jsonschema.validate(raw_payload, subtask.payload_schema)
+                    payload_schema_valid = True
+                except jsonschema.ValidationError as e:
+                    logger.warning(
+                        "Subtask %s attempt %d payload schema mismatch: %s",
+                        subtask.id.hex[:8], attempt, e,
+                    )
+                    last_result = ValidationResult.failed(
+                        "validation_failed",
+                        f"payload schema mismatch: {e}",
+                    )
+                    payload_schema_valid = False
+                except jsonschema.SchemaError as e:
+                    # Codex round-6 P2: malformed caller schema raises
+                    # SchemaError, not ValidationError. Map to validation_failed
+                    # too so spawn_sync callers see a deterministic outcome
+                    # rather than the exception escaping into the generic
+                    # "errored" path.
+                    logger.warning(
+                        "Subtask %s attempt %d caller-supplied payload_schema is malformed: %s",
+                        subtask.id.hex[:8], attempt, e,
+                    )
+                    last_result = ValidationResult.failed(
+                        "validation_failed",
+                        f"payload_schema is malformed: {e}",
+                    )
+                    payload_schema_valid = False
 
             if last_result.ok or last_result.outcome == "incomplete_blocked":
                 break
@@ -298,6 +428,7 @@ async def execute_hardened(
                     tokens_in=total_in,
                     tokens_out=total_out,
                     tool_calls_made=total_calls,
+                    payload_schema_valid=payload_schema_valid,
                 ))
             except asyncio.CancelledError:
                 # F061 PR-3 silent-failure review P1.1: CancelledError
@@ -425,6 +556,7 @@ async def _persist_outcome(
     tokens_in: int,
     tokens_out: int,
     tool_calls_made: int,
+    payload_schema_valid: bool | None = None,
 ) -> None:
     """Map ValidationResult onto a heart.subtasks row update."""
     common = dict(
@@ -433,6 +565,7 @@ async def _persist_outcome(
         tokens_out=tokens_out,
         tool_calls_made=tool_calls_made,
         report_jsonb=last_payload,
+        payload_schema_valid=payload_schema_valid,
     )
     if last_result.ok and last_result.report is not None:
         await heart.subtasks.complete(

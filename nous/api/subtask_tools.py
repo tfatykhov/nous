@@ -138,6 +138,37 @@ class SubtaskReportCollector:
         return self._submission_count
 
 
+def build_submit_final_report_schema(payload_property_enabled: bool) -> dict[str, Any]:
+    """Return a copy of SUBMIT_FINAL_REPORT_SCHEMA with the optional F062
+    ``payload`` property conditionally injected.
+
+    When ``payload_property_enabled`` is False (default — pre-F062-flag-flip,
+    or any subtask whose row has ``payload_schema=NULL``), the schema is
+    returned byte-identical to the legacy F061 schema; ``additionalProperties:
+    False`` then rejects any stray ``payload`` key the model might emit (a
+    deliberately fail-closed contract — see implementation plan §3 Commit B).
+
+    When True, an optional ``payload`` property is added with a permissive
+    type list matching JSON Schema's draft-2020-12 ``type`` semantics
+    (object/array/string/number/boolean/null). The post-execution
+    ``jsonschema.validate`` step in execute_hardened enforces the caller's
+    actual schema; this property only opens the gate so the field can be
+    transported through the tool-use round trip.
+    """
+    import copy
+    schema = copy.deepcopy(SUBMIT_FINAL_REPORT_SCHEMA)
+    if payload_property_enabled:
+        schema["input_schema"]["properties"]["payload"] = {
+            "type": ["object", "array", "string", "number", "boolean", "null"],
+            "description": (
+                "F062: schema-typed result payload. Required when the spawning "
+                "tool supplied a payload_schema (in which case the payload "
+                "MUST validate against that schema); ignored otherwise."
+            ),
+        }
+    return schema
+
+
 def make_submit_final_report_executor(
     collector: SubtaskReportCollector,
 ) -> Callable[..., Awaitable[tuple[str, bool]]]:

@@ -50,12 +50,12 @@ _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
-    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage"],
+    "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage"],
     "question": ["recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "write_file", "record_decision", "learn_fact", "learn_skill", "create_censor", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "run_python", "dag_manage"],
     "decision": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "create_censor", "bash", "read_file", "web_search", "web_fetch", "cache_retrieve", "list_tasks", "cancel_task", "dag_manage"],
     "creative": ["learn_fact", "recall_deep", "recall_recent", "get_procedure", "write_file", "web_search", "cache_retrieve"],
     "task": ["*"],  # All tools
-    "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage"],
+    "debug": ["record_decision", "recall_deep", "recall_recent", "get_procedure", "bash", "read_file", "learn_fact", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage"],
     "initiation": ["store_identity", "complete_initiation"],
 }
 
@@ -1348,7 +1348,12 @@ class AgentRunner:
 
         # 012.2: Remove delegation tools from subtask tool set (no-nesting rule)
         if is_subtask:
-            _SUBTASK_EXCLUDED_TOOLS = {"spawn_task", "schedule_task"}
+            # F062: spawn_sync has identical inline-blocking semantics to
+            # spawn_task(await_result=True) and competes for the same worker
+            # pool. Without exclusion, a hardened subtask could call
+            # spawn_sync recursively and either hit _MAX_PENDING / worker
+            # starvation or create a circular wait between subtask sessions.
+            _SUBTASK_EXCLUDED_TOOLS = {"spawn_task", "schedule_task", "spawn_sync"}
             base_tools = [t for t in base_tools if t["name"] not in _SUBTASK_EXCLUDED_TOOLS]
 
         # F034.5: Dynamic check tool restriction

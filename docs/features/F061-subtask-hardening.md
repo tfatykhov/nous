@@ -8,7 +8,7 @@
 
 **Not in scope:**
 - Heartbeat checks (`nous/heartbeat/*`) — they call `runner.run_turn(is_background=True)` directly and never go through `heart.subtasks`. F061 leaves their thin contract alone.
-- `schedule_task` *firing* fidelity (cron correctness) — that is **F062 (sibling)**. Schedule-fired subtasks DO inherit F061 contracts because they go through `heart.subtasks.create()`.
+- `schedule_task` *firing* fidelity (cron correctness) — deferred (unnumbered; originally sketched as F062 but F062 was reassigned to typed spawn_sync per Schmid taxonomy alignment, May 2026). Schedule-fired subtasks DO inherit F061 contracts because they go through `heart.subtasks.create()`.
 - `run_python` programmatic tool calls — different code path (`nous/api/runner.py` programmatic execution), not a subtask.
 - LLM critic / self-grading of report content — explicitly rejected (see _Design rationale_ → _Why no LLM critic_).
 
@@ -75,7 +75,7 @@ There are no per-subtask telemetry fields beyond `status / result / error`. No `
 - Multi-step sub-graphs / sub-agent-spawned-sub-agents (Anthropic's pattern explicitly forbids this; we keep the same flat-only constraint).
 - Cross-process subtask execution.
 - Replacing `_extract_text` or rewriting the runner tool loop.
-- Changing schedule firing semantics (F062).
+- Changing schedule firing semantics (unnumbered; see note above).
 - Adding a per-attempt LLM critic — see _Design rationale_.
 
 ---

@@ -705,6 +705,10 @@ class Subtask(Base):
         nullable=True,
     )
 
+    # F062: typed spawn_sync — caller-supplied schema + tri-state validation flag.
+    payload_schema: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    payload_schema_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
 
 class Schedule(Base):
     """Scheduled or recurring task."""
