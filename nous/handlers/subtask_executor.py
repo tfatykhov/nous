@@ -29,7 +29,6 @@ from typing import Any, Awaitable, Callable
 import jsonschema
 
 from nous.api.subtask_tools import (
-    SUBMIT_FINAL_REPORT_SCHEMA,
     SubtaskReportCollector,
     build_submit_final_report_schema,
     make_submit_final_report_executor,

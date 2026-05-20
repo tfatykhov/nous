@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.api.models import SubtaskOutcome, SubtaskResult
 from nous.storage.models import Subtask
 
-
 # Canonical strings F061 writes to heart.subtasks.final_outcome
 # (sql/migrations/041_subtask_hardening.sql:38). SubtaskOutcome MUST match.
 _F061_OUTCOMES = {
