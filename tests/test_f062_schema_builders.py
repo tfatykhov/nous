@@ -33,7 +33,9 @@ class TestBuildSpawnTaskSchema:
     def test_flag_on_adds_payload_schema_property(self) -> None:
         schema = _build_spawn_task_schema(payload_schema_enabled=True)
         assert "payload_schema" in schema["properties"]
-        assert schema["properties"]["payload_schema"]["type"] == "object"
+        # Codex round-11 L2117: draft-2020-12 permits boolean schemas too,
+        # so the type list includes "boolean".
+        assert set(schema["properties"]["payload_schema"]["type"]) == {"object", "boolean"}
         # task is still required; payload_schema is NOT
         assert "task" in schema["required"]
         assert "payload_schema" not in schema["required"]

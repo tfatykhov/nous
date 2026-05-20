@@ -42,4 +42,14 @@ class SubtaskReport(BaseModel):
     # execute_hardened — this field is just the transport. Default None
     # keeps F061 callers unchanged (no payload, structural validation
     # still passes).
+    #
+    # Note on fail-closed (Codex round-11 L45): we accept `payload` here
+    # unconditionally, but the *fail-closed gate* lives one layer up at the
+    # submit_final_report tool schema — when F062 is off,
+    # build_submit_final_report_schema(False) leaves `payload` out of
+    # input_schema.properties and additionalProperties: False rejects any
+    # stray payload key at tool-dispatch time. SubtaskReport.model_validate
+    # therefore never sees `payload` unless the tool layer allowed it
+    # through. The Pydantic field is defense-in-depth for direct Python
+    # callers, not the primary enforcement boundary.
     payload: Any | None = None

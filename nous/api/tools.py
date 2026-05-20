@@ -2114,13 +2114,16 @@ def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
     schema = copy.deepcopy(_SPAWN_TASK_SCHEMA)
     if payload_schema_enabled:
         schema["properties"]["payload_schema"] = {
-            "type": "object",
+            # Codex round-11 P2: draft-2020-12 permits boolean schemas
+            # (true/false) — mirror the same fix already in _SPAWN_SYNC_SCHEMA.
+            "type": ["object", "boolean"],
             "description": (
                 "F062: optional JSON Schema (draft 2020-12 compatible) for "
                 "the subtask's result payload. When supplied, the executor "
                 "validates submit_final_report.payload against this schema; "
                 "on mismatch the subtask retries (per F061) and ultimately "
-                "persists final_outcome='validation_failed'."
+                "persists final_outcome='validation_failed'. Accepts a JSON "
+                "object or a boolean (true accepts any payload, false rejects)."
             ),
         }
     return schema
