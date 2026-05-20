@@ -107,9 +107,11 @@ Return ONLY the JSON object — no prose wrapper.
 - Calls the existing F061 hardened executor / `_await_subtask()` polling loop; wraps the terminal `report_jsonb` into `SubtaskResult`.
 
 ### Phase 3 — Schema validation (≈2h)
-- On subtask completion, parse the payload candidate (`parsed = json.loads(raw_payload)` if the model emitted a string, else use the JSONB dict directly) and run `jsonschema.validate(parsed, schema)` against the caller-supplied schema.
-- On success: surface `SubtaskResult(status="completed", payload=parsed, ...)`.
-- On `jsonschema.ValidationError` or `json.JSONDecodeError`: surface `SubtaskResult(status="validation_failed", payload={}, raw_text=..., ...)` so the parent can inspect `raw_text` and decide whether to retry/escalate. Note: schema-validation failures here are *additional* to F061's structural validator — they layer on top of `submit_final_report`'s own schema check.
+- **`SubtaskResult.status` always mirrors `heart.subtasks.final_outcome`** as persisted by F061's outer handler / hardened executor. Schema validation never overwrites a non-success terminal outcome — `timed_out`, `errored`, `cancelled`, `incomplete_blocked`, and `incomplete_no_terminal` flow through unchanged so parent retry / escalation logic and F061-aligned telemetry consumers stay correct.
+- Schema validation runs **only on the path where F061 was about to record `completed`**. After F061's structural `validate_report` returns OK, parse the payload candidate (`parsed = json.loads(raw_payload)` if the model emitted a string, else use the JSONB dict directly) and run `jsonschema.validate(parsed, schema)` against the caller-supplied schema.
+- On success: F061 persists `final_outcome="completed"` (unchanged) and we surface `SubtaskResult(status="completed", payload=parsed, ...)`.
+- On `jsonschema.ValidationError` or `json.JSONDecodeError`: rewrite the in-flight `ValidationResult` to `validation_failed` so F061's existing retry loop sees the failure exactly as it does for `schema_invalid` / `summary_too_short`. The persisted `final_outcome` then ends up as either `completed` (retry succeeded) or `validation_failed` (retry exhausted). `SubtaskResult` is built from the persisted row, so its `status` is automatically correct.
+- Schema-validation failures here are *additional* to F061's structural validator — they layer on top of `submit_final_report`'s own schema check, never bypass other failure modes.
 
 **Total LOE estimate:** ~7h (three phases, single engineer)
 
