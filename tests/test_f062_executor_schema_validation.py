@@ -402,6 +402,38 @@ async def test_schema_mismatch_then_api_error_resets_valid_flag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_payload_rejected_when_flag_on_but_row_has_no_schema() -> None:
+    """Codex round-13 P2: even with F062 globally enabled, a subtask
+    spawned WITHOUT a payload_schema must reject `payload` keys —
+    otherwise a model that emits an out-of-contract payload would slip
+    through validation and be persisted as schema-typed output.
+    """
+    runner = _scripted_runner(scripted_payloads=[
+        {
+            "summary": "F062 is globally enabled but this subtask was spawned without payload_schema yet still emits payload — must reject.",
+            "confidence": 0.9,
+            "payload": {"name": "Eve", "score": 0.5},
+        },
+        {
+            "summary": "Retry same off-contract submission — must fail-closed again on the second attempt.",
+            "confidence": 0.9,
+            "payload": {"name": "Eve", "score": 0.5},
+        },
+    ])
+    heart = _make_heart_mock()
+    settings = _make_settings(payload_schema_enabled=True)
+    # Crucial: no payload_schema on the row.
+    subtask = _make_subtask(payload_schema=None)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "validation_failed"
+    assert "payload" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_payload_rejected_when_flag_off_even_without_payload_schema() -> None:
     """Codex round-11/12 P1 (L55): fail-closed gate restored — when the
     F062 flag is off, validate_report must reject submissions that carry

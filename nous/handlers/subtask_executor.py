@@ -294,14 +294,19 @@ async def execute_hardened(
 
             last_payload = collector.get()
             state.last_payload = last_payload
-            # F062: pass the flag so validate_report can fail-closed on
-            # an unexpected `payload` key when the master flag is off.
+            # F062: payload field is only accepted when BOTH the global
+            # flag is on AND the row was spawned with a payload_schema.
+            # Otherwise the runner's extra_tools dispatch would let a model-
+            # emitted payload through with no runtime validation, breaking
+            # the typed-contract guarantee (Codex round-13 P2).
+            _f062_payload_accepted = (
+                getattr(settings, "subtask_payload_schema_enabled", False)
+                and getattr(subtask, "payload_schema", None) is not None
+            )
             last_result = validate_report(
                 last_payload,
                 min_summary_chars=min_summary,
-                payload_schema_enabled=getattr(
-                    settings, "subtask_payload_schema_enabled", False
-                ),
+                payload_accepted=_f062_payload_accepted,
             )
 
             # F062: post-structural-validation JSON Schema check on the
