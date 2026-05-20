@@ -1370,12 +1370,19 @@ def create_subtask_tools(
             except Exception:
                 logger.debug("Censor check failed during spawn_task, proceeding")
 
-            # F062: only persist payload_schema when the flag is on.
-            # Operators flipping the flag off should not see stale schemas
-            # take effect on new rows even if a caller passes one through
-            # the (un-exposed) kwarg.
+            # F062: persist payload_schema only when BOTH flags are on
+            # (Codex round-9 P2). Without F061 hardening the legacy executor
+            # path runs and never validates; storing a schema there would
+            # make the row LOOK schema-constrained while never enforcing —
+            # a fail-closed violation that misleads downstream consumers
+            # who read payload_schema from the row.
             effective_payload_schema = (
-                payload_schema if settings.subtask_payload_schema_enabled else None
+                payload_schema
+                if (
+                    settings.subtask_payload_schema_enabled
+                    and settings.subtask_hardening_enabled
+                )
+                else None
             )
             subtask = await heart.subtasks.create(
                 task=task,
@@ -1838,9 +1845,16 @@ def create_subtask_tools(
             }
 
         report = match.report_jsonb or {}
+        # Codex round-9 P2: inline subtasks (await_result=True) bypass the
+        # worker pool's dequeue path, so started_at remains NULL. Fall back
+        # to created_at — inline runs start essentially immediately after
+        # creation, so the difference is negligible and the metric is no
+        # longer systematically 0.0 for the spawn_sync's primary use case.
         elapsed = 0.0
-        if match.completed_at and match.started_at:
-            elapsed = (match.completed_at - match.started_at).total_seconds()
+        if match.completed_at:
+            start_anchor = match.started_at or match.created_at
+            if start_anchor:
+                elapsed = (match.completed_at - start_anchor).total_seconds()
 
         # status mirrors final_outcome (Codex round-2 P1 invariant). Fall back
         # to legacy `status` only if final_outcome is somehow NULL — that
