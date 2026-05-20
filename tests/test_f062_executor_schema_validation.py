@@ -402,6 +402,42 @@ async def test_schema_mismatch_then_api_error_resets_valid_flag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_payload_key_fails_validation_even_for_null_schema() -> None:
+    """Codex round-7 P1: when payload_schema is supplied, the report MUST
+    include an explicit `payload` field. Omitting it must NOT be treated
+    as schema-valid even when the schema allows null — otherwise schemas
+    like {"type":"null"} silently accept missing payload, and spawn_sync
+    returns {} for a contract that promised a validated null value.
+    """
+    null_schema = {"type": "null"}
+    # Both attempts omit `payload` entirely — summaries >= 50 chars so the
+    # structural validator passes, exposing the missing-payload guard.
+    runner = _scripted_runner(scripted_payloads=[
+        {
+            "summary": "Did the task but forgot to include the payload field on this attempt; will need to retry to deliver schema-typed output.",
+            "confidence": 0.7,
+        },
+        {
+            "summary": "Retried but again forgot to populate the payload field; the schema-validated value was never emitted by the model on either attempt.",
+            "confidence": 0.7,
+        },
+    ])
+    heart = _make_heart_mock()
+    settings = _make_settings(max_attempts=2)
+    subtask = _make_subtask(payload_schema=null_schema)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "validation_failed"
+    assert "payload field missing" in result.reason
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs["final_outcome"] == "validation_failed"
+    assert kwargs["payload_schema_valid"] is False
+
+
+@pytest.mark.asyncio
 async def test_schema_check_accepts_null_payload() -> None:
     """Schema {"type": "null"} must accept payload=None."""
     null_schema = {"type": "null"}

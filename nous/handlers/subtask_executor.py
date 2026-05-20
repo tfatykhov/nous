@@ -315,7 +315,41 @@ async def execute_hardened(
                 # would mis-fire as JSONDecodeError and force validation_failed
                 # on a legitimately schema-valid string/scalar value. Always
                 # validate the raw Python value directly.
-                raw_payload = (last_payload or {}).get("payload")
+                #
+                # Codex round-7 P1: distinguish "model omitted the payload
+                # key entirely" from "model included payload: null". For
+                # schemas that allow null, .get returns None either way and
+                # validation would silently pass on a missing field that the
+                # F062 contract says is required. Require explicit presence
+                # of the key when a payload_schema is supplied.
+                _last = last_payload or {}
+                if "payload" not in _last:
+                    logger.warning(
+                        "Subtask %s attempt %d submit_final_report omitted "
+                        "required `payload` field (payload_schema was set)",
+                        subtask.id.hex[:8], attempt,
+                    )
+                    last_result = ValidationResult.failed(
+                        "validation_failed",
+                        "payload field missing from submit_final_report "
+                        "(required when payload_schema is supplied)",
+                    )
+                    payload_schema_valid = False
+                    # Skip the jsonschema.validate call entirely.
+                    if last_result.ok or last_result.outcome == "incomplete_blocked":
+                        break
+                    if (
+                        attempt < max_attempts
+                        and last_result.outcome in {"incomplete_no_terminal", "validation_failed"}
+                    ):
+                        user_message = _build_retry_message(
+                            subtask.task, last_payload, last_result.reason,
+                            min_summary_chars=min_summary,
+                        )
+                        continue
+                    break
+
+                raw_payload = _last["payload"]
                 try:
                     jsonschema.validate(raw_payload, subtask.payload_schema)
                     payload_schema_valid = True

@@ -2128,8 +2128,13 @@ def register_subtask_tools(
     """
     closures = create_subtask_tools(heart, settings, runner, bus=bus)
 
+    # F062: expose payload_schema on spawn_task's tool schema ONLY when BOTH
+    # F062 master flag AND F061 hardening are on. Without F061 hardening,
+    # spawn_task takes the legacy inline / worker path that never calls
+    # execute_hardened — the property would be advertised but never enforced
+    # (Codex round-7 P2; mirrors the same gate on spawn_sync registration).
     spawn_task_schema = _build_spawn_task_schema(
-        settings.subtask_payload_schema_enabled
+        settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled
     )
     dispatcher.register("spawn_task", closures["spawn_task"], spawn_task_schema)
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)
