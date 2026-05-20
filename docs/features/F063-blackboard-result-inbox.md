@@ -89,13 +89,13 @@ results = wait_results(board_id, timeout_seconds=180)
 ### Phase 2 — `fan_out` tool (≈2h)
 - Spawns N `spawn_task(await_result=False)` calls, sets `board_id` on each subtask row.
 - Returns list of task UUIDs.
-- Subtasks inherit F061 terminal-report contract; results written to `heart.subtasks.result` + `result_payload JSONB` (F062).
+- Subtasks inherit F061 terminal-report contract; the schema-validated payload (F062) is read from `heart.subtasks.report_jsonb` (or `result_payload` if F062 chose the new-column path — see F062 Phase 1).
 
 ### Phase 3 — `wait_results` tool (≈3h)
 - Polls `heart.subtasks WHERE board_id = $1` every 2s (exponential back-off to 10s).
-- Returns when `n_of_m` rows have terminal status (completed / validation_failed / error).
-- On timeout: returns whatever completed so far + marks remaining as `timed_out`.
-- Returns `list[SubtaskResult]` using F062 dataclass.
+- Treats a row as terminal when `final_outcome IN ('completed', 'incomplete_blocked', 'incomplete_no_terminal', 'validation_failed', 'timed_out', 'errored', 'cancelled')` — i.e. the full F061 outcome set. Returns once `n_of_m` rows have hit any terminal outcome (success or failure).
+- On `wait_results` wall-clock timeout: returns whatever subtasks reached a terminal outcome so far; subtasks still running are left untouched (their own timeouts will fire and write `final_outcome='timed_out'` via F061's authoritative outer handler).
+- Returns `list[SubtaskResult]` using F062 dataclass — caller can inspect `status` to distinguish completed vs. failed.
 
 **Total LOE estimate:** ~6h (three phases, single engineer). **Requires F062 to land first** (SubtaskResult type).
 

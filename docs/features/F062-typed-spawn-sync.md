@@ -25,7 +25,7 @@ result_text: str = await spawn_task(
 - Parent cannot distinguish `status='completed'` with empty result from a genuine empty response.
 - No structured way to surface partial vs. full completion.
 - No confidence score — parent must re-read and re-evaluate.
-- Inconsistent with F061's `SubtaskOutcome` enum (completed / incomplete_no_terminal / validation_failed / error).
+- Inconsistent with F061's `final_outcome` enum (`completed`, `incomplete_blocked`, `incomplete_no_terminal`, `validation_failed`, `timed_out`, `errored`, `cancelled` — see [F061 migration 041](../../sql/migrations/041_subtask_hardening.sql)).
 
 ---
 
@@ -34,11 +34,23 @@ result_text: str = await spawn_task(
 ### `SubtaskResult` return type
 
 ```python
+# F062 introduces SubtaskOutcome as the formal Literal alias for the seven
+# canonical strings F061 already writes to heart.subtasks.final_outcome.
+SubtaskOutcome = Literal[
+    "completed",
+    "incomplete_blocked",
+    "incomplete_no_terminal",
+    "validation_failed",
+    "timed_out",
+    "errored",
+    "cancelled",
+]
+
 @dataclass
 class SubtaskResult:
     task_id: str
-    status: SubtaskOutcome          # from F061: completed | incomplete_no_terminal | validation_failed | error
-    payload: dict                    # structured JSON extracted from the terminal report
+    status: SubtaskOutcome          # mirrors heart.subtasks.final_outcome (F061)
+    payload: dict                    # structured JSON extracted from the terminal report (may reuse F061's report_jsonb — see Implementation Plan)
     raw_text: str                    # original report text (for debugging)
     confidence: float | None        # 0.0–1.0; None if subtask didn't emit one
     elapsed_seconds: float
@@ -85,20 +97,19 @@ Return ONLY the JSON object — no prose wrapper.
 
 ## Implementation Plan
 
-### Phase 1 — `SubtaskResult` dataclass + DB column (≈2h)
-- Add `result_payload JSONB` column to `heart.subtasks` (new migration).
-- Add `SubtaskOutcome` import from F061 into `nous/api/tools.py`.
-- Define `SubtaskResult` in `nous/models/subtask.py` (new file).
+### Phase 1 — `SubtaskResult` dataclass + storage (≈2h)
+- Define the `SubtaskOutcome` `Literal` alias and `SubtaskResult` dataclass in `nous/api/models.py` (alongside existing subtask request/response models).
+- Decide storage path for the schema-validated payload: either (a) reuse F061's existing `heart.subtasks.report_jsonb` column by adding an optional `payload` field to `submit_final_report`'s input schema, or (b) add a new `result_payload JSONB` column via a follow-up migration. Default position: (a) — keeps the schema flat and avoids a new migration; revisit in the implementation plan.
 
 ### Phase 2 — `spawn_sync` tool (≈3h)
 - Add `spawn_sync` as a new tool in `nous/api/tools.py`.
-- Plumbs through schema injection into subtask system prompt.
-- Calls existing `_await_subtask()` polling loop; wraps result into `SubtaskResult`.
+- Plumbs the caller-supplied schema into the subtask system prompt (instructing the model to populate `submit_final_report`'s payload field with data matching that schema).
+- Calls the existing F061 hardened executor / `_await_subtask()` polling loop; wraps the terminal `report_jsonb` into `SubtaskResult`.
 
 ### Phase 3 — Schema validation (≈2h)
-- On subtask completion, attempt `json.loads(result)` + `jsonschema.validate(result, schema)`.
-- Write validated payload to `result_payload JSONB`; update `outcome` enum.
-- Expose `SubtaskResult.payload` to parent caller.
+- On subtask completion, parse the payload candidate (`parsed = json.loads(raw_payload)` if the model emitted a string, else use the JSONB dict directly) and run `jsonschema.validate(parsed, schema)` against the caller-supplied schema.
+- On success: surface `SubtaskResult(status="completed", payload=parsed, ...)`.
+- On `jsonschema.ValidationError` or `json.JSONDecodeError`: surface `SubtaskResult(status="validation_failed", payload={}, raw_text=..., ...)` so the parent can inspect `raw_text` and decide whether to retry/escalate. Note: schema-validation failures here are *additional* to F061's structural validator — they layer on top of `submit_final_report`'s own schema check.
 
 **Total LOE estimate:** ~7h (three phases, single engineer)
 
@@ -108,7 +119,7 @@ Return ONLY the JSON object — no prose wrapper.
 
 - **Return `SubtaskResult` from existing `spawn_task(await_result=True)`** — breaks callers treating return as `str`. Deferred to a later migration.
 - **LLM-based payload extraction** — rejected: adds latency and a second LLM call. Structural JSON schema in system prompt is sufficient.
-- **Pydantic model instead of dataclass** — valid; deferred until Pydantic is added as a dependency (currently not in `requirements.txt`).
+- **Pydantic model instead of dataclass** — valid; pydantic v2 is already a project dependency (`pyproject.toml`) and is used for API schemas. Decision deferred to the implementation plan: dataclass is sufficient if `SubtaskResult` stays internal, but a `BaseModel` may be preferable if the type crosses the REST API boundary.
 
 ---
 
