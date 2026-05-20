@@ -51,8 +51,8 @@ If any of these invariants are violated when this plan runs, STOP and re-verify 
 | Path | Purpose |
 |---|---|
 | `sql/migrations/042_f062_payload_schema.sql` | Adds `payload_schema JSONB` and `payload_schema_valid BOOLEAN` columns on `heart.subtasks`. Both nullable; pre-flag rows untouched. |
-| `sql/migrations/043_f063_blackboard.sql` | Adds `heart.boards` table + `board_id UUID NULL` column on `heart.subtasks` with FK to `heart.boards.id`. |
-| `nous/heart/boards.py` | Thin CRUD layer for `heart.boards` rows (`create`, `get`, `list_by_agent`, `mark_completed`). |
+| `sql/migrations/047_f063_blackboard.sql` | Adds `heart.boards` table + `board_id UUID NULL` column on `heart.subtasks` with FK to `heart.boards.id`. **Verified 2026-05-19: migrations 043–046 are taken** (`043_dag_node_columns`, `044_procedure_runtime_metadata`, `045_schedule_continuation`, `046_work_queue_items`); 047 is the next free slot. |
+| `nous/heart/boards.py` | Thin CRUD layer for `heart.boards` rows (`create`, `get`, `list_by_agent`). v1 omits `mark_completed` since no v1 caller closes a board — see Commit C note. |
 | `tests/test_f062_payload_schema.py` | Unit tests for SubtaskResult, schema-validation success/failure, no-schema back-compat. |
 | `tests/test_f062_spawn_sync_tool.py` | spawn_sync tool tests (success, validation_failed, timeout). |
 | `tests/test_f063_boards.py` | Unit tests for boards CRUD. |
@@ -63,12 +63,13 @@ If any of these invariants are violated when this plan runs, STOP and re-verify 
 |---|---|
 | `nous/api/models.py` | Add `SubtaskOutcome` Literal alias + `SubtaskResult` dataclass. |
 | `nous/api/subtask_tools.py` | Add optional `payload` property to `SUBMIT_FINAL_REPORT_SCHEMA.input_schema.properties` (no `required` change). |
-| `nous/api/tools.py` | (a) Add `payload_schema` arg to `spawn_task` closure + `_SPAWN_TASK_SCHEMA`; persist through `heart.subtasks.create()`. (b) Add `spawn_sync`, `create_board`, `fan_out`, `wait_results` tools + their schemas + register them. (c) Extend `build_subtask_prefix` to inject the payload schema instructions when present (hardening_enabled path only). |
+| `nous/api/tools.py` | (a) Add `payload_schema` arg to `spawn_task` closure; **only expose it via `_SPAWN_TASK_SCHEMA` when `settings.subtask_payload_schema_enabled=True`** (build the schema dict conditionally at `register_subtask_tools` time — see P1 fix below). Persist through `heart.subtasks.create()`. (b) Add `spawn_sync`, `create_board`, `fan_out`, `wait_results` tools + their schemas + register them. (c) Extend `build_subtask_prefix` to inject the payload schema instructions when present (hardening_enabled path only). |
 | `nous/handlers/subtask_executor.py` | After F061's structural `validate_report` passes, if `subtask.payload_schema` is non-NULL, run `jsonschema.validate(report['payload'], subtask.payload_schema)`. On failure: rewrite `last_result` to `ValidationResult.failed("validation_failed", str(e))` and let the existing retry/persist path handle it. |
-| `nous/heart/facts.py` *(or wherever `SubtaskCRUD` lives — verify path before editing)* | Add `payload_schema` + `board_id` to `Subtask.create` signature; thread through to the INSERT. |
-| `nous/heart/heart.py` *(verify)* | Surface `boards` collection accessor. |
-| `nous/storage/models.py` | Add `payload_schema`, `payload_schema_valid`, `board_id` columns to `Subtask`; add `Board` ORM model. |
+| `nous/heart/subtasks.py` | `SubtaskManager.create()` (line 27 today) gains `payload_schema: dict \| None = None` and `board_id: UUID \| None = None` kwargs; thread both to the INSERT. **NOT** `nous/heart/facts.py` — that holds `FactManager`. |
+| `nous/heart/heart.py` | Add `self.boards = BoardManager(self._session_factory)` alongside the existing `self.subtasks` wiring; expose `boards` as a public attribute. |
+| `nous/storage/models.py` | Add `payload_schema`, `payload_schema_valid`, `board_id` columns to `Subtask`; add `Board` ORM model (agent_id, label, created_at). |
 | `nous/config.py` | Add `subtask_payload_schema_enabled: bool = False` + `blackboard_enabled: bool = False` + `blackboard_poll_interval_seconds: float = 2.0` + `blackboard_poll_max_interval_seconds: float = 10.0`. |
+| `pyproject.toml` | Pin `jsonschema>=4,<5` in `[project] dependencies`. |
 | `CLAUDE.md` | Document the new env vars + REST surfaces if any (F062/F063 are pure tool layer; no new REST endpoints in v1). |
 | `docs/features/INDEX.md` | Flip F062/F063 from Draft → Implementing. (Note: spec PR explicitly left INDEX.md alone; we update it as part of the implementation PR.) |
 
@@ -83,7 +84,7 @@ If any of these invariants are violated when this plan runs, STOP and re-verify 
 
 1. **Migration 042** — add `payload_schema JSONB` (caller-supplied schema, NULL when not used) and `payload_schema_valid BOOLEAN` (NULL pre-validation, true/false post). No CHECK constraint in v1.
 2. **ORM update** — `nous/storage/models.py::Subtask` gains both columns; `Mapped[dict | None]` and `Mapped[bool | None]`.
-3. **API model** — `nous/api/models.py`:
+3. **API model** — `nous/api/models.py` (matches the existing file convention — every type in that file today is `@dataclass`; using `pydantic.BaseModel` would mix styles. If a follow-up needs `SubtaskResult` on the REST surface, switch the file's models en bloc):
    ```python
    SubtaskOutcome = Literal[
        "completed", "incomplete_blocked", "incomplete_no_terminal",
@@ -145,6 +146,10 @@ Acceptance: pytest `tests/test_f062_payload_schema.py` green; `nous_eval` smoke 
 
 3. **spawn_task extension** — accept optional `payload_schema: dict | None`; persist via `heart.subtasks.create(payload_schema=...)`; thread through `build_subtask_prefix`.
 
+   **Flag-gated schema exposure** (P1 fix from plan-review 2026-05-19): the `payload_schema` JSON Schema property MUST be added to `_SPAWN_TASK_SCHEMA.properties` only when `settings.subtask_payload_schema_enabled=True`. Otherwise the model sees a tool-schema property that silently drops at the executor — exactly the silent-failure anti-pattern the codebase already enforces against. Implementation: build `_SPAWN_TASK_SCHEMA` lazily inside `register_subtask_tools` and conditionally inject the property; do NOT mutate the module-level constant. Same pattern applied to `submit_final_report`'s optional `payload` property (only added when flag is on).
+
+   **Fail-closed behavior when flag is off** (P2 documentation fix): `submit_final_report`'s `input_schema.additionalProperties=False` means a model that emits a `payload` key with the flag off will be rejected by Anthropic's tool-validator. This is intentional — pre-flag rows can't have schema-validated payloads anyway. Document this in `nous/api/subtask_tools.py` and in the Commit B acceptance checklist so reviewers don't flag it as a regression.
+
 4. **execute_hardened extension** — schema validation runs **only** when F061's structural validator just returned `ok` (i.e., the in-flight attempt was about to record `completed`). Other terminal outcomes (`errored`, `timed_out`, `cancelled`, `incomplete_blocked`, `incomplete_no_terminal`) are **never** rewritten — `SubtaskResult.status` must always mirror the persisted `heart.subtasks.final_outcome`. Implementation:
    ```python
    # last_result.ok is True here — F061 has accepted the structural payload.
@@ -182,19 +187,15 @@ Acceptance:
 
 ### Commit C — F063 boards + fan_out + wait_results (≈3.5h)
 
-1. **Migration 043** — `heart.boards` table:
+1. **Migration 047** (free slot — 043–046 are taken; see §2 Create table) — `heart.boards` table:
    ```sql
    CREATE TABLE IF NOT EXISTS heart.boards (
        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
        agent_id    TEXT NOT NULL,
        label       TEXT NOT NULL,
-       status      VARCHAR(16) NOT NULL DEFAULT 'open',
-       created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-       closed_at   TIMESTAMPTZ NULL,
-       CONSTRAINT boards_status_chk
-           CHECK (status IN ('open', 'closed'))
+       created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
    );
-   CREATE INDEX idx_boards_agent_open ON heart.boards (agent_id, status, created_at DESC);
+   CREATE INDEX idx_boards_agent ON heart.boards (agent_id, created_at DESC);
 
    ALTER TABLE heart.subtasks
        ADD COLUMN IF NOT EXISTS board_id UUID NULL
@@ -202,16 +203,22 @@ Acceptance:
    CREATE INDEX IF NOT EXISTS idx_subtasks_board ON heart.subtasks (board_id)
        WHERE board_id IS NOT NULL;
    ```
-   Agent-scoped (required per memory note: every new table needs `agent_id`).
+   Agent-scoped (required per project convention: every new table needs `agent_id`). `status`/`closed_at` columns are intentionally **omitted** in v1 — no caller closes a board, so the column would be permanently `'open'`. Add them in a follow-up when a real lifecycle requirement appears.
 
-2. **ORM + CRUD** — `nous/storage/models.py::Board`; `nous/heart/boards.py::BoardManager`.
+2. **ORM + CRUD** — `nous/storage/models.py::Board`; `nous/heart/boards.py::BoardManager` (v1 surface: `create`, `get`, `list_by_agent`).
 
 3. **Tools** —
    - `create_board(label)` → `{"board_id": uuid}`.
    - `fan_out(board_id, tasks, frame_type=None, timeout_seconds=None)` → spawns N subtasks each with `board_id` set, returns `{"task_ids": [...]}`.
-   - `wait_results(board_id, n_of_m=None, timeout_seconds=300)` → polls `heart.subtasks WHERE board_id=$1` every 2s (exponential backoff up to 10s), terminal predicate uses the full F061 outcome set, returns when `n_of_m` rows terminal OR wall-clock timeout. Returns a list of `SubtaskResult.to_dict()` blobs.
+   - `wait_results(board_id, n_of_m=None, timeout_seconds=300)` — see step 4 for semantics + return shape.
 
-4. **Polling helper** — `nous/heart/boards.py::poll_terminal(board_id, n_of_m, deadline_monotonic)`. Pure-async loop; no busy-wait. Uses `asyncio.sleep` with backoff. Single SQL query per poll (no per-row trips). Cancellable.
+4. **`wait_results` semantics and contract** (P2 clarifications from plan-review):
+   - **Terminal predicate**: a row is terminal when `final_outcome IS NOT NULL` (covers the full F061 set: `completed`, `incomplete_blocked`, `incomplete_no_terminal`, `validation_failed`, `timed_out`, `errored`, `cancelled`).
+   - **Return shape**: `wait_results` always returns **all terminal rows on the board at the time the wait condition trips**, sorted by `completed_at ASC`. Each row is rendered as a `SubtaskResult.to_dict()` blob. Still-running subtasks are NOT included — the caller can re-poll for them later. (This is option (a) from the review; (b) "first n_of_m only" is ambiguous when ≥ n_of_m terminate in the same poll tick.)
+   - **Wait condition**: returns when EITHER (i) at least `n_of_m` rows are terminal (or all of them if `n_of_m=None`), OR (ii) wall-clock deadline (`timeout_seconds`) expires.
+   - **Polling loop**: pure-async via `asyncio.sleep` with exponential backoff (start `blackboard_poll_interval_seconds`, cap `blackboard_poll_max_interval_seconds`). Single `SELECT id, final_outcome, completed_at, report_jsonb FROM heart.subtasks WHERE board_id=$1` per poll — no per-row round trips. Index `idx_subtasks_board` covers the predicate.
+   - **CancelledError handling**: the polling loop MUST **propagate `asyncio.CancelledError` unchanged** to the caller. No `except asyncio.CancelledError`, no fall-through `except Exception:` that catches BaseException. Per `feedback_gather_cancellederror.md`, swallowing CancelledError here would hang agent shutdown. The caller (`spawn_task`'s outer `asyncio.wait_for` or the agent cancellation handler) is responsible for cleanup.
+   - **Helper location**: `nous/heart/boards.py::poll_terminal(board_id, n_of_m, deadline_monotonic)`. Returns the same dict-list as `wait_results`.
 
 5. **Tools schema + registration** — gated by `settings.blackboard_enabled`.
 
@@ -255,7 +262,7 @@ Rollout:
 | Adding `payload` field to submit_final_report makes models on legacy paths emit a payload nobody validates | New field is optional + nullable; pre-flag `payload_schema=None` means we never inspect the payload. |
 | Polling `wait_results` hammers DB at scale | Single GROUP BY query per tick; cap on `n_of_m` ≤ 50; per-board deadline forces cancellation. |
 | `fan_out` spawn loop spawns more subtasks than `subtask_max_concurrent` allows | `fan_out` does not bypass admission control — calls into `heart.subtasks.create()` the same way `spawn_task` does. Worker pool enforces concurrency. |
-| Race between F063 polling and F061 timeout writer | Both write to different columns at non-overlapping times: F063 only reads; F061's outer handler writes `final_outcome`. No mutation race. |
+| Race between F063 polling and F061 timeout writer | Safe by construction: `wait_results` is **read-only** on `heart.subtasks` — no `UPDATE`, no row lock. The only writer of `final_outcome` is F061's outer handler. Polling sees whatever the latest committed value is; eventual-consistency is acceptable since the worst case is one extra poll cycle. |
 | New `boards` table introduces orphan rows if agent restarts mid-fan-out | `boards.status` field + nightly sleep handler can prune `open` boards older than 24h (deferred — out of scope; orphan rows are harmless). |
 
 ---
