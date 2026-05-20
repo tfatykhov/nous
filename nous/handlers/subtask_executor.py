@@ -348,9 +348,7 @@ async def execute_hardened(
                         "(required when payload_schema is supplied)",
                     )
                     payload_schema_valid = False
-                    # Skip the jsonschema.validate call entirely.
-                    if last_result.ok or last_result.outcome == "incomplete_blocked":
-                        break
+                    # Drop through to the existing retry/break logic below.
                     if (
                         attempt < max_attempts
                         and last_result.outcome in {"incomplete_no_terminal", "validation_failed"}

@@ -245,14 +245,16 @@ class SubtaskManager:
         recently created row whose metadata.f062_spawn_sync_token matches.
         """
         async with self._db.session() as session:
-            # Cross-database JSONB containment: use the standard ->> operator
-            # which sqlalchemy renders portably for both Postgres and the
-            # SQLite test backend's JSON1 emulation.
+            # Match the established codebase pattern at
+            # nous/handlers/task_scheduler.py:99 — `.astext` renders the
+            # JSONB ->> operator on asyncpg without the surrounding quotes
+            # that `.as_string()` may include. Verified by the smoke test
+            # in test_f062_get_by_spawn_sync_token.py.
             result = await session.execute(
                 select(Subtask)
                 .where(Subtask.agent_id == self._agent_id)
                 .where(
-                    Subtask.metadata_["f062_spawn_sync_token"].as_string() == token
+                    Subtask.metadata_["f062_spawn_sync_token"].astext == token
                 )
                 .order_by(Subtask.created_at.desc())
                 .limit(1)

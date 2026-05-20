@@ -90,7 +90,7 @@ def validate_report(
     payload: dict | None,
     *,
     min_summary_chars: int,
-    payload_accepted: bool = True,
+    payload_accepted: bool = False,
 ) -> ValidationResult:
     """Validate a submit_final_report payload structurally.
 
