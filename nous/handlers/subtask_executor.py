@@ -294,7 +294,15 @@ async def execute_hardened(
 
             last_payload = collector.get()
             state.last_payload = last_payload
-            last_result = validate_report(last_payload, min_summary_chars=min_summary)
+            # F062: pass the flag so validate_report can fail-closed on
+            # an unexpected `payload` key when the master flag is off.
+            last_result = validate_report(
+                last_payload,
+                min_summary_chars=min_summary,
+                payload_schema_enabled=getattr(
+                    settings, "subtask_payload_schema_enabled", False
+                ),
+            )
 
             # F062: post-structural-validation JSON Schema check on the
             # optional `payload` field of the report. Fires only when

@@ -402,6 +402,40 @@ async def test_schema_mismatch_then_api_error_resets_valid_flag() -> None:
 
 
 @pytest.mark.asyncio
+async def test_payload_rejected_when_flag_off_even_without_payload_schema() -> None:
+    """Codex round-11/12 P1 (L55): fail-closed gate restored — when the
+    F062 flag is off, validate_report must reject submissions that carry
+    a `payload` key, mirroring F061's pre-F062 extra='forbid' behavior.
+
+    Pydantic accepts the field unconditionally (transport layer); the
+    structural validator at heart.subtask_validator.validate_report is
+    where the gate lives now.
+    """
+    runner = _scripted_runner(scripted_payloads=[
+        {
+            "summary": "Submitted a perfectly fine report — except it includes a payload field while F062 is off.",
+            "confidence": 0.9,
+            "payload": {"name": "Alice", "score": 0.9},
+        },
+        {
+            "summary": "Second attempt still tries to send a payload — should also fail-closed because F062 is off.",
+            "confidence": 0.9,
+            "payload": {"name": "Alice", "score": 0.9},
+        },
+    ])
+    heart = _make_heart_mock()
+    settings = _make_settings(payload_schema_enabled=False)
+    subtask = _make_subtask(payload_schema=None)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "validation_failed"
+    assert "payload" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_missing_payload_key_fails_validation_even_for_null_schema() -> None:
     """Codex round-7 P1: when payload_schema is supplied, the report MUST
     include an explicit `payload` field. Omitting it must NOT be treated

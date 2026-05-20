@@ -86,17 +86,37 @@ class ValidationResult:
         )
 
 
-def validate_report(payload: dict | None, *, min_summary_chars: int) -> ValidationResult:
+def validate_report(
+    payload: dict | None,
+    *,
+    min_summary_chars: int,
+    payload_schema_enabled: bool = True,
+) -> ValidationResult:
     """Validate a submit_final_report payload structurally.
 
     Returns a ``ValidationResult`` whose ``outcome`` field is one of the
     five-state enum values. The caller (worker) maps the outcome onto the
     ``final_outcome`` column.
+
+    F062: when ``payload_schema_enabled`` is False, the optional ``payload``
+    field is forbidden — falls back to F061's pre-F062 fail-closed behavior
+    so an operator who has not enabled F062 does not silently accept
+    unvalidated structured payloads from the model. (Codex round-11/12 P1)
     """
     if payload is None:
         return ValidationResult.failed(
             "incomplete_no_terminal",
             "Subtask exited without calling submit_final_report.",
+        )
+
+    # F062 gate: reject `payload` key at structural-validation time when the
+    # F062 flag is off. The Pydantic model accepts it unconditionally as a
+    # transport field; this gate restores the fail-closed contract.
+    if not payload_schema_enabled and isinstance(payload, dict) and "payload" in payload:
+        return ValidationResult.failed(
+            "validation_failed",
+            "schema_invalid: `payload` field is not accepted when "
+            "NOUS_SUBTASK_PAYLOAD_SCHEMA_ENABLED=false",
         )
 
     try:

@@ -1856,6 +1856,20 @@ def create_subtask_tools(
             if start_anchor:
                 elapsed = (match.completed_at - start_anchor).total_seconds()
 
+        # Codex round-12 P2: raw_text was the spawn_task wrapper string
+        # (e.g. "[Subtask abc12345 completed]"), which dropped the actual
+        # report content on failure paths where callers need it to debug.
+        # Use the persisted report content directly: prefer the validated
+        # summary, then fall back to .result (legacy column), and only as
+        # a last resort to spawn_task's wrapper text.
+        diagnostic_text = ""
+        if isinstance(report, dict) and isinstance(report.get("summary"), str) and report["summary"].strip():
+            diagnostic_text = report["summary"]
+        elif match.result:
+            diagnostic_text = match.result
+        else:
+            diagnostic_text = text
+
         # status mirrors final_outcome (Codex round-2 P1 invariant). Fall back
         # to legacy `status` only if final_outcome is somehow NULL — that
         # signals a pre-F061 row, which spawn_sync should never hit but we
@@ -1907,7 +1921,7 @@ def create_subtask_tools(
             task_id=str(match.id),
             status=status,
             payload=payload,
-            raw_text=text,
+            raw_text=diagnostic_text,
             confidence=confidence,
             elapsed_seconds=elapsed,
             validator_reason=validator_reason,
