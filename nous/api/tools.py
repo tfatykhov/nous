@@ -1813,14 +1813,12 @@ def create_subtask_tools(
         except (KeyError, IndexError, TypeError):
             text = ""
 
-        # Race-free lookup: heart.subtasks.list filters by agent_id; we
-        # narrow to our unique sync_session_id. A spawn_sync call always
-        # creates exactly one row tagged with that session id.
-        rows = await heart.subtasks.list(limit=50)
-        match = next(
-            (s for s in rows if getattr(s, "parent_session_id", None) == sync_session_id),
-            None,
-        )
+        # Race-free lookup by exact parent_session_id (Codex round-5 P1).
+        # The earlier scan-with-limit was fragile under load — a burst of
+        # concurrent subtasks could push the row out of the recency window
+        # and silently misreport the result as "errored". Direct query is
+        # both race-free and unbounded.
+        match = await heart.subtasks.get_by_parent_session(sync_session_id)
         if match is None:
             # Censor-rejection path or runner-unavailable path — no row
             # was created at all. Return a degraded but typed result.

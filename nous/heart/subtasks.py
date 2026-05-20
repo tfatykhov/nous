@@ -236,6 +236,24 @@ class SubtaskManager:
         async with self._db.session() as session:
             return await session.get(Subtask, subtask_id)
 
+    async def get_by_parent_session(self, parent_session_id: str) -> Subtask | None:
+        """F062: get a subtask by its parent_session_id (unique-per-spawn_sync).
+
+        Race-free lookup — does not depend on a recency window. Returns the
+        most recently created row matching the parent_session_id within the
+        current agent's scope, or None if no row exists yet (e.g. censor
+        rejected creation).
+        """
+        async with self._db.session() as session:
+            result = await session.execute(
+                select(Subtask)
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.parent_session_id == parent_session_id)
+                .order_by(Subtask.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
     async def list(
         self,
         status: str | None = None,
