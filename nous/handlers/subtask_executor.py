@@ -20,7 +20,6 @@ Contract:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -302,15 +301,17 @@ async def execute_hardened(
                 and getattr(settings, "subtask_payload_schema_enabled", False)
                 and getattr(subtask, "payload_schema", None) is not None
             ):
+                # Codex round-4 P1: tool-call arguments are already parsed by
+                # the runner into native Python values. Calling json.loads on
+                # a string payload like "hello" (valid for {"type":"string"})
+                # would mis-fire as JSONDecodeError and force validation_failed
+                # on a legitimately schema-valid string/scalar value. Always
+                # validate the raw Python value directly.
                 raw_payload = (last_payload or {}).get("payload")
                 try:
-                    if isinstance(raw_payload, str):
-                        parsed = json.loads(raw_payload)
-                    else:
-                        parsed = raw_payload
-                    jsonschema.validate(parsed, subtask.payload_schema)
+                    jsonschema.validate(raw_payload, subtask.payload_schema)
                     payload_schema_valid = True
-                except (json.JSONDecodeError, jsonschema.ValidationError) as e:
+                except jsonschema.ValidationError as e:
                     logger.warning(
                         "Subtask %s attempt %d payload schema mismatch: %s",
                         subtask.id.hex[:8], attempt, e,

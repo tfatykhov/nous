@@ -288,3 +288,51 @@ async def test_schema_check_accepts_scalar_payload() -> None:
     kwargs = heart.subtasks.complete.await_args.kwargs
     assert kwargs["payload_schema_valid"] is True
     assert kwargs["report_jsonb"]["payload"] == 42
+
+
+@pytest.mark.asyncio
+async def test_schema_check_accepts_string_payload() -> None:
+    """Codex round-4 P1: validate the raw Python value directly. A string
+    payload for a {"type": "string"} schema must NOT be json.loads'd into
+    a JSONDecodeError; the value "ok" is a valid schema-typed string.
+    """
+    string_schema = {"type": "string", "minLength": 1}
+    runner = _scripted_runner(scripted_payloads=[{
+        "summary": "Returned the requested answer as a single short string.",
+        "confidence": 0.9,
+        "payload": "ok",
+    }])
+    heart = _make_heart_mock()
+    settings = _make_settings()
+    subtask = _make_subtask(payload_schema=string_schema)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "completed"
+    kwargs = heart.subtasks.complete.await_args.kwargs
+    assert kwargs["payload_schema_valid"] is True
+    assert kwargs["report_jsonb"]["payload"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_schema_check_accepts_null_payload() -> None:
+    """Schema {"type": "null"} must accept payload=None."""
+    null_schema = {"type": "null"}
+    runner = _scripted_runner(scripted_payloads=[{
+        "summary": "Returned a null payload because the operation is intentionally void.",
+        "confidence": 0.9,
+        "payload": None,
+    }])
+    heart = _make_heart_mock()
+    settings = _make_settings()
+    subtask = _make_subtask(payload_schema=null_schema)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "completed"
+    kwargs = heart.subtasks.complete.await_args.kwargs
+    assert kwargs["payload_schema_valid"] is True

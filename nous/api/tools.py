@@ -1853,18 +1853,33 @@ def create_subtask_tools(
         else:
             status = "errored"
 
-        # Payload contract (reviewer P2-B clarification):
-        #   status == "completed"        → payload = validated dict/scalar
+        # Payload contract:
+        #   status == "completed"        → payload = the validated value from
+        #                                  the report. Preserves explicit
+        #                                  None (e.g., schema {"type":"null"})
+        #                                  vs. unset (no payload key in
+        #                                  report) — the former is a valid
+        #                                  schema-typed result and must NOT
+        #                                  be coerced to {} (Codex round-4
+        #                                  P2). Only fall back to {} when
+        #                                  the `payload` key was never set.
         #   any other terminal outcome   → payload = {} (do NOT surface a
         #                                  schema-invalid payload that a
-        #                                  caller might accidentally
-        #                                  consume thinking it validated).
+        #                                  caller might accidentally consume
+        #                                  thinking it validated).
         # raw_text + validator_reason carry the diagnostic info if the
         # caller actually wants to inspect the failed payload.
+        _UNSET = object()
         if status == "completed":
-            payload = report.get("payload") if isinstance(report, dict) else None
-            if payload is None:
+            payload_or_unset: Any = (
+                report.get("payload", _UNSET)
+                if isinstance(report, dict)
+                else _UNSET
+            )
+            if payload_or_unset is _UNSET:
                 payload = {}
+            else:
+                payload = payload_or_unset
         else:
             payload = {}
 
