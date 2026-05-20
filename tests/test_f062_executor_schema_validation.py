@@ -317,6 +317,91 @@ async def test_schema_check_accepts_string_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_malformed_caller_schema_maps_to_validation_failed() -> None:
+    """Codex round-6 P2: jsonschema.validate raises SchemaError when the
+    *caller's* payload_schema is malformed. The executor must map that to
+    validation_failed (a deterministic F062 outcome) instead of letting
+    the exception escape into the generic errored path.
+    """
+    # `minimum: "not-a-number"` is invalid JSON-Schema → SchemaError on use.
+    bad_schema = {"type": "number", "minimum": "not-a-number"}
+    runner = _scripted_runner(scripted_payloads=[
+        {
+            "summary": "Submitted a number payload as the caller asked.",
+            "confidence": 0.9,
+            "payload": 42,
+        },
+        {
+            "summary": "Same submission a second time — same broken caller schema.",
+            "confidence": 0.9,
+            "payload": 42,
+        },
+    ])
+    heart = _make_heart_mock()
+    settings = _make_settings(max_attempts=2)
+    subtask = _make_subtask(payload_schema=bad_schema)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "validation_failed"
+    assert "payload_schema is malformed" in result.reason
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs["final_outcome"] == "validation_failed"
+    assert kwargs["payload_schema_valid"] is False
+
+
+@pytest.mark.asyncio
+async def test_schema_mismatch_then_api_error_resets_valid_flag() -> None:
+    """Codex round-6 P2: payload_schema_valid must be reset at the start
+    of each attempt. Otherwise attempt-1 False would leak into attempt-2
+    runtime-error outcome and persist contradictory state
+    (final_outcome='errored' AND payload_schema_valid=False).
+    """
+    bad_payload = {
+        "summary": "First attempt sneaks an extra field that violates the schema.",
+        "confidence": 0.6,
+        "payload": {"name": 123, "score": 0.5},  # name must be string
+    }
+    runner = MagicMock()
+    call_idx = {"i": 0}
+
+    async def _run_turn(**kwargs):
+        i = call_idx["i"]
+        call_idx["i"] += 1
+        if i == 0:
+            # Attempt 1: submit the failing payload via the collector
+            extra = kwargs.get("extra_tools") or {}
+            _, executor = extra["submit_final_report"]
+            await executor(**bad_payload)
+            return (
+                "Report submitted.",
+                MagicMock(),
+                {"input_tokens": 100, "output_tokens": 50, "tool_calls": 1},
+            )
+        # Attempt 2: raise a runtime error before the model can call the tool
+        raise RuntimeError("upstream API blew up on retry")
+
+    runner.run_turn = AsyncMock(side_effect=_run_turn)
+
+    heart = _make_heart_mock()
+    settings = _make_settings(max_attempts=2)
+    subtask = _make_subtask(payload_schema=_SCHEMA)
+
+    _final, result = await execute_hardened(
+        subtask, "sess-1",
+        runner=runner, heart=heart, settings=settings,
+    )
+    assert result.outcome == "errored"
+    kwargs = heart.subtasks.fail.await_args.kwargs
+    assert kwargs["final_outcome"] == "errored"
+    # Crucial assertion: must NOT carry payload_schema_valid=False from the
+    # earlier attempt's schema mismatch.
+    assert kwargs["payload_schema_valid"] is None
+
+
+@pytest.mark.asyncio
 async def test_schema_check_accepts_null_payload() -> None:
     """Schema {"type": "null"} must accept payload=None."""
     null_schema = {"type": "null"}

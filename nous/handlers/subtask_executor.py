@@ -214,8 +214,10 @@ async def execute_hardened(
     total_calls = state.tool_calls_made
     attempt = state.attempts  # 0 if fresh
     # F062: tri-state — None when no schema check ran, True/False otherwise.
-    # Reset at the start of each attempt's validation block; the final value
-    # is whatever the most recent attempt produced.
+    # Reset at the start of EVERY attempt (Codex round-6 P2) so a False
+    # from attempt 1 cannot leak into a later runtime-error outcome —
+    # otherwise the persisted row would carry final_outcome='errored' with
+    # payload_schema_valid=False, contradictory state for telemetry.
     payload_schema_valid: bool | None = None
     started_monotonic = time.monotonic()
 
@@ -232,6 +234,12 @@ async def execute_hardened(
             # timeout that fires during the run still sees attempt=N.
             state.attempts = attempt
             collector.reset()
+            # F062 (Codex round-6 P2): reset per-attempt so a False from
+            # the prior attempt cannot leak into a later non-schema
+            # terminal outcome (e.g. attempt 1 schema-mismatch, attempt 2
+            # API exception → row would otherwise be persisted with
+            # final_outcome='errored' AND payload_schema_valid=False).
+            payload_schema_valid = None
             try:
                 response_text, _ctx, usage = await runner.run_turn(
                     session_id=session_id,
@@ -319,6 +327,21 @@ async def execute_hardened(
                     last_result = ValidationResult.failed(
                         "validation_failed",
                         f"payload schema mismatch: {e}",
+                    )
+                    payload_schema_valid = False
+                except jsonschema.SchemaError as e:
+                    # Codex round-6 P2: malformed caller schema raises
+                    # SchemaError, not ValidationError. Map to validation_failed
+                    # too so spawn_sync callers see a deterministic outcome
+                    # rather than the exception escaping into the generic
+                    # "errored" path.
+                    logger.warning(
+                        "Subtask %s attempt %d caller-supplied payload_schema is malformed: %s",
+                        subtask.id.hex[:8], attempt, e,
+                    )
+                    last_result = ValidationResult.failed(
+                        "validation_failed",
+                        f"payload_schema is malformed: {e}",
                     )
                     payload_schema_valid = False
 

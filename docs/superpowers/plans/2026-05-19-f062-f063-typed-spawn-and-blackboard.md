@@ -239,7 +239,7 @@ Acceptance:
 Acceptance:
 - All new tests green.
 - Existing test suite unchanged.
-- `docker compose up` against fresh DB applies migrations 042 + 043 in order.
+- `docker compose up` against fresh DB applies migrations **042 + 047** in order (verify the F063 migration is actually present at `sql/migrations/047_f063_blackboard.sql`).
 - A 5-line end-to-end smoke (in `tests/test_f063_fan_out_wait_results.py`) round-trips: `create_board` → `fan_out(3 tasks)` → `wait_results(n_of_m=2)` against in-memory subtasks.
 
 ---

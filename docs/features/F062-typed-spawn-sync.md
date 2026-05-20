@@ -50,7 +50,7 @@ SubtaskOutcome = Literal[
 class SubtaskResult:
     task_id: str
     status: SubtaskOutcome          # mirrors heart.subtasks.final_outcome (F061)
-    payload: dict                    # structured JSON extracted from the terminal report (may reuse F061's report_jsonb — see Implementation Plan)
+    payload: Any                     # full JSON value (object/array/string/number/boolean/null); typed as Any to match submit_final_report.payload's permissive schema. Stored via F061's report_jsonb — see Implementation Plan.
     raw_text: str                    # original report text (for debugging)
     confidence: float | None        # 0.0–1.0; None if subtask didn't emit one
     elapsed_seconds: float
@@ -88,11 +88,14 @@ result: SubtaskResult = spawn_sync(
 ### Subtask system prompt injection (when schema provided)
 
 ```
-Your terminal report MUST be valid JSON matching this schema:
+Your terminal report MUST include a `payload` field whose value validates
+against the schema below. The payload's JSON type is determined by the
+schema — it may be an object, array, string, number, boolean, or null;
+use the type the schema requires.
 <schema>
 {schema_json}
 </schema>
-Return ONLY the JSON object — no prose wrapper.
+Do not invent property names or types; mirror the schema exactly.
 ```
 
 ---
