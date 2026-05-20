@@ -4,7 +4,13 @@
 **Status:** 📝 Draft (2026-05-19)
 **Owner:** nous core
 **Implementer:** claude-opus-4-7 + reviewer subagents
-**Scope:** Implement both features on the spec PR's branch so the final PR ships specs and code together. F062 lands first (it provides `SubtaskResult`); F063 builds on top.
+
+**This-PR scope (PR #426 final form):**
+- Both spec drafts (F062 + F063).
+- **F062 implementation only** (Commits A + B below).
+- F063 implementation (Commit C) is deferred to a **follow-up PR** so the diff stays reviewable and the F062 foundation lands clean. F063's spec stays in this PR as the contract that follow-up will fulfil.
+
+**Why split:** F062 (~5.5h) is achievable end-to-end with green CI in one session; piling F063 (~3.5h) on top doubles failure surface for the final-review pass and risks leaving F063 half-implemented when the session budget runs out. Better to ship F062 cleanly + ship F063 next than to half-land both.
 
 ---
 
@@ -95,13 +101,14 @@ If any of these invariants are violated when this plan runs, STOP and re-verify 
    class SubtaskResult:
        task_id: str
        status: SubtaskOutcome
-       payload: dict[str, Any]
+       payload: Any   # full JSON value (object/array/string/number/boolean/null); typed as Any to match submit_final_report.payload's permissive schema
        raw_text: str
        confidence: float | None
        elapsed_seconds: float
        validator_reason: str | None = None
 
        def to_dict(self) -> dict[str, Any]:
+           # payload is passed through unchanged — could be any JSON-serializable value
            return {
                "task_id": self.task_id,
                "status": self.status,

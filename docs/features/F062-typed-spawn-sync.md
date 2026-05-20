@@ -56,17 +56,19 @@ class SubtaskResult:
     elapsed_seconds: float
 ```
 
-### `spawn_task` signature change (backward-compatible)
+### `spawn_task` signature — backward-compatible
 
 ```python
-# Before (unchanged default)
-result: str = spawn_task(task=..., await_result=False)
+# Today, await_result=False is fire-and-forget; returns an acknowledgment
+# with the new subtask's UUID (string), and the parent does not block.
+ack: str = spawn_task(task=..., await_result=False)
 
-# After — await_result=True returns SubtaskResult
-result: SubtaskResult = spawn_task(task=..., await_result=True)
+# Today, await_result=True blocks until the subtask terminates and returns
+# the raw report string (the result format F062 is replacing).
+raw_text: str = spawn_task(task=..., await_result=True)
 ```
 
-Returning a `SubtaskResult` when `await_result=True` is backward-incompatible for callers that treat the return as `str`. Mitigation: introduce `spawn_sync(...)` as the new explicit entry-point; leave `spawn_task(await_result=True)` returning raw string for one release cycle, then migrate.
+F062 does **not** change `spawn_task`'s return shape — every existing caller continues to receive the raw string when `await_result=True`. Instead, F062 introduces a new explicit entry-point, `spawn_sync(...)`, that returns a typed `SubtaskResult`. The legacy `spawn_task(await_result=True)` return contract stays untouched for at least one release cycle; migrate callers when convenient.
 
 ### `spawn_sync` entry-point
 
