@@ -1303,6 +1303,11 @@ def create_subtask_tools(
         # subtask row even when dropped at execute time — operators can
         # inspect via /dashboard/subtasks.
         payload_schema: dict | None = None,
+        # F062: internal-only lookup token written to metadata so spawn_sync
+        # can find the row it just created without overriding the caller's
+        # parent_session_id (Codex round-14 P2). Not exposed in the public
+        # tool schema.
+        _lookup_token: str | None = None,
         _session_id: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
@@ -1384,6 +1389,12 @@ def create_subtask_tools(
                 )
                 else None
             )
+            # F062: stash the spawn_sync lookup token in metadata when set
+            # so spawn_sync can find this row without clobbering the
+            # caller's parent_session_id.
+            _metadata: dict | None = None
+            if _lookup_token:
+                _metadata = {"f062_spawn_sync_token": _lookup_token}
             subtask = await heart.subtasks.create(
                 task=task,
                 priority=priority,
@@ -1392,6 +1403,7 @@ def create_subtask_tools(
                 parent_session_id=_session_id,
                 frame_type=frame_type,
                 model=effective_model,
+                metadata=_metadata,
                 # F061: persist the four-part brief for the executor.
                 output_format=output_format,
                 success_criteria=success_criteria,
@@ -1788,12 +1800,12 @@ def create_subtask_tools(
 
         from nous.api.models import SubtaskResult
 
-        # Generate a unique per-spawn_sync session id so the row lookup
-        # below can find the subtask by parent_session_id — race-free
-        # regardless of how many other subtasks land between create and
-        # lookup. (heart.subtasks.list is fine but bounded; this is
-        # unbounded-correct under any concurrency.)
-        sync_session_id = f"spawn_sync-{_uuid.uuid4().hex[:12]}"
+        # Generate a unique lookup token written to the subtask's metadata
+        # (Codex round-14 P2). Earlier rounds put this in parent_session_id,
+        # but that clobbered the caller's real parent_session and broke the
+        # cognitive-layer delivery sweep (heart.subtasks.get_undelivered).
+        # The metadata token is a clean side channel.
+        sync_lookup_token = f"spawn_sync-{_uuid.uuid4().hex[:16]}"
 
         # spawn_sync always blocks inline. Reuse spawn_task's plumbing so
         # the censor / hardened-executor / inline-outcome paths all stay
@@ -1810,7 +1822,8 @@ def create_subtask_tools(
             output_format=None,
             success_criteria=success_criteria,
             payload_schema=payload_schema,
-            _session_id=sync_session_id,
+            _lookup_token=sync_lookup_token,
+            _session_id=_session_id,  # preserve caller's parent_session_id
         )
 
         # spawn_task always returns {"content": [{"type":"text","text":...}]}.
@@ -1820,12 +1833,9 @@ def create_subtask_tools(
         except (KeyError, IndexError, TypeError):
             text = ""
 
-        # Race-free lookup by exact parent_session_id (Codex round-5 P1).
-        # The earlier scan-with-limit was fragile under load — a burst of
-        # concurrent subtasks could push the row out of the recency window
-        # and silently misreport the result as "errored". Direct query is
-        # both race-free and unbounded.
-        match = await heart.subtasks.get_by_parent_session(sync_session_id)
+        # Race-free lookup via metadata token — preserves caller session
+        # linkage and is unbounded-correct under any concurrency.
+        match = await heart.subtasks.get_by_spawn_sync_token(sync_lookup_token)
         if match is None:
             # Censor-rejection path or runner-unavailable path — no row
             # was created at all. Return a degraded but typed result.

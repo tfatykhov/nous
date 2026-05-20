@@ -236,19 +236,24 @@ class SubtaskManager:
         async with self._db.session() as session:
             return await session.get(Subtask, subtask_id)
 
-    async def get_by_parent_session(self, parent_session_id: str) -> Subtask | None:
-        """F062: get a subtask by its parent_session_id (unique-per-spawn_sync).
+    async def get_by_spawn_sync_token(self, token: str) -> Subtask | None:
+        """F062: get a subtask by its metadata-embedded spawn_sync token.
 
-        Race-free lookup — does not depend on a recency window. Returns the
-        most recently created row matching the parent_session_id within the
-        current agent's scope, or None if no row exists yet (e.g. censor
-        rejected creation).
+        Race-free lookup that does NOT clobber parent_session_id — the caller's
+        session linkage is preserved (so the cognitive layer's delivery sweep
+        still finds the row). Used exclusively by spawn_sync. Returns the most
+        recently created row whose metadata.f062_spawn_sync_token matches.
         """
         async with self._db.session() as session:
+            # Cross-database JSONB containment: use the standard ->> operator
+            # which sqlalchemy renders portably for both Postgres and the
+            # SQLite test backend's JSON1 emulation.
             result = await session.execute(
                 select(Subtask)
                 .where(Subtask.agent_id == self._agent_id)
-                .where(Subtask.parent_session_id == parent_session_id)
+                .where(
+                    Subtask.metadata_["f062_spawn_sync_token"].as_string() == token
+                )
                 .order_by(Subtask.created_at.desc())
                 .limit(1)
             )
