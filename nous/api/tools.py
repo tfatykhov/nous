@@ -2063,12 +2063,17 @@ _SPAWN_SYNC_SCHEMA: dict[str, Any] = {
             "description": "Natural-language instruction for the subtask",
         },
         "payload_schema": {
-            "type": "object",
+            # Codex round-10 P2: draft-2020-12 allows boolean schemas
+            # (true accepts anything, false rejects everything) in addition
+            # to object schemas. Accept both at the tool-arg layer so valid
+            # callers aren't rejected up-front.
+            "type": ["object", "boolean"],
             "description": (
                 "Optional JSON Schema (draft 2020-12 compatible). When set, "
                 "the subtask is instructed to populate submit_final_report's "
                 "`payload` field with data matching this schema; the executor "
-                "validates the result post-hoc."
+                "validates the result post-hoc. May be a JSON object or a "
+                "boolean (draft 2020-12 boolean-as-schema)."
             ),
         },
         "frame_type": {
@@ -2157,13 +2162,23 @@ def register_subtask_tools(
     # F062 requires F061's hardened executor — without subtask_hardening_enabled
     # the legacy inline path runs, which never calls execute_hardened, never
     # validates the payload, and would silently break F062's typed contract.
-    # Gate registration on BOTH flags so the operator can't accidentally flip
-    # only payload_schema_enabled and end up with broken validation guarantees.
+    # Also requires a runner — spawn_sync always uses await_result=True
+    # (inline execution), which is a no-op without a wired runner. Gate
+    # registration on ALL THREE so the operator can't accidentally end up
+    # with a tool that creates pending subtask rows and synthesizes false
+    # error results (Codex round-10 P2).
     if (
         settings.subtask_payload_schema_enabled
         and settings.subtask_hardening_enabled
+        and runner is not None
     ):
         dispatcher.register("spawn_sync", closures["spawn_sync"], _SPAWN_SYNC_SCHEMA)
+    elif settings.subtask_payload_schema_enabled and settings.subtask_hardening_enabled:
+        logger.warning(
+            "F062: both NOUS_SUBTASK_PAYLOAD_SCHEMA_ENABLED and "
+            "NOUS_SUBTASK_HARDENING_ENABLED are true but no runner is wired; "
+            "spawn_sync NOT registered. spawn_sync requires an inline runner."
+        )
     elif settings.subtask_payload_schema_enabled:
         logger.warning(
             "F062: NOUS_SUBTASK_PAYLOAD_SCHEMA_ENABLED=true but "
