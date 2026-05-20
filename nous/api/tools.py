@@ -1097,6 +1097,7 @@ def build_subtask_prefix(
     success_criteria: str | None = None,
     boundaries: str | None = None,
     hardening_enabled: bool = False,
+    payload_schema: dict | None = None,
 ) -> str:
     """Build a system prompt prefix for subtask execution.
 
@@ -1109,6 +1110,12 @@ def build_subtask_prefix(
     brief + termination contract (objective + output_format + success_criteria
     + boundaries) and instructs the agent to terminate via the
     ``submit_final_report`` tool.
+
+    F062: when ``payload_schema`` is non-None (and hardening_enabled is true),
+    appends a "Result schema (REQUIRED)" block instructing the model to
+    populate ``submit_final_report``'s ``payload`` field with data that
+    validates against the supplied JSON Schema. Ignored when hardening is off
+    — the legacy text path does not register ``submit_final_report`` at all.
     """
     from nous.api.runner import FRAME_TOOLS
 
@@ -1138,6 +1145,23 @@ def build_subtask_prefix(
             f"\n# Frame\n{frame_type} — apply {frame_type}-appropriate "
             "reasoning and tool usage.\n"
         )
+    # F062: when a payload schema was supplied, append a result-schema block
+    # that the model populates via submit_final_report's optional `payload`
+    # field. Compact JSON to keep prompt token spend bounded.
+    payload_schema_block = ""
+    if payload_schema is not None:
+        import json as _json
+        compact_schema = _json.dumps(payload_schema, separators=(",", ":"))
+        payload_schema_block = (
+            "\n# Result schema (REQUIRED)\n"
+            "When you call submit_final_report, the `payload` field MUST be "
+            "a JSON value that validates against this schema. Use the "
+            "schema's property names exactly; do not invent keys.\n\n"
+            "<schema>\n"
+            f"{compact_schema}\n"
+            "</schema>\n"
+        )
+
     return (
         "You are a Nous subtask agent. Your ONLY way to terminate is to call "
         "the submit_final_report tool with a schema-valid payload.\n\n"
@@ -1145,7 +1169,8 @@ def build_subtask_prefix(
         f"# Output format\n{of}\n\n"
         f"# Success criteria\n{sc}\n\n"
         f"# Boundaries\n{bd}\n"
-        f"{frame_block}\n"
+        f"{frame_block}"
+        f"{payload_schema_block}\n"
         "# Termination\n"
         "When you are done — and ONLY when done — call submit_final_report. "
         "Do not produce a final text-only response; the parent agent will "
@@ -1271,6 +1296,13 @@ def create_subtask_tools(
         # derived defaults at execute time when these are None.
         output_format: str | None = None,
         success_criteria: str | None = None,
+        # F062: optional JSON Schema for the result payload. Only honored
+        # when settings.subtask_payload_schema_enabled is True; otherwise
+        # silently dropped (the property is also gated out of
+        # _SPAWN_TASK_SCHEMA so the model can't see it). Persisted on the
+        # subtask row even when dropped at execute time — operators can
+        # inspect via /dashboard/subtasks.
+        payload_schema: dict | None = None,
         _session_id: str | None = None,
     ) -> dict[str, Any]:
         """Spawn a subtask, optionally waiting for its result inline.
@@ -1338,6 +1370,13 @@ def create_subtask_tools(
             except Exception:
                 logger.debug("Censor check failed during spawn_task, proceeding")
 
+            # F062: only persist payload_schema when the flag is on.
+            # Operators flipping the flag off should not see stale schemas
+            # take effect on new rows even if a caller passes one through
+            # the (un-exposed) kwarg.
+            effective_payload_schema = (
+                payload_schema if settings.subtask_payload_schema_enabled else None
+            )
             subtask = await heart.subtasks.create(
                 task=task,
                 priority=priority,
@@ -1349,6 +1388,8 @@ def create_subtask_tools(
                 # F061: persist the four-part brief for the executor.
                 output_format=output_format,
                 success_criteria=success_criteria,
+                # F062: caller-supplied JSON Schema for the result payload.
+                payload_schema=effective_payload_schema,
             )
 
             if not await_result:
@@ -1721,11 +1762,148 @@ def create_subtask_tools(
             logger.exception("cancel_task tool failed")
             return {"content": [{"type": "text", "text": f"Error cancelling task: {e}"}]}
 
+    # F062: spawn_sync — typed counterpart to spawn_task(await_result=True).
+    # Returns SubtaskResult.to_dict() as a JSON blob in the content. The
+    # spawn_task fire-and-forget contract and legacy string return stay
+    # untouched; spawn_sync is the new entry-point for callers that want
+    # a structured, schema-validated payload.
+    async def spawn_sync(
+        task: str,
+        payload_schema: dict | None = None,
+        frame_type: str | None = None,
+        timeout_seconds: int | None = None,
+        model: str | None = None,
+        success_criteria: str | None = None,
+        _session_id: str | None = None,
+    ) -> dict[str, Any]:
+        import json as _json
+        from nous.api.models import SubtaskResult
+
+        # spawn_sync always blocks inline. Reuse spawn_task's plumbing so
+        # the censor / hardened-executor / inline-outcome paths all stay
+        # in one place. Note: spawn_task already enforces effective_payload_schema
+        # gating on settings.subtask_payload_schema_enabled.
+        raw = await spawn_task(
+            task=task,
+            priority="normal",
+            timeout=timeout_seconds,
+            notify=False,
+            frame_type=frame_type,
+            await_result=True,
+            model=model,
+            output_format=None,
+            success_criteria=success_criteria,
+            payload_schema=payload_schema,
+            _session_id=_session_id,
+        )
+
+        # spawn_task always returns {"content": [{"type":"text","text":...}]}.
+        # Read back the resulting Subtask row to surface the persisted
+        # final_outcome + payload — this is what guarantees the
+        # status-mirrors-final_outcome invariant.
+        text = ""
+        try:
+            text = raw["content"][0]["text"]
+        except (KeyError, IndexError, TypeError):
+            text = ""
+
+        # Look up the most recent subtask spawned in this session if we
+        # have one. spawn_task embeds the UUID prefix in its text response
+        # for both success and failure paths. Parse it back out.
+        import re as _re
+        m = _re.search(r"Subtask ([0-9a-f]{8})", text)
+        if not m:
+            # Pre-flag legacy path or a censor-rejection. Best-effort: return
+            # a degraded SubtaskResult so callers still get a typed value.
+            result = SubtaskResult(
+                task_id="",
+                status="errored",
+                payload={},
+                raw_text=text,
+                confidence=None,
+                elapsed_seconds=0.0,
+                validator_reason="spawn_sync could not locate the subtask row",
+            )
+            return {
+                "content": [
+                    {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}
+                ]
+            }
+
+        # Resolve the full UUID via prefix lookup. heart.subtasks.list
+        # returns the most recent rows first; the 8-char prefix is unique
+        # within a small window.
+        prefix = m.group(1)
+        rows = await heart.subtasks.list(limit=20)
+        match = next(
+            (s for s in rows if s.id.hex.startswith(prefix)),
+            None,
+        )
+        if match is None:
+            result = SubtaskResult(
+                task_id="",
+                status="errored",
+                payload={},
+                raw_text=text,
+                confidence=None,
+                elapsed_seconds=0.0,
+                validator_reason="spawn_sync subtask row not found",
+            )
+            return {
+                "content": [
+                    {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}
+                ]
+            }
+
+        report = match.report_jsonb or {}
+        elapsed = 0.0
+        if match.completed_at and match.started_at:
+            elapsed = (match.completed_at - match.started_at).total_seconds()
+
+        # status mirrors final_outcome (Codex round-2 P1 invariant). Fall back
+        # to legacy `status` only if final_outcome is somehow NULL — that
+        # signals a pre-F061 row, which spawn_sync should never hit but we
+        # surface as "errored" for safety rather than guessing.
+        if match.final_outcome:
+            status: Any = match.final_outcome
+        else:
+            status = "errored"
+
+        # Extract payload only if the report carried one (the schema check
+        # may have written validation_failed without a usable payload).
+        payload = report.get("payload") if isinstance(report, dict) else None
+        if payload is None:
+            payload = {}
+
+        confidence = None
+        if isinstance(report, dict):
+            c = report.get("confidence")
+            if isinstance(c, (int, float)):
+                confidence = float(c)
+
+        validator_reason = match.error if match.error else None
+
+        result = SubtaskResult(
+            task_id=str(match.id),
+            status=status,
+            payload=payload,
+            raw_text=text,
+            confidence=confidence,
+            elapsed_seconds=elapsed,
+            validator_reason=validator_reason,
+        )
+        return {
+            "content": [
+                {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}
+            ]
+        }
+
     return {
         "spawn_task": spawn_task,
         "schedule_task": schedule_task,
         "list_tasks": list_tasks,
         "cancel_task": cancel_task,
+        "spawn_sync": spawn_sync,
     }
 
 
@@ -1847,6 +2025,81 @@ _CANCEL_TASK_SCHEMA: dict[str, Any] = {
     "required": ["task_id"],
 }
 
+# F062: spawn_sync tool schema. Typed counterpart to spawn_task(await_result=True);
+# returns a SubtaskResult JSON blob with status/payload/confidence/etc. Only
+# registered when settings.subtask_payload_schema_enabled is True.
+_SPAWN_SYNC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Run a subtask synchronously (inline) and return a typed SubtaskResult "
+        "containing status, structured payload, raw text, and confidence. "
+        "Pass payload_schema to require the subtask's report.payload to "
+        "validate against a JSON Schema; on mismatch the SubtaskResult will "
+        "have status='validation_failed'. Use spawn_task for fire-and-forget."
+    ),
+    "properties": {
+        "task": {
+            "type": "string",
+            "description": "Natural-language instruction for the subtask",
+        },
+        "payload_schema": {
+            "type": "object",
+            "description": (
+                "Optional JSON Schema (draft 2020-12 compatible). When set, "
+                "the subtask is instructed to populate submit_final_report's "
+                "`payload` field with data matching this schema; the executor "
+                "validates the result post-hoc."
+            ),
+        },
+        "frame_type": {
+            "type": "string",
+            "description": "Cognitive frame for the subtask. Defaults to current.",
+            "enum": ["task", "research", "conversation", "decision", "debug"],
+        },
+        "timeout_seconds": {
+            "type": "integer",
+            "description": "Max execution seconds (clamped to server max).",
+            "minimum": 10,
+        },
+        "model": {
+            "type": "string",
+            "description": "Model to use for this subtask. Defaults to background model.",
+        },
+        "success_criteria": {
+            "type": "string",
+            "description": (
+                "What 'done' looks like. Optional; defaults to a generic check."
+            ),
+        },
+    },
+    "required": ["task"],
+}
+
+
+def _build_spawn_task_schema(payload_schema_enabled: bool) -> dict[str, Any]:
+    """Return a copy of _SPAWN_TASK_SCHEMA with the F062 payload_schema
+    property conditionally injected.
+
+    Plan §3 Commit B step 3 — we don't mutate the module-level constant
+    because that would (a) leak the property on subsequent registrations
+    after a settings flip in tests and (b) cross-contaminate dispatchers
+    that share the import.
+    """
+    import copy
+    schema = copy.deepcopy(_SPAWN_TASK_SCHEMA)
+    if payload_schema_enabled:
+        schema["properties"]["payload_schema"] = {
+            "type": "object",
+            "description": (
+                "F062: optional JSON Schema (draft 2020-12 compatible) for "
+                "the subtask's result payload. When supplied, the executor "
+                "validates submit_final_report.payload against this schema; "
+                "on mismatch the subtask retries (per F061) and ultimately "
+                "persists final_outcome='validation_failed'."
+            ),
+        }
+    return schema
+
 
 def register_subtask_tools(
     dispatcher: ToolDispatcher,
@@ -1861,13 +2114,23 @@ def register_subtask_tools(
     The optional ``runner`` enables inline (await_result) subtask execution.
     The optional ``bus`` (F061 PR-3) lets inline hardened subtasks emit
     ``subtask_outcome`` telemetry via the EventBus.
+
+    F062: when ``settings.subtask_payload_schema_enabled`` is True, the
+    payload_schema property is added to spawn_task's schema AND spawn_sync
+    is registered as a separate tool. When False, neither is exposed —
+    F062 is entirely dormant.
     """
     closures = create_subtask_tools(heart, settings, runner, bus=bus)
 
-    dispatcher.register("spawn_task", closures["spawn_task"], _SPAWN_TASK_SCHEMA)
+    spawn_task_schema = _build_spawn_task_schema(
+        settings.subtask_payload_schema_enabled
+    )
+    dispatcher.register("spawn_task", closures["spawn_task"], spawn_task_schema)
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)
     dispatcher.register("list_tasks", closures["list_tasks"], _LIST_TASKS_SCHEMA)
     dispatcher.register("cancel_task", closures["cancel_task"], _CANCEL_TASK_SCHEMA)
+    if settings.subtask_payload_schema_enabled:
+        dispatcher.register("spawn_sync", closures["spawn_sync"], _SPAWN_SYNC_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

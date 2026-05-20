@@ -20,6 +20,8 @@ Notes for future maintainers:
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -35,3 +37,9 @@ class SubtaskReport(BaseModel):
     evidence_refs: list[str] = Field(default_factory=list)
     incomplete: bool = False
     blocked_reason: str = ""
+    # F062: optional schema-typed payload. Validation of `payload` against
+    # the caller-supplied JSON Schema is done post-structural in
+    # execute_hardened — this field is just the transport. Default None
+    # keeps F061 callers unchanged (no payload, structural validation
+    # still passes).
+    payload: Any | None = None
