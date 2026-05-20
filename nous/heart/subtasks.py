@@ -38,6 +38,8 @@ class SubtaskManager:
         output_format: str | None = None,
         success_criteria: str | None = None,
         dag_node_id: UUID | None = None,
+        # F062 addition — caller-supplied JSON Schema for the result payload.
+        payload_schema: dict | None = None,
     ) -> Subtask:
         """Create a new pending subtask. Raises ValueError if pending limit reached."""
         pri_val = _PRIORITY_MAP.get(priority, 100)
@@ -68,6 +70,7 @@ class SubtaskManager:
                 output_format=output_format,
                 success_criteria=success_criteria,
                 dag_node_id=dag_node_id,
+                payload_schema=payload_schema,
             )
             session.add(subtask)
             await session.commit()
@@ -113,6 +116,8 @@ class SubtaskManager:
         tokens_in: int | None = None,
         tokens_out: int | None = None,
         tool_calls_made: int | None = None,
+        # F062 addition — when None, payload_schema_valid is left untouched.
+        payload_schema_valid: bool | None = None,
     ) -> None:
         """Mark a subtask as completed with its result."""
         values: dict = {
@@ -132,6 +137,8 @@ class SubtaskManager:
             values["tokens_out"] = tokens_out
         if tool_calls_made is not None:
             values["tool_calls_made"] = tool_calls_made
+        if payload_schema_valid is not None:
+            values["payload_schema_valid"] = payload_schema_valid
 
         async with self._db.session() as session:
             await session.execute(
@@ -162,6 +169,9 @@ class SubtaskManager:
         tokens_in: int | None = None,
         tokens_out: int | None = None,
         tool_calls_made: int | None = None,
+        # F062 addition — same semantics as complete(). Set False when the
+        # final attempt's schema validation failed; left untouched otherwise.
+        payload_schema_valid: bool | None = None,
     ) -> None:
         """Mark a subtask as failed with error message."""
         values: dict = {
@@ -181,6 +191,8 @@ class SubtaskManager:
             values["tokens_out"] = tokens_out
         if tool_calls_made is not None:
             values["tool_calls_made"] = tool_calls_made
+        if payload_schema_valid is not None:
+            values["payload_schema_valid"] = payload_schema_valid
 
         async with self._db.session() as session:
             await session.execute(
