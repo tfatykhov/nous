@@ -1777,11 +1777,20 @@ def create_subtask_tools(
         _session_id: str | None = None,
     ) -> dict[str, Any]:
         import json as _json
+        import uuid as _uuid
+
         from nous.api.models import SubtaskResult
+
+        # Generate a unique per-spawn_sync session id so the row lookup
+        # below can find the subtask by parent_session_id — race-free
+        # regardless of how many other subtasks land between create and
+        # lookup. (heart.subtasks.list is fine but bounded; this is
+        # unbounded-correct under any concurrency.)
+        sync_session_id = f"spawn_sync-{_uuid.uuid4().hex[:12]}"
 
         # spawn_sync always blocks inline. Reuse spawn_task's plumbing so
         # the censor / hardened-executor / inline-outcome paths all stay
-        # in one place. Note: spawn_task already enforces effective_payload_schema
+        # in one place. spawn_task already enforces effective_payload_schema
         # gating on settings.subtask_payload_schema_enabled.
         raw = await spawn_task(
             task=task,
@@ -1794,52 +1803,27 @@ def create_subtask_tools(
             output_format=None,
             success_criteria=success_criteria,
             payload_schema=payload_schema,
-            _session_id=_session_id,
+            _session_id=sync_session_id,
         )
 
         # spawn_task always returns {"content": [{"type":"text","text":...}]}.
-        # Read back the resulting Subtask row to surface the persisted
-        # final_outcome + payload — this is what guarantees the
-        # status-mirrors-final_outcome invariant.
         text = ""
         try:
             text = raw["content"][0]["text"]
         except (KeyError, IndexError, TypeError):
             text = ""
 
-        # Look up the most recent subtask spawned in this session if we
-        # have one. spawn_task embeds the UUID prefix in its text response
-        # for both success and failure paths. Parse it back out.
-        import re as _re
-        m = _re.search(r"Subtask ([0-9a-f]{8})", text)
-        if not m:
-            # Pre-flag legacy path or a censor-rejection. Best-effort: return
-            # a degraded SubtaskResult so callers still get a typed value.
-            result = SubtaskResult(
-                task_id="",
-                status="errored",
-                payload={},
-                raw_text=text,
-                confidence=None,
-                elapsed_seconds=0.0,
-                validator_reason="spawn_sync could not locate the subtask row",
-            )
-            return {
-                "content": [
-                    {"type": "text", "text": _json.dumps(result.to_dict(), indent=2)}
-                ]
-            }
-
-        # Resolve the full UUID via prefix lookup. heart.subtasks.list
-        # returns the most recent rows first; the 8-char prefix is unique
-        # within a small window.
-        prefix = m.group(1)
-        rows = await heart.subtasks.list(limit=20)
+        # Race-free lookup: heart.subtasks.list filters by agent_id; we
+        # narrow to our unique sync_session_id. A spawn_sync call always
+        # creates exactly one row tagged with that session id.
+        rows = await heart.subtasks.list(limit=50)
         match = next(
-            (s for s in rows if s.id.hex.startswith(prefix)),
+            (s for s in rows if getattr(s, "parent_session_id", None) == sync_session_id),
             None,
         )
         if match is None:
+            # Censor-rejection path or runner-unavailable path — no row
+            # was created at all. Return a degraded but typed result.
             result = SubtaskResult(
                 task_id="",
                 status="errored",
@@ -1847,7 +1831,7 @@ def create_subtask_tools(
                 raw_text=text,
                 confidence=None,
                 elapsed_seconds=0.0,
-                validator_reason="spawn_sync subtask row not found",
+                validator_reason="spawn_sync: no subtask row created (censor or runner unavailable)",
             )
             return {
                 "content": [
@@ -1869,10 +1853,19 @@ def create_subtask_tools(
         else:
             status = "errored"
 
-        # Extract payload only if the report carried one (the schema check
-        # may have written validation_failed without a usable payload).
-        payload = report.get("payload") if isinstance(report, dict) else None
-        if payload is None:
+        # Payload contract (reviewer P2-B clarification):
+        #   status == "completed"        → payload = validated dict/scalar
+        #   any other terminal outcome   → payload = {} (do NOT surface a
+        #                                  schema-invalid payload that a
+        #                                  caller might accidentally
+        #                                  consume thinking it validated).
+        # raw_text + validator_reason carry the diagnostic info if the
+        # caller actually wants to inspect the failed payload.
+        if status == "completed":
+            payload = report.get("payload") if isinstance(report, dict) else None
+            if payload is None:
+                payload = {}
+        else:
             payload = {}
 
         confidence = None
@@ -2129,8 +2122,22 @@ def register_subtask_tools(
     dispatcher.register("schedule_task", closures["schedule_task"], _SCHEDULE_TASK_SCHEMA)
     dispatcher.register("list_tasks", closures["list_tasks"], _LIST_TASKS_SCHEMA)
     dispatcher.register("cancel_task", closures["cancel_task"], _CANCEL_TASK_SCHEMA)
-    if settings.subtask_payload_schema_enabled:
+    # F062 requires F061's hardened executor — without subtask_hardening_enabled
+    # the legacy inline path runs, which never calls execute_hardened, never
+    # validates the payload, and would silently break F062's typed contract.
+    # Gate registration on BOTH flags so the operator can't accidentally flip
+    # only payload_schema_enabled and end up with broken validation guarantees.
+    if (
+        settings.subtask_payload_schema_enabled
+        and settings.subtask_hardening_enabled
+    ):
         dispatcher.register("spawn_sync", closures["spawn_sync"], _SPAWN_SYNC_SCHEMA)
+    elif settings.subtask_payload_schema_enabled:
+        logger.warning(
+            "F062: NOUS_SUBTASK_PAYLOAD_SCHEMA_ENABLED=true but "
+            "NOUS_SUBTASK_HARDENING_ENABLED=false; spawn_sync NOT registered. "
+            "F062 requires F061's hardened executor — enable both flags to use it."
+        )
 
 
 # ---------------------------------------------------------------------------

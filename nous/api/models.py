@@ -56,14 +56,24 @@ SubtaskOutcome = Literal[
 class SubtaskResult:
     """Typed return value from F062's spawn_sync tool.
 
-    status mirrors heart.subtasks.final_outcome — never derived from
-    schema-validation alone. Schema validation can only flip an in-flight
-    'completed' to 'validation_failed' (handled inside execute_hardened);
-    other terminal outcomes (errored / timed_out / cancelled /
-    incomplete_*) flow through unchanged.
+    Contract guarantees:
 
-    payload is typed Any (not dict) because submit_final_report.payload
-    accepts any JSON value (object/array/string/number/boolean/null).
+    - ``status`` mirrors ``heart.subtasks.final_outcome`` — never derived
+      from schema-validation alone. Schema validation can only flip an
+      in-flight 'completed' to 'validation_failed' (handled inside
+      execute_hardened); other terminal outcomes (``errored`` /
+      ``timed_out`` / ``cancelled`` / ``incomplete_*``) flow through
+      unchanged.
+    - ``payload`` is the schema-validated result **only when**
+      ``status == 'completed'``. For every other terminal outcome
+      ``payload`` is the empty dict ``{}`` — surfacing a possibly
+      schema-invalid payload here would let callers accidentally consume
+      it thinking it had validated. The original failed payload, if any,
+      is still in ``raw_text`` for diagnostic purposes, and
+      ``validator_reason`` carries the schema/structural error string.
+    - ``payload`` is typed ``Any`` (not dict) because the underlying
+      submit_final_report.payload accepts any JSON value
+      (object/array/string/number/boolean/null).
     """
 
     task_id: str
