@@ -1071,6 +1071,8 @@ class Brain:
         target_type: str = "decision",
         session: AsyncSession | None = None,
     ) -> GraphEdgeInfo:
+        from nous.brain.edge_provenance import classify  # F065 (avoid circular)
+
         edge = GraphEdge(
             source_id=source_id,
             target_id=target_id,
@@ -1080,6 +1082,7 @@ class Brain:
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
+            extraction_method=classify(relation),  # F065
         )
         session.add(edge)
         await session.flush()
@@ -1276,6 +1279,7 @@ class Brain:
                 src, tgt = tgt, src
 
             # P2-20: ON CONFLICT DO NOTHING for concurrent inserts
+            from nous.brain.edge_provenance import classify  # F065
             stmt = (
                 pg_insert(GraphEdge)
                 .values(
@@ -1287,6 +1291,7 @@ class Brain:
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,
+                    extraction_method=classify("related_to"),  # F065
                 )
                 .on_conflict_do_nothing(constraint="uq_edges_src_tgt_rel")
             )

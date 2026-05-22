@@ -164,6 +164,7 @@ class FactManager:
         Uses a nested savepoint so failures don't abort the outer transaction.
         """
         try:
+            from nous.brain.edge_provenance import classify  # F065
             async with session.begin_nested():
                 stmt = (
                     pg_insert(GraphEdge)
@@ -176,6 +177,7 @@ class FactManager:
                         relation=relation,
                         weight=weight,
                         auto_linked=True,
+                        extraction_method=classify(relation),  # F065
                     )
                     .on_conflict_do_nothing(
                         index_elements=["source_id", "target_id", "relation"],
