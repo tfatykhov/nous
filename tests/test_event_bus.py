@@ -1509,6 +1509,7 @@ class TestSleepHandler:
         handler._phase_recover_abandoned_episodes = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
         handler._phase_evolve_rubric = AsyncMock(return_value=True)
+        handler._phase_prune_hub_snapshots = AsyncMock(return_value=True)  # F065 Phase 2
 
         event = _make_event("sleep_started", agent_id="system")
         await handler._run_sleep(event)
@@ -1524,12 +1525,14 @@ class TestSleepHandler:
         handler._phase_recover_abandoned_episodes.assert_called_once()
         handler._phase_generalize.assert_called_once()
         handler._phase_evolve_rubric.assert_called_once()
+        handler._phase_prune_hub_snapshots.assert_called_once()
 
         # Check sleep_completed emitted
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
         assert emitted.type == "sleep_completed"
-        assert len(emitted.data["phases_completed"]) == 11
+        # F065 Phase 2 adds prune_hub_snapshots → 12 phases.
+        assert len(emitted.data["phases_completed"]) == 12
         assert emitted.data["interrupted"] is False
 
     @pytest.mark.asyncio
