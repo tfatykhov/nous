@@ -82,7 +82,35 @@ Existing edges are categorised by their `relation` value alone. **Critical corre
 
 **Why three tiers and not two?** The `'deterministic'` tier is small but non-empty today (only `supersedes`) and provides a natural extension point for future writers that DO carry structural provenance (e.g. a future "fact extracted from this specific episode token range" relation). Keeping the tier in the enum costs nothing and lets downstream code treat it as the highest-trust signal.
 
-**Write-time rule for new edges** (resolves Open Question 1): the new-edge classifier applies the same relation-based mapping as the backfill. The mapping lives in a new helper `nous/brain/edge_provenance.py::classify(relation: str) -> str` (single source of truth — no duplication between backfill and write-time). Each `GraphEdge(...)` construction site sets `extraction_method=classify(relation)` BEFORE handing the row to `session.add` / `pg_insert`. There are eight construction sites total (audited 2026-05-23):
+**Write-time rule for new edges** (resolves Open Question 1): the new-edge classifier applies the same relation-based mapping as the backfill, with an explicit override for writers that carry structural provenance the relation string alone can't express. The helper lives in `nous/brain/edge_provenance.py`:
+
+```python
+def classify(relation: str, *, source: str | None = None) -> str:
+    """Map (relation, optional source) → extraction_method tier.
+
+    source='structural' is the explicit override for writers like
+    link_episode_deterministic that know the edge is structurally
+    extracted (episode token → fact/decision link) even though the
+    relation string ('discussed_in', 'extracted_from') is shared with
+    the cosine-derived densifier path.
+
+    Without source override, the rule is relation-only:
+      relation='supersedes'   → 'deterministic'
+      relation='contradicts'  → 'inferred'
+      otherwise               → 'heuristic'
+    """
+    if source == "structural":
+        return "deterministic"
+    if relation == "supersedes":
+        return "deterministic"
+    if relation == "contradicts":
+        return "inferred"
+    return "heuristic"
+```
+
+`link_episode_deterministic` (graph_linker.py:292) is the canonical structural-extraction site — episode parsing yields explicit fact/decision references, not cosine matches. Both its insert sites pass `source="structural"`. The other 6 writer sites pass relation only.
+
+Each `GraphEdge(...)` construction sets `extraction_method=classify(relation, source=...)` BEFORE handing the row to `session.add` / `pg_insert`. There are eight construction sites total (audited 2026-05-23):
 
 | # | File:line | Writer context |
 |---|---|---|
@@ -307,16 +335,16 @@ ALTER TABLE brain.graph_edges
     ADD COLUMN IF NOT EXISTS extraction_method VARCHAR(20)
         CHECK (extraction_method IN ('deterministic', 'heuristic', 'inferred'));
 
--- Step 2: Backfill — deterministic = explicit (not auto_linked) structural relations.
--- The auto_linked = FALSE clause is load-bearing: graph_densifier and
--- FactGraphLinker / DecisionGraphLinker also write extracted_from /
--- discussed_in edges via cosine-threshold matching with auto_linked=TRUE.
--- Without this gate, the deterministic tier is silently polluted by
--- thousands of heuristic edges (review 2026-05-22 P0).
+-- Step 2: Backfill — deterministic = supersession relations only.
+-- The auto_linked column is NOT a useful discriminator because every
+-- production writer hard-codes auto_linked=True (verified 2026-05-23:
+-- Brain.link() has zero callers, all 8 GraphEdge construction sites
+-- write auto_linked=True). Supersession is the one relation whose
+-- writer carries structural provenance — facts.py and brain.py write
+-- it from explicit supersession decisions, never from cosine matching.
 UPDATE brain.graph_edges
 SET extraction_method = 'deterministic'
-WHERE relation IN ('extracted_from', 'discussed_in', 'supersedes')
-  AND auto_linked = FALSE
+WHERE relation = 'supersedes'
   AND extraction_method IS NULL;
 
 -- Step 3: Backfill — LLM-inferred contradictions (F027 Supersession Detection contradiction path)

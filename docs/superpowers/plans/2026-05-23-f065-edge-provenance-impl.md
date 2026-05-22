@@ -27,7 +27,7 @@ If any of these invariants fails when the implementer runs, STOP and re-verify b
 **Files:**
 - `sql/migrations/047_f065_edge_provenance.sql` (new) — exactly as in spec § Migration.
 - `nous/storage/models.py` — `GraphEdge.extraction_method: Mapped[str]` (`String(20)`, `nullable=False`, `server_default="'heuristic'"`); new `GraphHubSnapshot` ORM model under `brain` schema with the table definition from the spec.
-- `nous/brain/edge_provenance.py` (new) — single function `classify(relation: str) -> str` returning `'deterministic'` for `supersedes`, `'inferred'` for `contradicts`, `'heuristic'` otherwise. Plus a `VALID_METHODS: Final[frozenset[str]] = frozenset({"deterministic", "heuristic", "inferred"})` for the CHECK constraint mirror.
+- `nous/brain/edge_provenance.py` (new) — `classify(relation: str, *, source: str | None = None) -> str`. Returns `'deterministic'` for `source='structural'` OR `relation='supersedes'`; `'inferred'` for `relation='contradicts'`; `'heuristic'` otherwise. Plus a `VALID_METHODS: Final[frozenset[str]] = frozenset({"deterministic", "heuristic", "inferred"})` for the CHECK constraint mirror.
 - `tests/test_f065_storage.py` — three tests: classify() exhaustive (every existing relation maps somewhere); GraphEdge row default = 'heuristic' when no extraction_method passed; GraphHubSnapshot ORM round-trip.
 
 **Acceptance:** all three new tests pass; `uv run pytest tests/test_f065_*.py` green.
@@ -39,9 +39,17 @@ If any of these invariants fails when the implementer runs, STOP and re-verify b
 - `nous/brain/brain.py:1280` — direct `GraphEdge(...)` in `_auto_link` adds the same.
 - `nous/heart/facts.py:166-186` — fact↔fact edge insert; classify there.
 - `nous/brain/graph_linker.py:99` — `GraphLinker.create_edge` constructor.
-- `nous/brain/graph_linker.py:188, 266, 304, 326` — four direct `pg_insert(GraphEdge)` calls, each gets `extraction_method=classify(relation)`.
+- `nous/brain/graph_linker.py:188, 304, 326` — three direct `pg_insert(GraphEdge)` calls inside `link_episode_deterministic`. Each gets `extraction_method=classify(relation, source="structural")` because episode parsing yields explicit references, not cosine matches.
+- `nous/brain/graph_linker.py:266` — `link_fact_to_decisions` direct `pg_insert`. Cosine-derived; gets `extraction_method=classify(relation)` (no source override).
 - `tests/test_f065_writer_coverage.py` (new) — CI grep-guard. Scan `nous/brain/` and `nous/heart/` for `GraphEdge(` and `pg_insert(GraphEdge)`. Assert count == `EXPECTED_WRITER_COUNT = 8`. Comment in the test explains how to register a new site.
-- `tests/test_f065_writer_classification.py` (new) — for each of the 8 sites, write an edge through that code path and verify `extraction_method` matches `classify(relation)` for the relation actually written. For sites that write `supersedes`, expect `'deterministic'`; for `contradicts`, `'inferred'`; for everything else, `'heuristic'`. Use real Postgres backend via the existing test fixtures.
+- `tests/test_f065_writer_classification.py` (new) — for each of the 8 sites, write an edge through that code path and verify `extraction_method` matches `classify(relation, source=...)` for the (relation, source) actually written. Specifically:
+  - `Brain._link` (site #1) — exercise ALL THREE buckets: write `supersedes` → expect `'deterministic'`; write `contradicts` → expect `'inferred'`; write `related_to` → expect `'heuristic'`. (P1-3 fix: most general writer covers every classification branch.)
+  - `Brain._auto_link` (site #2) — writes `related_to` → expect `'heuristic'`.
+  - `facts.py` fact↔fact edges (site #3) — write `supersedes` → expect `'deterministic'`; write `related_to` → expect `'heuristic'`.
+  - `GraphLinker.create_edge` (site #4) — cosine-derived; expect `'heuristic'`.
+  - `link_episode_deterministic` (sites #5, #7, #8) — explicit `source="structural"` override; expect `'deterministic'`.
+  - `link_fact_to_decisions` (site #6) — cosine-derived; expect `'heuristic'`.
+  Use real Postgres backend via the existing test fixtures.
 
 **Acceptance:** writer-coverage test passes; per-site classification tests pass; existing graph tests (`tests/test_graph_*.py`, `tests/test_brain_*.py`) still pass.
 
@@ -50,13 +58,27 @@ If any of these invariants fails when the implementer runs, STOP and re-verify b
 **Files:**
 - `nous/brain/schemas.py::NeighborResult` — add `extraction_method: str = "heuristic"` (str, not Optional; default is the fail-open tier; comment cites the F065 P0-3 NULL-handling rationale).
 - `nous/brain/brain.py::_neighbors` — `source_q` and `target_q` SELECT `GraphEdge.extraction_method.label("extraction_method")`. `edge_map[r.neighbor_id]` tuple extended to carry `extraction_method`. All `NeighborResult(...)` constructors set it.
-- `nous/api/retrieval_pipeline.py::_graph_expanded_to_pipeline` and `:_heart_graph_to_pipeline` — apply penalty:
+- `nous/api/retrieval_pipeline.py::_graph_expanded_to_pipeline` and `:_heart_graph_to_pipeline` — apply penalty via a module-scoped helper:
   ```python
-  method = neighbor.extraction_method or "heuristic"
-  penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0
-  score = base_score * decay * penalty
+  def _apply_provenance_penalty(
+      neighbor: NeighborResult,
+      base_score: float,
+      decay: float,
+      settings: Settings,
+  ) -> float:
+      """F065 inferred-tier penalty.  Helper computes `source` internally
+      from neighbor.edge_relation — no need for callers to pass it."""
+      if neighbor.edge_relation == "spreading_activation":
+          # Defense in depth: SA results are already filtered against
+          # relation='contradicts' at spreading_activation.py:103, so
+          # the inferred penalty cannot apply. Skip even if a future
+          # inferred-tier relation bypasses the SA filter.
+          return base_score * decay
+      method = neighbor.extraction_method or "heuristic"  # NULL → heuristic (fail-open, WARN logged)
+      penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0
+      return base_score * decay * penalty
   ```
-  Both call sites use the same helper `_apply_provenance_penalty(neighbor, base_score, decay, settings, source)` defined once at module scope. The helper short-circuits when `source == "spreading_activation"` (defense-in-depth per spec).
+  Both pipeline functions call this helper. Source detection is internal — no `source` parameter at the call site (resolves P1-1 ambiguity).
 - `nous/config.py` — `graph_inferred_edge_penalty: float = 1.0` with env var `NOUS_GRAPH_INFERRED_EDGE_PENALTY`. Dark-launch default.
 - `tests/test_f065_pipeline_penalty.py` (new) — test plan items 3, 4, 4b verbatim. Use mocked `NeighborResult` objects with explicit `extraction_method`. No live DB needed.
 
@@ -100,6 +122,8 @@ If any of these invariants fails when the implementer runs, STOP and re-verify b
 | A new GraphEdge writer is added in a different PR and bypasses classify() | `test_f065_writer_coverage.py` greps the codebase and fails CI if the count drifts. |
 | `NeighborResult.extraction_method` arrives as None despite the str-typed field | Default `"heuristic"` at the schema level prevents None values from existing. Pipeline penalty wrapper still does `neighbor.extraction_method or "heuristic"` as defense in depth and logs WARN once per agent. |
 | pre_turn hub-shift detection blocks session start | `asyncio.create_task` makes the whole computation fire-and-forget; pre_turn never awaits the task. |
+| Empty graph (brand-new agent, zero edges) breaks pre_turn task | `top_hubs()` returns `[]`; the spawned task short-circuits early when the result is empty, never calls `get_latest([])`. Covered by `test_f065_hub_shift.py::test_empty_graph_no_op`. |
+| Race between two concurrent pre_turn calls inserting baseline for the same new hub | Both insert; the DISTINCT ON read picks the later row. No correctness bug, just minor disk waste. Documented; no constraint added (capture_at uniqueness is microsecond-granular). |
 | F040 nightly densification triggers hub-shift notices for every hub | Rank-based shift (top-10 entry/exit) replaces raw degree %. Densification typically uplifts all hubs proportionally, so ranks rarely change — false-positive storm avoided. |
 | `recall_hubs` tool exposed before useful, makes noise in tool catalog | Tool is opt-in (agent must call it explicitly). No autosurface in Phase 1. |
 
