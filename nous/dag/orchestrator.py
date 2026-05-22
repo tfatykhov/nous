@@ -1042,10 +1042,25 @@ class DAGOrchestrator:
             )
 
             # Always bump fix_attempts_used so we cap retries even if the
-            # action ends up being a noop.
+            # action ends up being a noop. Also transition the fix node
+            # itself to a terminal status — without this, the DAG never
+            # completes because _check_dag_completion sees the fix node
+            # stuck in 'pending' forever (Codex P1 on b333f78). The fix
+            # node is conceptually a one-shot per firing; if the parent
+            # fails again and budget remains, the next tick re-fires it
+            # via the same code path (the lookup in fix_by_parent is by
+            # parent_node string, not by fix node status).
             fix_node.fix_attempts_used += 1
+            fix_node.status = "completed"
+            fix_node.result = (
+                f"Fix-stage chose '{outcome.action}' for parent '{parent.name}': "
+                f"{outcome.rationale or ''}".strip()
+            )
             await self._store.update_node(
-                fix_node.id, fix_attempts_used=fix_node.fix_attempts_used,
+                fix_node.id,
+                fix_attempts_used=fix_node.fix_attempts_used,
+                status="completed",
+                result=fix_node.result,
             )
 
             if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
@@ -1274,7 +1289,31 @@ class DAGOrchestrator:
                 logger.debug("Could not disable check %s", node.check_name)
 
     async def _check_dag_completion(self, dag: ExecutionDAG) -> None:
-        """Check if all nodes are terminal and set final DAG status."""
+        """Check if all nodes are terminal and set final DAG status.
+
+        F066.1: a fix node that never fires (because its parent reached
+        a non-failed terminal state) would otherwise sit in 'pending'
+        forever, keeping the DAG running. Auto-complete idle fix nodes
+        when their parent terminates without ever failing.
+        """
+        # Sweep pending fix nodes whose parent reached a non-failed terminal.
+        node_by_name = {n.name: n for n in dag.nodes}
+        for n in dag.nodes:
+            if n.node_type != "fix" or n.status != "pending":
+                continue
+            parent = node_by_name.get(n.parent_node or "")
+            if parent is None:
+                continue
+            if parent.status in ("completed", "skipped", "cancelled"):
+                n.status = "completed"
+                n.result = (
+                    f"Fix-stage not fired — parent '{parent.name}' "
+                    f"reached terminal '{parent.status}' without failure."
+                )
+                await self._store.update_node(
+                    n.id, status="completed", result=n.result,
+                )
+
         statuses = {n.status for n in dag.nodes}
 
         # If any nodes are still non-terminal, DAG is not done
