@@ -57,6 +57,7 @@ async def test_all_tables_exist(db):
         ("brain", "decision_bridge"),
         ("brain", "thoughts"),
         ("brain", "graph_edges"),
+        ("brain", "graph_hub_snapshots"),  # F065
         ("brain", "guardrails"),
         ("brain", "calibration_snapshots"),
         # heart (12)

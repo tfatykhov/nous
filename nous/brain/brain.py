@@ -1249,6 +1249,9 @@ class Brain:
         from sqlalchemy import bindparam
 
         # Step 1: aggregate degree across both edge directions.
+        # CAST :node_type to TEXT so asyncpg can determine the parameter type
+        # when the value is None — without the cast, asyncpg raises
+        # AmbiguousParameterError.
         sql = text("""
             SELECT node_id, node_type, COUNT(*) AS degree
             FROM (
@@ -1258,7 +1261,7 @@ class Brain:
                 SELECT target_id AS node_id, target_type AS node_type
                 FROM brain.graph_edges WHERE agent_id = :agent_id
             ) combined
-            WHERE (:node_type IS NULL OR node_type = :node_type)
+            WHERE (CAST(:node_type AS TEXT) IS NULL OR node_type = CAST(:node_type AS TEXT))
             GROUP BY node_id, node_type
             ORDER BY degree DESC
             LIMIT :limit
