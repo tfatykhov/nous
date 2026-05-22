@@ -876,25 +876,43 @@ class DAGOrchestrator:
         """Demote orphaned 'ready' nodes to 'pending' after the grace period.
 
         Wave-0 nodes are created with status='ready' and are supposed to be
-        transitioned by start_dag(). If that path was bypassed (e.g. direct DB
-        writes) the nodes sit invisible to _find_ready_nodes() forever.  After
-        _STALE_READY_GRACE_SECONDS we demote them to 'pending' so the normal
-        tick loop can dispatch them.
+        transitioned by start_dag(). If that path was bypassed (e.g. direct
+        DB writes via psql, as in issue #430) the nodes sit invisible to
+        _find_ready_nodes() forever. After _STALE_READY_GRACE_SECONDS the
+        sweep demotes them to 'pending' so the normal tick loop dispatches
+        them.
 
-        The reference time is dag.started_at — it is set to now() when the DAG
-        transitions to 'running', which is the exact moment wave-0 nodes should
-        have been dispatched.  If the DAG has been running for longer than the
-        grace period and a node is still 'ready' with no started_at, it was
-        never dispatched and needs recovery.
+        Covers TWO bypass scenarios:
 
-        Only fires when the parent DAG is already 'running' — 'pending' DAGs
-        are legitimately waiting for start_dag().
+        1. ``status='pending'`` with ``started_at=NULL`` — psql INSERT path
+           from issue #430. start_dag() never ran. Reference time is
+           dag.created_at (always set by the INSERT). When this recovery
+           fires we ALSO transition the DAG to 'running' via
+           ``update_dag_status`` so downstream tick-loop steps
+           (_check_dag_completion, _propagate_failures, budget enforcement)
+           see a consistent 'running with dispatched wave-0' state — the
+           same invariant start_dag() would have produced.
+
+        2. ``status='running'`` but wave-0 still in 'ready' — start_dag()
+           ran (started_at set) but the dispatch never landed (a bug we
+           don't have a concrete repro for, but Codex flagged the parity
+           gap). Reference time is dag.started_at.
+
+        Grace window is 300s by default. The legitimate dag_create →
+        start_dag window is sub-second (called inline in the same tool
+        — orchestrator.start_dag is invoked at the end of dag_create's
+        body), so 5 minutes dwarfs it without risk of false-positive
+        recovery.
         """
-        if dag.status != "running":
+        if dag.status not in ("pending", "running"):
             return
 
-        ref = dag.started_at
+        # Reference time: prefer started_at (running case), fall back to
+        # created_at (pending bypass case). created_at is NOT NULL — even
+        # a raw INSERT populates it via server_default=now().
+        ref = dag.started_at or dag.created_at
         if ref is None:
+            # Defensive: should never happen given created_at NOT NULL.
             return
         if ref.tzinfo is None:
             ref = ref.replace(tzinfo=UTC)
@@ -904,21 +922,38 @@ class DAGOrchestrator:
         if dag_age_seconds < _STALE_READY_GRACE_SECONDS:
             return
 
-        for node in dag.nodes:
-            if node.status != "ready":
-                continue
-            if node.started_at is not None:
-                # Node already launched — 'ready' here is the momentary in-
-                # flight status set by _dispatch_ready_nodes just before
-                # _launch_node; don't touch it.
-                continue
+        # Identify orphan ready nodes first; only mutate state if at least
+        # one is recoverable. Avoids promoting a 'pending' DAG to 'running'
+        # when there's nothing to dispatch.
+        recoverable = [
+            n for n in dag.nodes
+            if n.status == "ready" and n.started_at is None
+        ]
+        if not recoverable:
+            return
 
+        # For bypass scenario 1: promote the DAG itself to 'running' so
+        # downstream _advance_dag steps operate on the canonical invariant
+        # (running DAG with dispatched wave-0). This also populates
+        # started_at via update_dag_status, fixing the underlying bypass.
+        if dag.status == "pending":
+            await self._store.update_dag_status(dag.id, "running")
+            dag.status = "running"
+            if dag.started_at is None:
+                dag.started_at = now
+            logger.warning(
+                "Recovered orphaned pending DAG %s (age %.0fs, %d ready "
+                "nodes) — promoted to 'running' so tick loop can dispatch",
+                dag.id, dag_age_seconds, len(recoverable),
+            )
+
+        for node in recoverable:
             await self._store.update_node(node.id, status="pending")
             node.status = "pending"
             logger.warning(
                 "Recovered stale ready node '%s' in DAG %s "
-                "(DAG has been running for %.0fs with no dispatch) — "
-                "demoted to pending so tick loop can dispatch it",
+                "(DAG age %.0fs with no dispatch) — demoted to pending "
+                "so tick loop can dispatch it",
                 node.name, dag.id, dag_age_seconds,
             )
 
