@@ -11,8 +11,11 @@
 BEGIN;
 
 -- Step 1: extend node_type CHECK constraint to include 'fix'.
--- The DROP + ADD pattern takes a brief AccessExclusiveLock. Acceptable
--- here because the dag_nodes table is bounded (small in prod).
+-- Drop BOTH possible names (Postgres-auto from inline CHECK in F038
+-- migration 032 + the ORM-defined name) to be safe; only one will exist
+-- at any given time depending on the deployment history.
+ALTER TABLE nous_system.dag_nodes
+    DROP CONSTRAINT IF EXISTS dag_nodes_node_type_check;
 ALTER TABLE nous_system.dag_nodes
     DROP CONSTRAINT IF EXISTS chk_dag_node_type;
 ALTER TABLE nous_system.dag_nodes
@@ -20,6 +23,10 @@ ALTER TABLE nous_system.dag_nodes
     CHECK (node_type IN ('subtask', 'check', 'gate', 'callback', 'fix'));
 
 -- Step 2: extend status CHECK constraint to include 'skipped'.
+-- Drop both possible names (mirrors the F033 pattern at
+-- 033_dag_completion_check.sql).
+ALTER TABLE nous_system.dag_nodes
+    DROP CONSTRAINT IF EXISTS dag_nodes_status_check;
 ALTER TABLE nous_system.dag_nodes
     DROP CONSTRAINT IF EXISTS chk_dag_node_status;
 ALTER TABLE nous_system.dag_nodes
@@ -28,6 +35,15 @@ ALTER TABLE nous_system.dag_nodes
         'pending', 'ready', 'running', 'awaiting_check',
         'completed', 'failed', 'blocked', 'cancelled', 'skipped'
     ));
+
+-- Step 2b: extend dag_edges edge_type CHECK constraint to include 'on_failure'.
+ALTER TABLE nous_system.dag_edges
+    DROP CONSTRAINT IF EXISTS dag_edges_edge_type_check;
+ALTER TABLE nous_system.dag_edges
+    DROP CONSTRAINT IF EXISTS chk_dag_edge_type;
+ALTER TABLE nous_system.dag_edges
+    ADD CONSTRAINT chk_dag_edge_type
+    CHECK (edge_type IN ('dependency', 'cancel_cascade', 'context_flow', 'on_failure'));
 
 -- Step 3: new fix-stage columns.
 ALTER TABLE nous_system.dag_nodes
