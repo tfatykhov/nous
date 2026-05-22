@@ -1134,12 +1134,15 @@ class Brain:
         limit: int,
         session: AsyncSession,
     ) -> list[NeighborResult]:
-        # Find edges where this node is source or target, matching node type
+        # Find edges where this node is source or target, matching node type.
+        # F065: SELECT extraction_method so neighbors carry provenance tier
+        # for downstream penalty multiplier wiring in retrieval_pipeline.
         source_q = select(
             GraphEdge.target_id.label("neighbor_id"),
             GraphEdge.target_type.label("neighbor_type"),
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
+            GraphEdge.extraction_method.label("extraction_method"),
         ).where(
             GraphEdge.source_id == node_id,
             GraphEdge.source_type == node_type,
@@ -1151,6 +1154,7 @@ class Brain:
             GraphEdge.source_type.label("neighbor_type"),
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
+            GraphEdge.extraction_method.label("extraction_method"),
         ).where(
             GraphEdge.target_id == node_id,
             GraphEdge.target_type == node_type,
@@ -1168,10 +1172,11 @@ class Brain:
         if not rows:
             return []
 
-        # Build edge metadata map
-        edge_map: dict[UUID, tuple[str, str, float]] = {}
+        # Build edge metadata map. F065: now carries extraction_method.
+        edge_map: dict[UUID, tuple[str, str, float, str]] = {}
         for r in rows:
-            edge_map[r.neighbor_id] = (r.neighbor_type, r.edge_relation, r.edge_weight or 1.0)
+            method = r.extraction_method or "heuristic"  # F065: NULL → fail-open heuristic
+            edge_map[r.neighbor_id] = (r.neighbor_type, r.edge_relation, r.edge_weight or 1.0, method)
 
         # Resolve decision neighbors
         decision_ids = [r.neighbor_id for r in rows if r.neighbor_type == "decision"]
@@ -1187,7 +1192,7 @@ class Brain:
         # Build results
         results = []
         for r in rows:
-            ntype, rel, weight = edge_map[r.neighbor_id]
+            ntype, rel, weight, method = edge_map[r.neighbor_id]
             if ntype == "decision" and r.neighbor_id in descriptions:
                 desc, created = descriptions[r.neighbor_id]
             else:
@@ -1200,6 +1205,7 @@ class Brain:
                 edge_relation=rel,
                 edge_weight=weight,
                 created_at=created,
+                extraction_method=method,  # F065
             ))
 
         return results

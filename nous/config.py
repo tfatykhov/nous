@@ -489,6 +489,17 @@ class Settings(BaseSettings):
     graph_recall_decay: float = 0.7
     graph_recall_max_neighbors: int = 3
 
+    # F065: Edge-provenance penalty multiplier for `inferred`-tier edges
+    # in recall_deep graph expansion. Defaults to 1.0 (dark launch — no
+    # behavioral change). Flip to 0.7 after the F051 harness quantifies
+    # the MRR impact.
+    graph_inferred_edge_penalty: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="F065: down-weight multiplier for 'inferred' provenance edges in recall_deep (1.0 = disabled).",
+    )
+
     # F022 Phase 2: Cross-type linking
     cross_type_linking_enabled: bool = True
     cross_type_threshold: float = 0.80
