@@ -489,6 +489,38 @@ class Settings(BaseSettings):
     graph_recall_decay: float = 0.7
     graph_recall_max_neighbors: int = 3
 
+    # F065: Edge-provenance penalty multiplier for `inferred`-tier edges
+    # in recall_deep graph expansion. Defaults to 1.0 (dark launch — no
+    # behavioral change). Flip to 0.7 after the F051 harness quantifies
+    # the MRR impact.
+    graph_inferred_edge_penalty: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="F065: down-weight multiplier for 'inferred' provenance edges in recall_deep (1.0 = disabled).",
+    )
+
+    # F065: Hub autosurface — when True, pre_turn detects rank shifts
+    # in the top-10 hub list and injects a hub-shift notice into the
+    # working-memory context. Disabled by default for one release of
+    # bake-time on the snapshot table.
+    graph_hub_autosurface_enabled: bool = False
+
+    # F065: Hub-snapshot retention (sleep handler prunes older rows).
+    graph_hub_snapshot_retention_days: int = Field(
+        default=90,
+        ge=1,
+        description="F065: days to retain brain.graph_hub_snapshots rows. Sleep handler prunes older rows.",
+    )
+
+    # F065: top-N hubs the autosurface tracks.
+    graph_hub_autosurface_top_n: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="F065: size of the top-N hub list used for rank-shift detection.",
+    )
+
     # F022 Phase 2: Cross-type linking
     cross_type_linking_enabled: bool = True
     cross_type_threshold: float = 0.80

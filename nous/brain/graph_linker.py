@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.brain.edge_provenance import classify  # F065
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.schemas import GraphEdgeInfo
 from nous.config import Settings
@@ -106,6 +107,7 @@ class GraphLinker:
                 relation=relation,
                 weight=adjusted_weight,
                 auto_linked=True,
+                extraction_method=classify(relation),  # F065 (cosine-derived)
             )
             .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
         )
@@ -195,6 +197,7 @@ class GraphLinker:
                         relation="evidence_for",
                         weight=float(similarity),
                         auto_linked=True,
+                        extraction_method=classify("evidence_for"),  # F065 (cosine-derived)
                     )
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
@@ -273,6 +276,7 @@ class GraphLinker:
                         relation="related_to",
                         weight=float(row.similarity),
                         auto_linked=True,
+                        extraction_method=classify("related_to"),  # F065 (cosine-derived)
                     )
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
@@ -311,6 +315,9 @@ class GraphLinker:
                     relation="discussed_in",
                     weight=1.0,
                     auto_linked=True,
+                    # F065: explicit episode-token reference, NOT cosine-derived.
+                    # source="structural" override yields 'deterministic'.
+                    extraction_method=classify("discussed_in", source="structural"),
                 )
                 .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
             )
@@ -333,6 +340,9 @@ class GraphLinker:
                     relation="extracted_from",
                     weight=1.0,
                     auto_linked=True,
+                    # F065: explicit episode-token reference, NOT cosine-derived.
+                    # source="structural" override yields 'deterministic'.
+                    extraction_method=classify("extracted_from", source="structural"),
                 )
                 .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
             )

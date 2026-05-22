@@ -1071,6 +1071,8 @@ class Brain:
         target_type: str = "decision",
         session: AsyncSession | None = None,
     ) -> GraphEdgeInfo:
+        from nous.brain.edge_provenance import classify  # F065 (avoid circular)
+
         edge = GraphEdge(
             source_id=source_id,
             target_id=target_id,
@@ -1080,6 +1082,7 @@ class Brain:
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
+            extraction_method=classify(relation),  # F065
         )
         session.add(edge)
         await session.flush()
@@ -1131,12 +1134,15 @@ class Brain:
         limit: int,
         session: AsyncSession,
     ) -> list[NeighborResult]:
-        # Find edges where this node is source or target, matching node type
+        # Find edges where this node is source or target, matching node type.
+        # F065: SELECT extraction_method so neighbors carry provenance tier
+        # for downstream penalty multiplier wiring in retrieval_pipeline.
         source_q = select(
             GraphEdge.target_id.label("neighbor_id"),
             GraphEdge.target_type.label("neighbor_type"),
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
+            GraphEdge.extraction_method.label("extraction_method"),
         ).where(
             GraphEdge.source_id == node_id,
             GraphEdge.source_type == node_type,
@@ -1148,6 +1154,7 @@ class Brain:
             GraphEdge.source_type.label("neighbor_type"),
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
+            GraphEdge.extraction_method.label("extraction_method"),
         ).where(
             GraphEdge.target_id == node_id,
             GraphEdge.target_type == node_type,
@@ -1165,10 +1172,11 @@ class Brain:
         if not rows:
             return []
 
-        # Build edge metadata map
-        edge_map: dict[UUID, tuple[str, str, float]] = {}
+        # Build edge metadata map. F065: now carries extraction_method.
+        edge_map: dict[UUID, tuple[str, str, float, str]] = {}
         for r in rows:
-            edge_map[r.neighbor_id] = (r.neighbor_type, r.edge_relation, r.edge_weight or 1.0)
+            method = r.extraction_method or "heuristic"  # F065: NULL → fail-open heuristic
+            edge_map[r.neighbor_id] = (r.neighbor_type, r.edge_relation, r.edge_weight or 1.0, method)
 
         # Resolve decision neighbors
         decision_ids = [r.neighbor_id for r in rows if r.neighbor_type == "decision"]
@@ -1184,7 +1192,7 @@ class Brain:
         # Build results
         results = []
         for r in rows:
-            ntype, rel, weight = edge_map[r.neighbor_id]
+            ntype, rel, weight, method = edge_map[r.neighbor_id]
             if ntype == "decision" and r.neighbor_id in descriptions:
                 desc, created = descriptions[r.neighbor_id]
             else:
@@ -1197,8 +1205,163 @@ class Brain:
                 edge_relation=rel,
                 edge_weight=weight,
                 created_at=created,
+                extraction_method=method,  # F065
             ))
 
+        return results
+
+    # ------------------------------------------------------------------
+    # top_hubs() — F065 god-node surfacing
+    # ------------------------------------------------------------------
+
+    async def top_hubs(
+        self,
+        limit: int = 10,
+        node_type: str | None = None,
+        session: AsyncSession | None = None,
+    ) -> list[dict]:
+        """Return the highest-degree nodes in brain.graph_edges for this agent.
+
+        Uses undirected degree (source + target appearances combined).
+        Inspired by Graphify's god_nodes() — Postgres aggregation instead
+        of NetworkX, keeping the zero-dependency posture from F022.
+
+        Each row resolves to:
+          {
+              "node_id": str(UUID),
+              "node_type": "decision" | "fact" | "episode" | "procedure",
+              "label": str,
+              "degree": int,
+              "extraction_method_breakdown": {"deterministic": N, "heuristic": N, "inferred": N},
+          }
+        """
+        if session is None:
+            async with self.db.session() as s:
+                return await self._top_hubs(limit, node_type, s)
+        return await self._top_hubs(limit, node_type, session)
+
+    async def _top_hubs(
+        self,
+        limit: int,
+        node_type: str | None,
+        session: AsyncSession,
+    ) -> list[dict]:
+        from sqlalchemy import bindparam
+
+        # Step 1: aggregate degree across both edge directions.
+        # CAST :node_type to TEXT so asyncpg can determine the parameter type
+        # when the value is None — without the cast, asyncpg raises
+        # AmbiguousParameterError.
+        sql = text("""
+            SELECT node_id, node_type, COUNT(*) AS degree
+            FROM (
+                SELECT source_id AS node_id, source_type AS node_type
+                FROM brain.graph_edges WHERE agent_id = :agent_id
+                UNION ALL
+                SELECT target_id AS node_id, target_type AS node_type
+                FROM brain.graph_edges WHERE agent_id = :agent_id
+            ) combined
+            WHERE (CAST(:node_type AS TEXT) IS NULL OR node_type = CAST(:node_type AS TEXT))
+            GROUP BY node_id, node_type
+            ORDER BY degree DESC
+            LIMIT :limit
+        """)
+        result = await session.execute(
+            sql,
+            {"agent_id": self.agent_id, "node_type": node_type, "limit": limit},
+        )
+        hubs = result.all()
+        if not hubs:
+            return []
+
+        hub_ids = [h.node_id for h in hubs]
+
+        # Step 2: single-pass extraction_method_breakdown across both directions.
+        # Uses expanding bindparam (renders as IN (?,?,...)) so the query is
+        # portable across Postgres and the SQLite test backend.
+        breakdown_sql = text("""
+            SELECT node_id, extraction_method, COUNT(*) AS cnt
+            FROM (
+                SELECT source_id AS node_id, extraction_method
+                FROM brain.graph_edges WHERE agent_id = :agent_id
+                UNION ALL
+                SELECT target_id AS node_id, extraction_method
+                FROM brain.graph_edges WHERE agent_id = :agent_id
+            ) combined
+            WHERE node_id IN :hub_ids
+            GROUP BY node_id, extraction_method
+        """).bindparams(bindparam("hub_ids", expanding=True))
+        breakdown_result = await session.execute(
+            breakdown_sql,
+            {"agent_id": self.agent_id, "hub_ids": hub_ids},
+        )
+        # Pivot into a dict[UUID -> dict[method -> count]].
+        breakdown: dict[UUID, dict[str, int]] = {}
+        for row in breakdown_result.all():
+            breakdown.setdefault(row.node_id, {})[row.extraction_method] = int(row.cnt)
+
+        # Step 3: resolve labels per node_type. Mirrors _neighbors's pattern.
+        # Raw SQL returns node_ids as strings on SQLite / as UUID on asyncpg —
+        # normalize to UUID objects for the ORM .in_() filters.
+        def _as_uuid(v) -> UUID:
+            return v if isinstance(v, UUID) else UUID(str(v))
+
+        labels: dict[UUID, str] = {}
+        decision_ids = [_as_uuid(h.node_id) for h in hubs if h.node_type == "decision"]
+        if decision_ids:
+            dec_result = await session.execute(
+                select(Decision.id, Decision.description)
+                .where(Decision.id.in_(decision_ids))
+            )
+            for d in dec_result.all():
+                labels[d.id] = d.description
+
+        fact_ids = [_as_uuid(h.node_id) for h in hubs if h.node_type == "fact"]
+        if fact_ids:
+            from nous.storage.models import Fact
+            fact_result = await session.execute(
+                select(Fact.id, Fact.subject).where(Fact.id.in_(fact_ids))
+            )
+            for f in fact_result.all():
+                labels[f.id] = f.subject or f"[fact] {f.id}"
+
+        episode_ids = [_as_uuid(h.node_id) for h in hubs if h.node_type == "episode"]
+        if episode_ids:
+            from nous.storage.models import Episode
+            ep_result = await session.execute(
+                select(Episode.id, Episode.summary).where(Episode.id.in_(episode_ids))
+            )
+            for e in ep_result.all():
+                labels[e.id] = e.summary or f"[episode] {e.id}"
+
+        proc_ids = [_as_uuid(h.node_id) for h in hubs if h.node_type == "procedure"]
+        if proc_ids:
+            from nous.storage.models import Procedure
+            proc_result = await session.execute(
+                select(Procedure.id, Procedure.name).where(Procedure.id.in_(proc_ids))
+            )
+            for p in proc_result.all():
+                labels[p.id] = p.name or f"[procedure] {p.id}"
+
+        # Step 4: assemble. Fall back to [<type>] <uuid> for orphan / soft-deleted nodes.
+        results = []
+        for h in hubs:
+            hub_id = _as_uuid(h.node_id)
+            label = labels.get(hub_id) or f"[{h.node_type}] {hub_id}"
+            row_breakdown = breakdown.get(h.node_id, {})
+            # Always present all three tier keys (zero-fill missing).
+            full_breakdown = {
+                "deterministic": int(row_breakdown.get("deterministic", 0)),
+                "heuristic": int(row_breakdown.get("heuristic", 0)),
+                "inferred": int(row_breakdown.get("inferred", 0)),
+            }
+            results.append({
+                "node_id": str(hub_id),
+                "node_type": h.node_type,
+                "label": label,
+                "degree": int(h.degree),
+                "extraction_method_breakdown": full_breakdown,
+            })
         return results
 
     # ------------------------------------------------------------------
@@ -1276,6 +1439,7 @@ class Brain:
                 src, tgt = tgt, src
 
             # P2-20: ON CONFLICT DO NOTHING for concurrent inserts
+            from nous.brain.edge_provenance import classify  # F065
             stmt = (
                 pg_insert(GraphEdge)
                 .values(
@@ -1287,6 +1451,7 @@ class Brain:
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,
+                    extraction_method=classify("related_to"),  # F065
                 )
                 .on_conflict_do_nothing(constraint="uq_edges_src_tgt_rel")
             )

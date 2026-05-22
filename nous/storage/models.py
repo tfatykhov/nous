@@ -250,6 +250,11 @@ class GraphEdge(Base):
             "target_type IN ('decision', 'fact', 'episode', 'procedure')",
             name="ck_edges_target_type",
         ),
+        # F065: provenance tier — see edge_provenance.classify().
+        CheckConstraint(
+            "extraction_method IN ('deterministic', 'heuristic', 'inferred')",
+            name="ck_edges_extraction_method",
+        ),
         {"schema": "brain"},
     )
 
@@ -262,7 +267,45 @@ class GraphEdge(Base):
     relation: Mapped[str] = mapped_column(String(50), nullable=False)
     weight: Mapped[float | None] = mapped_column(Float, server_default="1.0")
     auto_linked: Mapped[bool | None] = mapped_column(Boolean, server_default="false")
+    # F065: provenance tier; default 'heuristic' so direct constructions
+    # that forget to pass it still get a safe value at the DB level. The
+    # writer plumbing (edge_provenance.classify) sets this explicitly at
+    # every write site; the DB default is defense in depth. We set both
+    # `default` (client-side, applied by SQLAlchemy on flush when omitted)
+    # and `server_default` (DB-level, applied when raw SQL inserts omit
+    # the column) so the default applies regardless of insert path.
+    extraction_method: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="heuristic",
+        server_default="heuristic",
+    )
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GraphHubSnapshot(Base):
+    """F065: rank/degree snapshots for session-start hub-shift detection.
+
+    Lives in brain schema with no FTS / vector index — rows must never
+    appear as candidates in recall_deep (pollute the retrieval corpus).
+    """
+
+    __tablename__ = "graph_hub_snapshots"
+    __table_args__ = (
+        {"schema": "brain"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    node_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    node_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    degree: Mapped[int] = mapped_column(Integer, nullable=False)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class Guardrail(Base):

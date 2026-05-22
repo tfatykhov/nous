@@ -784,6 +784,38 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("get_procedure tool failed")
             return {"content": [{"type": "text", "text": f"Error fetching procedure: {e}"}]}
 
+    async def recall_hubs(
+        limit: int = 10,
+        node_type: str | None = None,
+    ) -> dict[str, Any]:
+        """F065: return the most-connected (highest-degree) nodes in the graph.
+
+        Args:
+            limit: Top-N to return (1..50, default 10).
+            node_type: Optional filter ('decision' | 'fact' | 'episode' | 'procedure').
+
+        Returns:
+            MCP-compliant response with a labeled list of hubs, their degree,
+            and a per-tier provenance breakdown.
+        """
+        try:
+            hubs = await brain.top_hubs(limit=max(1, min(50, limit)), node_type=node_type)
+            if not hubs:
+                return {"content": [{"type": "text", "text": "No graph hubs found yet — the graph may be empty."}]}
+
+            lines = [f"Top-{len(hubs)} hubs by degree:"]
+            for i, h in enumerate(hubs, start=1):
+                bk = h["extraction_method_breakdown"]
+                lines.append(
+                    f"{i}. [{h['node_type']}] {h['label'][:80]} — "
+                    f"degree {h['degree']} "
+                    f"(det={bk['deterministic']}, heu={bk['heuristic']}, inf={bk['inferred']})"
+                )
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+        except Exception as e:
+            logger.exception("recall_hubs tool failed")
+            return {"content": [{"type": "text", "text": f"Error fetching hubs: {e}"}]}
+
     return {
         "record_decision": record_decision,
         "learn_fact": learn_fact,
@@ -792,6 +824,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "recall_recent": recall_recent,
         "learn_skill": learn_skill,
         "get_procedure": get_procedure,
+        "recall_hubs": recall_hubs,
     }
 
 
@@ -991,6 +1024,32 @@ _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
 }
 
 
+_RECALL_HUBS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "F065: return the most-connected (highest-degree) nodes in Nous's "
+        "knowledge graph. Use to discover which concepts, decisions, facts, "
+        "or episodes act as hubs that many other memories reference. "
+        "Optionally filter by node_type."
+    ),
+    "properties": {
+        "limit": {
+            "type": "integer",
+            "description": "Top-N to return (1..50, default 10)",
+            "default": 10,
+            "minimum": 1,
+            "maximum": 50,
+        },
+        "node_type": {
+            "type": "string",
+            "description": "Optional filter by node type",
+            "enum": ["decision", "fact", "episode", "procedure"],
+        },
+    },
+    "required": [],
+}
+
+
 def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
@@ -1006,6 +1065,7 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
     dispatcher.register("recall_recent", closures["recall_recent"], _RECALL_RECENT_SCHEMA)
     dispatcher.register("learn_skill", closures["learn_skill"], _LEARN_SKILL_SCHEMA)
     dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
+    dispatcher.register("recall_hubs", closures["recall_hubs"], _RECALL_HUBS_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

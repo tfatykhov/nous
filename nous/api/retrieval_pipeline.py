@@ -457,6 +457,33 @@ def _heart_results_to_pipeline(
     ]
 
 
+def _f065_provenance_penalty(
+    neighbor: "NeighborResult", base_score: float, decay: float, settings: "Settings"
+) -> float:
+    """F065: apply the inferred-edge penalty on top of F022's graph decay.
+
+    Returns ``base_score * decay * penalty`` where ``penalty`` is
+    ``settings.graph_inferred_edge_penalty`` (default 1.0 — dark launch)
+    iff the neighbor's edge is `inferred`. All other tiers, plus
+    spreading-activation results, pass through unchanged.
+
+    NULL handling: ``NeighborResult.extraction_method`` defaults to
+    ``'heuristic'`` at the schema, so this helper should never see None.
+    The ``or "heuristic"`` is belt-and-braces (matches F065 spec NULL-handling
+    rule: NULL → heuristic, fail-open).
+
+    Spreading-activation defense in depth: SA already filters
+    `relation != 'contradicts'` at spreading_activation.py:103. If a future
+    inferred-tier relation bypasses the SA filter, this short-circuit keeps
+    the penalty from double-applying.
+    """
+    if neighbor.edge_relation == "spreading_activation":
+        return base_score * decay
+    method = neighbor.extraction_method or "heuristic"
+    penalty = settings.graph_inferred_edge_penalty if method == "inferred" else 1.0
+    return base_score * decay * penalty
+
+
 def _heart_graph_to_pipeline(
     heart_graph: list["NeighborResult"], settings: "Settings"
 ) -> list[PipelineResult]:
@@ -466,7 +493,7 @@ def _heart_graph_to_pipeline(
             id=n.id,
             type="decision",  # Only decision neighbors are appended at this stage
             description=n.description,
-            score=n.edge_weight * decay,
+            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
             source="graph_expanded",
             edge_relation=n.edge_relation,
         )
@@ -508,7 +535,7 @@ def _graph_expanded_to_pipeline(
             id=n.id,
             type=n.node_type,  # type: ignore[arg-type]
             description=n.description,
-            score=n.edge_weight * decay,
+            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
             source=(
                 "spreading_activation"
                 if n.edge_relation == "spreading_activation"

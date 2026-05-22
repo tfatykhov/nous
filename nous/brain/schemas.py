@@ -159,3 +159,8 @@ class NeighborResult(BaseModel):
     edge_relation: str
     edge_weight: float
     created_at: datetime
+    # F065: provenance tier of the edge connecting this neighbor.
+    # Default 'heuristic' (fail-open) for any synthetic NeighborResult
+    # constructed outside _neighbors (e.g. spreading-activation rows)
+    # or for rows that somehow slip through the migration with NULL.
+    extraction_method: str = "heuristic"
