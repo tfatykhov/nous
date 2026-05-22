@@ -23,7 +23,6 @@ from nous.brain.edge_provenance import (
 )
 from nous.storage.models import GraphEdge, GraphHubSnapshot
 
-
 # Canonical relations from the GraphEdge ck_edges_relation CHECK constraint
 # (sql/init.sql / models.py:241-242). If the constraint is ever extended,
 # classify() must handle the new value — this test fails loudly until then.

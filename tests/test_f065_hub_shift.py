@@ -13,11 +13,9 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -199,7 +197,6 @@ class TestHubSnapshotManager:
     ) -> None:
         """record_snapshot swallows DB errors and WARN-logs.
         The pre_turn fire-and-forget caller depends on this contract."""
-        import nous.brain.hub_snapshots as mod
 
         class BrokenDb:
             def session(self):
