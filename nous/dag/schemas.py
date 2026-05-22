@@ -21,6 +21,11 @@ class DAGNodeType(str, Enum):
     check = "check"
     gate = "gate"
     callback = "callback"
+    # F066.1 — fix-stage recovery. Fix nodes are dispatched by the
+    # orchestrator's _try_fix_failed_nodes hook (NOT by _find_ready_nodes /
+    # _dispatch_ready_nodes), so they sit in 'pending' until their parent
+    # transitions to 'failed'.
+    fix = "fix"
 
 
 class DAGStatus(str, Enum):
@@ -45,13 +50,29 @@ class DAGNodeStatus(str, Enum):
     failed = "failed"
     blocked = "blocked"
     cancelled = "cancelled"
+    # F066.1 — terminal state set by fix-node action 'skip_and_continue'.
+    # Treated like 'completed' for dependency resolution; distinguished in
+    # telemetry so operators can see which nodes were intentionally bypassed.
+    skipped = "skipped"
 
 
 # ---------------------------------------------------------------------------
 # Edge / Node specs
 # ---------------------------------------------------------------------------
 
-EdgeType = Literal["dependency", "cancel_cascade", "context_flow"]
+EdgeType = Literal["dependency", "cancel_cascade", "context_flow", "on_failure"]
+
+
+# F066.1 — vocabulary for the `fix_actions` field on fix nodes.
+FixAction = Literal[
+    "retry_as_is",
+    "retry_with_amended_prompt",
+    "mark_unrecoverable",
+    "skip_and_continue",
+]
+_VALID_FIX_ACTIONS = frozenset(
+    {"retry_as_is", "retry_with_amended_prompt", "mark_unrecoverable", "skip_and_continue"}
+)
 
 
 class DAGEdgeSpec(BaseModel):
@@ -110,6 +131,43 @@ class DAGNodeSpec(BaseModel):
             "(NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT). 0 = explicitly disabled for this node. "
             "When > 0, the orchestrator fails the node if no activity ping arrived within "
             "this window. Clamped to NOUS_DAG_NODE_MAX_STALL_TIMEOUT at insert."
+        ),
+    )
+
+    # F066.1 — fix-stage recovery. Set only when type=='fix'.
+    parent_node: str | None = Field(
+        None,
+        description=(
+            "F066.1: for fix nodes only — name of the node this fix attaches "
+            "to. The fix fires when the parent transitions to 'failed' "
+            "(after F061's bounded retry, where applicable)."
+        ),
+    )
+    fix_actions: list[FixAction] | None = Field(
+        None,
+        description=(
+            "F066.1: for fix nodes only — allowed action vocabulary the LLM "
+            "may choose from. Must be a non-empty subset of "
+            "{retry_as_is, retry_with_amended_prompt, mark_unrecoverable, "
+            "skip_and_continue}."
+        ),
+    )
+    max_fix_attempts: int = Field(
+        1,
+        ge=1,
+        le=3,
+        description=(
+            "F066.1: maximum number of fix attempts per parent failure. "
+            "Default 1 (one fix attempt). After exhaustion the parent stays "
+            "in its terminal state."
+        ),
+    )
+    expected_modes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "F066.1: declared failure modes for typed dispatch (Phase 2). "
+            "Phase 1 ignores this field — kept in the schema for forward "
+            "compatibility with the eventual typed-dispatch executor."
         ),
     )
 
@@ -201,6 +259,77 @@ class DAGCreateRequest(BaseModel):
                 raise ValueError(f"Edge references unknown node: '{edge.to_node}'")
             if edge.from_node == edge.to_node:
                 raise ValueError(f"Self-loop detected on node: '{edge.from_node}'")
+
+        # --- F066.1: fix-node structural constraints ---
+        nodes_by_name: dict[str, DAGNodeSpec] = {n.name: n for n in self.nodes}
+        fix_nodes = [n for n in self.nodes if n.type == DAGNodeType.fix]
+        for fn in fix_nodes:
+            # Fix node MUST declare parent_node + fix_actions.
+            if not fn.parent_node:
+                raise ValueError(
+                    f"Fix node '{fn.name}' must declare parent_node"
+                )
+            if not fn.fix_actions:
+                raise ValueError(
+                    f"Fix node '{fn.name}' must declare a non-empty fix_actions list"
+                )
+            invalid = [a for a in fn.fix_actions if a not in _VALID_FIX_ACTIONS]
+            if invalid:
+                raise ValueError(
+                    f"Fix node '{fn.name}' has invalid actions: {invalid}. "
+                    f"Allowed: {sorted(_VALID_FIX_ACTIONS)}"
+                )
+            # parent_node must reference a real node in the DAG.
+            if fn.parent_node not in name_set:
+                raise ValueError(
+                    f"Fix node '{fn.name}' references unknown parent_node '{fn.parent_node}'"
+                )
+            # No fix-of-fix.
+            parent = nodes_by_name[fn.parent_node]
+            if parent.type == DAGNodeType.fix:
+                raise ValueError(
+                    f"Fix node '{fn.name}' has another fix node as parent — fix-of-fix is forbidden"
+                )
+
+        # At most one fix child per parent (count on_failure edges per source).
+        on_failure_count_by_parent: dict[str, int] = {}
+        on_failure_inbound_by_fix: dict[str, int] = {}
+        for edge in self.edges:
+            if edge.edge_type == "on_failure":
+                # The TARGET must be a fix node; the SOURCE is the parent.
+                tgt = nodes_by_name.get(edge.to_node)
+                src = nodes_by_name.get(edge.from_node)
+                if tgt is None or tgt.type != DAGNodeType.fix:
+                    raise ValueError(
+                        f"on_failure edge target '{edge.to_node}' must be a fix node"
+                    )
+                if src is None or src.type == DAGNodeType.fix:
+                    raise ValueError(
+                        f"on_failure edge source '{edge.from_node}' cannot be another fix node"
+                    )
+                on_failure_count_by_parent[edge.from_node] = (
+                    on_failure_count_by_parent.get(edge.from_node, 0) + 1
+                )
+                on_failure_inbound_by_fix[edge.to_node] = (
+                    on_failure_inbound_by_fix.get(edge.to_node, 0) + 1
+                )
+
+        # Every fix node MUST have exactly one on_failure inbound edge,
+        # AND that edge's parent MUST match fn.parent_node.
+        for fn in fix_nodes:
+            inbound = on_failure_inbound_by_fix.get(fn.name, 0)
+            if inbound != 1:
+                raise ValueError(
+                    f"Fix node '{fn.name}' must have exactly one on_failure "
+                    f"inbound edge; found {inbound}"
+                )
+        # At most one fix child per parent.
+        for parent_name, count in on_failure_count_by_parent.items():
+            if count > 1:
+                raise ValueError(
+                    f"Node '{parent_name}' has {count} fix children; at most "
+                    "one is allowed"
+                )
 
         # --- cycle detection + wave computation ---
         waves = self.compute_waves()

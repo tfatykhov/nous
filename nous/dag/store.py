@@ -118,13 +118,25 @@ class DAGStore:
                             "would never fire (silent dead config). Reduce "
                             "stall_timeout_seconds or raise timeout_seconds."
                         )
+                # F066.1: fix nodes stay in 'pending' regardless of wave —
+                # they only activate when their parent transitions to 'failed'
+                # via _try_fix_failed_nodes. Without this guard, a wave-0
+                # fix node would be promoted to 'ready' here and dispatched
+                # by start_dag's wave_zero loop, hitting the silent
+                # fallthrough in _launch_node.
+                if spec.type.value == "fix":
+                    initial_status = "pending"
+                elif wave == 0:
+                    initial_status = "ready"
+                else:
+                    initial_status = "pending"
                 node = DAGNode(
                     dag_id=dag.id,
                     name=spec.name,
                     description=spec.description,
                     node_type=spec.type.value,
                     wave=wave,
-                    status="ready" if wave == 0 else "pending",
+                    status=initial_status,
                     instructions=spec.instructions or None,
                     tools=spec.tools,
                     frame_type=spec.frame_type,
@@ -135,6 +147,11 @@ class DAGStore:
                     completion_check_interval=spec.completion_check_interval,
                     max_check_attempts=spec.max_check_attempts,
                     stall_timeout_seconds=resolved_stall,
+                    # F066.1 — fix-stage columns.
+                    parent_node=spec.parent_node,
+                    fix_actions=spec.fix_actions,
+                    max_fix_attempts=spec.max_fix_attempts,
+                    expected_modes=list(spec.expected_modes),
                 )
                 session.add(node)
                 node_map[spec.name] = node
