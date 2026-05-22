@@ -1272,14 +1272,27 @@ class CognitiveLayer:
             return ""
 
         hub_mgr = HubSnapshotManager(self._brain.db, agent_id)
-        hub_uuids = [UUID(h["node_id"]) for h in live_hubs]
-        prior = await hub_mgr.get_latest(hub_uuids, session=session)
+        live_hub_uuids = [UUID(h["node_id"]) for h in live_hubs]
+        # Codex P1 (2026-05-22): the prior set must include hubs that USED
+        # to be in the top-N but are no longer, otherwise the 'left' branch
+        # of detect_rank_shifts can never fire. Merge live-lookup with a
+        # broader "prior top-N members" lookup; live takes precedence on
+        # collision so the latest snapshot wins.
+        prior_live = await hub_mgr.get_latest(live_hub_uuids, session=session)
+        prior_top_n = await hub_mgr.get_latest_top_n(top_n, session=session)
+        prior = {**prior_top_n, **prior_live}
 
         notices, new_nodes = detect_rank_shifts(live_hubs, prior, top_n=top_n)
 
+        # Codex P2 (2026-05-22): resolve entered hubs by node_id (UUID) — labels
+        # are NOT unique. Build an index once for O(1) lookup.
+        live_by_uuid: dict[UUID, dict] = {
+            UUID(h["node_id"]): h for h in live_hubs
+        }
+
         # Silent baseline writes for first-sight hubs.
         for uid in new_nodes:
-            hub = next((h for h in live_hubs if UUID(h["node_id"]) == uid), None)
+            hub = live_by_uuid.get(uid)
             if hub is None:
                 continue
             # Compute rank index from live position (1-based).
@@ -1300,14 +1313,11 @@ class CognitiveLayer:
         for notice in notices:
             if notice["kind"] != "entered":
                 continue
-            live_hub = next(
-                (h for h in live_hubs if h["label"] == notice["label"]), None,
-            )
-            if live_hub is None:
+            uid = notice.get("node_id")
+            if uid is None:
                 continue
-            try:
-                uid = UUID(live_hub["node_id"])
-            except (ValueError, KeyError, TypeError):
+            live_hub = live_by_uuid.get(uid)
+            if live_hub is None:
                 continue
             await hub_mgr.record_snapshot(
                 node_id=uid,

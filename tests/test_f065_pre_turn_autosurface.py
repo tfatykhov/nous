@@ -152,6 +152,51 @@ class TestComputeHubShiftNotice:
         assert "entered the top-10" in result
         assert "shifted hub" in result
 
+    async def test_left_top_n_emits_notice(
+        self, cognitive_layer, db, session: AsyncSession
+    ) -> None:
+        """A hub previously in the top-N that no longer appears in live
+        hubs should fire a 'left the top-10' notice. Codex P1 (2026-05-22)
+        regression — get_latest alone biased prior to the live set, so
+        'left' could never fire.
+        """
+        agent_id = f"f065-p2-left-{uuid.uuid4().hex[:6]}"
+        cognitive_layer._brain.agent_id = agent_id
+
+        # Seed one live hub so live_top_hubs is non-empty (else early return).
+        live_hub_id = await _seed_decision(session, agent_id, "still hubby")
+        for _ in range(3):
+            leaf = await _seed_decision(session, agent_id, "leaf")
+            await _seed_edge(
+                session, agent_id=agent_id, source_id=live_hub_id, target_id=leaf,
+            )
+
+        # Baseline snapshot for the live hub (so it doesn't fire 'entered').
+        session.add(GraphHubSnapshot(
+            agent_id=agent_id,
+            node_id=live_hub_id,
+            node_type="decision",
+            degree=3,
+            rank=1,
+            captured_at=datetime.now(UTC) - timedelta(hours=1),
+        ))
+
+        # Prior top-N snapshot for a node that no longer appears in the
+        # live graph at all — should fire 'left'.
+        gone_id = uuid.uuid4()
+        session.add(GraphHubSnapshot(
+            agent_id=agent_id,
+            node_id=gone_id,
+            node_type="decision",
+            degree=5,
+            rank=3,
+            captured_at=datetime.now(UTC) - timedelta(hours=1),
+        ))
+        await session.commit()
+
+        result = await cognitive_layer._compute_hub_shift_notice(agent_id, session=session)
+        assert "left the top-10" in result
+
     async def test_autosurface_disabled_path_short_circuits(
         self, cognitive_layer, db, session: AsyncSession
     ) -> None:

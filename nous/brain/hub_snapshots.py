@@ -55,6 +55,67 @@ class HubSnapshotManager:
                 return await self._get_latest_inner(node_ids, s)
         return await self._get_latest_inner(node_ids, session)
 
+    async def get_latest_top_n(
+        self,
+        top_n: int,
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, GraphHubSnapshot]:
+        """F065: return the most-recent snapshot for each node that was
+        in the top-N at last capture (rank IS NOT NULL AND rank <= top_n).
+
+        Used by pre_turn alongside ``get_latest`` for the live hubs —
+        the combined set lets ``detect_rank_shifts`` fire 'left top-N'
+        notices for nodes that dropped out (Codex review P1, 2026-05-22).
+        Without this, the lookup is biased toward current live hubs and
+        we never emit the 'left' branch of the shift signal.
+        """
+        from sqlalchemy import desc, func, select as _select
+
+        if session is None:
+            async with self._db.session() as s:
+                return await self._get_latest_top_n_inner(top_n, s)
+        return await self._get_latest_top_n_inner(top_n, session)
+
+    async def _get_latest_top_n_inner(
+        self,
+        top_n: int,
+        session: AsyncSession,
+    ) -> dict[UUID, GraphHubSnapshot]:
+        from sqlalchemy import desc, func
+
+        subq = (
+            select(
+                GraphHubSnapshot.node_id,
+                func.max(GraphHubSnapshot.captured_at).label("max_at"),
+            )
+            .where(GraphHubSnapshot.agent_id == self._agent_id)
+            .where(GraphHubSnapshot.rank.is_not(None))
+            .where(GraphHubSnapshot.rank <= top_n)
+            .group_by(GraphHubSnapshot.node_id)
+            .subquery()
+        )
+        q = (
+            select(GraphHubSnapshot)
+            .join(
+                subq,
+                (GraphHubSnapshot.node_id == subq.c.node_id)
+                & (GraphHubSnapshot.captured_at == subq.c.max_at),
+            )
+            .where(GraphHubSnapshot.agent_id == self._agent_id)
+            .order_by(desc(GraphHubSnapshot.captured_at))
+        )
+        result = await session.execute(q)
+        latest: dict[UUID, GraphHubSnapshot] = {}
+        for snap in result.scalars().all():
+            # If the latest row for this node has rank > top_n, exclude it
+            # — the prior-top-N filter above selects a snapshot where the
+            # node was once in the top-N, but the *most recent* row for it
+            # may be a later out-of-top-N record. We want the last one
+            # where it was actually in the top-N, which the subquery
+            # already gives us. The dict-merge below is just dedup.
+            latest.setdefault(snap.node_id, snap)
+        return latest
+
     async def _get_latest_inner(
         self,
         node_ids: list[UUID],
@@ -218,6 +279,7 @@ def detect_rank_shifts(
             # Wasn't in the top-N before, is now.
             notices.append({
                 "kind": "entered",
+                "node_id": uid,
                 "label": h["label"],
                 "rank": h["rank"],
                 "degree": h["degree"],
@@ -231,6 +293,7 @@ def detect_rank_shifts(
             # Was a hub, no longer in the top-N.
             notices.append({
                 "kind": "left",
+                "node_id": uid,
                 "label": f"[{prior.node_type}] {uid}",
                 "rank": None,
                 "degree": prior.degree,
