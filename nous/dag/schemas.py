@@ -315,13 +315,30 @@ class DAGCreateRequest(BaseModel):
                 )
 
         # Every fix node MUST have exactly one on_failure inbound edge,
-        # AND that edge's parent MUST match fn.parent_node.
+        # AND that edge's source MUST equal fn.parent_node.
+        # Build (fix_name → set of edge sources) so we can compare.
+        on_failure_sources_by_fix: dict[str, list[str]] = {}
+        for edge in self.edges:
+            if edge.edge_type == "on_failure":
+                on_failure_sources_by_fix.setdefault(edge.to_node, []).append(edge.from_node)
+
         for fn in fix_nodes:
             inbound = on_failure_inbound_by_fix.get(fn.name, 0)
             if inbound != 1:
                 raise ValueError(
                     f"Fix node '{fn.name}' must have exactly one on_failure "
                     f"inbound edge; found {inbound}"
+                )
+            # Source of the on_failure edge MUST match parent_node, or
+            # runtime lookup (by parent_node string) won't find this fix
+            # when the cited edge's source fails (Codex round-2 P2).
+            sources = on_failure_sources_by_fix.get(fn.name, [])
+            if sources and sources[0] != fn.parent_node:
+                raise ValueError(
+                    f"Fix node '{fn.name}' parent_node='{fn.parent_node}' "
+                    f"but its on_failure edge source is '{sources[0]}'. "
+                    f"These must match — the runtime fix dispatcher keys "
+                    f"by parent_node string."
                 )
         # At most one fix child per parent.
         for parent_name, count in on_failure_count_by_parent.items():

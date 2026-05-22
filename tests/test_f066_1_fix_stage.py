@@ -227,6 +227,28 @@ class TestFixNodeValidator:
                 edges=[],  # missing on_failure
             )
 
+    def test_on_failure_edge_source_must_match_parent_node(self) -> None:
+        """Codex round-2 P2: prevent inconsistent DAGs where the
+        on_failure edge source differs from the fix node's parent_node.
+        Runtime keys fixes by parent_node, not by edge source."""
+        with pytest.raises(ValueError, match="must match"):
+            DAGCreateRequest(
+                name="bad",
+                nodes=[
+                    DAGNodeSpec(name="A", type=DAGNodeType.subtask),
+                    DAGNodeSpec(name="B", type=DAGNodeType.subtask),
+                    DAGNodeSpec(
+                        name="fix",
+                        type=DAGNodeType.fix,
+                        parent_node="A",  # but the edge below points from B
+                        fix_actions=["retry_as_is"],
+                    ),
+                ],
+                edges=[
+                    DAGEdgeSpec(from_node="B", to_node="fix", edge_type="on_failure"),
+                ],
+            )
+
 
 # ---------------------------------------------------------------------------
 # Enum membership
