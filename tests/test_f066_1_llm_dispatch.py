@@ -159,6 +159,36 @@ class TestChooseActionLLM:
             )
 
     @pytest.mark.asyncio
+    async def test_payload_includes_system_key_for_sdk_backend(self):
+        """Codex P1 (2026-05-22): SdkAnthropicClient._payload_to_kwargs indexes
+        payload["system"] unconditionally. Without this key, the SDK backend
+        raises KeyError before reaching Anthropic and every LLM dispatch
+        silently falls back to rule-based. Guard the payload shape so the
+        regression can't reappear.
+        """
+        captured: dict = {}
+
+        async def _capture(payload):
+            captured.update(payload)
+            return _llm_response("retry_as_is")
+
+        client = MagicMock()
+        client.call = _capture
+
+        await choose_action_llm(
+            parent_name="p",
+            parent_instructions=None,
+            parent_error="incomplete_no_terminal",
+            parent_result=None,
+            fix_instructions=None,
+            fix_actions=["retry_as_is"],
+            llm_client=client,
+            model="x",
+            timeout_seconds=5.0,
+        )
+        assert "system" in captured, "payload must include 'system' for SDK backend"
+
+    @pytest.mark.asyncio
     async def test_empty_fix_actions_raises(self):
         client = _llm_client_returning(_llm_response("retry_as_is"))
         with pytest.raises(ValueError, match="non-empty"):

@@ -244,6 +244,12 @@ async def choose_action_llm(
     payload = {
         "model": model,
         "max_tokens": 512,
+        # Codex P1 (2026-05-22): SdkAnthropicClient._payload_to_kwargs
+        # at anthropic_client.py:1014 indexes payload["system"] (not .get),
+        # so an empty string is required to keep the SDK backend from
+        # KeyError-ing before the request ever reaches Anthropic. Mirrors
+        # nous_eval/handlers/summary.py:158.
+        "system": "",
         "tools": [tool],
         # Force the tool — Anthropic's tool_choice with a specific tool
         # name guarantees the model returns a tool_use block.
