@@ -838,6 +838,27 @@ class CognitiveLayer:
                 injected_section += f"{result_text}\n\n"
             system_prompt += injected_section
 
+        # F065 Phase 2: Hub-shift autosurface (gated dormant by default).
+        # Synchronous by design — the manager swallows DB errors internally
+        # (record_snapshot has its own try/except), the two SQL queries are
+        # ~10ms total, and synchronous lets us inject the notice into this
+        # same turn's system prompt. The earlier asyncio.create_task design
+        # was hedging against a blocking risk that doesn't materialize once
+        # the manager owns its error handling.
+        if self._settings.graph_hub_autosurface_enabled:
+            try:
+                hub_shift_block = await self._compute_hub_shift_notice(
+                    agent_id, session=session,
+                )
+                if hub_shift_block:
+                    system_prompt += "\n\n" + hub_shift_block
+            except Exception:
+                # Belt and braces: pre_turn never fails on a diagnostic.
+                logger.warning(
+                    "F065 hub-shift autosurface raised; pre_turn continues",
+                    exc_info=True,
+                )
+
         # F024: Attach pending diagnostic nudges from previous turn
         _diagnostic_nudges = self._pending_nudges.pop(session_id, "")
 
@@ -1210,6 +1231,93 @@ class CognitiveLayer:
         "is", "a", "an", "do", "its", "it's", "what's", "right",
         "really", "sure", "just", "so", "then", "well", "ok",
     })
+
+    async def _compute_hub_shift_notice(
+        self,
+        agent_id: str,
+        session: "AsyncSession | None" = None,
+    ) -> str:
+        """F065 Phase 2: detect hub-rank shifts and return a notice block.
+
+        Runs synchronously inside pre_turn (gated by
+        graph_hub_autosurface_enabled). Returns the formatted
+        '[graph] Hub shift: ...' block to append to the system prompt,
+        or empty string if nothing crossed the top-N boundary.
+
+        On first sight (no prior snapshot), the node gets a silent
+        baseline insert and no notice — the signal is about CHANGE, and
+        a brand-new hub has no history to compare against.
+
+        DB errors are caught at the call site in pre_turn (so pre_turn
+        never blocks on a diagnostic); HubSnapshotManager also has
+        internal try/except around record_snapshot for defense in depth.
+
+        ``session`` is plumbed through to all DB calls so tests can
+        exercise the path against a rollback-isolated transaction. In
+        production pre_turn passes the request session in, matching the
+        existing pattern (Heart.recall, Brain.neighbors, etc.).
+        """
+        from uuid import UUID
+
+        from nous.brain.hub_snapshots import (
+            HubSnapshotManager,
+            detect_rank_shifts,
+            format_hub_shift_block,
+        )
+
+        top_n = self._settings.graph_hub_autosurface_top_n
+        live_hubs = await self._brain.top_hubs(limit=top_n, session=session)
+        if not live_hubs:
+            # Brand-new agent or empty graph — nothing to compare against.
+            return ""
+
+        hub_mgr = HubSnapshotManager(self._brain.db, agent_id)
+        hub_uuids = [UUID(h["node_id"]) for h in live_hubs]
+        prior = await hub_mgr.get_latest(hub_uuids, session=session)
+
+        notices, new_nodes = detect_rank_shifts(live_hubs, prior, top_n=top_n)
+
+        # Silent baseline writes for first-sight hubs.
+        for uid in new_nodes:
+            hub = next((h for h in live_hubs if UUID(h["node_id"]) == uid), None)
+            if hub is None:
+                continue
+            # Compute rank index from live position (1-based).
+            rank = next(
+                (i + 1 for i, h in enumerate(live_hubs) if UUID(h["node_id"]) == uid),
+                None,
+            )
+            await hub_mgr.record_snapshot(
+                node_id=uid,
+                node_type=hub["node_type"],
+                degree=hub["degree"],
+                rank=rank,
+                session=session,
+            )
+
+        # Persist new snapshots for hubs whose rank crossed the top-N
+        # boundary so the next session compares correctly.
+        for notice in notices:
+            if notice["kind"] != "entered":
+                continue
+            live_hub = next(
+                (h for h in live_hubs if h["label"] == notice["label"]), None,
+            )
+            if live_hub is None:
+                continue
+            try:
+                uid = UUID(live_hub["node_id"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            await hub_mgr.record_snapshot(
+                node_id=uid,
+                node_type=live_hub["node_type"],
+                degree=live_hub["degree"],
+                rank=notice["rank"],
+                session=session,
+            )
+
+        return format_hub_shift_block(notices)
 
     def _resolve_focus_text(self, user_input: str) -> str | None:
         """Return the text to set as current_task, or None to preserve existing topic.
