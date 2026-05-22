@@ -131,6 +131,39 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
         description="F022 graph recall + spreading activation disabled.",
     ),
     # ------------------------------------------------------------------
+    # F065 phase 4 — Edge-provenance penalty A/B.
+    # Baseline (1.0, default) vs candidate (0.7). Pair with `baseline` to
+    # measure the MRR delta of down-weighting `inferred`-tier graph edges
+    # during recall_deep expansion. Flip the default in nous/config.py
+    # only after this A/B clears the gate semantics in
+    # `decide_gate_f050` (per-source regression cap + majority positive).
+    # ------------------------------------------------------------------
+    "f065_penalty_on": RetrievalConfig(
+        name="f065_penalty_on",
+        flags={"graph_inferred_edge_penalty": 0.7},
+        description=(
+            "F065 phase 4: penalize `inferred`-tier provenance edges by "
+            "0.7x during recall_deep expansion. Pair with `baseline` "
+            "(penalty=1.0) for A/B."
+        ),
+    ),
+    # F065 autosurface neutrality probe.
+    # Toggles the pre_turn hub-shift autosurface flag ON. The autosurface
+    # writes into the system prompt only — it does NOT touch recall_deep,
+    # so MRR is expected to be byte-identical to baseline. The config
+    # exists so the F051 harness can produce the receipt that closes
+    # the loop (zero delta confirmed) rather than asserting neutrality
+    # by inspection.
+    "f065_autosurface_on": RetrievalConfig(
+        name="f065_autosurface_on",
+        flags={"graph_hub_autosurface_enabled": True},
+        description=(
+            "F065 follow-up: enable pre_turn hub-shift autosurface. "
+            "Autosurface affects system-prompt context, not recall_deep — "
+            "expected MRR delta vs baseline is exactly 0."
+        ),
+    ),
+    # ------------------------------------------------------------------
     # F053 — density-eval diagnostic configs (used by
     # `python -m nous_eval.density_eval`, not the retrieval matrix).
     # ------------------------------------------------------------------
