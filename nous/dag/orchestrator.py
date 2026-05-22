@@ -69,12 +69,18 @@ class DAGOrchestrator:
         bus: EventBus | None = None,
         *,
         settings: Settings,
+        llm_client: object | None = None,
     ) -> None:
         self._store = store
         self._subtask_mgr = subtask_mgr
         self._dynamic_loader = dynamic_loader
         self._bus = bus
         self._settings = settings
+        # F066.1 Phase 1.5: optional LLM client for fix-node free-form dispatch.
+        # When None or when settings.dag_fix_llm_dispatch_enabled=False, the
+        # orchestrator falls back to fix_executor.choose_action (rule-based,
+        # Phase 1 behavior).
+        self._llm_client = llm_client
         self._lock = asyncio.Lock()
 
     async def tick(self) -> int:
@@ -996,7 +1002,7 @@ class DAGOrchestrator:
         fix_attempts_used to prevent an infinite retry loop and leave
         the parent in 'failed' so cascade proceeds normally.
         """
-        from nous.dag.fix_executor import choose_action
+        from nous.dag.fix_executor import choose_action, choose_action_llm
 
         # Index fix nodes by parent_node for O(1) lookup.
         fix_by_parent: dict[str, DAGNode] = {}
@@ -1018,23 +1024,61 @@ class DAGOrchestrator:
             if fix_node.fix_attempts_used >= fix_node.max_fix_attempts:
                 continue
 
-            try:
-                outcome = choose_action(
-                    parent_error=parent.error,
-                    parent_status=parent.status,
-                    fix_actions=fix_node.fix_actions,
-                )
-            except Exception:
-                logger.exception(
-                    "F066.1: fix_executor raised for parent %s (DAG %s); "
-                    "bumping fix_attempts_used and leaving parent failed",
-                    parent.name, dag.id,
-                )
-                fix_node.fix_attempts_used += 1
-                await self._store.update_node(
-                    fix_node.id, fix_attempts_used=fix_node.fix_attempts_used,
-                )
-                continue
+            outcome = None
+            llm_enabled = (
+                getattr(self._settings, "dag_fix_llm_dispatch_enabled", False)
+                and self._llm_client is not None
+            )
+            if llm_enabled:
+                # Phase 1.5: try LLM-based dispatch first; fall back to
+                # rule-based on any failure (timeout, parse error, etc.).
+                try:
+                    outcome = await choose_action_llm(
+                        parent_name=parent.name,
+                        parent_instructions=parent.instructions,
+                        parent_error=parent.error,
+                        parent_result=parent.result,
+                        fix_instructions=fix_node.instructions,
+                        fix_actions=fix_node.fix_actions or [],
+                        llm_client=self._llm_client,
+                        model=getattr(
+                            self._settings, "dag_fix_llm_model",
+                            "claude-haiku-4-5-20251001",
+                        ),
+                        timeout_seconds=getattr(
+                            self._settings, "dag_fix_llm_timeout_seconds", 10.0,
+                        ),
+                    )
+                    logger.info(
+                        "F066.1 Phase 1.5: LLM dispatch chose '%s' for parent '%s'",
+                        outcome.action, parent.name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "F066.1 Phase 1.5: LLM dispatch failed (%s); falling "
+                        "back to rule-based choose_action",
+                        type(exc).__name__,
+                    )
+                    outcome = None
+
+            if outcome is None:
+                try:
+                    outcome = choose_action(
+                        parent_error=parent.error,
+                        parent_status=parent.status,
+                        fix_actions=fix_node.fix_actions,
+                    )
+                except Exception:
+                    logger.exception(
+                        "F066.1: fix_executor raised for parent %s (DAG %s); "
+                        "bumping fix_attempts_used and leaving parent failed",
+                        parent.name, dag.id,
+                    )
+                    fix_node.fix_attempts_used += 1
+                    await self._store.update_node(
+                        fix_node.id, fix_attempts_used=fix_node.fix_attempts_used,
+                    )
+                    continue
 
             logger.info(
                 "F066.1: fix '%s' chose '%s' for parent '%s' — %s",
@@ -1065,11 +1109,21 @@ class DAGOrchestrator:
 
             if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
                 # Re-enqueue parent for dispatch on next tick.
+                update_kwargs: dict[str, Any] = {"status": "pending", "error": None}
+                # F066.1 Phase 1.5: when LLM dispatch returns an amended
+                # prompt, replace the parent's instructions so the next
+                # dispatch sees the revised prompt. Phase 1 (rule-based)
+                # always has amended_prompt=None — this branch is a no-op
+                # for that path.
+                if (
+                    outcome.action == "retry_with_amended_prompt"
+                    and outcome.amended_prompt
+                ):
+                    parent.instructions = outcome.amended_prompt
+                    update_kwargs["instructions"] = outcome.amended_prompt
                 parent.status = "pending"
                 parent.error = None
-                await self._store.update_node(
-                    parent.id, status="pending", error=None,
-                )
+                await self._store.update_node(parent.id, **update_kwargs)
             elif outcome.action == "skip_and_continue":
                 parent.status = "skipped"
                 parent.result = (
