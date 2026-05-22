@@ -1437,3 +1437,100 @@ class TestDAGOrchestratorTimeoutClamp:
         timed_out = next(n for n in final.nodes if n.name == "long-check")
         assert timed_out.status == "failed"
         assert f"{settings.dag_node_max_timeout}s" in (timed_out.error or "")
+
+
+class TestStaleReadyRecovery:
+    """Issue #430 Bug 1: orphaned wave-0 'ready' nodes in running DAGs are recovered.
+
+    Root cause: start_dag() is the only path that transitions wave-0 nodes from
+    'ready' to dispatched.  If that path is bypassed (e.g. direct DB write setting
+    DAG status='running'), those nodes are invisible to _find_ready_nodes() which
+    only looks for 'pending' nodes — the DAG hangs silently.
+
+    The fix: _recover_stale_ready_nodes() in _advance_dag() demotes stale 'ready'
+    nodes to 'pending' after _STALE_READY_GRACE_SECONDS, making them visible to the
+    normal dispatch path on the same tick.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_ready_node_recovered_after_grace(
+        self, store, orchestrator, subtask_mgr, monkeypatch
+    ):
+        """Orphaned wave-0 'ready' node in a running DAG is swept to pending and
+        then launched within the same tick when the grace period is 0."""
+        import nous.dag.orchestrator as orch_module
+        monkeypatch.setattr(orch_module, "_STALE_READY_GRACE_SECONDS", 0)
+
+        # Reproduce the real-world bug: DAG is set to 'running' by bypassing
+        # start_dag() so wave-0 nodes are stuck in 'ready' with no subtask.
+        dag = await store.create(_two_subtask_request())
+        await store.update_dag_status(dag.id, "running")  # bypass start_dag
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "ready"
+        assert research.started_at is None
+        assert research.subtask_id is None
+
+        # A tick with grace=0 should sweep and dispatch on the same tick.
+        await orchestrator.tick()
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "running", (
+            f"Expected 'running' after stale-ready recovery, got '{research.status}'"
+        )
+        subtask_mgr.create.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_fresh_ready_node_not_swept(
+        self, store, orchestrator, subtask_mgr
+    ):
+        """A 'ready' wave-0 node that was created moments ago is NOT swept because
+        the DAG started_at is within the grace period."""
+        # Do not monkeypatch — default _STALE_READY_GRACE_SECONDS=300 ensures
+        # a just-started DAG's wave-0 nodes are untouched.
+        dag = await store.create(_two_subtask_request())
+        await store.update_dag_status(dag.id, "running")  # bypass start_dag
+
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "ready"
+
+        await orchestrator.tick()
+
+        # dag.started_at is 'just now' → elapsed < 300s → no sweep fires.
+        # _find_ready_nodes ignores 'ready' status → no dispatch.
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "ready", (
+            "Fresh ready node must NOT be swept before the grace period elapses"
+        )
+        subtask_mgr.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pending_dag_ready_nodes_not_swept(
+        self, store, orchestrator, subtask_mgr, monkeypatch
+    ):
+        """Wave-0 'ready' nodes in a 'pending' DAG are never swept — those are
+        legitimately waiting for start_dag() to be called."""
+        import nous.dag.orchestrator as orch_module
+        monkeypatch.setattr(orch_module, "_STALE_READY_GRACE_SECONDS", 0)
+
+        # Create but do NOT start the DAG.
+        dag = await store.create(_two_subtask_request())
+
+        fetched = await store.get_dag(dag.id)
+        assert fetched.status == "pending"
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "ready"
+
+        await orchestrator.tick()
+
+        # Pending DAGs pass through the sweep guard (status != 'running') unchanged.
+        fetched = await store.get_dag(dag.id)
+        research = next(n for n in fetched.nodes if n.name == "research")
+        assert research.status == "ready", (
+            "Pending DAG ready nodes must NOT be swept — they await start_dag()"
+        )
+        subtask_mgr.create.assert_not_called()

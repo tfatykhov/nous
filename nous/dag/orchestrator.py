@@ -31,6 +31,11 @@ _BUDGET_WARNING_RATIO = 0.80
 
 # Completion check polling
 _CHECK_CMD_TIMEOUT = 10.0  # Hard timeout per check command invocation
+
+# Grace period before a 'ready' node in a running DAG is demoted to 'pending'
+# so the tick loop can pick it up. Wave-0 nodes normally transition immediately
+# via start_dag(); this constant covers the case where that path was bypassed.
+_STALE_READY_GRACE_SECONDS = 300
 DAG_STATUS_BASE_DIR = Path(tempfile.gettempdir()) / "nous-workspace" / "dag-status"
 
 CheckStatus = Literal["success", "failed", "pending"]
@@ -222,6 +227,10 @@ class DAGOrchestrator:
                 logger.info(
                     "DAG %s at %.0f%% of token budget", dag.id, ratio * 100
                 )
+
+        # 2.5. Recover orphaned wave-0 nodes that are stuck in 'ready' status
+        # because start_dag() was bypassed or the dispatch failed silently.
+        await self._recover_stale_ready_nodes(dag)
 
         # 3. Propagate failures
         await self._propagate_failures(dag)
@@ -862,6 +871,56 @@ class DAGOrchestrator:
             # error sets "failed") don't consume a running-slot.
             if node.status == "running":
                 running_by_frame[frame] = running_by_frame.get(frame, 0) + 1
+
+    async def _recover_stale_ready_nodes(self, dag: ExecutionDAG) -> None:
+        """Demote orphaned 'ready' nodes to 'pending' after the grace period.
+
+        Wave-0 nodes are created with status='ready' and are supposed to be
+        transitioned by start_dag(). If that path was bypassed (e.g. direct DB
+        writes) the nodes sit invisible to _find_ready_nodes() forever.  After
+        _STALE_READY_GRACE_SECONDS we demote them to 'pending' so the normal
+        tick loop can dispatch them.
+
+        The reference time is dag.started_at — it is set to now() when the DAG
+        transitions to 'running', which is the exact moment wave-0 nodes should
+        have been dispatched.  If the DAG has been running for longer than the
+        grace period and a node is still 'ready' with no started_at, it was
+        never dispatched and needs recovery.
+
+        Only fires when the parent DAG is already 'running' — 'pending' DAGs
+        are legitimately waiting for start_dag().
+        """
+        if dag.status != "running":
+            return
+
+        ref = dag.started_at
+        if ref is None:
+            return
+        if ref.tzinfo is None:
+            ref = ref.replace(tzinfo=UTC)
+
+        now = datetime.now(UTC)
+        dag_age_seconds = (now - ref).total_seconds()
+        if dag_age_seconds < _STALE_READY_GRACE_SECONDS:
+            return
+
+        for node in dag.nodes:
+            if node.status != "ready":
+                continue
+            if node.started_at is not None:
+                # Node already launched — 'ready' here is the momentary in-
+                # flight status set by _dispatch_ready_nodes just before
+                # _launch_node; don't touch it.
+                continue
+
+            await self._store.update_node(node.id, status="pending")
+            node.status = "pending"
+            logger.warning(
+                "Recovered stale ready node '%s' in DAG %s "
+                "(DAG has been running for %.0fs with no dispatch) — "
+                "demoted to pending so tick loop can dispatch it",
+                node.name, dag.id, dag_age_seconds,
+            )
 
     def _find_ready_nodes(self, dag: ExecutionDAG) -> list[DAGNode]:
         """Find pending nodes whose all dependency/context_flow predecessors are completed."""
