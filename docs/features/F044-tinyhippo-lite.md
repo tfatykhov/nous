@@ -2,8 +2,8 @@
 
 > **Status:** Draft
 > **Priority:** P2
-> **Depends on:** F031 (Sleep Consolidation — shipped), F040 (Graph Densification — shipped)
-> **Related:** F041 (SNN Sleep Densification — Draft, .h5 ingestion), tinyHippo (github.com/max-talanov/tinyHippo)
+> **Depends on:** F031-b (Consolidation Orient & Resolve — shipped), F040 (Graph Densification — shipped)
+> **Related:** F041 (SNN Sleep Densification — Draft, .h5 ingestion), F053 (Density-Eval Harness — shipped, used by the Run A/B/C harness), tinyHippo (github.com/max-talanov/tinyHippo)
 > **Author:** Nous + Tim
 > **Created:** 2026-05-08
 > **Updated:** 2026-05-08
@@ -23,8 +23,8 @@ This is **not a substitute for F041**. F041 ingests outputs from a real SNN simu
 Nous's sleep cycle currently performs:
 
 1. **F040 graph densification** — cosine-similarity backfill on orphan nodes
-2. **F053 dead-edge pruning** — delete edges incident to inactive nodes
-3. **F031 contradiction resolution** — supersession via LLM
+2. **Dead-edge pruning** — implicit cleanup of edges incident to inactive nodes (not a numbered feature; spread across the sleep handler)
+3. **F031-b contradiction resolution** — supersession via LLM (`Consolidation Orient & Resolve`, PR #232)
 4. **Generic edge weight maintenance** — implicit, scattered, no principled decay
 
 What's missing:
