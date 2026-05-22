@@ -23,8 +23,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Terminal statuses — nodes in these states won't be touched
-_TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled"})
+# Terminal statuses — nodes in these states won't be touched.
+# F066.1: 'skipped' is a terminal state introduced by skip_and_continue
+# fix action; it behaves like 'completed' for dependency resolution but
+# is distinguished in telemetry.
+_TERMINAL = frozenset({"completed", "failed", "blocked", "cancelled", "skipped"})
+
+# F066.1: statuses that "resolve" a node for dependency-resolution
+# purposes — i.e. _find_ready_nodes treats them as satisfied predecessors.
+# `skipped` joins `completed` here because skip_and_continue says
+# "proceed past this failure"; cascade-failed nodes are NOT in this set.
+_RESOLVED = frozenset({"completed", "skipped"})
 
 # Budget warning threshold (80%)
 _BUDGET_WARNING_RATIO = 0.80
@@ -231,6 +240,12 @@ class DAGOrchestrator:
         # 2.5. Recover orphaned wave-0 nodes that are stuck in 'ready' status
         # because start_dag() was bypassed or the dispatch failed silently.
         await self._recover_stale_ready_nodes(dag)
+
+        # 2.7. F066.1: try to apply a fix to any node that just transitioned
+        # to 'failed' BEFORE the cascade fires. A successful fix either
+        # retries the parent (back to 'pending') or skips it (terminal
+        # 'skipped') — in either case the cascade should not propagate.
+        await self._try_fix_failed_nodes(dag)
 
         # 3. Propagate failures
         await self._propagate_failures(dag)
@@ -957,6 +972,121 @@ class DAGOrchestrator:
                 node.name, dag.id, dag_age_seconds,
             )
 
+    async def _try_fix_failed_nodes(self, dag: ExecutionDAG) -> None:
+        """F066.1: apply fix-stage recovery to nodes that just failed.
+
+        For each non-fix node currently in 'failed' status, look up its
+        fix child (a fix node with parent_node == this node's name) and,
+        if found AND fix_attempts_used < max_fix_attempts, run the fix
+        executor and apply the chosen action.
+
+        Action semantics:
+          - retry_as_is: bump attempts, set parent back to 'pending' so
+            _find_ready_nodes picks it up on the next tick (or this one).
+            Clear `error` so cascade doesn't trigger on the stale value.
+          - retry_with_amended_prompt: same as retry_as_is in Phase 1
+            (no LLM diagnosis → no amended prompt to apply); falls back
+            to mark_unrecoverable per fix_executor.choose_action.
+          - mark_unrecoverable: leave parent in 'failed'; record fix
+            diagnosis in result; let _propagate_failures cascade.
+          - skip_and_continue: set parent to 'skipped' (terminal state);
+            successors will unblock via _RESOLVED predicate.
+
+        Fail-safe: if the fix node itself errors, we bump
+        fix_attempts_used to prevent an infinite retry loop and leave
+        the parent in 'failed' so cascade proceeds normally.
+        """
+        from nous.dag.fix_executor import choose_action
+
+        # Index fix nodes by parent_node for O(1) lookup.
+        fix_by_parent: dict[str, DAGNode] = {}
+        for n in dag.nodes:
+            if n.node_type == "fix" and n.parent_node:
+                fix_by_parent[n.parent_node] = n
+
+        if not fix_by_parent:
+            return
+
+        for parent in dag.nodes:
+            if parent.node_type == "fix":
+                continue
+            if parent.status != "failed":
+                continue
+            fix_node = fix_by_parent.get(parent.name)
+            if fix_node is None:
+                continue
+            if fix_node.fix_attempts_used >= fix_node.max_fix_attempts:
+                continue
+
+            try:
+                outcome = choose_action(
+                    parent_error=parent.error,
+                    parent_status=parent.status,
+                    fix_actions=fix_node.fix_actions,
+                )
+            except Exception:
+                logger.exception(
+                    "F066.1: fix_executor raised for parent %s (DAG %s); "
+                    "bumping fix_attempts_used and leaving parent failed",
+                    parent.name, dag.id,
+                )
+                fix_node.fix_attempts_used += 1
+                await self._store.update_node(
+                    fix_node.id, fix_attempts_used=fix_node.fix_attempts_used,
+                )
+                continue
+
+            logger.info(
+                "F066.1: fix '%s' chose '%s' for parent '%s' — %s",
+                fix_node.name, outcome.action, parent.name, outcome.rationale,
+            )
+
+            # Always bump fix_attempts_used so we cap retries even if the
+            # action ends up being a noop. Also transition the fix node
+            # itself to a terminal status — without this, the DAG never
+            # completes because _check_dag_completion sees the fix node
+            # stuck in 'pending' forever (Codex P1 on b333f78). The fix
+            # node is conceptually a one-shot per firing; if the parent
+            # fails again and budget remains, the next tick re-fires it
+            # via the same code path (the lookup in fix_by_parent is by
+            # parent_node string, not by fix node status).
+            fix_node.fix_attempts_used += 1
+            fix_node.status = "completed"
+            fix_node.result = (
+                f"Fix-stage chose '{outcome.action}' for parent '{parent.name}': "
+                f"{outcome.rationale or ''}".strip()
+            )
+            await self._store.update_node(
+                fix_node.id,
+                fix_attempts_used=fix_node.fix_attempts_used,
+                status="completed",
+                result=fix_node.result,
+            )
+
+            if outcome.action == "retry_as_is" or outcome.action == "retry_with_amended_prompt":
+                # Re-enqueue parent for dispatch on next tick.
+                parent.status = "pending"
+                parent.error = None
+                await self._store.update_node(
+                    parent.id, status="pending", error=None,
+                )
+            elif outcome.action == "skip_and_continue":
+                parent.status = "skipped"
+                parent.result = (
+                    f"Fix '{fix_node.name}': {outcome.rationale or 'skipped by fix-stage'}"
+                )
+                await self._store.update_node(
+                    parent.id, status="skipped", result=parent.result,
+                )
+            else:
+                # mark_unrecoverable — leave 'failed' but annotate.
+                diag = f"Fix '{fix_node.name}': {outcome.rationale or 'mark_unrecoverable'}"
+                existing = parent.result or ""
+                parent.result = (existing + "\n" + diag).strip()
+                await self._store.update_node(
+                    parent.id, result=parent.result,
+                )
+
     def _find_ready_nodes(self, dag: ExecutionDAG) -> list[DAGNode]:
         """Find pending nodes whose all dependency/context_flow predecessors are completed."""
         # Build set of predecessor node_ids per node (dependency + context_flow)
@@ -966,11 +1096,19 @@ class DAGOrchestrator:
                 dep_map[str(edge.to_node_id)].add(str(edge.from_node_id))
 
         # Completed node IDs
-        completed_ids = {str(n.id) for n in dag.nodes if n.status == "completed"}
+        # F066.1: 'skipped' resolves dependencies just like 'completed'.
+        completed_ids = {str(n.id) for n in dag.nodes if n.status in _RESOLVED}
 
         ready: list[DAGNode] = []
         for node in dag.nodes:
             if node.status != "pending":
+                continue
+            # F066.1: fix nodes are NOT dispatched by the normal ready path.
+            # They are launched by _try_fix_failed_nodes when their parent
+            # transitions to 'failed'. Skipping here prevents the silent
+            # no-op fallthrough in _launch_node where node_type='fix' has
+            # no branch.
+            if node.node_type == "fix":
                 continue
             predecessors = dep_map[str(node.id)]
             if predecessors <= completed_ids:  # All predecessors completed
@@ -1151,7 +1289,31 @@ class DAGOrchestrator:
                 logger.debug("Could not disable check %s", node.check_name)
 
     async def _check_dag_completion(self, dag: ExecutionDAG) -> None:
-        """Check if all nodes are terminal and set final DAG status."""
+        """Check if all nodes are terminal and set final DAG status.
+
+        F066.1: a fix node that never fires (because its parent reached
+        a non-failed terminal state) would otherwise sit in 'pending'
+        forever, keeping the DAG running. Auto-complete idle fix nodes
+        when their parent terminates without ever failing.
+        """
+        # Sweep pending fix nodes whose parent reached a non-failed terminal.
+        node_by_name = {n.name: n for n in dag.nodes}
+        for n in dag.nodes:
+            if n.node_type != "fix" or n.status != "pending":
+                continue
+            parent = node_by_name.get(n.parent_node or "")
+            if parent is None:
+                continue
+            if parent.status in ("completed", "skipped", "cancelled"):
+                n.status = "completed"
+                n.result = (
+                    f"Fix-stage not fired — parent '{parent.name}' "
+                    f"reached terminal '{parent.status}' without failure."
+                )
+                await self._store.update_node(
+                    n.id, status="completed", result=n.result,
+                )
+
         statuses = {n.status for n in dag.nodes}
 
         # If any nodes are still non-terminal, DAG is not done

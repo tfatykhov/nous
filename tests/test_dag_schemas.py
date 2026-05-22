@@ -127,6 +127,7 @@ class TestEnums:
             DAGNodeType.check,
             DAGNodeType.gate,
             DAGNodeType.callback,
+            DAGNodeType.fix,  # F066.1
         }
 
     def test_dag_statuses(self):
@@ -149,6 +150,7 @@ class TestEnums:
             DAGNodeStatus.failed,
             DAGNodeStatus.blocked,
             DAGNodeStatus.cancelled,
+            DAGNodeStatus.skipped,  # F066.1
         }
 
 

@@ -936,12 +936,13 @@ class DAGNode(Base):
 
     __tablename__ = "dag_nodes"
     __table_args__ = (
+        # F066.1 adds 'skipped' to status; 'fix' to node_type.
         CheckConstraint(
-            "status IN ('pending', 'ready', 'running', 'awaiting_check', 'completed', 'failed', 'blocked', 'cancelled')",
+            "status IN ('pending', 'ready', 'running', 'awaiting_check', 'completed', 'failed', 'blocked', 'cancelled', 'skipped')",
             name="chk_dag_node_status",
         ),
         CheckConstraint(
-            "node_type IN ('subtask', 'check', 'gate', 'callback')",
+            "node_type IN ('subtask', 'check', 'gate', 'callback', 'fix')",
             name="chk_dag_node_type",
         ),
         UniqueConstraint("dag_id", "name", name="uq_dag_node_name"),
@@ -998,6 +999,23 @@ class DAGNode(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     injected_context: Mapped[str | None] = mapped_column(Text)
+
+    # F066.1 — fix-stage recovery. parent_node names the node a fix attaches
+    # to; fix_actions is the allowed action vocabulary for free-form dispatch;
+    # max_fix_attempts caps fix re-runs per parent; fix_attempts_used tracks
+    # consumed attempts; expected_modes is reserved for Phase 2 typed
+    # dispatch (Phase 1 ignores it).
+    parent_node: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    fix_actions: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    max_fix_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    fix_attempts_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    expected_modes: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="'[]'::jsonb"
+    )
 
     dag: Mapped["ExecutionDAG"] = relationship("ExecutionDAG", back_populates="nodes")
 
