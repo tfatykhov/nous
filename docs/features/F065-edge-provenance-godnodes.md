@@ -72,28 +72,34 @@ The column is **nullable** at addition time to permit a safe migration without l
 
 #### Backfill rules
 
-Existing edges are categorised by their `relation` value and `auto_linked` flag:
+Existing edges are categorised by their `relation` value and `auto_linked` flag. **Critical correction (review 2026-05-22):** `extracted_from` and `discussed_in` are written by BOTH explicit-extraction paths AND by `Brain.auto_link()` / `graph_densifier.py` cosine-threshold matching (see `nous/brain/graph_linker.py:311-343` and `nous/brain/graph_densifier.py:35-38`). The deterministic tier MUST gate on `auto_linked = FALSE` — otherwise thousands of cosine-derived edges silently get promoted to the trusted tier and the entire down-weighting story for F065 is voided.
 
 | Condition | `extraction_method` assigned | Reasoning |
 |---|---|---|
-| `relation IN ('extracted_from', 'discussed_in', 'supersedes')` | `'deterministic'` | These relation types require an explicit, structural match — a fact lifted from a specific episode, or one decision known to supersede another. No model inference involved. |
-| `auto_linked = TRUE AND relation = 'related_to'` | `'heuristic'` | Created by `Brain.auto_link()` (cosine > 0.85). Threshold is meaningful but not infallible. |
-| `relation = 'related_to' AND auto_linked = FALSE` | `'heuristic'` | Manually created related_to edges; trust slightly above auto-linked but still non-deterministic. |
+| `relation IN ('extracted_from', 'discussed_in', 'supersedes') AND auto_linked = FALSE` | `'deterministic'` | These relations PLUS an explicit, structural match — a fact lifted from a specific episode, or one decision known to supersede another. No model inference involved. |
+| `relation IN ('extracted_from', 'discussed_in') AND auto_linked = TRUE` | `'heuristic'` | Same relation labels but created by `graph_linker` / `graph_densifier` similarity ranking (cosine threshold). Threshold is meaningful but not infallible. |
+| `auto_linked = TRUE AND relation = 'related_to'` | `'heuristic'` | Created by `Brain.auto_link()` (cosine > 0.85). |
+| `relation = 'related_to' AND auto_linked = FALSE` | `'heuristic'` | Manually created related_to edges. |
 | `relation = 'contradicts'` | `'inferred'` | Written by F027 (Supersession Detection) contradiction path via LLM reasoning over high-similarity pairs. Model inference, not structural extraction. |
 | All remaining (`supports`, `caused_by`, `informed_by`, `evidence_for`) | `'heuristic'` | Default safe tier; re-classify when provenance can be verified. |
+
+**Write-time rule for new edges** (resolves Open Question 1): the new-edge writer applies the same `auto_linked`-gated rule as the backfill. Specifically: `extraction_method='deterministic'` iff `auto_linked=FALSE AND relation IN ('extracted_from','discussed_in','supersedes')`; `'inferred'` iff `relation='contradicts'`; otherwise `'heuristic'`. Wire into `Brain._create_edge` (and the four call sites that bypass it).
 
 SQL backfill (included in migration 047):
 
 ```sql
--- deterministic
+-- deterministic (must gate on auto_linked = FALSE — see correction above)
 UPDATE brain.graph_edges
 SET extraction_method = 'deterministic'
-WHERE relation IN ('extracted_from', 'discussed_in', 'supersedes');
+WHERE relation IN ('extracted_from', 'discussed_in', 'supersedes')
+  AND auto_linked = FALSE
+  AND extraction_method IS NULL;
 
 -- inferred (F027 contradiction detector)
 UPDATE brain.graph_edges
 SET extraction_method = 'inferred'
-WHERE relation = 'contradicts';
+WHERE relation = 'contradicts'
+  AND extraction_method IS NULL;
 
 -- heuristic catch-all
 UPDATE brain.graph_edges
@@ -117,18 +123,35 @@ ALTER TABLE brain.graph_edges
 final_score = base_score × graph_recall_decay × inferred_penalty
 ```
 
-where `inferred_penalty` defaults to `0.7` for `inferred` edges and `1.0` for `deterministic` and `heuristic`.
+where `inferred_penalty` defaults to `1.0` (penalty inactive) on initial rollout, and is tuned downward (e.g. to `0.7`) after the F051 harness quantifies the MRR impact.
 
 New config knob:
 
 ```python
 # nous/config.py
-graph_inferred_edge_penalty: float = 0.7   # F065: down-weight 'inferred' edges in recall_deep
+graph_inferred_edge_penalty: float = 1.0   # F065: dark-launch default; flip to 0.7 after harness gate
 ```
 
-Exposed as env var `NOUS_GRAPH_INFERRED_EDGE_PENALTY`. Setting to `1.0` disables the penalty.
+Exposed as env var `NOUS_GRAPH_INFERRED_EDGE_PENALTY`. Setting to `1.0` (default) disables the penalty.
 
-The penalty is applied inside `retrieval_pipeline.py` at the same stage as F022's existing decay (Stage 4 — graph-expanded decisions), keeping the scoring logic in one place.
+The penalty must be applied at **two** sites that both implement the F022 graph-expansion scoring:
+
+1. `nous/api/retrieval_pipeline.py::_graph_expanded_to_pipeline` (Brain-side 1-hop expansion).
+2. `nous/api/retrieval_pipeline.py::_heart_graph_to_pipeline` (Heart→decision expansion path). Reviewer P1 (2026-05-22) flagged this site as missed in the original spec — the same `edge_weight × decay` formula applies and the same penalty must layer on top.
+
+Both sites consume `NeighborResult` from `Brain._neighbors`, which must be extended to carry `extraction_method` (see "Integration touchpoints" below).
+
+**Spreading activation (`nous/brain/spreading_activation.py:103`)** already hard-filters `relation != 'contradicts'`, which is the only `inferred`-tier relation in the backfill. The F065 penalty is therefore a no-op on the SA path today — resolving Open Question 2: no action needed unless a future inferred relation is introduced.
+
+#### Integration touchpoints (full list)
+
+Reviewer P1 (2026-05-22): the API Changes table understates the breadth of the integration. Implementation must touch all five sites:
+
+1. `nous/storage/models.py::GraphEdge` — add `extraction_method: Mapped[str | None] = mapped_column(String(20))`.
+2. `nous/brain/schemas.py::NeighborResult` — add `extraction_method: str | None` field.
+3. `nous/brain/brain.py::_neighbors` — select `extraction_method` in `source_q` / `target_q` and populate `NeighborResult`.
+4. `nous/api/retrieval_pipeline.py::_graph_expanded_to_pipeline` — apply the penalty multiplier.
+5. `nous/api/retrieval_pipeline.py::_heart_graph_to_pipeline` — apply the same penalty multiplier.
 
 ---
 
@@ -212,13 +235,30 @@ Expose `top_hubs()` as a tool callable by the agent:
 
 #### Auto-surfacing at session start
 
-During session-start working-memory construction, check whether any hub's degree has shifted by more than 20% since the degree was last recorded in `heart.facts` (subject `"graph_hub_degree:<node_id>"`). If any hub crosses this threshold, prepend a one-line notice to the system prompt context block:
+The hook lives inside `nous/cognitive/layer.py::pre_turn` (the canonical session-start path — there is no `nous/api/session.py`, an error in the original spec).
+
+During session-start working-memory construction, check whether any hub's degree has shifted by more than 20% since the previous snapshot. If any hub crosses this threshold, prepend a one-line notice to the system prompt context block:
 
 ```
 [graph] Hub shift detected: "Use pgvector for embedding storage" now degree 38 (was 31, +22.6%).
 ```
 
-Degree snapshots are written back to `heart.facts` after each session-start check so the baseline tracks naturally. The 20% threshold is configurable via `NOUS_GRAPH_HUB_SHIFT_THRESHOLD` (default `0.20`).
+**Storage (resolves Open Question 3, reviewer P1):** baseline snapshots do NOT live in `heart.facts`. Rows there enter `recall_deep` candidacy, fact-extractor dedup, and the F051 eval candidate set — polluting the corpus with thousands of operator-metadata facts. Instead, F065 adds a new lightweight table:
+
+```sql
+CREATE TABLE IF NOT EXISTS brain.graph_hub_snapshots (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id     TEXT NOT NULL,
+    node_id      UUID NOT NULL,
+    node_type    VARCHAR(20) NOT NULL,
+    degree       INTEGER NOT NULL,
+    captured_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_graph_hub_snapshots_agent_node
+    ON brain.graph_hub_snapshots (agent_id, node_id, captured_at DESC);
+```
+
+The pre_turn hook reads the most-recent snapshot per `(agent_id, node_id)`, compares against the live `top_hubs()` result, and inserts a new snapshot row when any threshold is crossed. The table is read-only to `recall_deep` (no FTS/vector index by design). The 20% threshold is configurable via `NOUS_GRAPH_HUB_SHIFT_THRESHOLD` (default `0.20`).
 
 ---
 
@@ -227,7 +267,7 @@ Degree snapshots are written back to `heart.facts` after each session-start chec
 **File:** `sql/migrations/047_f065_edge_provenance.sql`
 
 ```sql
--- Migration 043: F065 — Edge Provenance & God-Node Surfacing
+-- Migration 047: F065 — Edge Provenance & God-Node Surfacing
 -- Adds extraction_method to brain.graph_edges.
 -- Run: psql $DATABASE_URL < sql/migrations/047_f065_edge_provenance.sql
 
@@ -238,10 +278,16 @@ ALTER TABLE brain.graph_edges
     ADD COLUMN IF NOT EXISTS extraction_method VARCHAR(20)
         CHECK (extraction_method IN ('deterministic', 'heuristic', 'inferred'));
 
--- Step 2: Backfill — deterministic relations
+-- Step 2: Backfill — deterministic = explicit (not auto_linked) structural relations.
+-- The auto_linked = FALSE clause is load-bearing: graph_densifier and
+-- FactGraphLinker / DecisionGraphLinker also write extracted_from /
+-- discussed_in edges via cosine-threshold matching with auto_linked=TRUE.
+-- Without this gate, the deterministic tier is silently polluted by
+-- thousands of heuristic edges (review 2026-05-22 P0).
 UPDATE brain.graph_edges
 SET extraction_method = 'deterministic'
 WHERE relation IN ('extracted_from', 'discussed_in', 'supersedes')
+  AND auto_linked = FALSE
   AND extraction_method IS NULL;
 
 -- Step 3: Backfill — LLM-inferred contradictions (F027 Supersession Detection contradiction path)
@@ -264,6 +310,21 @@ ALTER TABLE brain.graph_edges
 CREATE INDEX IF NOT EXISTS idx_graph_edges_extraction_method
     ON brain.graph_edges(agent_id, extraction_method);
 
+-- Step 7: Hub-snapshot table for session-start shift detection.
+-- Lives in brain schema so it's NOT indexed by FTS / vector embedding
+-- pipelines that operate on heart.facts; baseline rows must NEVER
+-- appear as candidates in recall_deep (review 2026-05-22 P1).
+CREATE TABLE IF NOT EXISTS brain.graph_hub_snapshots (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_id     TEXT NOT NULL,
+    node_id      UUID NOT NULL,
+    node_type    VARCHAR(20) NOT NULL,
+    degree       INTEGER NOT NULL,
+    captured_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_graph_hub_snapshots_agent_node
+    ON brain.graph_hub_snapshots (agent_id, node_id, captured_at DESC);
+
 COMMIT;
 ```
 
@@ -280,7 +341,7 @@ COMMIT;
 | `nous/api/retrieval_pipeline.py` | Apply `graph_inferred_edge_penalty` multiplier at Stage 4 | Modified |
 | `nous/config.py` | Add `graph_inferred_edge_penalty: float = 0.7` | New config field |
 | `nous/config.py` | Add `graph_hub_shift_threshold: float = 0.20` | New config field |
-| `nous/api/session.py` (or equivalent session-start hook) | Hub-shift check + working-memory injection | Modified |
+| `nous/cognitive/layer.py::pre_turn` | Hub-shift check + working-memory injection | Modified |
 | `GraphEdge` SQLAlchemy model | Add `extraction_method` column mapping | Modified |
 
 ---
@@ -297,7 +358,7 @@ COMMIT;
 
 5. **`recall_hubs` tool returns correct top-N.** Insert 20 nodes with known degree distributions. Call `recall_hubs(limit=5)`. Assert the five returned nodes are exactly the five highest-degree nodes, sorted descending. Assert `node_type` filter works: `recall_hubs(limit=5, node_type='fact')` returns only fact nodes.
 
-6. **Hub-shift auto-surface.** Record a baseline degree of 25 for a hub node in `heart.facts`. Increase the node's degree to 31 (24% gain — above 20% threshold). Simulate a session-start. Assert the working-memory context block contains the hub-shift notice line. Then set degree to 26 (4% gain — below threshold) and assert no notice is injected.
+6. **Hub-shift auto-surface.** Record a baseline degree of 25 for a hub node in the new `brain.graph_hub_snapshots` table. Increase the node's degree to 31 (24% gain — above 20% threshold). Simulate a session-start (`pre_turn` invocation). Assert the working-memory context block contains the hub-shift notice line and a new snapshot row was inserted. Then set degree to 26 (4% gain — below threshold) and assert no notice is injected and no new snapshot is written.
 
 ---
 
@@ -315,11 +376,37 @@ COMMIT;
 
 ## Open Questions
 
-1. **`extraction_method` on newly-written edges — who sets it?** The backfill is straightforward, but callers that create new edges (e.g. `graph_densifier.py`, `FactGraphLinker`, `DecisionGraphLinker` from F040) currently don't pass an `extraction_method`. Do we (a) infer it at write time from the `relation` type using the same backfill rules, or (b) require callers to pass it explicitly and fail loudly if omitted? Option (a) is less error-prone but hides the intent; option (b) is more disciplined but needs all call sites updated simultaneously.
+1. ~~**`extraction_method` on newly-written edges — who sets it?**~~ **Resolved** (2026-05-22 review): write-time inference using the same `relation` + `auto_linked` rule as the backfill. See "Write-time rule for new edges" under Edge Provenance § Backfill rules. Wire into `Brain._create_edge` and the four densifier/linker call sites that bypass it.
 
-2. **Inferred-edge penalty interaction with spreading activation.** The `0.7` penalty is defined for 1-hop `recall_deep` expansion (Stage 4 in `retrieval_pipeline.py`). Spreading activation in `spreading_activation.py` uses `weight` directly and is unaware of `extraction_method`. Should spreading activation also apply the penalty, and if so, where — inside `spreading_activation.py` or by pre-filtering edges before the activation loop?
+2. ~~**Inferred-edge penalty interaction with spreading activation.**~~ **Resolved** (2026-05-22 review): currently moot — `spreading_activation.py:103` already hard-filters `relation != 'contradicts'`, which is the only `inferred`-tier relation in the backfill. If a future inferred-tier relation is added (e.g. an LLM-inferred semantic link), revisit this question then.
 
-3. **Hub degree baseline storage.** The auto-surface feature proposes storing degree snapshots in `heart.facts` (subject `"graph_hub_degree:<node_id>"`). This creates O(hub count) facts per agent — currently ~10, manageable. But if hub count grows (e.g. after F040 orphan backfill densifies the graph), this could generate noise in `recall_deep` results. Is `heart.facts` the right store, or should hub baselines live in a dedicated lightweight table or in `nous/config.py` as a runtime-only cache?
+3. ~~**Hub degree baseline storage.**~~ **Resolved** (2026-05-22 review): baselines live in a new `brain.graph_hub_snapshots` table (see God-Node Surfacing → Auto-surfacing at session start). `heart.facts` would pollute the retrieval corpus and the F051 eval candidate set.
+
+---
+
+## Rollout & Success Criteria
+
+**LOE estimate:** ~6h focused work — migration + ORM (1h), backfill correctness tests (1h), `top_hubs` + `recall_hubs` tool (1.5h), pipeline penalty wiring at both sites (1.5h), pre_turn hub-shift hook + snapshot table tests (1h).
+
+**Phases:**
+
+1. **Schema + dormant penalty.** Land migration 047 + ORM + `NeighborResult.extraction_method` + the penalty multiplier code path, with `NOUS_GRAPH_INFERRED_EDGE_PENALTY=1.0` (no behavioral change). Verify backfill correctness on a snapshot of prod `brain.graph_edges`.
+
+2. **Surface hubs.** Land `top_hubs()` + `recall_hubs` tool + the `graph_hub_snapshots` table + `pre_turn` hook. Tool is opt-in only — agent has to call it explicitly. No autosurface activation yet.
+
+3. **Activate autosurface.** Flip `NOUS_GRAPH_HUB_AUTOSURFACE_ENABLED=true` after one release of bake time on the hub-snapshot table. Monitor F051 MRR delta — autosurface adds context tokens and could regress retrieval if hub-shift signal is noisy.
+
+4. **Tune penalty.** After F051 harness measures the MRR impact of `inferred` down-weighting, choose the operating value (likely `0.7` if MRR improves, `1.0` if neutral or negative).
+
+**Success criteria:**
+
+- F051 harness MRR does not regress in Phase 1 (penalty inactive — should be byte-equivalent retrieval).
+- Backfill correctness audit: spot-check 100 random `brain.graph_edges` rows post-migration and verify the `extraction_method` value matches the table's stated rule.
+- `recall_hubs` tool returns sane results (highest-degree nodes are recognizable concepts, not metadata rows or noise).
+- Phase 3 autosurface fires < 2× per session on average (avoid notification fatigue).
+- Phase 4 inferred-penalty (`0.7`) shows non-negative MRR delta vs `1.0` baseline.
+
+**Rollback:** Phases 1-3 are forward-only on schema but behaviorally gated. Setting `NOUS_GRAPH_INFERRED_EDGE_PENALTY=1.0` and `NOUS_GRAPH_HUB_AUTOSURFACE_ENABLED=false` returns to F022 baseline behavior. The two new tables can be dropped in a follow-up if F065 is rolled back entirely.
 
 4. **20% hub-shift threshold — is it the right signal?** The threshold is borrowed from the god-node intuition (hub = high-degree node that "everything flows through"), but degree growth can be mechanical — a single densification sweep from F040 could add 50 edges to every fact node uniformly. Would a relative *rank* shift (e.g. a node entering or leaving the top-10 list) be a more meaningful signal than a raw degree percentage?
 
