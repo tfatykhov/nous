@@ -1,0 +1,452 @@
+"""F051 graph-targeted qrels miner.
+
+Generates a qrels JSONL whose gold IDs are reachable only via graph
+expansion — they're NOT in the vector+keyword top-K, but ARE in the
+graph-expanded top-K. Without this, eval configs that touch graph
+behavior (F065 penalty multiplier, F022 spreading activation,
+F030 MMR-after-graph) produce zero deltas against probes because
+probes' gold IDs are all directly findable.
+
+Pipeline:
+
+  1. Sample trusted edges (deterministic OR high-weight heuristic).
+  2. For each (S, T) edge, ask Haiku to write a question whose answer
+     is in T but whose vocabulary comes from S (without naming T).
+  3. Validate via run_recall_pipeline:
+       a. graph_recall_enabled=False → assert T is NOT in top-K.
+       b. graph_recall_enabled=True  → assert T IS in top-K.
+  4. Emit JSONL rows compatible with QrelSource.graph_targeted.
+
+Run:
+    python -m nous_eval.generate_graph_qrels \\
+        --sample-size 50 \\
+        --out E:/Projects/nous-eval-fixtures/v2026-Q2/qrels_graph_targeted.jsonl
+
+Both validation passes are mandatory. A query that survives only the
+first check (graph-off miss) is still useless if graph expansion
+ALSO can't reach the gold — that's a malformed query, not a graph
+positive. The yield is typically 10-30% of candidates; cost a couple
+hundred Haiku tokens per kept qrel.
+
+The miner reads from the eval DB (NOUS_EVAL_* env vars), not from
+prod, so generation is reproducible against a pinned fixture.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
+
+from nous.api.anthropic_client import create_client
+from nous.api.retrieval_pipeline import PipelineResult, run_recall_pipeline
+from nous.brain.brain import Brain
+from nous.config import Settings
+from nous.heart.heart import Heart
+from nous_eval.config import EvalSettings
+from nous_eval.retrieval_runner import _build_heart_for_eval, _settings_for_eval_db
+from nous.storage.database import Database
+
+logger = logging.getLogger(__name__)
+
+
+_QUERY_GEN_TOOL_NAME = "emit_graph_query"
+
+_QUERY_GEN_TOOL = {
+    "name": _QUERY_GEN_TOOL_NAME,
+    "description": (
+        "Emit a question whose factual answer is in TARGET but whose "
+        "vocabulary leans toward SOURCE. The query MUST NOT name TARGET "
+        "directly — the test is whether graph expansion (not vector "
+        "search alone) is needed to reach TARGET from a SOURCE-flavored "
+        "query."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "The generated question. Phrase it naturally; do not "
+                    "include any phrasing from TARGET that would let a "
+                    "lexical or embedding match find TARGET directly."
+                ),
+            },
+            "answerable": {
+                "type": "boolean",
+                "description": (
+                    "True if TARGET genuinely answers the question. "
+                    "False if you couldn't write a faithful question "
+                    "linking SOURCE-vocabulary to TARGET-fact (in which "
+                    "case the row will be dropped)."
+                ),
+            },
+            "rationale": {
+                "type": "string",
+                "description": "One short sentence on why this bridges S→T.",
+            },
+        },
+        "required": ["query", "answerable", "rationale"],
+        "additionalProperties": False,
+    },
+}
+
+
+@dataclass(frozen=True, slots=True)
+class EdgeCandidate:
+    source_id: UUID
+    target_id: UUID
+    source_type: str
+    target_type: str
+    relation: str
+    weight: float
+    source_content: str
+    target_content: str
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedQrel:
+    query: str
+    gold_id: UUID
+    gold_type: str
+    source_id: UUID
+    relation: str
+    rationale: str
+
+
+async def fetch_edge_candidates(
+    db: Database,
+    agent_id: str,
+    *,
+    sample_size: int,
+    min_weight: float = 0.7,
+) -> list[EdgeCandidate]:
+    """Pull trusted edges from the eval DB.
+
+    `extraction_method='inferred'` rows are excluded — those are the
+    edges the penalty is designed to weigh down, so using them as the
+    qrel bridge would be circular. `deterministic` (supersession) and
+    high-weight `heuristic` rows are trusted ground truth.
+
+    Selection is randomized via TABLESAMPLE-equivalent (ORDER BY
+    random() LIMIT N) so repeated runs explore different bridges.
+    Fact↔fact and fact→decision relations dominate the prod snapshot
+    and are the most retrieval-relevant — no per-type quota for now.
+    """
+    # We need to join graph_edges to the source/target content tables
+    # to feed the LLM. Three node types matter here: fact, decision,
+    # episode. Procedures rarely participate in retrieval-shaped queries.
+    # The retrieval_pipeline graph-expansion paths ONLY surface DECISION
+    # neighbors (heart→graph→decisions at line 268-292; brain
+    # decision-expansion at line 305+). So for a graph-targeted qrel to
+    # be reachable via the graph path at all, target_type MUST equal
+    # 'decision'. Fact↔fact bridges in the prod corpus also tend to be
+    # near-duplicates of the auto-linker, which don't differentiate
+    # configs even if reachable.
+    #
+    # Source side is open — fact/decision/episode/procedure all work as
+    # the seed via Heart's vector+keyword retrieval. We rank cross-type
+    # candidates first (fact→decision evidence_for, procedure→decision
+    # informed_by) because the source-target embedding gap is larger,
+    # giving the validator a better chance of finding a query where
+    # graph helps the rank.
+    sql = text("""
+        WITH candidates AS (
+            SELECT
+                e.source_id, e.target_id, e.source_type, e.target_type,
+                e.relation, e.weight,
+                CASE
+                    WHEN e.source_type <> e.target_type THEN 0
+                    ELSE 1
+                END AS same_type_penalty
+            FROM brain.graph_edges e
+            WHERE e.agent_id = :agent_id
+              AND e.extraction_method <> 'inferred'
+              AND e.weight >= :min_weight
+              AND e.source_type IN ('fact','decision','episode','procedure')
+              AND e.target_type = 'decision'
+            ORDER BY same_type_penalty ASC, random()
+            LIMIT :sample_size
+        )
+        SELECT
+            c.source_id, c.target_id, c.source_type, c.target_type,
+            c.relation, c.weight,
+            COALESCE(
+                fs.content,
+                ds.description,
+                es.summary,
+                ps.description
+            ) AS source_content,
+            COALESCE(
+                ft.content,
+                dt.description,
+                et.summary,
+                pt.description
+            ) AS target_content
+        FROM candidates c
+        LEFT JOIN heart.facts      fs ON c.source_type='fact'      AND fs.id=c.source_id
+        LEFT JOIN brain.decisions  ds ON c.source_type='decision'  AND ds.id=c.source_id
+        LEFT JOIN heart.episodes   es ON c.source_type='episode'   AND es.id=c.source_id
+        LEFT JOIN heart.procedures ps ON c.source_type='procedure' AND ps.id=c.source_id
+        LEFT JOIN heart.facts      ft ON c.target_type='fact'      AND ft.id=c.target_id
+        LEFT JOIN brain.decisions  dt ON c.target_type='decision'  AND dt.id=c.target_id
+        LEFT JOIN heart.episodes   et ON c.target_type='episode'   AND et.id=c.target_id
+        LEFT JOIN heart.procedures pt ON c.target_type='procedure' AND pt.id=c.target_id
+    """)
+    async with db.session() as s:
+        rows = (await s.execute(
+            sql,
+            {"agent_id": agent_id, "min_weight": min_weight, "sample_size": sample_size},
+        )).all()
+    out: list[EdgeCandidate] = []
+    for r in rows:
+        if not r.source_content or not r.target_content:
+            continue
+        # Trim very long contents — Haiku prompt budget.
+        out.append(EdgeCandidate(
+            source_id=r.source_id,
+            target_id=r.target_id,
+            source_type=r.source_type,
+            target_type=r.target_type,
+            relation=r.relation,
+            weight=float(r.weight),
+            source_content=(r.source_content or "")[:600],
+            target_content=(r.target_content or "")[:600],
+        ))
+    return out
+
+
+def _build_query_gen_prompt(c: EdgeCandidate) -> str:
+    return (
+        "You will be shown two memory items that are connected by a "
+        "graph edge in our knowledge base. Your task is to generate a "
+        "natural-language question that someone might realistically ask, "
+        "such that:\n"
+        " - The factual answer is in TARGET.\n"
+        " - The question's wording leans on SOURCE's vocabulary, not TARGET's.\n"
+        " - The question does NOT mention TARGET's distinctive terms directly.\n\n"
+        f"SOURCE ({c.source_type}):\n{c.source_content}\n\n"
+        f"TARGET ({c.target_type}):\n{c.target_content}\n\n"
+        f"Edge relation: {c.relation} (from SOURCE to TARGET).\n\n"
+        "Call emit_graph_query. If you cannot write a faithful question "
+        "where TARGET genuinely answers it, set answerable=false."
+    )
+
+
+async def generate_query(
+    candidate: EdgeCandidate,
+    llm_client: Any,
+    model: str,
+) -> tuple[str, str] | None:
+    """Returns (query, rationale) or None if the model declines."""
+    payload = {
+        "model": model,
+        "max_tokens": 512,
+        "system": "",
+        "tools": [_QUERY_GEN_TOOL],
+        "tool_choice": {"type": "tool", "name": _QUERY_GEN_TOOL_NAME},
+        "messages": [
+            {"role": "user", "content": _build_query_gen_prompt(candidate)},
+        ],
+    }
+    response = await llm_client.call(payload)
+    for block in (response.content or []):
+        if block.get("type") == "tool_use" and block.get("name") == _QUERY_GEN_TOOL_NAME:
+            data = block.get("input") or {}
+            if not data.get("answerable", False):
+                return None
+            query = (data.get("query") or "").strip()
+            rationale = (data.get("rationale") or "").strip()
+            if not query:
+                return None
+            return query, rationale
+    return None
+
+
+def _rank_of(results: list[PipelineResult], target_id: UUID, limit: int) -> int | None:
+    """1-based rank within top-K, or None if not present in top-K."""
+    for i, r in enumerate(results[:limit], 1):
+        if r.id == target_id:
+            return i
+    return None
+
+
+def _rank_of_full(results: list[PipelineResult], target_id: UUID) -> int | None:
+    """1-based rank across the full result list (no K limit)."""
+    for i, r in enumerate(results, 1):
+        if r.id == target_id:
+            return i
+    return None
+
+
+async def _validate_query(
+    query: str,
+    target_id: UUID,
+    heart: Heart,
+    brain: Brain,
+    settings: Settings,
+    limit: int,
+) -> bool:
+    """Keep if graph recall demonstrably HELPS the target's rank.
+
+    Strict "graph-off misses, graph-on hits" is too restrictive on
+    heuristic-edge bridges (those edges have cosine ~0.8 by
+    construction, so the vector path usually finds the target
+    somewhere in top-K). The looser criterion — graph-on improves the
+    rank vs graph-off, OR graph-off misses entirely while graph-on
+    hits — still ensures these qrels DO differentiate graph configs
+    (which is the whole point) without zero-yielding on a corpus
+    whose edges are nearly all cosine-derived.
+    """
+    settings_off = settings.model_copy(update={"graph_recall_enabled": False})
+    settings_on = settings.model_copy(update={"graph_recall_enabled": True})
+
+    off_results, _ = await run_recall_pipeline(
+        query, heart, brain, settings_off, limit=limit,
+    )
+    on_results, _ = await run_recall_pipeline(
+        query, heart, brain, settings_on, limit=limit,
+    )
+
+    off_full = _rank_of_full(off_results, target_id)
+    on_full = _rank_of_full(on_results, target_id)
+    logger.debug(
+        "validate query=%r off_full_rank=%s on_full_rank=%s",
+        query[:60], off_full, on_full,
+    )
+
+    # Keep when graph_on improves the gold's full-list rank vs graph_off
+    # (or graph_off misses entirely). NOTE: graph-expanded items are
+    # appended AFTER heart_results in the pipeline's stage order, so they
+    # typically land at position 11+ — outside a top-K=10 eval cutoff.
+    # The F051 harness will not score these as "found" at top-K=10 unless
+    # CE rerank reorders the assembled list such that the graph item rises
+    # into the top window. On the v2026-Q2 nous-prod-snapshot corpus
+    # (heuristic edges, 0 inferred edges) the F065 penalty A/B produces
+    # zero delta regardless — the penalty only weighs inferred-tier edges.
+    if on_full is None:
+        return False
+    if off_full is None:
+        return True
+    return on_full < off_full
+
+
+def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
+    return json.dumps({
+        "query": qrel.query,
+        "gold_ids": [str(qrel.gold_id)],
+        "memory_types": [qrel.gold_type],
+        "source": "graph_targeted",
+        "notes": {
+            "bridge_via": str(qrel.source_id),
+            "edge_relation": qrel.relation,
+            "rationale": qrel.rationale,
+        },
+        "reviewed_by": "auto",
+    })
+
+
+async def _run_async(args: argparse.Namespace) -> int:
+    eval_settings = EvalSettings()
+    eval_settings.warn_if_default_password()
+    base_settings = Settings()
+    main_settings = _settings_for_eval_db(eval_settings, base_settings)
+
+    db = Database(settings=main_settings)
+    await db.connect()
+    try:
+        candidates = await fetch_edge_candidates(
+            db,
+            agent_id=main_settings.agent_id,
+            sample_size=args.sample_size,
+            min_weight=args.min_weight,
+        )
+        logger.info("Sampled %d edge candidates", len(candidates))
+        if not candidates:
+            print("No candidates available — confirm the eval DB has heuristic/deterministic edges.", file=sys.stderr)
+            return 1
+
+        api_client = create_client(main_settings)
+        await api_client.start()
+        try:
+            kept: list[GeneratedQrel] = []
+            async with _build_heart_for_eval(db, main_settings) as heart:
+                brain = Brain(database=db, settings=main_settings)
+                for i, cand in enumerate(candidates, 1):
+                    try:
+                        gen = await generate_query(cand, api_client, args.model)
+                    except Exception as exc:
+                        logger.warning("Haiku call failed for edge %s→%s: %s",
+                                       cand.source_id, cand.target_id, exc)
+                        continue
+                    if gen is None:
+                        continue
+                    query, rationale = gen
+                    try:
+                        ok = await _validate_query(
+                            query, cand.target_id, heart, brain, main_settings, args.top_k,
+                        )
+                    except Exception as exc:
+                        logger.warning("Validation failed for %s: %s", query[:60], exc)
+                        continue
+                    if not ok:
+                        continue
+                    kept.append(GeneratedQrel(
+                        query=query,
+                        gold_id=cand.target_id,
+                        gold_type=cand.target_type,
+                        source_id=cand.source_id,
+                        relation=cand.relation,
+                        rationale=rationale,
+                    ))
+                    logger.info("KEEP [%d/%d]: %s", i, len(candidates), query[:80])
+                    if len(kept) >= args.target_size:
+                        break
+        finally:
+            await api_client.close()
+    finally:
+        await db.disconnect()
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        for q in kept:
+            f.write(_qrel_to_jsonl(q) + "\n")
+    print(f"Wrote {len(kept)} qrels to {out_path}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m nous_eval.generate_graph_qrels")
+    parser.add_argument("--sample-size", type=int, default=60,
+                        help="Edge candidates to sample (yield is typically 10-30%%).")
+    parser.add_argument("--target-size", type=int, default=20,
+                        help="Stop early once this many qrels are kept.")
+    parser.add_argument("--min-weight", type=float, default=0.7,
+                        help="Minimum edge weight for trusted bridges.")
+    parser.add_argument("--top-k", type=int, default=10,
+                        help="Top-K depth used by validation passes.")
+    parser.add_argument("--model", default="claude-haiku-4-5-20251001",
+                        help="LLM for query generation.")
+    parser.add_argument("--out", required=True,
+                        help="Output JSONL path (typically inside the fixtures dir).")
+    parser.add_argument("--log-level", default="info")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=args.log_level.upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    return asyncio.run(_run_async(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

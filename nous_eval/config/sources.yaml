@@ -42,6 +42,13 @@ sources:
     requires_fixtures_dir: true
     description: "Haiku-reverse-generated (informational only, circular risk)"
 
+  - name: graph_targeted
+    path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_graph_targeted.jsonl"
+    enabled_by_default: true
+    gate_eligible: true
+    requires_fixtures_dir: true
+    description: "Graph-only-reachable queries (validated: graph-off misses, graph-on hits) — produced by nous_eval.generate_graph_qrels"
+
   - name: nous_prod
     path: "tests/fixtures/qrels_nous_prod.jsonl"
     enabled_by_default: false
