@@ -296,20 +296,21 @@ async def _validate_query(
     settings: Settings,
     limit: int,
 ) -> bool:
-    """Keep iff graph_on places the gold INSIDE the top-K AND that
-    placement is at least as good as graph_off's (i.e., graph helped
-    or graph_off missed entirely).
+    """Keep iff graph_off MISSES top-K AND graph_on HITS top-K.
 
-    Codex P1 (2026-05-23): the prior implementation kept qrels whose
-    gold ranked outside top-K under both configs (so long as
-    on_full < off_full). Harness scoring only counts retrieved[:top_k]
-    (retrieval_runner._score_rank), so such rows are misses for both
-    configs — they bloat n_qrels without contributing to metric deltas
-    and risk distorting gate decisions on `graph_targeted` (which is
-    gate_eligible: true).
+    Codex P2 (2026-05-23): this source is named `graph_targeted` and
+    documented as "graph-only-reachable". Keeping rows where graph_off
+    already finds the gold in top-K (just at a worse rank than
+    graph_on) violates that contract: P@K and R@K count both configs
+    as hits, so per-config recall comparisons can't distinguish
+    graph-only signal from rank-shuffle signal. MRR can still differ
+    on rank-shifts, but mixing rank-shift rows into a source marketed
+    as "graph-only" makes the source's purpose ambiguous and risks
+    distorting gate decisions.
 
-    The strict criterion below is the only safe choice for an
-    enabled-by-default gate-eligible source.
+    The strict criterion below — graph-off MUST miss top-K and
+    graph-on MUST hit top-K — gives the source a single, audit-clear
+    contract.
     """
     settings_off = settings.model_copy(update={"graph_recall_enabled": False})
     settings_on = settings.model_copy(update={"graph_recall_enabled": True})
@@ -328,14 +329,7 @@ async def _validate_query(
         query[:60], off_rank, on_rank,
     )
 
-    # graph-on MUST place the gold inside top-K — otherwise the qrel
-    # is a miss in the harness and provides no signal.
-    if on_rank is None:
-        return False
-    # graph-off either missed entirely OR ranked worse than graph-on.
-    if off_rank is None:
-        return True
-    return on_rank < off_rank
+    return on_rank is not None and off_rank is None
 
 
 def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
