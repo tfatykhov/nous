@@ -15,14 +15,22 @@
 -- written by the same code paths pre-fix.
 --
 -- Discriminator: auto_linked=true AND extraction_method='heuristic' AND
--- relation NOT IN ('supersedes', 'contradicts'). The relation filter
--- protects rows that migration 047 already classified by structural
--- provenance — those keep their tier.
+-- relation NOT IN the structural-provenance set:
+--   - 'supersedes' and 'contradicts' are already classified by
+--     migration 047 (supersedes→deterministic, contradicts→inferred);
+--     re-running over them would be a no-op anyway.
+--   - 'discussed_in' and 'extracted_from' are written by
+--     `link_episode_deterministic` in nous/brain/graph_linker.py:320,345
+--     which calls classify(..., source='structural') for new writes,
+--     yielding 'deterministic'. But rows created before migration 047
+--     were backfilled to 'heuristic' (relation-only rule). Codex P1
+--     (2026-05-23): without excluding those relations here, the
+--     backfill would silently flip legacy structural edges to
+--     'inferred', applying the F065 penalty to deterministic
+--     provenance.
 --
 -- F027 supersedes/contradicts writes also set auto_linked=true (see
--- nous/heart/facts.py:179) but their extraction_method was already set
--- correctly by relation in migration 047, so they're skipped by the
--- relation-filter.
+-- nous/heart/facts.py:179) but the relation filter above protects them.
 
 BEGIN;
 
@@ -30,6 +38,9 @@ UPDATE brain.graph_edges
 SET extraction_method = 'inferred'
 WHERE auto_linked = true
   AND extraction_method = 'heuristic'
-  AND relation NOT IN ('supersedes', 'contradicts');
+  AND relation NOT IN (
+      'supersedes', 'contradicts',         -- already classified by relation
+      'discussed_in', 'extracted_from'      -- structural per graph_linker
+  );
 
 COMMIT;

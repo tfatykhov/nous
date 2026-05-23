@@ -60,17 +60,18 @@ def _pr(uid, type_: str = "fact", score: float = 0.8) -> PipelineResult:
     )
 
 
-async def _fake_pipeline_hit(query, heart, brain, settings, limit, memory_types):
+async def _fake_pipeline_hit(query, heart, brain, settings, limit, memory_types, **kwargs):
     """Return a hit at rank 1 for any query."""
     uid = uuid4()
     return [_pr(uid)], PipelineStats()
 
 
-async def _fake_pipeline_miss(query, heart, brain, settings, limit, memory_types):
+async def _fake_pipeline_miss(query, heart, brain, settings, limit, memory_types, **kwargs):
     return [], PipelineStats()
 
 
-async def _fake_pipeline_raises(query, heart, brain, settings, limit, memory_types):
+
+async def _fake_pipeline_raises(query, heart, brain, settings, limit, memory_types, **kwargs):
     raise RuntimeError("synthetic failure from fake pipeline")
 
 
@@ -257,7 +258,7 @@ async def test_score_rank_first_gold_match() -> None:
     gold = uuid4()
     other = uuid4()
 
-    async def _pipeline(query, heart, brain, settings, limit, memory_types):
+    async def _pipeline(query, heart, brain, settings, limit, memory_types, **kwargs):
         return [_pr(other), _pr(gold), _pr(uuid4())], PipelineStats()
 
     cfgs = [RetrievalConfig(name="baseline", flags={})]
