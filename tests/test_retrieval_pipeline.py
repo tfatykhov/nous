@@ -266,6 +266,81 @@ class TestRunRecallPipeline:
         assert DECISION_TWO_ID in d1.contradicts
 
     @pytest.mark.asyncio
+    async def test_rerank_by_score_merges_graph_into_top_k(self):
+        """F065 follow-up (2026-05-23): when rerank_by_score=True, the
+        assembled list is stably re-sorted by score descending. Graph-
+        expanded items whose score exceeds a heart_result's score should
+        be able to rank into the top window — the whole point of the flag.
+        Stable sort preserves stage order for equal scores so the snapshot-
+        protected default path is untouched.
+        """
+        # Build a heart pool with a LOW score and a graph_expanded with a
+        # HIGH score. Without the flag the graph item ends up last; with
+        # the flag it should leapfrog into rank 1.
+        low_score_heart = RecallResult(
+            type="fact",
+            id=FACT_ID,
+            summary="low-scored heart hit",
+            score=0.10,
+        )
+        heart = _make_heart(recall_results=[low_score_heart])
+        # Brain neighbors with a high edge_weight so the score after
+        # decay (0.7 default) is still ~0.9 — beats the heart item.
+        high_score_neighbor = NeighborResult(
+            id=HEART_GRAPH_DECISION_ID,
+            node_type="decision",
+            description="high-scoring graph neighbor",
+            edge_relation="supports",
+            edge_weight=1.3,  # 1.3 * 0.7 decay = 0.91, beats 0.10
+            created_at=datetime.now(UTC),
+        )
+        brain = _make_brain(
+            neighbors_by_node={
+                FACT_ID: [high_score_neighbor],
+                EPISODE_ID: [],
+            },
+            contradictions=[],
+            decision_results=[],
+        )
+        settings = _make_settings()
+
+        # Baseline (rerank_by_score=False, default): stage order — heart first.
+        baseline_results, _ = await run_recall_pipeline(
+            query="anything",
+            heart=heart,
+            brain=brain,
+            settings=settings,
+            limit=10,
+        )
+        assert baseline_results[0].id == FACT_ID, "default path keeps stage order"
+
+        # Reset mocks so the heart.recall returns the same result on the
+        # opt-in call.
+        heart = _make_heart(recall_results=[low_score_heart])
+        brain = _make_brain(
+            neighbors_by_node={
+                FACT_ID: [high_score_neighbor],
+                EPISODE_ID: [],
+            },
+            contradictions=[],
+            decision_results=[],
+        )
+
+        # Opt-in (rerank_by_score=True): score-sorted — graph item climbs.
+        merged_results, _ = await run_recall_pipeline(
+            query="anything",
+            heart=heart,
+            brain=brain,
+            settings=settings,
+            limit=10,
+            rerank_by_score=True,
+        )
+        assert merged_results[0].id == HEART_GRAPH_DECISION_ID, (
+            "rerank_by_score=True must place the high-scored graph item at rank 1"
+        )
+        assert merged_results[1].id == FACT_ID
+
+    @pytest.mark.asyncio
     async def test_decisions_only_skips_heart(self):
         heart = _make_heart(recall_results=[])
         brain = _make_brain(

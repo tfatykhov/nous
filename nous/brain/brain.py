@@ -1073,6 +1073,13 @@ class Brain:
     ) -> GraphEdgeInfo:
         from nous.brain.edge_provenance import classify  # F065 (avoid circular)
 
+        # F065 phase 4 follow-up (2026-05-23): auto-linked writes are
+        # cosine-derived "inferred" provenance even when the relation is
+        # neither contradicts nor supersedes. Without this tagging, the
+        # F065 penalty multiplier had nothing to apply to in prod (0
+        # contradicts rows — see nous/heart/facts.py:35 for the F027
+        # classifier's CONTRADICTION bias).
+        writer = "auto_linker" if auto_linked else None
         edge = GraphEdge(
             source_id=source_id,
             target_id=target_id,
@@ -1082,7 +1089,7 @@ class Brain:
             relation=relation,
             weight=weight,
             auto_linked=auto_linked,
-            extraction_method=classify(relation),  # F065
+            extraction_method=classify(relation, source=writer),
         )
         session.add(edge)
         await session.flush()
@@ -1451,7 +1458,7 @@ class Brain:
                     relation="related_to",
                     weight=float(row.similarity),
                     auto_linked=True,
-                    extraction_method=classify("related_to"),  # F065
+                    extraction_method=classify("related_to", source="auto_linker"),
                 )
                 .on_conflict_do_nothing(constraint="uq_edges_src_tgt_rel")
             )

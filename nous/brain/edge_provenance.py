@@ -41,20 +41,36 @@ def classify(
     Args:
         relation: the edge relation string (e.g. 'supersedes', 'contradicts',
                   'related_to', 'extracted_from', 'discussed_in', etc.).
-        source: explicit override for writers that carry structural
-                provenance the relation string alone can't express. Only
-                ``'structural'`` is currently recognized — used by
-                ``link_episode_deterministic`` whose discussed_in /
-                extracted_from edges come from explicit episode-token
-                references, not cosine matching.
+        source: writer-identity tag explicitly passed by the call site.
+                Recognized values:
+                  - ``'structural'``: explicit episode-token / supersession
+                    references, not cosine-derived. → deterministic.
+                  - ``'auto_linker'``: event-bus cosine auto-linker writes
+                    (``nous/brain/graph_linker.py`` related_to / evidence_for
+                    paths). → inferred. Added 2026-05-23 as the F065 phase 4
+                    follow-up: prod has 0 ``contradicts`` rows (F027
+                    classifier is biased toward UPDATE — see
+                    ``nous/heart/facts.py:35``), so the original
+                    relation-only rule left ``inferred`` empty and the
+                    penalty multiplier dormant. Tagging the auto-linker as
+                    its own writer aligns the tier with operational reality.
+                  - ``'ce_backfill'``: F040 sleep-cycle cross-encoder
+                    backfill. Also cosine-derived. → inferred.
 
     Returns:
         One of 'deterministic', 'inferred', 'heuristic'.
     """
-    if source == "structural":
-        return "deterministic"
+    # Precedence: structural-provenance relations win over any source
+    # tag, because supersedes/contradicts encode the writer's intent in
+    # the relation itself. The `source` tag only disambiguates relations
+    # that COULD be either heuristic or inferred (related_to,
+    # evidence_for, informed_by, etc.).
     if relation == "supersedes":
         return "deterministic"
     if relation == "contradicts":
+        return "inferred"
+    if source == "structural":
+        return "deterministic"
+    if source in ("auto_linker", "ce_backfill"):
         return "inferred"
     return "heuristic"

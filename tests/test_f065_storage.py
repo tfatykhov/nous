@@ -68,17 +68,51 @@ class TestClassify:
         assert classify("extracted_from", source="structural") == "deterministic"
         assert classify("discussed_in", source="structural") == "deterministic"
 
-    def test_source_structural_overrides_inferred(self) -> None:
-        # Edge case: structural source wins even when relation would be
-        # 'inferred'. This shouldn't happen in production but documents
-        # the precedence rule.
-        assert classify("contradicts", source="structural") == "deterministic"
+    def test_relation_contradicts_wins_over_source_structural(self) -> None:
+        # 2026-05-23: precedence rule reversed as part of F065 phase 4
+        # follow-up. The relation `contradicts` is inherently
+        # LLM-classifier inferred — calling it `deterministic` because
+        # someone tagged the writer as `structural` would lie about how
+        # the edge was determined. Structurally-deterministic relations
+        # (supersedes) win over source; for other relations the source
+        # tag is the disambiguator. Hypothetical case; no caller passes
+        # this combination in production today.
+        assert classify("contradicts", source="structural") == "inferred"
 
     def test_unknown_source_is_ignored(self) -> None:
         # Defense in depth: an unknown source value must NOT silently
-        # change behavior. Only 'structural' is recognized.
+        # change behavior. Only the registered values are recognized.
         assert classify("related_to", source="experimental") == "heuristic"
         assert classify("supersedes", source="experimental") == "deterministic"
+
+    def test_source_auto_linker_routes_to_inferred(self) -> None:
+        # F065 phase 4 follow-up (2026-05-23): cosine-derived auto-linker
+        # writes get the `inferred` tier so the F065 penalty multiplier
+        # actually has a population to apply to in prod (the F027
+        # classifier writes ~0 contradicts rows by design — see
+        # nous/heart/facts.py:35).
+        assert classify("related_to", source="auto_linker") == "inferred"
+        assert classify("evidence_for", source="auto_linker") == "inferred"
+        assert classify("informed_by", source="auto_linker") == "inferred"
+
+    def test_source_ce_backfill_routes_to_inferred(self) -> None:
+        # F040 sleep-cycle cross-encoder backfill is also cosine-derived
+        # and shares the same trust tier as the live auto-linker.
+        assert classify("related_to", source="ce_backfill") == "inferred"
+        assert classify("evidence_for", source="ce_backfill") == "inferred"
+
+    def test_relation_supersedes_overrides_source_auto_linker(self) -> None:
+        # Precedence: structural-provenance relations win over any
+        # source tag. A theoretical caller passing source='auto_linker'
+        # with relation='supersedes' must still classify as
+        # deterministic — supersedes encodes structural provenance in
+        # the relation itself.
+        assert classify("supersedes", source="auto_linker") == "deterministic"
+
+    def test_relation_contradicts_keeps_inferred_under_auto_linker(self) -> None:
+        # Both rules agree on `inferred` here; the precedence ordering
+        # just shouldn't shift it to anything else.
+        assert classify("contradicts", source="auto_linker") == "inferred"
 
     def test_extraction_method_literal_type(self) -> None:
         # Type-level smoke: classify's return type is the ExtractionMethod

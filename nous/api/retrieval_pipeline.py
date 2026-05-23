@@ -156,6 +156,7 @@ async def run_recall_pipeline(
     memory_types: list[str] | None = None,
     residual_activations: dict[UUID, float] | None = None,
     apply_mmr: bool | None = None,
+    rerank_by_score: bool = False,
 ) -> tuple[list[PipelineResult], PipelineStats]:
     """Run the full retrieval pipeline.
 
@@ -199,6 +200,25 @@ async def run_recall_pipeline(
     # Attach contradiction links to matching results
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
+
+    # F065 follow-up (2026-05-23): optional score-based merge.
+    #
+    # The default stage-order assembly above places graph-expanded items
+    # AFTER heart_results in the concatenated list — so they always sit
+    # at position 11+ for a top-K=10 reader, no matter how high their
+    # scores are. That makes every graph-touching feature (F022 spreading
+    # activation, F030 MMR-after-graph, F065 inferred-edge penalty)
+    # invisible to a top-K=10 eval.
+    #
+    # When ``rerank_by_score=True``, we stably re-sort by score descending
+    # (Python's sort is stable, so equal scores preserve stage order as
+    # a tiebreaker). Default ``False`` keeps the `recall_deep` tool output
+    # byte-identical to its committed snapshot — only callers that opt in
+    # (the F051 harness today) see the new behavior. When we're confident
+    # the merged ordering is preferable in production too, the default
+    # can be flipped and the snapshot regenerated.
+    if rerank_by_score:
+        results.sort(key=lambda r: r.score or 0.0, reverse=True)
 
     stats = PipelineStats(
         ce_reranked=False,  # CE rerank happens inside heart.recall already
