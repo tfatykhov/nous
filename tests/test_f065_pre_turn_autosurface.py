@@ -197,6 +197,66 @@ class TestComputeHubShiftNotice:
         result = await cognitive_layer._compute_hub_shift_notice(agent_id, session=session)
         assert "left the top-10" in result
 
+    async def test_left_top_n_persisted_no_repeat_notice(
+        self, cognitive_layer, db, session: AsyncSession
+    ) -> None:
+        """Codex P1 follow-up (2026-05-22): the first pre_turn after a hub
+        drops out emits a 'left' notice and persists a rank=None
+        snapshot. The second pre_turn must NOT re-emit — otherwise the
+        same notice spams the system prompt every turn until retention
+        pruning eventually deletes the stale in-top-N row.
+        """
+        from sqlalchemy import select as _select
+
+        agent_id = f"f065-p2-leftspam-{uuid.uuid4().hex[:6]}"
+        cognitive_layer._brain.agent_id = agent_id
+
+        live_hub_id = await _seed_decision(session, agent_id, "still hubby")
+        for _ in range(3):
+            leaf = await _seed_decision(session, agent_id, "leaf")
+            await _seed_edge(
+                session, agent_id=agent_id, source_id=live_hub_id, target_id=leaf,
+            )
+        session.add(GraphHubSnapshot(
+            agent_id=agent_id,
+            node_id=live_hub_id,
+            node_type="decision",
+            degree=3,
+            rank=1,
+            captured_at=datetime.now(UTC) - timedelta(hours=1),
+        ))
+
+        gone_id = uuid.uuid4()
+        session.add(GraphHubSnapshot(
+            agent_id=agent_id,
+            node_id=gone_id,
+            node_type="decision",
+            degree=5,
+            rank=3,
+            captured_at=datetime.now(UTC) - timedelta(hours=1),
+        ))
+        await session.commit()
+
+        first = await cognitive_layer._compute_hub_shift_notice(agent_id, session=session)
+        assert "left the top-10" in first
+
+        # A rank=None snapshot for gone_id must now exist.
+        rows = (await session.execute(
+            _select(GraphHubSnapshot).where(
+                GraphHubSnapshot.node_id == gone_id,
+                GraphHubSnapshot.rank.is_(None),
+            )
+        )).scalars().all()
+        assert len(rows) == 1, (
+            "expected one rank=NULL snapshot persisted for the 'left' transition"
+        )
+
+        second = await cognitive_layer._compute_hub_shift_notice(agent_id, session=session)
+        assert "left the top-10" not in second, (
+            "second pre_turn must not re-emit the same 'left' notice — "
+            "the rank=None snapshot should suppress it via get_latest_top_n"
+        )
+
     async def test_autosurface_disabled_path_short_circuits(
         self, cognitive_layer, db, session: AsyncSession
     ) -> None:

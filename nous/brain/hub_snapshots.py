@@ -83,14 +83,20 @@ class HubSnapshotManager:
     ) -> dict[UUID, GraphHubSnapshot]:
         from sqlalchemy import desc, func
 
+        # Codex P1 (2026-05-22, follow-up): take the ABSOLUTE most recent
+        # snapshot per node (no rank filter in the subquery), then filter
+        # the outer join by rank in [1, top_n]. This way, when a "left"
+        # transition is persisted as a rank=NULL row, that newer row
+        # supersedes the earlier in-top-N row and the node is correctly
+        # excluded. Without this, a node that dropped out kept surfacing
+        # its stale in-top-N snapshot turn after turn, re-emitting "left"
+        # notices forever (prompt spam) until retention pruning kicked in.
         subq = (
             select(
                 GraphHubSnapshot.node_id,
                 func.max(GraphHubSnapshot.captured_at).label("max_at"),
             )
             .where(GraphHubSnapshot.agent_id == self._agent_id)
-            .where(GraphHubSnapshot.rank.is_not(None))
-            .where(GraphHubSnapshot.rank <= top_n)
             .group_by(GraphHubSnapshot.node_id)
             .subquery()
         )
@@ -102,17 +108,15 @@ class HubSnapshotManager:
                 & (GraphHubSnapshot.captured_at == subq.c.max_at),
             )
             .where(GraphHubSnapshot.agent_id == self._agent_id)
+            .where(GraphHubSnapshot.rank.is_not(None))
+            .where(GraphHubSnapshot.rank <= top_n)
             .order_by(desc(GraphHubSnapshot.captured_at))
         )
         result = await session.execute(q)
         latest: dict[UUID, GraphHubSnapshot] = {}
         for snap in result.scalars().all():
-            # If the latest row for this node has rank > top_n, exclude it
-            # — the prior-top-N filter above selects a snapshot where the
-            # node was once in the top-N, but the *most recent* row for it
-            # may be a later out-of-top-N record. We want the last one
-            # where it was actually in the top-N, which the subquery
-            # already gives us. The dict-merge below is just dedup.
+            # Duplicates with identical captured_at (microsecond race) —
+            # keep the first seen.
             latest.setdefault(snap.node_id, snap)
         return latest
 

@@ -1310,22 +1310,51 @@ class CognitiveLayer:
 
         # Persist new snapshots for hubs whose rank crossed the top-N
         # boundary so the next session compares correctly.
+        #
+        # Codex P1 (2026-05-22 follow-up): we MUST persist transitions
+        # in BOTH directions. Previously only `entered` notices wrote a
+        # new snapshot, so a node that dropped out kept surfacing its
+        # stale in-top-N row via get_latest_top_n turn after turn,
+        # re-emitting the same "left" notice every pre_turn until
+        # retention pruning cleaned it up. For `left` notices we now
+        # write a snapshot with rank=None (the node is no longer ranked
+        # in the top-N); the paired query change in
+        # HubSnapshotManager._get_latest_top_n_inner now compares
+        # against the ABSOLUTE-latest row, so this rank=None entry
+        # correctly suppresses the next "left" emission.
         for notice in notices:
-            if notice["kind"] != "entered":
-                continue
             uid = notice.get("node_id")
             if uid is None:
                 continue
-            live_hub = live_by_uuid.get(uid)
-            if live_hub is None:
-                continue
-            await hub_mgr.record_snapshot(
-                node_id=uid,
-                node_type=live_hub["node_type"],
-                degree=live_hub["degree"],
-                rank=notice["rank"],
-                session=session,
-            )
+            if notice["kind"] == "entered":
+                live_hub = live_by_uuid.get(uid)
+                if live_hub is None:
+                    continue
+                await hub_mgr.record_snapshot(
+                    node_id=uid,
+                    node_type=live_hub["node_type"],
+                    degree=live_hub["degree"],
+                    rank=notice["rank"],
+                    session=session,
+                )
+            elif notice["kind"] == "left":
+                # The node isn't in live_hubs by definition; node_type
+                # is encoded in the "left" label as `[node_type] uuid`
+                # (see detect_rank_shifts). Extract defensively, falling
+                # back to "unknown" if the label shape ever changes —
+                # we don't want a parse failure to skip the snapshot
+                # write and re-trigger the spam Codex flagged.
+                label = notice.get("label", "")
+                node_type = "unknown"
+                if label.startswith("[") and "]" in label:
+                    node_type = label[1:label.index("]")]
+                await hub_mgr.record_snapshot(
+                    node_id=uid,
+                    node_type=node_type,
+                    degree=notice.get("degree", 0),
+                    rank=None,
+                    session=session,
+                )
 
         return format_hub_shift_block(notices)
 
