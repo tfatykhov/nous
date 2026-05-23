@@ -2562,20 +2562,44 @@ def register_dag_tools(
             # Parse nodes
             node_specs: list[DAGNodeSpec] = []
             for n in kwargs.get("nodes", []):
-                node_specs.append(DAGNodeSpec(
-                    name=n["name"],
-                    type=DAGNodeType(n["type"]),
-                    instructions=n.get("instructions", ""),
-                    description=n.get("description", ""),
-                    tools=n.get("tools"),
-                    frame_type=n.get("frame_type"),
-                    model=n.get("model"),
-                    timeout_seconds=n.get("timeout_seconds"),
-                    completion_condition=n.get("completion_condition"),
-                    completion_check=n.get("completion_check"),
-                    completion_check_interval=n.get("completion_check_interval"),
-                    max_check_attempts=n.get("max_check_attempts"),
-                ))
+                # F066.1 (2026-05-23): the orchestrator + schemas + migration
+                # shipped fix-node support, but this handler historically only
+                # threaded a fixed set of fields into DAGNodeSpec — so fix-node
+                # fields (parent_node, fix_actions, max_fix_attempts,
+                # expected_modes) were silently dropped at the tool surface,
+                # making fix nodes unauthorable via dag_create. Same silent-
+                # drop pattern affected F064.1's stall_timeout_seconds. The
+                # block below threads every field the schema accepts so
+                # future field additions to DAGNodeSpec land in dag_create
+                # automatically as long as the tool schema description in
+                # register() also exposes them.
+                node_data: dict[str, Any] = {
+                    "name": n["name"],
+                    "type": DAGNodeType(n["type"]),
+                    "instructions": n.get("instructions", ""),
+                    "description": n.get("description", ""),
+                    "tools": n.get("tools"),
+                    "frame_type": n.get("frame_type"),
+                    "model": n.get("model"),
+                    "timeout_seconds": n.get("timeout_seconds"),
+                    "completion_condition": n.get("completion_condition"),
+                    "completion_check": n.get("completion_check"),
+                    "completion_check_interval": n.get("completion_check_interval"),
+                    "max_check_attempts": n.get("max_check_attempts"),
+                    "stall_timeout_seconds": n.get("stall_timeout_seconds"),
+                    # F066.1 fix-node fields. Optional except for type='fix';
+                    # the DAGCreateRequest validator enforces parent_node +
+                    # non-empty fix_actions when type=='fix'.
+                    "parent_node": n.get("parent_node"),
+                    "fix_actions": n.get("fix_actions"),
+                    "expected_modes": n.get("expected_modes", []),
+                }
+                # max_fix_attempts has no nullable type (ge=1, le=3). Only
+                # forward it if the caller supplied a value so pydantic's
+                # default (1) applies otherwise.
+                if "max_fix_attempts" in n:
+                    node_data["max_fix_attempts"] = n["max_fix_attempts"]
+                node_specs.append(DAGNodeSpec(**node_data))
 
             # Parse edges
             edge_specs: list[DAGEdgeSpec] = []
@@ -2690,8 +2714,59 @@ def register_dag_tools(
         "properties": {
             "name": {"type": "string", "description": "DAG name"},
             "description": {"type": "string"},
-            "nodes": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback"]}, "instructions": {"type": "string"}, "tools": {"type": "array", "items": {"type": "string"}}, "frame_type": {"type": "string"}, "model": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT)"}, "completion_condition": {"type": "string"}, "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."}, "completion_check_interval": {"type": "integer", "description": "Seconds between completion check polls (default: every tick)"}, "max_check_attempts": {"type": "integer", "description": "Max poll attempts before node fails"}}, "required": ["name", "type", "instructions"]}},
-            "edges": {"type": "array", "items": {"type": "object", "properties": {"from_node": {"type": "string"}, "to_node": {"type": "string"}, "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow"]}}, "required": ["from_node", "to_node"]}},
+            "nodes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        # F066.1 (2026-05-23): added "fix" so fix-stage
+                        # recovery nodes are authorable. Phase 1 ships
+                        # rule-based dispatch; Phase 1.5 (NOUS_DAG_FIX_LLM_
+                        # DISPATCH_ENABLED) routes to Haiku tool-use.
+                        "type": {"type": "string", "enum": ["subtask", "check", "gate", "callback", "fix"]},
+                        "instructions": {"type": "string"},
+                        "tools": {"type": "array", "items": {"type": "string"}},
+                        "frame_type": {"type": "string"},
+                        "model": {"type": "string"},
+                        "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Execution timeout in seconds (default: NOUS_DAG_NODE_DEFAULT_TIMEOUT, ceiling: NOUS_DAG_NODE_MAX_TIMEOUT)"},
+                        "stall_timeout_seconds": {"type": "integer", "minimum": 0, "description": "F064.1: max seconds without activity before failing this node. 0 = disabled for this node. Unset = inherit NOUS_DAG_NODE_DEFAULT_STALL_TIMEOUT."},
+                        "completion_condition": {"type": "string"},
+                        "completion_check": {"type": "string", "description": "Shell command polled each tick. Exit 0 = success, 1 = failed, 2 = still running."},
+                        "completion_check_interval": {"type": "integer", "description": "Seconds between completion check polls (default: every tick)"},
+                        "max_check_attempts": {"type": "integer", "description": "Max poll attempts before node fails"},
+                        # F066.1 — fix-stage recovery fields. Only meaningful
+                        # when type='fix'; the DAGCreateRequest validator
+                        # enforces parent_node + non-empty fix_actions for
+                        # fix nodes and rejects these fields on non-fix nodes.
+                        "parent_node": {"type": "string", "description": "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the parent transitions to 'failed'. The matching 'on_failure' edge MUST point from the parent to this fix node — i.e. from_node = (this parent_node value), to_node = (the fix node's own name). Pointing the edge the other direction fails validation."},
+                        "fix_actions": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["retry_as_is", "retry_with_amended_prompt", "mark_unrecoverable", "skip_and_continue"]},
+                            "description": "F066.1 (type='fix' only): allowed action vocabulary. Phase 1 dispatcher rules: incomplete/validation_failed errors → retry_as_is; timed_out → skip_and_continue (or mark_unrecoverable); other errors → skip_and_continue then mark_unrecoverable as final fallback. retry_with_amended_prompt only acts when NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true."
+                        },
+                        "max_fix_attempts": {"type": "integer", "minimum": 1, "maximum": 3, "description": "F066.1 (type='fix' only): max fix attempts per parent failure. Default 1."},
+                        "expected_modes": {"type": "array", "items": {"type": "string"}, "description": "F066.1 (type='fix' only): declared failure modes for typed dispatch (Phase 2). Phase 1 ignores this field."},
+                    },
+                    "required": ["name", "type", "instructions"],
+                },
+            },
+            "edges": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "from_node": {"type": "string"},
+                        "to_node": {"type": "string"},
+                        # F066.1: added "on_failure" so the fix-node attach
+                        # edge is authorable. The validator requires exactly
+                        # one on_failure inbound edge per fix node, with
+                        # from_node == fix.parent_node.
+                        "edge_type": {"type": "string", "enum": ["dependency", "cancel_cascade", "context_flow", "on_failure"]},
+                    },
+                    "required": ["from_node", "to_node"],
+                },
+            },
             "source": {"type": "string"},
             "token_budget": {"type": "integer"},
         },

@@ -133,6 +133,92 @@ class TestDagCreateTool:
         assert isinstance(result["content"][0]["text"], str)
 
     @pytest.mark.asyncio
+    async def test_dag_create_authors_fix_node(self, tools, dag_store):
+        """F066.1 (2026-05-23): dag_create must thread fix-node fields
+        (parent_node, fix_actions, max_fix_attempts, expected_modes) into
+        DAGNodeSpec. The historical handler dropped them silently — the
+        DAG appeared to create cleanly but the fix node was unreachable
+        because its required fields were lost at the tool surface.
+        """
+        handler = tools._handlers["dag_create"]
+        result = await handler(
+            name="fix-node-dag",
+            nodes=[
+                {"name": "fetch", "type": "subtask", "instructions": "Fetch data"},
+                {
+                    "name": "fix-fetch",
+                    "type": "fix",
+                    "instructions": "Recover from fetch failure",
+                    "parent_node": "fetch",
+                    "fix_actions": ["retry_as_is", "skip_and_continue"],
+                    "max_fix_attempts": 2,
+                    "expected_modes": ["timed_out"],
+                },
+            ],
+            edges=[
+                {"from_node": "fetch", "to_node": "fix-fetch", "edge_type": "on_failure"},
+            ],
+        )
+        text = result["content"][0]["text"]
+        # Handler reports success — not "Error".
+        assert "Error" not in text, f"dag_create unexpectedly failed: {text}"
+        assert "fix-node-dag" in text
+
+        # The fix-node fields actually landed in the persisted DAG.
+        dags = await dag_store.get_active_dags()
+        fix_node_dag = next(d for d in dags if d.name == "fix-node-dag")
+        fix_node = next(n for n in fix_node_dag.nodes if n.name == "fix-fetch")
+        assert fix_node.node_type == "fix"
+        assert fix_node.parent_node == "fetch"
+        assert fix_node.fix_actions == ["retry_as_is", "skip_and_continue"]
+        assert fix_node.max_fix_attempts == 2
+        assert fix_node.expected_modes == ["timed_out"]
+
+    @pytest.mark.asyncio
+    async def test_dag_create_fix_node_missing_parent_node_errors(self, tools):
+        """A fix node without parent_node should be rejected by the
+        DAGCreateRequest validator and surfaced as an error — not silently
+        accepted. Guards against the prior bug where parent_node was
+        dropped: an LLM that omits it accidentally would have gotten a
+        "running" DAG with a broken fix node."""
+        handler = tools._handlers["dag_create"]
+        result = await handler(
+            name="broken-fix",
+            nodes=[
+                {"name": "task", "type": "subtask", "instructions": "Do it"},
+                {
+                    "name": "fix-task",
+                    "type": "fix",
+                    "instructions": "Recover",
+                    # parent_node MISSING — must fail loudly
+                    "fix_actions": ["mark_unrecoverable"],
+                },
+            ],
+            edges=[
+                {"from_node": "task", "to_node": "fix-task", "edge_type": "on_failure"},
+            ],
+        )
+        text = result["content"][0]["text"]
+        assert "Error" in text
+        assert "parent_node" in text
+
+    @pytest.mark.asyncio
+    async def test_dag_create_tool_schema_advertises_fix_surface(self, tools):
+        """The tool's JSON schema (consumed by Anthropic tool-use
+        validation) must list 'fix' in node.type.enum and 'on_failure'
+        in edge.edge_type.enum, plus the four fix-node fields under
+        node.properties. Without these, the LLM can't even attempt to
+        author a fix node — the API rejects the call before the handler
+        sees it."""
+        schema = tools._schemas["dag_create"]
+        node_props = schema["properties"]["nodes"]["items"]["properties"]
+        assert "fix" in node_props["type"]["enum"]
+        for field in ("parent_node", "fix_actions", "max_fix_attempts", "expected_modes"):
+            assert field in node_props, f"node schema missing {field}"
+        edge_enum = schema["properties"]["edges"]["items"]["properties"]["edge_type"]["enum"]
+        assert "on_failure" in edge_enum
+
+    @pytest.mark.asyncio
     async def test_dag_create_handles_db_error(self, tools, dag_store, dag_orchestrator):
         """dag_create catches non-ValueError exceptions and returns clean error."""
         original_create = dag_store.create
