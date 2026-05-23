@@ -14,23 +14,40 @@
 -- `inferred`. This migration backfills the EXISTING rows that were
 -- written by the same code paths pre-fix.
 --
--- Discriminator: auto_linked=true AND extraction_method='heuristic' AND
--- relation NOT IN the structural-provenance set:
---   - 'supersedes' and 'contradicts' are already classified by
---     migration 047 (supersedes→deterministic, contradicts→inferred);
---     re-running over them would be a no-op anyway.
---   - 'discussed_in' and 'extracted_from' are written by
---     `link_episode_deterministic` in nous/brain/graph_linker.py:320,345
---     which calls classify(..., source='structural') for new writes,
---     yielding 'deterministic'. But rows created before migration 047
---     were backfilled to 'heuristic' (relation-only rule). Codex P1
---     (2026-05-23): without excluding those relations here, the
---     backfill would silently flip legacy structural edges to
---     'inferred', applying the F065 penalty to deterministic
---     provenance.
+-- Discriminator: auto_linked=true AND extraction_method='heuristic'
+-- AND weight < 1.0 AND relation NOT IN ('supersedes', 'contradicts').
 --
--- F027 supersedes/contradicts writes also set auto_linked=true (see
--- nous/heart/facts.py:179) but the relation filter above protects them.
+-- The weight predicate splits the two writers that produce
+-- discussed_in / extracted_from rows:
+--
+--   - `link_episode_deterministic` in nous/brain/graph_linker.py:316,341
+--     writes weight=1.0 literally — structural provenance.
+--   - `DecisionGraphLinker` in
+--     nous/handlers/decision_graph_linker.py:118,161 writes
+--     weight=float(cosine_similarity) — cosine-derived, statistically
+--     always strictly < 1.0.
+--
+-- Without the weight predicate, two distinct concerns would collide:
+--
+--   1. Codex P1 round 1 (2026-05-23): excluding discussed_in /
+--      extracted_from entirely from the backfill protects legacy
+--      structural rows but ALSO skips legacy COSINE rows of those same
+--      relations. After the migration, the same cosine writer would
+--      produce split provenance depending on whether the row pre-dates
+--      this migration.
+--
+--   2. Codex P1 round 2 (2026-05-23): the weight-based split picks up
+--      the legacy cosine discussed_in / extracted_from rows while
+--      leaving structural rows alone.
+--
+-- supersedes / contradicts already have correct extraction_method
+-- from migration 047 (relation-based), so the relation filter is
+-- belt-and-braces.
+--
+-- A future migration may want to additionally promote weight=1.0
+-- discussed_in / extracted_from rows from 'heuristic' to
+-- 'deterministic' to fully reflect their structural provenance, but
+-- that is orthogonal to F065 and out of scope here.
 
 BEGIN;
 
@@ -38,9 +55,7 @@ UPDATE brain.graph_edges
 SET extraction_method = 'inferred'
 WHERE auto_linked = true
   AND extraction_method = 'heuristic'
-  AND relation NOT IN (
-      'supersedes', 'contradicts',         -- already classified by relation
-      'discussed_in', 'extracted_from'      -- structural per graph_linker
-  );
+  AND weight < 1.0
+  AND relation NOT IN ('supersedes', 'contradicts');
 
 COMMIT;
