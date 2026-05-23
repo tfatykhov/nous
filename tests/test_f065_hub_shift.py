@@ -100,6 +100,20 @@ class TestDetectRankShifts:
     def test_format_block_empty_when_no_notices(self) -> None:
         assert format_hub_shift_block([]) == ""
 
+    def test_format_block_renders_configured_top_n(self) -> None:
+        """Codex P2 (2026-05-22): the formatter must reflect the
+        configured top_n, not the hardcoded literal 10. Operators
+        running with graph_hub_autosurface_top_n=20 should see
+        'top-20' in the rendered text."""
+        notices = [
+            {"kind": "entered", "label": "X", "rank": 4, "degree": 38},
+            {"kind": "left", "label": "[decision] some-uuid", "rank": None, "degree": 20},
+        ]
+        block = format_hub_shift_block(notices, top_n=20)
+        assert "entered the top-20" in block
+        assert "left the top-20" in block
+        assert "top-10" not in block
+
 
 # ---------------------------------------------------------------------------
 # HubSnapshotManager integration tests
@@ -159,6 +173,56 @@ class TestHubSnapshotManager:
         latest = await mgr.get_latest([uid], session=session)
         # The most recent row wins.
         assert latest[uid].degree == 31
+
+    async def test_record_snapshot_failure_does_not_poison_outer_txn(
+        self, session: AsyncSession, db
+    ) -> None:
+        """Codex P2 (2026-05-22): when record_snapshot is given a shared
+        session and the flush fails, the failure must NOT leave the outer
+        transaction in a PendingRollbackError state. Simulating the
+        failure by passing an obviously-invalid value (None for a
+        NOT NULL column would normally raise IntegrityError on flush) is
+        sketchy with SQLite, so instead we drive the savepoint code
+        path directly: monkeypatch session.flush to raise once, confirm
+        the outer session is still usable afterwards.
+        """
+        import uuid as _uuid
+        from unittest.mock import AsyncMock, patch
+
+        agent_id = f"t-hub-{_uuid.uuid4().hex[:6]}"
+        mgr = HubSnapshotManager(database=db, agent_id=agent_id)
+        uid = _uuid.uuid4()
+
+        original_flush = session.flush
+        call_count = {"n": 0}
+
+        async def flaky_flush(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated flush failure")
+            return await original_flush(*args, **kwargs)
+
+        with patch.object(session, "flush", side_effect=flaky_flush):
+            # First call: flush raises inside record_snapshot → savepoint
+            # rolls back → outer transaction stays clean.
+            await mgr.record_snapshot(
+                uid, "decision", degree=31, rank=4, session=session,
+            )
+
+        # The outer session must still be usable: we can issue a query
+        # and add+flush a new row without PendingRollbackError.
+        latest = await mgr.get_latest([uid], session=session)
+        # First write was rolled back via savepoint, so the row isn't there.
+        assert uid not in latest
+
+        # Subsequent writes succeed on the same session.
+        uid2 = _uuid.uuid4()
+        await mgr.record_snapshot(
+            uid2, "decision", degree=10, rank=2, session=session,
+        )
+        await session.flush()
+        latest2 = await mgr.get_latest([uid2], session=session)
+        assert uid2 in latest2
 
     async def test_prune_older_than(
         self, session: AsyncSession, db

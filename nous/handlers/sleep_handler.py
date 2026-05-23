@@ -493,6 +493,14 @@ class SleepHandler:
                 if success:
                     phases_completed.append("prune_dead_edges")
 
+            # F065 Phase 2: prune old hub-rank snapshots so the
+            # brain.graph_hub_snapshots table doesn't grow monotonically.
+            # Disabled when retention_days == 0.
+            if not self._interrupted:
+                success = await self._phase_prune_hub_snapshots(sleep_stats)
+                if success:
+                    phases_completed.append("prune_hub_snapshots")
+
             if not self._interrupted:
                 success = await self._phase_generalize(sleep_stats)
                 if success:
@@ -1456,6 +1464,42 @@ class SleepHandler:
             # returns False so it's excluded from phases_completed.
             sleep_stats["dead_edges_prune_error"] = type(exc).__name__
             logger.warning("F053 dead-edge prune failed", exc_info=True)
+            return False
+
+    async def _phase_prune_hub_snapshots(self, sleep_stats: dict) -> bool:
+        """F065 Phase 2: prune old rows from brain.graph_hub_snapshots.
+
+        The autosurface hook in pre_turn writes one row per (agent, hub)
+        when a rank changes (and one row per first-sight). Over time
+        this table grows monotonically — this phase prunes rows older
+        than NOUS_GRAPH_HUB_SNAPSHOT_RETENTION_DAYS so the table stays
+        bounded.
+
+        Disabled when retention_days <= 0. Errors are caught and logged;
+        the phase returns False but pre_turn / other sleep phases are
+        unaffected.
+        """
+        try:
+            retention_days = int(self._settings.graph_hub_snapshot_retention_days)
+            if retention_days <= 0:
+                return True
+            from nous.brain.hub_snapshots import HubSnapshotManager
+
+            agent_id = self._settings.agent_id
+            # Reuse the heart DB pool — HubSnapshotManager only writes
+            # to brain.graph_hub_snapshots, no schema-isolation issue.
+            mgr = HubSnapshotManager(self._heart.db, agent_id)
+            deleted = await mgr.prune_older_than(days=retention_days)
+            sleep_stats["hub_snapshots_pruned"] = deleted
+            if deleted:
+                logger.info(
+                    "F065: pruned %d hub-snapshot rows older than %d days",
+                    deleted, retention_days,
+                )
+            return True
+        except Exception as exc:
+            sleep_stats["hub_snapshot_prune_error"] = type(exc).__name__
+            logger.warning("F065 hub-snapshot prune failed", exc_info=True)
             return False
 
     async def _phase_recover_abandoned_episodes(self, sleep_stats: dict) -> bool:

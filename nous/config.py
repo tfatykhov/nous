@@ -507,10 +507,11 @@ class Settings(BaseSettings):
     graph_hub_autosurface_enabled: bool = False
 
     # F065: Hub-snapshot retention (sleep handler prunes older rows).
+    # Set to 0 to disable the prune phase entirely (rows accumulate).
     graph_hub_snapshot_retention_days: int = Field(
         default=90,
-        ge=1,
-        description="F065: days to retain brain.graph_hub_snapshots rows. Sleep handler prunes older rows.",
+        ge=0,
+        description="F065: days to retain brain.graph_hub_snapshots rows. Sleep handler prunes older rows. 0 disables the prune phase.",
     )
 
     # F065: top-N hubs the autosurface tracks.

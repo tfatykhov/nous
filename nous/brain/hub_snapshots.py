@@ -55,6 +55,71 @@ class HubSnapshotManager:
                 return await self._get_latest_inner(node_ids, s)
         return await self._get_latest_inner(node_ids, session)
 
+    async def get_latest_top_n(
+        self,
+        top_n: int,
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, GraphHubSnapshot]:
+        """F065: return the most-recent snapshot for each node that was
+        in the top-N at last capture (rank IS NOT NULL AND rank <= top_n).
+
+        Used by pre_turn alongside ``get_latest`` for the live hubs —
+        the combined set lets ``detect_rank_shifts`` fire 'left top-N'
+        notices for nodes that dropped out (Codex review P1, 2026-05-22).
+        Without this, the lookup is biased toward current live hubs and
+        we never emit the 'left' branch of the shift signal.
+        """
+        from sqlalchemy import desc, func, select as _select
+
+        if session is None:
+            async with self._db.session() as s:
+                return await self._get_latest_top_n_inner(top_n, s)
+        return await self._get_latest_top_n_inner(top_n, session)
+
+    async def _get_latest_top_n_inner(
+        self,
+        top_n: int,
+        session: AsyncSession,
+    ) -> dict[UUID, GraphHubSnapshot]:
+        from sqlalchemy import desc, func
+
+        # Codex P1 (2026-05-22, follow-up): take the ABSOLUTE most recent
+        # snapshot per node (no rank filter in the subquery), then filter
+        # the outer join by rank in [1, top_n]. This way, when a "left"
+        # transition is persisted as a rank=NULL row, that newer row
+        # supersedes the earlier in-top-N row and the node is correctly
+        # excluded. Without this, a node that dropped out kept surfacing
+        # its stale in-top-N snapshot turn after turn, re-emitting "left"
+        # notices forever (prompt spam) until retention pruning kicked in.
+        subq = (
+            select(
+                GraphHubSnapshot.node_id,
+                func.max(GraphHubSnapshot.captured_at).label("max_at"),
+            )
+            .where(GraphHubSnapshot.agent_id == self._agent_id)
+            .group_by(GraphHubSnapshot.node_id)
+            .subquery()
+        )
+        q = (
+            select(GraphHubSnapshot)
+            .join(
+                subq,
+                (GraphHubSnapshot.node_id == subq.c.node_id)
+                & (GraphHubSnapshot.captured_at == subq.c.max_at),
+            )
+            .where(GraphHubSnapshot.agent_id == self._agent_id)
+            .where(GraphHubSnapshot.rank.is_not(None))
+            .where(GraphHubSnapshot.rank <= top_n)
+            .order_by(desc(GraphHubSnapshot.captured_at))
+        )
+        result = await session.execute(q)
+        latest: dict[UUID, GraphHubSnapshot] = {}
+        for snap in result.scalars().all():
+            # Duplicates with identical captured_at (microsecond race) —
+            # keep the first seen.
+            latest.setdefault(snap.node_id, snap)
+        return latest
+
     async def _get_latest_inner(
         self,
         node_ids: list[UUID],
@@ -104,6 +169,15 @@ class HubSnapshotManager:
         """Insert a snapshot row. Errors are logged and swallowed —
         the caller (pre_turn fire-and-forget task) doesn't propagate
         snapshot failures.
+
+        Codex P2 (2026-05-22): when the caller passes in its own
+        session, wrap the flush in a SAVEPOINT (``begin_nested``) so a
+        snapshot-write failure rolls back ONLY the snapshot, not the
+        caller's whole transaction. Without this, a swallowed flush
+        error on a shared session leaves SQLAlchemy in a failed-flush
+        state and every subsequent operation raises
+        ``PendingRollbackError`` — silently turning a diagnostic
+        write failure into a pre_turn-wide outage.
         """
         try:
             if session is None:
@@ -117,14 +191,15 @@ class HubSnapshotManager:
                     ))
                     await s.commit()
             else:
-                session.add(GraphHubSnapshot(
-                    agent_id=self._agent_id,
-                    node_id=node_id,
-                    node_type=node_type,
-                    degree=degree,
-                    rank=rank,
-                ))
-                await session.flush()
+                async with session.begin_nested():
+                    session.add(GraphHubSnapshot(
+                        agent_id=self._agent_id,
+                        node_id=node_id,
+                        node_type=node_type,
+                        degree=degree,
+                        rank=rank,
+                    ))
+                    await session.flush()
         except Exception:
             logger.warning(
                 "F065: failed to record hub snapshot for %s (agent=%s)",
@@ -218,6 +293,7 @@ def detect_rank_shifts(
             # Wasn't in the top-N before, is now.
             notices.append({
                 "kind": "entered",
+                "node_id": uid,
                 "label": h["label"],
                 "rank": h["rank"],
                 "degree": h["degree"],
@@ -231,6 +307,7 @@ def detect_rank_shifts(
             # Was a hub, no longer in the top-N.
             notices.append({
                 "kind": "left",
+                "node_id": uid,
                 "label": f"[{prior.node_type}] {uid}",
                 "rank": None,
                 "degree": prior.degree,
@@ -239,11 +316,18 @@ def detect_rank_shifts(
     return notices, new_nodes
 
 
-def format_hub_shift_block(notices: list[dict]) -> str:
+def format_hub_shift_block(notices: list[dict], top_n: int = 10) -> str:
     """Render hub-shift notices for injection into the system prompt.
 
     Returns an empty string when no notices fired (caller can skip the
     section header entirely).
+
+    Codex P2 (2026-05-22): ``top_n`` is now a parameter so the rendered
+    text matches the configured ``graph_hub_autosurface_top_n`` setting.
+    Previously the formatter hardcoded "top-10" — if an operator set
+    the threshold to anything else, the injected prompt lied to the
+    model. Defaults to 10 so existing call sites that haven't been
+    updated keep producing the historical text.
     """
     if not notices:
         return ""
@@ -252,11 +336,11 @@ def format_hub_shift_block(notices: list[dict]) -> str:
         if n["kind"] == "entered":
             lines.append(
                 f"[graph] Hub shift: \"{n['label'][:80]}\" entered the "
-                f"top-10 (rank #{n['rank']}, degree {n['degree']})."
+                f"top-{top_n} (rank #{n['rank']}, degree {n['degree']})."
             )
         elif n["kind"] == "left":
             lines.append(
-                f"[graph] Hub shift: {n['label'][:80]} left the top-10 "
+                f"[graph] Hub shift: {n['label'][:80]} left the top-{top_n} "
                 f"(was degree {n['degree']})."
             )
     return "\n".join(lines)

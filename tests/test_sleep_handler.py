@@ -226,7 +226,10 @@ class TestPhasesCompleted:
         assert "graph_densification" in emitted.data["phases_completed"]
         assert "recover_abandoned_episodes" in emitted.data["phases_completed"]
         assert "generalize" in emitted.data["phases_completed"]
-        assert len(emitted.data["phases_completed"]) == 8
+        # F065 Phase 2: prune_hub_snapshots runs after prune_dead_edges
+        # and is included when graph_hub_snapshot_retention_days > 0 (default).
+        assert "prune_hub_snapshots" in emitted.data["phases_completed"]
+        assert len(emitted.data["phases_completed"]) == 9
 
     @pytest.mark.asyncio
     async def test_all_phases_succeed_all_in_phases_completed(self):
@@ -240,11 +243,13 @@ class TestPhasesCompleted:
         handler._phase_recover_abandoned_episodes = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
         handler._phase_evolve_rubric = AsyncMock(return_value=True)
+        handler._phase_prune_hub_snapshots = AsyncMock(return_value=True)  # F065 Phase 2
 
         await handler._run_sleep(_make_event("sleep_started"))
 
         emitted = bus.emit.call_args[0][0]
-        assert len(emitted.data["phases_completed"]) == 9
+        # F065 Phase 2 adds prune_hub_snapshots → 10 phases.
+        assert len(emitted.data["phases_completed"]) == 10
 
 
 # ===========================================================================
