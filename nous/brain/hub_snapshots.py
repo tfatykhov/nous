@@ -169,6 +169,15 @@ class HubSnapshotManager:
         """Insert a snapshot row. Errors are logged and swallowed —
         the caller (pre_turn fire-and-forget task) doesn't propagate
         snapshot failures.
+
+        Codex P2 (2026-05-22): when the caller passes in its own
+        session, wrap the flush in a SAVEPOINT (``begin_nested``) so a
+        snapshot-write failure rolls back ONLY the snapshot, not the
+        caller's whole transaction. Without this, a swallowed flush
+        error on a shared session leaves SQLAlchemy in a failed-flush
+        state and every subsequent operation raises
+        ``PendingRollbackError`` — silently turning a diagnostic
+        write failure into a pre_turn-wide outage.
         """
         try:
             if session is None:
@@ -182,14 +191,15 @@ class HubSnapshotManager:
                     ))
                     await s.commit()
             else:
-                session.add(GraphHubSnapshot(
-                    agent_id=self._agent_id,
-                    node_id=node_id,
-                    node_type=node_type,
-                    degree=degree,
-                    rank=rank,
-                ))
-                await session.flush()
+                async with session.begin_nested():
+                    session.add(GraphHubSnapshot(
+                        agent_id=self._agent_id,
+                        node_id=node_id,
+                        node_type=node_type,
+                        degree=degree,
+                        rank=rank,
+                    ))
+                    await session.flush()
         except Exception:
             logger.warning(
                 "F065: failed to record hub snapshot for %s (agent=%s)",
@@ -306,11 +316,18 @@ def detect_rank_shifts(
     return notices, new_nodes
 
 
-def format_hub_shift_block(notices: list[dict]) -> str:
+def format_hub_shift_block(notices: list[dict], top_n: int = 10) -> str:
     """Render hub-shift notices for injection into the system prompt.
 
     Returns an empty string when no notices fired (caller can skip the
     section header entirely).
+
+    Codex P2 (2026-05-22): ``top_n`` is now a parameter so the rendered
+    text matches the configured ``graph_hub_autosurface_top_n`` setting.
+    Previously the formatter hardcoded "top-10" — if an operator set
+    the threshold to anything else, the injected prompt lied to the
+    model. Defaults to 10 so existing call sites that haven't been
+    updated keep producing the historical text.
     """
     if not notices:
         return ""
@@ -319,11 +336,11 @@ def format_hub_shift_block(notices: list[dict]) -> str:
         if n["kind"] == "entered":
             lines.append(
                 f"[graph] Hub shift: \"{n['label'][:80]}\" entered the "
-                f"top-10 (rank #{n['rank']}, degree {n['degree']})."
+                f"top-{top_n} (rank #{n['rank']}, degree {n['degree']})."
             )
         elif n["kind"] == "left":
             lines.append(
-                f"[graph] Hub shift: {n['label'][:80]} left the top-10 "
+                f"[graph] Hub shift: {n['label'][:80]} left the top-{top_n} "
                 f"(was degree {n['degree']})."
             )
     return "\n".join(lines)

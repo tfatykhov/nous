@@ -1356,7 +1356,7 @@ class CognitiveLayer:
                     session=session,
                 )
 
-        return format_hub_shift_block(notices)
+        return format_hub_shift_block(notices, top_n=top_n)
 
     def _resolve_focus_text(self, user_input: str) -> str | None:
         """Return the text to set as current_task, or None to preserve existing topic.
