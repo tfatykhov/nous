@@ -72,7 +72,10 @@ class TestJsonlEmitter:
         loaded = json.loads(line)
         assert loaded["query"] == qrel.query
         assert loaded["gold_ids"] == [str(target)]
-        assert loaded["memory_types"] == ["decision"]
+        # Codex P1 (2026-05-23): memory_types must enable the full pipeline,
+        # not just the gold's type — otherwise the Heart→graph stage that
+        # produces the qrel's signal won't fire during harness scoring.
+        assert set(loaded["memory_types"]) == {"fact", "decision", "episode", "procedure"}
         assert loaded["source"] == QrelSource.GRAPH_TARGETED.value
         assert loaded["reviewed_by"] == "auto"
         assert loaded["notes"]["bridge_via"] == str(bridge)

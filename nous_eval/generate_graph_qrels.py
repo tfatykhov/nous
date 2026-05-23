@@ -295,16 +295,20 @@ async def _validate_query(
     settings: Settings,
     limit: int,
 ) -> bool:
-    """Keep if graph recall demonstrably HELPS the target's rank.
+    """Keep iff graph_on places the gold INSIDE the top-K AND that
+    placement is at least as good as graph_off's (i.e., graph helped
+    or graph_off missed entirely).
 
-    Strict "graph-off misses, graph-on hits" is too restrictive on
-    heuristic-edge bridges (those edges have cosine ~0.8 by
-    construction, so the vector path usually finds the target
-    somewhere in top-K). The looser criterion — graph-on improves the
-    rank vs graph-off, OR graph-off misses entirely while graph-on
-    hits — still ensures these qrels DO differentiate graph configs
-    (which is the whole point) without zero-yielding on a corpus
-    whose edges are nearly all cosine-derived.
+    Codex P1 (2026-05-23): the prior implementation kept qrels whose
+    gold ranked outside top-K under both configs (so long as
+    on_full < off_full). Harness scoring only counts retrieved[:top_k]
+    (retrieval_runner._score_rank), so such rows are misses for both
+    configs — they bloat n_qrels without contributing to metric deltas
+    and risk distorting gate decisions on `graph_targeted` (which is
+    gate_eligible: true).
+
+    The strict criterion below is the only safe choice for an
+    enabled-by-default gate-eligible source.
     """
     settings_off = settings.model_copy(update={"graph_recall_enabled": False})
     settings_on = settings.model_copy(update={"graph_recall_enabled": True})
@@ -316,37 +320,39 @@ async def _validate_query(
         query, heart, brain, settings_on, limit=limit,
     )
 
-    off_full = _rank_of_full(off_results, target_id)
-    on_full = _rank_of_full(on_results, target_id)
+    off_rank = _rank_of(off_results, target_id, limit)
+    on_rank = _rank_of(on_results, target_id, limit)
     logger.debug(
-        "validate query=%r off_full_rank=%s on_full_rank=%s",
-        query[:60], off_full, on_full,
+        "validate query=%r off_topk_rank=%s on_topk_rank=%s",
+        query[:60], off_rank, on_rank,
     )
 
-    # Keep when graph_on improves the gold's full-list rank vs graph_off
-    # (or graph_off misses entirely). NOTE: graph-expanded items are
-    # appended AFTER heart_results in the pipeline's stage order, so they
-    # typically land at position 11+ — outside a top-K=10 eval cutoff.
-    # The F051 harness will not score these as "found" at top-K=10 unless
-    # CE rerank reorders the assembled list such that the graph item rises
-    # into the top window. On the v2026-Q2 nous-prod-snapshot corpus
-    # (heuristic edges, 0 inferred edges) the F065 penalty A/B produces
-    # zero delta regardless — the penalty only weighs inferred-tier edges.
-    if on_full is None:
+    # graph-on MUST place the gold inside top-K — otherwise the qrel
+    # is a miss in the harness and provides no signal.
+    if on_rank is None:
         return False
-    if off_full is None:
+    # graph-off either missed entirely OR ranked worse than graph-on.
+    if off_rank is None:
         return True
-    return on_full < off_full
+    return on_rank < off_rank
 
 
 def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
+    # Codex P1 (2026-05-23): memory_types MUST include the full pipeline
+    # surface, not just the gold's type. The retrieval harness routes
+    # `qrel.memory_types` into `run_recall_pipeline(memory_types=...)`,
+    # which gates which stages fire. Restricting to `[gold_type]` would
+    # disable the Heart stage when gold_type='decision' (which is the
+    # 100% case here) — and that's the very stage whose graph expansion
+    # produces the qrel's signal. The whole pipeline must run.
     return json.dumps({
         "query": qrel.query,
         "gold_ids": [str(qrel.gold_id)],
-        "memory_types": [qrel.gold_type],
+        "memory_types": ["fact", "decision", "episode", "procedure"],
         "source": "graph_targeted",
         "notes": {
             "bridge_via": str(qrel.source_id),
+            "bridge_source_type": qrel.gold_type,  # kept for audit
             "edge_relation": qrel.relation,
             "rationale": qrel.rationale,
         },

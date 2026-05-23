@@ -44,10 +44,18 @@ sources:
 
   - name: graph_targeted
     path: "${NOUS_EVAL_FIXTURES_DIR}/qrels_graph_targeted.jsonl"
-    enabled_by_default: true
-    gate_eligible: true
+    # Default-off until the eval corpus contains an inferred-edge
+    # population that gives the F065 penalty multiplier something to
+    # apply to. On the v2026-Q2 nous-prod-snapshot corpus (and on the
+    # current prod nous DB, verified 2026-05-23) the
+    # extraction_method='inferred' bucket is empty, so the strict-
+    # top-K validator yields zero qrels and shipping the source as
+    # enabled-by-default would inject an empty gate-eligible source
+    # into every run.
+    enabled_by_default: false
+    gate_eligible: false
     requires_fixtures_dir: true
-    description: "Graph-only-reachable queries (validated: graph-off misses, graph-on hits) — produced by nous_eval.generate_graph_qrels"
+    description: "Graph-only-reachable queries — opt-in via --sources graph_targeted once the corpus has inferred-tier edges (see nous_eval.generate_graph_qrels)"
 
   - name: nous_prod
     path: "tests/fixtures/qrels_nous_prod.jsonl"
