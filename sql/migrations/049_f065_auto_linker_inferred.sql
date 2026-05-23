@@ -14,40 +14,39 @@
 -- `inferred`. This migration backfills the EXISTING rows that were
 -- written by the same code paths pre-fix.
 --
--- Discriminator: auto_linked=true AND extraction_method='heuristic'
--- AND weight < 1.0 AND relation NOT IN ('supersedes', 'contradicts').
+-- Discriminator (relation-conditional, NOT a blanket weight gate):
 --
--- The weight predicate splits the two writers that produce
--- discussed_in / extracted_from rows:
+--   - For `discussed_in` / `extracted_from`: weight=1.0 is the literal
+--     signature of `link_episode_deterministic`
+--     (nous/brain/graph_linker.py:316,341), which writes structural
+--     provenance. weight<1.0 is the signature of `DecisionGraphLinker`
+--     (nous/handlers/decision_graph_linker.py:118,161; cosine-derived).
+--     Backfill only the latter.
 --
---   - `link_episode_deterministic` in nous/brain/graph_linker.py:316,341
---     writes weight=1.0 literally — structural provenance.
---   - `DecisionGraphLinker` in
---     nous/handlers/decision_graph_linker.py:118,161 writes
---     weight=float(cosine_similarity) — cosine-derived, statistically
---     always strictly < 1.0.
+--   - For every other auto_linker relation (related_to, evidence_for,
+--     supports, caused_by, informed_by): there is no structural
+--     writer. Every auto_linked row is cosine-derived, regardless of
+--     weight. The weight predicate does NOT apply here, so cosine
+--     writes that happen to land at weight=1.0 (identical embeddings —
+--     duplicate-content facts the dedup pass missed) still get
+--     backfilled. Without this, the same writer would produce split
+--     provenance based on row age (Codex P1 round 3, 2026-05-23).
 --
--- Without the weight predicate, two distinct concerns would collide:
+--   - `supersedes` / `contradicts`: already classified by relation
+--     in migration 047 (deterministic / inferred). The relation
+--     filter is belt-and-braces.
 --
---   1. Codex P1 round 1 (2026-05-23): excluding discussed_in /
---      extracted_from entirely from the backfill protects legacy
---      structural rows but ALSO skips legacy COSINE rows of those same
---      relations. After the migration, the same cosine writer would
---      produce split provenance depending on whether the row pre-dates
---      this migration.
+-- Refresher on why `refines` isn't a concern: it is written by
+-- `Facts._create_graph_edge` at nous/heart/facts.py:564 with
+-- auto_linked=true + weight=0.8, but the ck_edges_relation CHECK
+-- constraint rejects it. The surrounding try/except swallows the
+-- failure, so zero `refines` rows exist in either prod or eval DB
+-- (verified 2026-05-23).
 --
---   2. Codex P1 round 2 (2026-05-23): the weight-based split picks up
---      the legacy cosine discussed_in / extracted_from rows while
---      leaving structural rows alone.
---
--- supersedes / contradicts already have correct extraction_method
--- from migration 047 (relation-based), so the relation filter is
--- belt-and-braces.
---
--- A future migration may want to additionally promote weight=1.0
--- discussed_in / extracted_from rows from 'heuristic' to
--- 'deterministic' to fully reflect their structural provenance, but
--- that is orthogonal to F065 and out of scope here.
+-- A future migration may promote the weight=1.0 structural
+-- discussed_in/extracted_from rows from 'heuristic' to 'deterministic'
+-- to fully reflect their structural provenance, but that is orthogonal
+-- to F065 and out of scope here.
 
 BEGIN;
 
@@ -55,7 +54,15 @@ UPDATE brain.graph_edges
 SET extraction_method = 'inferred'
 WHERE auto_linked = true
   AND extraction_method = 'heuristic'
-  AND weight < 1.0
-  AND relation NOT IN ('supersedes', 'contradicts');
+  AND relation NOT IN ('supersedes', 'contradicts')
+  AND (
+      -- Cosine-derived discussed_in / extracted_from rows:
+      -- DecisionGraphLinker writes weight=float(similarity), < 1.0.
+      -- Structural writes (link_episode_deterministic) use weight=1.0.
+      (relation IN ('discussed_in', 'extracted_from') AND weight < 1.0)
+      -- All other auto_linker relations have no structural writer;
+      -- weight is irrelevant for routing.
+      OR relation NOT IN ('discussed_in', 'extracted_from')
+  );
 
 COMMIT;
