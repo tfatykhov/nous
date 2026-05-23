@@ -521,6 +521,24 @@ class Settings(BaseSettings):
         description="F065: size of the top-N hub list used for rank-shift detection.",
     )
 
+    # F066.1 Phase 1.5: LLM-based fix-node dispatch. When False (default),
+    # the orchestrator uses fix_executor.choose_action (rule-based, Phase 1
+    # behavior). When True AND an LLM client is wired into DAGOrchestrator,
+    # the orchestrator calls fix_executor.choose_action_llm; any failure
+    # (timeout, parse error, unsupported action) falls back to the
+    # rule-based path.
+    dag_fix_llm_dispatch_enabled: bool = False
+    dag_fix_llm_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="F066.1 Phase 1.5: model for fix-node LLM dispatch. Default Haiku — the action set is small (4 enum values) and the prompt is short.",
+    )
+    dag_fix_llm_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=60.0,
+        description="F066.1 Phase 1.5: per-call timeout for the fix-node LLM dispatcher. Bounded so a slow LLM never hangs the orchestrator tick.",
+    )
+
     # F022 Phase 2: Cross-type linking
     cross_type_linking_enabled: bool = True
     cross_type_threshold: float = 0.80
