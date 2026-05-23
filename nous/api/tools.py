@@ -2739,7 +2739,7 @@ def register_dag_tools(
                         # when type='fix'; the DAGCreateRequest validator
                         # enforces parent_node + non-empty fix_actions for
                         # fix nodes and rejects these fields on non-fix nodes.
-                        "parent_node": {"type": "string", "description": "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the parent transitions to 'failed'. The matching 'on_failure' edge must have this node's name as from_node."},
+                        "parent_node": {"type": "string", "description": "F066.1 (type='fix' only): name of the node this fix attaches to. Fires when the parent transitions to 'failed'. The matching 'on_failure' edge MUST point from the parent to this fix node — i.e. from_node = (this parent_node value), to_node = (the fix node's own name). Pointing the edge the other direction fails validation."},
                         "fix_actions": {
                             "type": "array",
                             "items": {"type": "string", "enum": ["retry_as_is", "retry_with_amended_prompt", "mark_unrecoverable", "skip_and_continue"]},
