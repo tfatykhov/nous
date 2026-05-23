@@ -118,6 +118,7 @@ class GeneratedQrel:
     gold_id: UUID
     gold_type: str
     source_id: UUID
+    source_type: str
     relation: str
     rationale: str
 
@@ -342,17 +343,23 @@ def _qrel_to_jsonl(qrel: GeneratedQrel) -> str:
     # surface, not just the gold's type. The retrieval harness routes
     # `qrel.memory_types` into `run_recall_pipeline(memory_types=...)`,
     # which gates which stages fire. Restricting to `[gold_type]` would
-    # disable the Heart stage when gold_type='decision' (which is the
-    # 100% case here) — and that's the very stage whose graph expansion
-    # produces the qrel's signal. The whole pipeline must run.
+    # disable the Heart stage when gold_type='decision' (the 100% case
+    # under our target_type filter) — that's the very stage whose graph
+    # expansion produces the qrel's signal. Include `censor` so the full
+    # production candidate composition runs (Codex P2 follow-up: omitting
+    # censor changes stage-1 candidates vs the production `all` default).
+    # Codex P2/P3 follow-up: `bridge_source_type` must carry the SOURCE
+    # node's type, not the gold's type — the previous emit hardcoded all
+    # rows to `gold_type` (always 'decision' under our target_type filter)
+    # which made downstream provenance analysis useless.
     return json.dumps({
         "query": qrel.query,
         "gold_ids": [str(qrel.gold_id)],
-        "memory_types": ["fact", "decision", "episode", "procedure"],
+        "memory_types": ["fact", "decision", "episode", "procedure", "censor"],
         "source": "graph_targeted",
         "notes": {
             "bridge_via": str(qrel.source_id),
-            "bridge_source_type": qrel.gold_type,  # kept for audit
+            "bridge_source_type": qrel.source_type,
             "edge_relation": qrel.relation,
             "rationale": qrel.rationale,
         },
@@ -410,6 +417,7 @@ async def _run_async(args: argparse.Namespace) -> int:
                         gold_id=cand.target_id,
                         gold_type=cand.target_type,
                         source_id=cand.source_id,
+                        source_type=cand.source_type,
                         relation=cand.relation,
                         rationale=rationale,
                     ))

@@ -65,6 +65,7 @@ class TestJsonlEmitter:
             gold_id=target,
             gold_type="decision",
             source_id=bridge,
+            source_type="fact",
             relation="evidence_for",
             rationale="performance evidence → adoption decision",
         )
@@ -72,14 +73,22 @@ class TestJsonlEmitter:
         loaded = json.loads(line)
         assert loaded["query"] == qrel.query
         assert loaded["gold_ids"] == [str(target)]
-        # Codex P1 (2026-05-23): memory_types must enable the full pipeline,
-        # not just the gold's type — otherwise the Heart→graph stage that
-        # produces the qrel's signal won't fire during harness scoring.
-        assert set(loaded["memory_types"]) == {"fact", "decision", "episode", "procedure"}
+        # Codex P1+P2 (2026-05-23): memory_types must enable the full
+        # pipeline surface (including censor) so harness stage composition
+        # matches production `all`.
+        assert set(loaded["memory_types"]) == {
+            "fact", "decision", "episode", "procedure", "censor",
+        }
         assert loaded["source"] == QrelSource.GRAPH_TARGETED.value
         assert loaded["reviewed_by"] == "auto"
         assert loaded["notes"]["bridge_via"] == str(bridge)
         assert loaded["notes"]["edge_relation"] == "evidence_for"
+        # Codex P2/P3 (2026-05-23): bridge_source_type carries the SOURCE
+        # node's type, NOT the gold's type. The miner's target_type filter
+        # constrains gold_type to 'decision', so without this fix the
+        # field would be uniformly 'decision' across every row.
+        assert loaded["notes"]["bridge_source_type"] == "fact"
+        assert loaded["notes"]["bridge_source_type"] != qrel.gold_type
 
     def test_source_tag_matches_enum(self) -> None:
         """Codex-style guard: if QrelSource.GRAPH_TARGETED ever drifts
