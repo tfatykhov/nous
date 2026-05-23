@@ -508,6 +508,13 @@ async def _run_one(
             settings=settings,
             limit=top_k,
             memory_types=memory_types,
+            # F065 follow-up (2026-05-23): merge stage outputs by score so
+            # graph-expanded items can compete for the top-K window. The
+            # default stage-order concatenation pins them at position 11+,
+            # making every graph-touching config invisible to top-K=10
+            # scoring. Without this, F065 penalty / F022 spreading /
+            # F030 MMR-after-graph all produce structurally-zero deltas.
+            rerank_by_score=True,
         )
     except Exception as exc:
         # Per plan silent-failure table: captured, not zero-scored.

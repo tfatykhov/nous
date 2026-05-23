@@ -107,7 +107,7 @@ class GraphLinker:
                 relation=relation,
                 weight=adjusted_weight,
                 auto_linked=True,
-                extraction_method=classify(relation),  # F065 (cosine-derived)
+                extraction_method=classify(relation, source="auto_linker"),  # F065
             )
             .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
         )
@@ -197,7 +197,7 @@ class GraphLinker:
                         relation="evidence_for",
                         weight=float(similarity),
                         auto_linked=True,
-                        extraction_method=classify("evidence_for"),  # F065 (cosine-derived)
+                        extraction_method=classify("evidence_for", source="auto_linker"),
                     )
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
@@ -276,7 +276,7 @@ class GraphLinker:
                         relation="related_to",
                         weight=float(row.similarity),
                         auto_linked=True,
-                        extraction_method=classify("related_to"),  # F065 (cosine-derived)
+                        extraction_method=classify("related_to", source="auto_linker"),
                     )
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
