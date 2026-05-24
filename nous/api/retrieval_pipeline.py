@@ -78,6 +78,12 @@ class PipelineStats:
     graph_expansion_used: bool = False
     spreading_activation_used: bool = False
     contradiction_checks_ran: bool = False
+    # F067 observability: True iff the chunk-recall stage was eligible
+    # AND attempted. Mirrors ``_PipelineAccumulator.chunks_searched`` —
+    # surfaced here so callers (recall_deep logger, eval harness) can
+    # distinguish "feature flag off / ineligible memory_types" from
+    # "stage ran but produced 0 chunks in top-K".
+    chunks_searched: bool = False
     n_heart_results: int = 0
     n_brain_results: int = 0
     n_graph_expanded: int = 0
@@ -233,6 +239,7 @@ async def run_recall_pipeline(
         graph_expansion_used=acc.graph_expansion_used,
         spreading_activation_used=acc.spreading_activation_used,
         contradiction_checks_ran=acc.contradiction_checks_ran,
+        chunks_searched=acc.chunks_searched,  # F067 observability
         n_heart_results=len(acc.heart_results),
         n_brain_results=len(acc.decision_results),
         n_graph_expanded=len(acc.graph_expanded),

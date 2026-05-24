@@ -615,6 +615,26 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 residual_activations=residual_activations or None,  # F055
                 rerank_by_score=chunks_rerank,
             )
+            # F067 observability: one INFO line per recall_deep call so
+            # operators can grep for chunk surfacing in prod without
+            # turning on F055 residual_activation. Logs the gate state
+            # (chunks_searched), how many chunks made the final top-K,
+            # and the total result count for quick eyeball checks.
+            n_chunks_in_topk = sum(
+                1 for r in results if getattr(r, "type", None) == "chunk"
+            )
+            logger.info(
+                "recall_deep agent=%s query_chars=%d limit=%d "
+                "chunks_enabled=%s chunks_searched=%s n_chunk_results=%d "
+                "n_total=%d",
+                brain.agent_id,
+                len(query or ""),
+                limit,
+                getattr(settings, "episode_chunks_enabled", False),
+                stats.chunks_searched,
+                n_chunks_in_topk,
+                len(results),
+            )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter
             # falls back to legacy output when parent_episodes is empty.
