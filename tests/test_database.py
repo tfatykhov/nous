@@ -63,6 +63,7 @@ async def test_all_tables_exist(db):
         # heart (12)
         ("heart", "episodes"),
         ("heart", "episode_decisions"),
+        ("heart", "episode_chunks"),  # F067
         ("heart", "facts"),
         ("heart", "procedures"),
         ("heart", "episode_procedures"),

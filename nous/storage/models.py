@@ -401,6 +401,40 @@ class Episode(Base):
     episode_procedures: Mapped[list["EpisodeProcedure"]] = relationship(
         back_populates="episode", cascade="all, delete-orphan"
     )
+    episode_chunks: Mapped[list["EpisodeChunk"]] = relationship(
+        back_populates="episode", cascade="all, delete-orphan"
+    )
+
+
+class EpisodeChunk(Base):
+    """F067: raw transcript chunks for episode-aware retrieval.
+
+    Co-stored with lossy fact extraction (heart.facts) so verbatim tokens
+    (names, numbers, exact quotes) remain searchable when the fact extractor
+    discards them. Cascade-deleted with the parent episode.
+    """
+
+    __tablename__ = "episode_chunks"
+    __table_args__ = {"schema": "heart"}
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("heart.episodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding = mapped_column(Vector(1536), nullable=True)
+    # search_tsv is GENERATED ALWAYS — read-only DB-side
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    episode: Mapped["Episode"] = relationship(back_populates="episode_chunks")
 
 
 class EpisodeDecision(Base):
