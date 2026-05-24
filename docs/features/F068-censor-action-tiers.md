@@ -117,7 +117,7 @@ When a `refuse` censor matches user input:
 - `spawn_sync` / `spawn_task` — refusal could launch a subtask that performs the blocked action with its own tool budget
 - `run_python` — refusal could execute arbitrary Python that calls `learn_fact` or another write inside the closure (`tools.py::run_python` exposes memory functions in scope)
 
-The directive is a soft constraint; the tool strip is the hard one. **Sourcing the denylist from `STATE_MODIFYING_TOOLS` instead of a local list ensures new state-modifying tools cannot become accidental circumvention vectors when added** — the F026 execution-ledger contract becomes the safety boundary for F068's refuse tier too.
+The directive is a soft constraint; the tool strip is the hard one. **Sourcing the denylist from the F026 ledger's canonical sets (`WRITE_TOOLS ∪ EXTERNAL_TOOLS ∪ IRREVERSIBLE_TOOLS`) rather than a local list ensures new state-modifying tools cannot become accidental circumvention vectors when added** — the F026 execution-ledger contract becomes the safety boundary for F068's refuse tier too.
 
 ### 4. Why no `refusal_censor_ids` in Phase 1
 
