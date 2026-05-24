@@ -589,6 +589,15 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     )
                     residual_activations = {}
 
+            # F067 fix: when episode chunks are enabled, rerank by score so
+            # chunks (appended after the fact stage in pipeline order) can
+            # reach the top-K consumer. Without this, chunks always sit at
+            # positions 11+ even when their cosine score beats the surfaced
+            # facts — making the chunk-recall leg silently dead in
+            # production. When chunks are disabled, the score-rerank flag
+            # stays off so recall_deep text output remains byte-identical
+            # to the pre-F067 legacy snapshot.
+            chunks_rerank = getattr(settings, "episode_chunks_enabled", False)
             results, stats = await run_recall_pipeline(
                 query=query,
                 heart=heart,
@@ -597,6 +606,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 limit=limit,
                 memory_types=memory_types,
                 residual_activations=residual_activations or None,  # F055
+                rerank_by_score=chunks_rerank,
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter
