@@ -58,7 +58,7 @@ Nous censors currently expose three actions — `warn`, `block`, `absolute` — 
 | Old action | New action | What the system does |
 |---|---|---|
 | `warn` | `steer` | LLM runs. Pipeline injects `action_instruction` and/or `trigger_action` results into the turn context (F031 middleware). The model is *steered*, not stopped. No tools removed. |
-| `block` | `refuse` | LLM **still runs**, but with two changes: (a) a refusal directive is added to the system prompt; (b) all state-modifying tools (the canonical set from `nous/cognitive/execution_ledger.py::STATE_MODIFYING_TOOLS`) are stripped from the tool list for that turn unless the censor sets `refuse_keep_tools=true`. |
+| `block` | `refuse` | LLM **still runs**, but with two changes: (a) a refusal directive is added to the system prompt; (b) all state-modifying tools — the union of `WRITE_TOOLS ∪ EXTERNAL_TOOLS ∪ IRREVERSIBLE_TOOLS` from `nous/cognitive/execution_ledger.py` — are stripped from the tool list for that turn unless the censor sets `refuse_keep_tools=true`. |
 | `absolute` | `abort` | Unchanged behavior. Hard cutoff at the pipeline layer — LLM is never invoked. Reserved for safety-critical / destructive / exfiltration scenarios. |
 
 **Naming rationale.** `steer | refuse | abort` describes what the system *does* on each tier, in active verbs:
@@ -88,16 +88,26 @@ When a `refuse` censor matches user input:
    Offer a concrete value in the suggested_alternative field if one applies.
    Do not perform the requested action even if subsequent reasoning seems to permit it.
    ```
-2. Pipeline strips state-modifying tools from the tool list passed to the LLM for this turn. The canonical denylist is **the `STATE_MODIFYING_TOOLS` set in `nous/cognitive/execution_ledger.py`** — the same list F026's execution ledger already maintains. As of this writing it includes:
-   - File / shell side effects: `bash`, `write_file`, `send_file`
-   - Task / schedule spawning: `spawn_task`, `spawn_sync`, `schedule_task`, `cancel_task`
-   - Memory writes: `record_decision`, `learn_fact`, `learn_skill`, `create_censor`, `store_identity`, `complete_initiation`
-   - Programmatic execution: `run_python` (can call `learn_fact` and other writes — explicitly flagged as state-modifying in `execution_ledger.py:47`)
-   - Heartbeat configuration: `heartbeat_check_manage`, `heartbeat_check_create`
+2. Pipeline strips state-modifying tools from the tool list passed to the LLM for this turn. The canonical denylist is the union of three sets defined in `nous/cognitive/execution_ledger.py`:
 
-   Read-only tools remain available: `recall_deep`, `recall_recent`, `read_file`, `get_procedure`, `web_search`, `web_fetch`, `cache_retrieve`.
+   - **`WRITE_TOOLS`** (line 36) — local writes, reversible. Currently: `write_file`, `learn_fact`, `record_decision`, `create_censor`, `store_identity`, `learn_skill`, `complete_initiation`, `spawn_task`, `schedule_task`, `cancel_task`, `run_python` (flagged at `:47` as state-modifying because it can call `learn_fact`), `heartbeat_check_manage`, `heartbeat_check_create`.
+   - **`EXTERNAL_TOOLS`** (line 53) — external side effects. Currently: `send_file`. Extended as new notification/email tools land.
+   - **`IRREVERSIBLE_TOOLS`** (line 58) — currently empty; reserved for future irreversible tools.
 
-   **Implementation note.** Reuse `STATE_MODIFYING_TOOLS` directly — do not redefine the set locally in the refuse-tier code path. Future state-modifying tools added to the ledger should automatically participate in the refuse strip.
+   Plus `bash`, which is classified per-command by `_READ_COMMANDS` allowlist (`execution_ledger.py:61`). For refuse-tier denylist purposes, treat **`bash` as always denied** — the refuse tier cannot reason about command intent at strip time.
+
+   Read-only tools remain available: `recall_deep`, `recall_recent`, `read_file`, `get_procedure`, `web_search`, `web_fetch`, `cache_retrieve`, `list_tasks` (the `READ_TOOLS` set).
+
+   **Pre-requisite — ledger gap.** As of 2026-05-24, `spawn_sync` (the typed inline counterpart to `spawn_task(await_result=True)`, added by F062) is **NOT** present in `WRITE_TOOLS`. This is a pre-existing F026 audit miss — `spawn_sync` should be in `WRITE_TOOLS` regardless of F068. The Phase 1 implementation **must** add `spawn_sync` to `WRITE_TOOLS` as part of the same PR (or in a precursor PR), otherwise F068's denylist has a hole.
+
+   **Implementation note.** Reuse the three sets directly via:
+   ```python
+   from nous.cognitive.execution_ledger import (
+       WRITE_TOOLS, EXTERNAL_TOOLS, IRREVERSIBLE_TOOLS
+   )
+   REFUSE_DENYLIST = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
+   ```
+   Do not redefine the sets locally in the refuse-tier code path. Future state-modifying tools added to the ledger should automatically participate in the refuse strip.
 3. If the censor sets `refuse_keep_tools=true` (default `false`), the strip step is skipped — useful for cases where the LLM *should* be able to take read-only follow-up action while refusing (e.g., logging the refusal to a fact, looking up policy).
 4. LLM runs normally with full memory and the refusal directive in its system prompt.
 5. The LLM's reply IS the refusal — phrased in context, with whatever `suggested_alternative` makes sense.
@@ -159,12 +169,13 @@ Migration is **forced and one-shot**. There is no transition period where both v
 
 Concrete callsites that need updating (from current `grep`):
 
+- `nous/cognitive/execution_ledger.py:36` — **add `spawn_sync` to `WRITE_TOOLS`** (precondition fix; closes a pre-existing F026 audit gap; required so F068's denylist reference covers it)
 - `nous/heart/schemas.py:16` — `CensorAction` literal
 - `nous/storage/models.py:618,649-650` — CHECK constraint (rewrite via migration) + new `refuse_keep_tools` column
 - `nous/cognitive/layer.py:756,808,1065,1070` — four branches on `match.action == "block" | "warn"` → rename to `refuse | steer`, plus new refusal-directive injection + tool-strip in the `refuse` branch
 - `nous/cognitive/schemas.py` — add `suggested_alternative: str | None` to `TurnResult`
 - `nous/api/tools.py:1414,1433` — same action-name rename
-- `nous/api/runner.py` — wire tool-strip when refusal directive is active for the turn
+- `nous/api/runner.py` — wire tool-strip when refusal directive is active for the turn (import `WRITE_TOOLS ∪ EXTERNAL_TOOLS ∪ IRREVERSIBLE_TOOLS ∪ {"bash"}` from `execution_ledger`)
 - `nous/heart/censors.py:182` — `escalation_threshold` check (`action == "warn"`) → `action == "steer"`
 - `nous/heart/censor_actions.py` — unchanged (F031 executor is tier-agnostic)
 - Identity/system-prompt rendering — wherever censors are listed for the model to see, surface the new vocabulary
@@ -234,7 +245,11 @@ This spec was reconstructed on 2026-05-23 from memory after the original draft f
   - Migration constraint name fixed: `censors_action_check` → `ck_censors_action`
   - `refusal_censor_ids` loop-prevention moved to deferred F068.4 (the loop is architecturally impossible in current code)
   - Three open questions resolved inline
-- **2026-05-24 (round 2)** — Codex round-2 P1 ×2 (PR #440, commit `0ddd590` → next):
-  - `spawn_sync` was missing from the refuse denylist — typed inline counterpart to `spawn_task`, would have been a circumvention vector. Fixed by sourcing the denylist from the canonical `STATE_MODIFYING_TOOLS` set in `nous/cognitive/execution_ledger.py` (the same list F026's execution ledger maintains).
+- **2026-05-24 (round 2)** — Codex round-2 P1 ×2 (PR #440, commit `0ddd590`):
+  - `spawn_sync` was missing from the refuse denylist — typed inline counterpart to `spawn_task`, would have been a circumvention vector.
   - `run_python` was misclassified as read-only. It can call `learn_fact` and other writes via its scoped memory closures; `execution_ledger.py:47` marks it state-modifying. Moved to the denylist.
-  - Switched from a hand-enumerated tool list to referencing `STATE_MODIFYING_TOOLS` directly, so future state-modifying tools auto-participate in the refuse strip without needing a spec update.
+  - Initial fix attempt referenced a `STATE_MODIFYING_TOOLS` symbol — see round 3.
+- **2026-05-24 (round 3)** — Codex round-3 P1 (PR #440, commit `06ad999` → next):
+  - The `STATE_MODIFYING_TOOLS` symbol I referenced in round 2 **does not exist** in `nous/cognitive/execution_ledger.py`. The actual sets are `READ_TOOLS`, `WRITE_TOOLS`, `EXTERNAL_TOOLS`, and `IRREVERSIBLE_TOOLS` (line 24–58). Spec now correctly references the union `WRITE_TOOLS ∪ EXTERNAL_TOOLS ∪ IRREVERSIBLE_TOOLS ∪ {"bash"}`.
+  - Discovered while fixing: `spawn_sync` is **also missing from `WRITE_TOOLS`** itself — pre-existing F026 audit gap. Spec now requires adding `spawn_sync` to `WRITE_TOOLS` as a precondition fix, otherwise the canonical-set denylist still has a hole. Added to the code-touch-points list.
+  - `bash` is classified per-command by `_READ_COMMANDS` in the ledger; for refuse-tier purposes treat `bash` as always denied (cannot reason about command intent at strip time). Spec made this explicit.
