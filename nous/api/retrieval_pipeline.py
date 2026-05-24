@@ -617,6 +617,13 @@ def _heart_graph_to_pipeline(
             score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
             source="graph_expanded",
             edge_relation=n.edge_relation,
+            # Stage origin tag — the formatter uses this to bucket
+            # graph_expanded results into the "Graph-Connected Decisions"
+            # (heart-side) vs "Brain Decisions" (brain-side) sections
+            # without relying on positional inference. Required because
+            # ``rerank_by_score`` can globally re-sort the result list,
+            # which would otherwise break the position-based heuristic.
+            metadata={"stage_origin": "heart_graph"},
         )
         for n in heart_graph
     ]
@@ -663,6 +670,13 @@ def _graph_expanded_to_pipeline(
                 else "graph_expanded"
             ),
             edge_relation=n.edge_relation,
+            # Stage origin tag — companion to _heart_graph_to_pipeline.
+            # Brain-side graph expansion (1-hop neighbors of brain seeds
+            # OR spreading activation from brain seeds) ends up under the
+            # "Brain Decisions" section. Keeping this metadata in sync
+            # with the formatter's bucketing logic is what makes the
+            # output stable under ``rerank_by_score``.
+            metadata={"stage_origin": "brain_graph"},
         )
         for n in graph_expanded
     ]

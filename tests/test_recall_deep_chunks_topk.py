@@ -165,6 +165,63 @@ async def test_chunks_enabled_with_explicit_fact_type_reranks(fake_pipeline_resu
     assert kwargs["rerank_by_score"] is True
 
 
+def test_formatter_buckets_graph_via_stage_origin_metadata_under_rerank():
+    """Codex P2 (PR #443): once ``rerank_by_score`` globally re-sorts the
+    result list, the formatter's previous position-based heuristic for
+    classifying ``source="graph_expanded"`` results into "Graph-Connected
+    Decisions" (heart-side) vs "Brain Decisions" (brain-side) breaks.
+
+    This regression test pins the new behavior: bucketing is driven by
+    ``metadata["stage_origin"]``, which survives a global re-sort.
+    """
+    from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+    from nous.api.tools import _format_pipeline_text
+
+    # Construct a result list where post-rerank order would mis-bucket
+    # under the old positional logic: a heart-side graph-expanded
+    # decision sits AFTER a brain decision because of a lower score.
+    heart_fact = PipelineResult(
+        id=uuid.uuid4(), type="fact", description="heart fact",
+        score=0.9, source="heart",
+    )
+    heart_graph_dec = PipelineResult(
+        id=uuid.uuid4(), type="decision", description="heart-side graph dec",
+        score=0.3, source="graph_expanded", edge_relation="causes",
+        metadata={"stage_origin": "heart_graph"},
+    )
+    brain_dec = PipelineResult(
+        id=uuid.uuid4(), type="decision", description="brain dec",
+        score=0.7, source="brain",
+        metadata={"category": "design", "stakes": "low",
+                  "confidence": 0.8, "raw_score": 0.7},
+    )
+    brain_graph_dec = PipelineResult(
+        id=uuid.uuid4(), type="decision", description="brain-side graph dec",
+        score=0.5, source="graph_expanded", edge_relation="informed_by",
+        metadata={"stage_origin": "brain_graph"},
+    )
+    # Post-rerank by score descending — the heart_graph_dec is now AFTER
+    # brain_dec, which would mis-bucket it under the old positional logic.
+    results = sorted(
+        [heart_fact, heart_graph_dec, brain_dec, brain_graph_dec],
+        key=lambda r: r.score, reverse=True,
+    )
+    stats = PipelineStats()
+
+    out = _format_pipeline_text(results, stats, search_types=["all"])
+
+    # heart_graph_dec must land in the Graph-Connected Decisions section
+    assert "=== Graph-Connected Decisions ===" in out
+    assert "heart-side graph dec" in out.split(
+        "=== Graph-Connected Decisions ==="
+    )[1].split("=== Brain Decisions ===")[0]
+
+    # brain_graph_dec must land in the Brain Decisions section
+    assert "brain-side graph dec" in out.split("=== Brain Decisions ===")[1]
+    # Cross-check: heart-side dec must NOT appear in the Brain section
+    assert "heart-side graph dec" not in out.split("=== Brain Decisions ===")[1]
+
+
 @pytest.mark.asyncio
 async def test_chunks_enabled_default_attribute_missing_safe(fake_pipeline_results):
     """Safety: settings without the new attribute don't break recall_deep.
