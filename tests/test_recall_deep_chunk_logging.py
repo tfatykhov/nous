@@ -19,17 +19,37 @@ from nous.api.tools import create_nous_tools
 
 @pytest.fixture
 def mixed_pipeline_results():
-    """A small mix of fact + chunk results to assert the n_chunk count."""
+    """Order matters for first_chunk_rank: chunks at positions 2 and 3
+    (1-indexed) within a 4-item list."""
     from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
     results = [
         PipelineResult(id=uuid.uuid4(), type="fact", description="f1",
-                       score=0.5, source="heart"),
+                       score=0.95, source="heart"),
         PipelineResult(id=uuid.uuid4(), type="chunk", description="c1",
                        score=0.9, source="heart"),
         PipelineResult(id=uuid.uuid4(), type="chunk", description="c2",
                        score=0.85, source="heart"),
         PipelineResult(id=uuid.uuid4(), type="episode", description="e1",
                        score=0.7, source="heart"),
+    ]
+    stats = PipelineStats(chunks_searched=True)
+    return results, stats
+
+
+@pytest.fixture
+def chunks_buried_results():
+    """Chunks at positions 11 and 12 of a 12-item list — simulating the
+    prod-observed case where chunks score lower than facts/decisions and
+    sit at the bottom of the global result list."""
+    from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
+    results = [
+        PipelineResult(id=uuid.uuid4(), type="fact", description=f"f{i}",
+                       score=0.9 - i * 0.01, source="heart")
+        for i in range(10)
+    ] + [
+        PipelineResult(id=uuid.uuid4(), type="chunk", description=f"c{i}",
+                       score=0.5 - i * 0.01, source="heart")
+        for i in range(2)
     ]
     stats = PipelineStats(chunks_searched=True)
     return results, stats
@@ -79,8 +99,43 @@ async def test_recall_deep_logs_chunk_surfacing_when_chunks_present(
     assert "agent=test-agent" in msg
     assert "chunks_enabled=True" in msg
     assert "chunks_searched=True" in msg
-    assert "n_chunk_results=2" in msg
+    # 2 chunks total in the 4-item list
+    assert "n_chunks_total=2" in msg
+    # Both are in positions 2 and 3, so both fall within top-10
+    assert "n_chunks_top10=2" in msg
+    # First chunk is at rank 2 (1-indexed)
+    assert "first_chunk_rank=2" in msg
     assert "n_total=4" in msg
+
+
+@pytest.mark.asyncio
+async def test_recall_deep_logs_buried_chunks_at_correct_rank(
+    chunks_buried_results, caplog
+):
+    """Prod-observed pattern: chunks retrieved but buried at positions
+    11-12 behind facts. Top-10 count should be 0 even though
+    n_chunks_total=2."""
+    brain = MagicMock()
+    brain.agent_id = "test-agent"
+    heart = MagicMock()
+    settings = _make_settings(chunks_enabled=True)
+
+    tools = create_nous_tools(brain, heart, settings=settings)
+    recall_deep = tools["recall_deep"]
+
+    with patch(
+        "nous.api.retrieval_pipeline.run_recall_pipeline",
+        new=AsyncMock(return_value=chunks_buried_results),
+    ), caplog.at_level(logging.INFO, logger="nous.api.tools"):
+        await recall_deep(query="hello", limit=10)
+
+    msg = [
+        rec.getMessage() for rec in caplog.records if "recall_deep" in rec.getMessage()
+    ][-1]
+    assert "n_chunks_total=2" in msg
+    assert "n_chunks_top10=0" in msg
+    assert "first_chunk_rank=11" in msg
+    assert "n_total=12" in msg
 
 
 @pytest.mark.asyncio
@@ -114,4 +169,6 @@ async def test_recall_deep_logs_zero_chunks_when_disabled(caplog):
     ][-1]
     assert "chunks_enabled=False" in msg
     assert "chunks_searched=False" in msg
-    assert "n_chunk_results=0" in msg
+    assert "n_chunks_total=0" in msg
+    assert "n_chunks_top10=0" in msg
+    assert "first_chunk_rank=n/a" in msg

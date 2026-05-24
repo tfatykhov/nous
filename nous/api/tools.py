@@ -618,21 +618,33 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # F067 observability: one INFO line per recall_deep call so
             # operators can grep for chunk surfacing in prod without
             # turning on F055 residual_activation. Logs the gate state
-            # (chunks_searched), how many chunks made the final top-K,
-            # and the total result count for quick eyeball checks.
-            n_chunks_in_topk = sum(
+            # (chunks_searched), how many chunks reach the top-of-list,
+            # and where the first chunk lands in the global result order
+            # so we can spot "chunks retrieved but buried" cases.
+            n_chunks_total = sum(
                 1 for r in results if getattr(r, "type", None) == "chunk"
+            )
+            n_chunks_top10 = sum(
+                1 for r in results[:10] if getattr(r, "type", None) == "chunk"
+            )
+            first_chunk_rank = next(
+                (i + 1 for i, r in enumerate(results)
+                 if getattr(r, "type", None) == "chunk"),
+                None,
             )
             logger.info(
                 "recall_deep agent=%s query_chars=%d limit=%d "
-                "chunks_enabled=%s chunks_searched=%s n_chunk_results=%d "
+                "chunks_enabled=%s chunks_searched=%s "
+                "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
                 "n_total=%d",
                 brain.agent_id,
                 len(query or ""),
                 limit,
                 getattr(settings, "episode_chunks_enabled", False),
                 stats.chunks_searched,
-                n_chunks_in_topk,
+                n_chunks_total,
+                n_chunks_top10,
+                first_chunk_rank if first_chunk_rank is not None else "n/a",
                 len(results),
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
