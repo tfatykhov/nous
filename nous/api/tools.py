@@ -163,6 +163,10 @@ async def _fetch_parent_episodes_for_facts(
     fact_ids = [str(r.id) for r in results if getattr(r, "type", None) == "fact"]
     if not fact_ids:
         return []
+    # Codex fix: cap=0 should disable injection entirely. Early-return when
+    # the operator set max_parents=0 — saves a DB round-trip too.
+    if max_parents <= 0:
+        return []
     async with heart.db.session() as s:
         rows = (await s.execute(
             sa_text(
@@ -175,17 +179,27 @@ async def _fetch_parent_episodes_for_facts(
         ordered_eps: list[str] = []
         seen: set[str] = set()
         for fid in fact_ids:
+            # Codex fix: enforce cap BEFORE appending so max_parents=N stays
+            # exactly N. Previous order ("append then check len >= max")
+            # produced N+1 entries when the iteration walked one extra step
+            # past a fresh episode_id.
+            if len(ordered_eps) >= max_parents:
+                break
             ep = fact_to_ep.get(fid)
             if ep and ep not in seen:
                 seen.add(ep)
                 ordered_eps.append(ep)
-            if len(ordered_eps) >= max_parents:
-                break
         if not ordered_eps:
             return []
+        # Codex fix: structured_summary is JSONB with title/topics/key_points/
+        # candidate_facts/etc. Casting the whole blob to text bloats context
+        # and risks mid-JSON truncation at [:truncate]. Extract the inner
+        # 'summary' string via ->> operator; fall back to the legacy summary
+        # column when structured_summary is NULL.
         ep_rows = (await s.execute(
             sa_text(
-                "SELECT id::text, COALESCE(structured_summary::text, summary) "
+                "SELECT id::text, "
+                "COALESCE(structured_summary->>'summary', summary) "
                 "FROM heart.episodes WHERE agent_id = :a AND id::text = ANY(:ids)"
             ),
             {"a": heart.agent_id, "ids": ordered_eps},
