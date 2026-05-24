@@ -111,6 +111,61 @@ async def test_chunks_enabled_triggers_score_rerank(fake_pipeline_results):
 
 
 @pytest.mark.asyncio
+async def test_chunks_enabled_but_memory_types_excludes_facts(fake_pipeline_results):
+    """Codex P2 gate (PR #443): chunks_enabled=True + memory_types that
+    excludes facts → no chunk fetch happens in run_recall_pipeline (see
+    retrieval_pipeline.py:301), so rerank_by_score must also stay False
+    to preserve legacy stage-order output on those non-chunk recall paths.
+    """
+    brain = MagicMock()
+    brain.agent_id = "test"
+    heart = MagicMock()
+    settings = _make_settings(chunks_enabled=True)
+
+    tools = create_nous_tools(brain, heart, settings=settings)
+    recall_deep = tools["recall_deep"]
+
+    with patch(
+        "nous.api.retrieval_pipeline.run_recall_pipeline",
+        new=AsyncMock(return_value=fake_pipeline_results),
+    ) as mock_pipeline:
+        # Decision-only recall: chunks won't be fetched even with flag on
+        await recall_deep(
+            query="anything", limit=10, memory_types=["decision"],
+        )
+
+    kwargs = mock_pipeline.call_args.kwargs
+    assert kwargs["rerank_by_score"] is False, (
+        f"chunks-enabled but memory_types=['decision'] must NOT score-rerank "
+        f"(chunks aren't fetched); got rerank_by_score={kwargs.get('rerank_by_score')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_chunks_enabled_with_explicit_fact_type_reranks(fake_pipeline_results):
+    """Counterpart to the test above: chunks_enabled=True + memory_types
+    explicitly listing "fact" DOES fetch chunks, so rerank must fire."""
+    brain = MagicMock()
+    brain.agent_id = "test"
+    heart = MagicMock()
+    settings = _make_settings(chunks_enabled=True)
+
+    tools = create_nous_tools(brain, heart, settings=settings)
+    recall_deep = tools["recall_deep"]
+
+    with patch(
+        "nous.api.retrieval_pipeline.run_recall_pipeline",
+        new=AsyncMock(return_value=fake_pipeline_results),
+    ) as mock_pipeline:
+        await recall_deep(
+            query="anything", limit=10, memory_types=["fact", "episode"],
+        )
+
+    kwargs = mock_pipeline.call_args.kwargs
+    assert kwargs["rerank_by_score"] is True
+
+
+@pytest.mark.asyncio
 async def test_chunks_enabled_default_attribute_missing_safe(fake_pipeline_results):
     """Safety: settings without the new attribute don't break recall_deep.
 

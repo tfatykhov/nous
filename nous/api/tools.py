@@ -589,15 +589,24 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     )
                     residual_activations = {}
 
-            # F067 fix: when episode chunks are enabled, rerank by score so
-            # chunks (appended after the fact stage in pipeline order) can
-            # reach the top-K consumer. Without this, chunks always sit at
-            # positions 11+ even when their cosine score beats the surfaced
-            # facts — making the chunk-recall leg silently dead in
-            # production. When chunks are disabled, the score-rerank flag
-            # stays off so recall_deep text output remains byte-identical
-            # to the pre-F067 legacy snapshot.
-            chunks_rerank = getattr(settings, "episode_chunks_enabled", False)
+            # F067 fix: when episode chunks are enabled AND will actually be
+            # fetched, rerank by score so chunks (appended after the fact
+            # stage in pipeline order) can reach the top-K consumer. Without
+            # this, chunks always sit at positions 11+ even when their
+            # cosine score beats the surfaced facts — making the chunk-
+            # recall leg silently dead in production.
+            #
+            # Codex P2 gate (PR #443): chunks only fetch when
+            # ``episode_chunks_enabled AND (search_all OR "fact" in
+            # search_types)`` — see retrieval_pipeline.py:301. Mirror that
+            # exact condition so non-chunk recall paths (e.g.
+            # memory_types=["decision"]) keep legacy stage-order output
+            # even with the feature flag on.
+            search_all_for_rerank = "all" in search_types
+            chunks_rerank = (
+                getattr(settings, "episode_chunks_enabled", False)
+                and (search_all_for_rerank or "fact" in search_types)
+            )
             results, stats = await run_recall_pipeline(
                 query=query,
                 heart=heart,
