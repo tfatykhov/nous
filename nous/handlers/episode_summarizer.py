@@ -179,41 +179,53 @@ class EpisodeSummarizer:
         if not chunks:
             return 0
 
-        # Embed all chunks in one batched call when the embedder supports it.
+        # Embed all chunks in one batched call. If the embedder fails or
+        # isn't wired, we ABORT the insert entirely rather than persist
+        # NULL-embedding rows — those rows would never appear in retrieval
+        # (the recall query filters `embedding IS NOT NULL`) AND the
+        # ON CONFLICT (episode_id, chunk_index) DO NOTHING idempotency
+        # would prevent a later retry from patching them. Better to leave
+        # the table clean; a backfill handler can re-attempt later.
         embedder = getattr(self._heart, "_embeddings", None) or self._embedder
-        vectors: list[list[float]] | list[None] = [None] * len(chunks)
-        if embedder is not None:
-            try:
-                vectors = await embedder.embed_batch(chunks)
-            except Exception:
-                logger.warning(
-                    "F067: embed_batch failed for episode %s; storing chunks "
-                    "without vectors (keyword search still works)",
-                    episode_id, exc_info=True,
-                )
-                vectors = [None] * len(chunks)
+        if embedder is None:
+            logger.info(
+                "F067: no embedder wired; skipping chunk store for episode %s",
+                episode_id,
+            )
+            return 0
+        try:
+            vectors = await embedder.embed_batch(chunks)
+        except Exception:
+            logger.warning(
+                "F067: embed_batch failed for episode %s; aborting chunk "
+                "store (no NULL-embedding rows written — retry later)",
+                episode_id, exc_info=True,
+            )
+            return 0
+        if len(vectors) != len(chunks):
+            logger.warning(
+                "F067: embedder returned %d vectors for %d chunks (episode %s); "
+                "aborting chunk store to avoid misalignment",
+                len(vectors), len(chunks), episode_id,
+            )
+            return 0
 
         async with self._heart.db.session() as s:
             for idx, (content, vec) in enumerate(zip(chunks, vectors)):
-                vec_lit = ("[" + ",".join(f"{v:.6f}" for v in vec) + "]") if vec else None
-                params = {
+                if not vec:
+                    # Defensive — shouldn't happen given the length check above,
+                    # but a single None in the batch is still skippable.
+                    continue
+                vec_lit = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+                await s.execute(sa_text(
+                    "INSERT INTO heart.episode_chunks "
+                    "(agent_id, episode_id, chunk_index, content, embedding) "
+                    "VALUES (:agent_id, :ep, :idx, :content, CAST(:vec AS vector)) "
+                    "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
+                ), {
                     "agent_id": agent_id, "ep": str(episode_id),
                     "idx": idx, "content": content, "vec": vec_lit,
-                }
-                if vec_lit is not None:
-                    await s.execute(sa_text(
-                        "INSERT INTO heart.episode_chunks "
-                        "(agent_id, episode_id, chunk_index, content, embedding) "
-                        "VALUES (:agent_id, :ep, :idx, :content, CAST(:vec AS vector)) "
-                        "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
-                    ), params)
-                else:
-                    await s.execute(sa_text(
-                        "INSERT INTO heart.episode_chunks "
-                        "(agent_id, episode_id, chunk_index, content) "
-                        "VALUES (:agent_id, :ep, :idx, :content) "
-                        "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
-                    ), params)
+                })
             await s.commit()
         return len(chunks)
 

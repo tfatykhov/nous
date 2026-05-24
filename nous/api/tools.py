@@ -597,10 +597,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         truncate=settings.recall_parent_episode_truncate,
                     )
                 except Exception:
+                    n_facts = sum(
+                        1 for r in results if getattr(r, "type", None) == "fact"
+                    )
                     logger.warning(
-                        "F067: parent-episode fetch failed; falling back to "
-                        "legacy recall_deep output",
-                        exc_info=True,
+                        "F067: parent-episode fetch failed for agent=%s "
+                        "(n_facts=%d, falling back to legacy recall_deep "
+                        "output)",
+                        heart.agent_id, n_facts, exc_info=True,
                     )
                     parent_episodes = []
             text = _format_pipeline_text(

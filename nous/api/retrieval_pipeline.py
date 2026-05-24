@@ -292,13 +292,19 @@ async def _run_stages(
     # ------------------------------------------------------------------
     # Stage 1.5: F067 episode chunks (opt-in; default off)
     # ------------------------------------------------------------------
-    # Independent of Stage 1's heart_types — chunks are searched whenever
-    # the flag is on AND the caller is willing to see them (memory_types
-    # includes "all" or "chunk" or "fact" — chunks are conceptually fact-
-    # adjacent, and the formatter co-displays them with Heart results).
+    # Chunks are searched when memory_types includes "all" or "fact"
+    # (chunks are conceptually fact-adjacent and ride on the same gate as
+    # facts). We deliberately do NOT gate on `"chunk" in search_types`
+    # because the legacy formatter's heart_section_eligible only checks
+    # episode/fact/procedure/censor — a caller passing memory_types=["chunk"]
+    # would otherwise retrieve chunks that the formatter silently drops.
     if getattr(settings, "episode_chunks_enabled", False) and (
-        search_all or "chunk" in search_types or "fact" in search_types
+        search_all or "fact" in search_types
     ):
+        # Mark BEFORE the try so PipelineStats can distinguish "flag off"
+        # (chunks_searched stays False) from "flag on but stage failed"
+        # (chunks_searched True + n_stage_errors["chunk_recall"] non-zero).
+        acc.chunks_searched = True
         try:
             acc.chunk_results = await _search_episode_chunks(
                 heart=heart,
@@ -308,8 +314,16 @@ async def _run_stages(
                     settings.episode_chunk_recall_limit, limit * 2
                 ),
             )
-            acc.chunks_searched = True
         except Exception:
+            # Match the sibling stages' pattern (spreading_activation,
+            # decision_neighbors): log + count. Non-eval callers (recall_deep
+            # tool) discard the stats counter, so the log is the operator's
+            # only signal that chunk recall is broken.
+            logger.warning(
+                "F067: chunk_recall failed for agent=%s query=%r "
+                "(non-fatal, no chunk results this turn)",
+                heart.agent_id, query[:80], exc_info=True,
+            )
             acc.stage_errors["chunk_recall"] = (
                 acc.stage_errors.get("chunk_recall", 0) + 1
             )
@@ -538,22 +552,18 @@ async def _search_episode_chunks(
     """F067: vector-similarity search over heart.episode_chunks.
 
     Returns ``[(id, content, similarity_score)]`` ordered by descending
-    similarity. Returns ``[]`` when:
-    - no embedder is wired (no way to embed the query)
-    - the query embeds to None
-    - no chunks exist for this agent_id
-
-    Failures inside the helper raise; the caller wraps in try/except and
-    increments ``acc.stage_errors``.
+    similarity. Returns ``[]`` only when no embedder is wired (no way to
+    embed the query) or the query embeds to an empty vector. All other
+    failure modes — embed timeout, DB error, pgvector cast failure — RAISE
+    so the caller's try/except surfaces them via ``acc.stage_errors``
+    AND a WARN log. Silent fall-through to ``[]`` on embedder failure
+    would masquerade as "no matches" and hide real outages.
     """
     from sqlalchemy import text as sa_text
     embedder = getattr(heart, "_embeddings", None)
     if embedder is None:
         return []
-    try:
-        query_vec = await embedder.embed(query)
-    except Exception:
-        return []
+    query_vec = await embedder.embed(query)
     if not query_vec:
         return []
     vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
