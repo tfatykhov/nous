@@ -258,22 +258,18 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     # Graph-Connected Decisions section (F022 Phase 2 cross-type)
     # ------------------------------------------------------------------
-    # Pre-refactor: heart_graph_decisions are PipelineResult.source == "graph_expanded"
-    # AND derived from Heart seeds. We tag those distinctly: graph-expanded results
-    # produced from Heart seeds appear as `source="graph_expanded"` with type=="decision"
-    # AND no matching brain-side seed (i.e., emitted in stage 2 not stage 4).
-    # Distinguish via a heuristic: stage-2 entries have edge_relation that is NOT
-    # "spreading_activation", and they precede the Brain section in the result
-    # ordering. We rely on the pipeline's stage ordering: stage-2 results come
-    # before any "brain" source result.
-    heart_graph: list = []
-    seen_brain = False
-    for r in results:
-        if r.source == "brain":
-            seen_brain = True
-            continue
-        if r.source == "graph_expanded" and not seen_brain and r.type == "decision":
-            heart_graph.append(r)
+    # heart-side graph-expanded decisions (stage 2 of run_recall_pipeline)
+    # are tagged ``metadata["stage_origin"] == "heart_graph"`` by
+    # ``_heart_graph_to_pipeline``. This tag lets the formatter bucket
+    # them correctly regardless of result-list order — important because
+    # ``rerank_by_score`` (set when F067 chunks are enabled) globally
+    # re-sorts the list and would otherwise break a position-based gate.
+    heart_graph: list = [
+        r for r in results
+        if r.source == "graph_expanded"
+        and r.type == "decision"
+        and r.metadata.get("stage_origin") == "heart_graph"
+    ]
 
     if heart_graph:
         results_text.append("\n=== Graph-Connected Decisions ===")
@@ -288,16 +284,18 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     if search_all or "decision" in search_types:
         decision_results = [r for r in results if r.source == "brain"]
-        # Brain-side graph-expanded entries: source in {graph_expanded,
-        # spreading_activation} AND appear after the brain block.
-        brain_graph: list = []
-        seen_brain = False
-        for r in results:
-            if r.source == "brain":
-                seen_brain = True
-                continue
-            if seen_brain and r.source in ("graph_expanded", "spreading_activation"):
-                brain_graph.append(r)
+        # Brain-side graph-expanded entries (stage 4): tagged
+        # ``metadata["stage_origin"] == "brain_graph"`` by
+        # ``_graph_expanded_to_pipeline``. Spreading-activation results
+        # share the brain-graph bucket — see the OR below. Companion to
+        # the heart-side filter above; the metadata tag replaces the
+        # previous position-based gate so the formatter is stable under
+        # ``rerank_by_score``.
+        brain_graph: list = [
+            r for r in results
+            if r.source in ("graph_expanded", "spreading_activation")
+            and r.metadata.get("stage_origin") == "brain_graph"
+        ]
 
         if decision_results or brain_graph:
             results_text.append("\n=== Brain Decisions ===")
@@ -589,6 +587,24 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     )
                     residual_activations = {}
 
+            # F067 fix: when episode chunks are enabled AND will actually be
+            # fetched, rerank by score so chunks (appended after the fact
+            # stage in pipeline order) can reach the top-K consumer. Without
+            # this, chunks always sit at positions 11+ even when their
+            # cosine score beats the surfaced facts — making the chunk-
+            # recall leg silently dead in production.
+            #
+            # Codex P2 gate (PR #443): chunks only fetch when
+            # ``episode_chunks_enabled AND (search_all OR "fact" in
+            # search_types)`` — see retrieval_pipeline.py:301. Mirror that
+            # exact condition so non-chunk recall paths (e.g.
+            # memory_types=["decision"]) keep legacy stage-order output
+            # even with the feature flag on.
+            search_all_for_rerank = "all" in search_types
+            chunks_rerank = (
+                getattr(settings, "episode_chunks_enabled", False)
+                and (search_all_for_rerank or "fact" in search_types)
+            )
             results, stats = await run_recall_pipeline(
                 query=query,
                 heart=heart,
@@ -597,6 +613,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 limit=limit,
                 memory_types=memory_types,
                 residual_activations=residual_activations or None,  # F055
+                rerank_by_score=chunks_rerank,
             )
             # F067 Phase 2: optionally fetch parent episode summaries for
             # facts in the result set. Failures are non-fatal — the formatter
