@@ -58,7 +58,7 @@ class PipelineResult:
     """
 
     id: UUID
-    type: Literal["episode", "fact", "procedure", "censor", "decision"]
+    type: Literal["episode", "fact", "procedure", "censor", "decision", "chunk"]
     description: str
     score: float
     source: Literal[
@@ -130,12 +130,16 @@ class _PipelineAccumulator:
     # Stage 5: contradiction edges (source_id, source_type, target_id, target_type)
     contradictions: list[tuple[UUID, str, UUID, str]] = field(default_factory=list)
 
+    # F067 Stage 1.5: chunk-recall results (id, content, score)
+    chunk_results: list[tuple[UUID, str, float]] = field(default_factory=list)
+
     # Flags
     searched_decisions: bool = False
     searched_heart: bool = False
     spreading_activation_used: bool = False
     graph_expansion_used: bool = False
     contradiction_checks_ran: bool = False
+    chunks_searched: bool = False
 
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
@@ -193,6 +197,9 @@ async def run_recall_pipeline(
     # Build flat PipelineResult list in stage order
     results: list[PipelineResult] = []
     results.extend(_heart_results_to_pipeline(acc.heart_results))
+    # F067: episode chunks appended to Heart section (same source tag,
+    # naturally co-displayed). Empty when feature flag is off.
+    results.extend(_chunks_to_pipeline(acc.chunk_results))
     results.extend(_heart_graph_to_pipeline(acc.heart_graph_decisions, settings))
     results.extend(_decisions_to_pipeline(acc.decision_results))
     results.extend(_graph_expanded_to_pipeline(acc.graph_expanded, settings))
@@ -281,6 +288,31 @@ async def _run_stages(
                 apply_mmr=apply_mmr,  # F030.2
             )
             acc.heart_results = list(heart_results or [])
+
+    # ------------------------------------------------------------------
+    # Stage 1.5: F067 episode chunks (opt-in; default off)
+    # ------------------------------------------------------------------
+    # Independent of Stage 1's heart_types — chunks are searched whenever
+    # the flag is on AND the caller is willing to see them (memory_types
+    # includes "all" or "chunk" or "fact" — chunks are conceptually fact-
+    # adjacent, and the formatter co-displays them with Heart results).
+    if getattr(settings, "episode_chunks_enabled", False) and (
+        search_all or "chunk" in search_types or "fact" in search_types
+    ):
+        try:
+            acc.chunk_results = await _search_episode_chunks(
+                heart=heart,
+                query=query,
+                agent_id=heart.agent_id,
+                limit=min(
+                    settings.episode_chunk_recall_limit, limit * 2
+                ),
+            )
+            acc.chunks_searched = True
+        except Exception:
+            acc.stage_errors["chunk_recall"] = (
+                acc.stage_errors.get("chunk_recall", 0) + 1
+            )
 
     # ------------------------------------------------------------------
     # Stage 2: F022 Phase 2 cross-type graph expansion from Heart seeds
@@ -475,6 +507,65 @@ def _heart_results_to_pipeline(
         )
         for r in heart_results
     ]
+
+
+def _chunks_to_pipeline(
+    chunk_results: list[tuple[UUID, str, float]],
+) -> list[PipelineResult]:
+    """F067: convert chunk-search rows into PipelineResult.
+
+    Chunks are tagged ``type="chunk"`` and ``source="heart"`` so they appear
+    in the legacy Heart Memory section of the formatter without extra logic.
+    """
+    return [
+        PipelineResult(
+            id=cid,
+            type="chunk",
+            description=content,
+            score=score,
+            source="heart",
+        )
+        for cid, content, score in chunk_results
+    ]
+
+
+async def _search_episode_chunks(
+    heart: "Heart",
+    query: str,
+    agent_id: str,
+    limit: int,
+) -> list[tuple[UUID, str, float]]:
+    """F067: vector-similarity search over heart.episode_chunks.
+
+    Returns ``[(id, content, similarity_score)]`` ordered by descending
+    similarity. Returns ``[]`` when:
+    - no embedder is wired (no way to embed the query)
+    - the query embeds to None
+    - no chunks exist for this agent_id
+
+    Failures inside the helper raise; the caller wraps in try/except and
+    increments ``acc.stage_errors``.
+    """
+    from sqlalchemy import text as sa_text
+    embedder = getattr(heart, "_embeddings", None)
+    if embedder is None:
+        return []
+    try:
+        query_vec = await embedder.embed(query)
+    except Exception:
+        return []
+    if not query_vec:
+        return []
+    vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
+    async with heart.db.session() as s:
+        rows = (await s.execute(sa_text(
+            "SELECT id, content, 1 - (embedding <=> CAST(:v AS vector)) AS sim "
+            "FROM heart.episode_chunks "
+            "WHERE agent_id = :a AND embedding IS NOT NULL "
+            "ORDER BY embedding <=> CAST(:v AS vector) "
+            "LIMIT :k"
+        ), {"v": vec_lit, "a": agent_id, "k": limit})).all()
+    return [(r[0], r[1], float(r[2])) for r in rows]
 
 
 def _f065_provenance_penalty(

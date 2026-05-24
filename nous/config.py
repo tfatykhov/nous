@@ -947,6 +947,52 @@ class Settings(BaseSettings):
         description="F050 — cache row retention; sweep handler ships in F050.2.",
     )
 
+    # F067: Episode chunks (raw transcript chunks alongside lossy fact extraction)
+    # and parent episode injection in recall_deep. Both default OFF — opt-in.
+    # Validated on LongMemEval per-question isolation methodology (+13pp chunks,
+    # +6pp parent episodes). NOT validated on shared-corpus retrieval where
+    # cross-topic noise can regress performance. See
+    # memory/project_lme_methodology_dependency for details.
+    episode_chunks_enabled: bool = Field(
+        default=False,
+        description=(
+            "F067 master switch. When true, episode_summarizer also chunks the raw "
+            "transcript and embeds chunks into heart.episode_chunks. Default OFF."
+        ),
+    )
+    episode_chunk_size: int = Field(
+        default=600,
+        description="F067 chunk size in chars (sliding window).",
+    )
+    episode_chunk_overlap: int = Field(
+        default=80,
+        description="F067 chunk overlap in chars to avoid splitting key tokens.",
+    )
+    episode_chunk_recall_limit: int = Field(
+        default=10,
+        description="F067 max chunks returned by the new chunk-recall leg before RRF merge.",
+    )
+    episode_chunk_min_transcript_chars: int = Field(
+        default=50,
+        description="F067 minimum transcript length to chunk (shorter transcripts are skipped).",
+    )
+    recall_include_parent_episodes: bool = Field(
+        default=False,
+        description=(
+            "F067 Phase 2. When true, recall_deep appends up to recall_max_parent_episodes "
+            "parent episode summaries to its text output (deduped by source_episode_id). "
+            "Validated on per-question isolation only; opt-in for prod."
+        ),
+    )
+    recall_max_parent_episodes: int = Field(
+        default=2,
+        description="F067 cap on parent episode summaries appended (deduplicated).",
+    )
+    recall_parent_episode_truncate: int = Field(
+        default=500,
+        description="F067 per-parent-episode summary char truncation.",
+    )
+
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
         object.__setattr__(self, '_compaction_threshold_explicit',

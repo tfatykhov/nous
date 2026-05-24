@@ -144,17 +144,74 @@ class ToolDispatcher:
 # ---------------------------------------------------------------------------
 
 
+async def _fetch_parent_episodes_for_facts(
+    heart: "Heart",
+    results: "list[Any]",  # list[PipelineResult]
+    max_parents: int,
+    truncate: int,
+) -> list[tuple[str, str]]:
+    """F067 Phase 2: fetch parent episode summaries for fact-typed results.
+
+    Walks ``results`` in rank order, collects each fact's ``source_episode_id``
+    (deduped, preserving rank order), caps at ``max_parents``, fetches the
+    episode summary for each, and returns ``[(episode_id, summary)]``.
+
+    Returns an empty list when no facts have parent episodes or all lookups
+    fail. The caller is responsible for the feature-flag gate.
+    """
+    from sqlalchemy import text as sa_text
+    fact_ids = [str(r.id) for r in results if getattr(r, "type", None) == "fact"]
+    if not fact_ids:
+        return []
+    async with heart.db.session() as s:
+        rows = (await s.execute(
+            sa_text(
+                "SELECT id::text, source_episode_id::text FROM heart.facts "
+                "WHERE agent_id = :a AND id::text = ANY(:ids)"
+            ),
+            {"a": heart.agent_id, "ids": fact_ids},
+        )).all()
+        fact_to_ep = {r[0]: r[1] for r in rows if r[1] is not None}
+        ordered_eps: list[str] = []
+        seen: set[str] = set()
+        for fid in fact_ids:
+            ep = fact_to_ep.get(fid)
+            if ep and ep not in seen:
+                seen.add(ep)
+                ordered_eps.append(ep)
+            if len(ordered_eps) >= max_parents:
+                break
+        if not ordered_eps:
+            return []
+        ep_rows = (await s.execute(
+            sa_text(
+                "SELECT id::text, COALESCE(structured_summary::text, summary) "
+                "FROM heart.episodes WHERE agent_id = :a AND id::text = ANY(:ids)"
+            ),
+            {"a": heart.agent_id, "ids": ordered_eps},
+        )).all()
+        ep_summary = {r[0]: r[1] for r in ep_rows if r[1]}
+    out: list[tuple[str, str]] = []
+    for eid in ordered_eps:
+        summary = ep_summary.get(eid)
+        if summary:
+            out.append((eid, str(summary)[:truncate]))
+    return out
+
+
 def _format_pipeline_text(
     results: "list[Any]",  # list[PipelineResult] — string-quoted to avoid import cycle at module top
     stats: "Any",  # PipelineStats
     search_types: list[str],
+    parent_episodes: list[tuple[str, str]] | None = None,
 ) -> str:
     """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
 
     Byte-identical to the pre-F051 ``recall_deep`` text output for the same
-    query + heart/brain state. Section ordering, headings, score precision,
-    score-truthy elision (``if dec.score`` not ``is not None``), and contradiction
-    warning format are all preserved exactly.
+    query + heart/brain state — except when ``parent_episodes`` is provided
+    (F067 Phase 2), in which case a `=== Parent Episode Context ===` section
+    is appended at the end. When ``parent_episodes`` is empty/None, output
+    remains byte-identical for backwards compatibility.
     """
     search_all = "all" in search_types
     results_text: list[str] = []
@@ -264,6 +321,14 @@ def _format_pipeline_text(
 
     if not results_text:
         results_text.append("No results found.")
+
+    # F067 Phase 2: append parent episode summaries when provided. Skipped
+    # when the caller opted out (parent_episodes is None or empty) — keeps
+    # legacy output byte-identical.
+    if parent_episodes:
+        results_text.append("\n=== Parent Episode Context ===")
+        for ep_id, summary in parent_episodes:
+            results_text.append(f"- ({ep_id[:8]}) {summary}")
 
     return "\n".join(results_text)
 
@@ -519,7 +584,28 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 memory_types=memory_types,
                 residual_activations=residual_activations or None,  # F055
             )
-            text = _format_pipeline_text(results, stats, search_types)
+            # F067 Phase 2: optionally fetch parent episode summaries for
+            # facts in the result set. Failures are non-fatal — the formatter
+            # falls back to legacy output when parent_episodes is empty.
+            parent_episodes: list[tuple[str, str]] = []
+            if getattr(settings, "recall_include_parent_episodes", False):
+                try:
+                    parent_episodes = await _fetch_parent_episodes_for_facts(
+                        heart=heart,
+                        results=results,
+                        max_parents=settings.recall_max_parent_episodes,
+                        truncate=settings.recall_parent_episode_truncate,
+                    )
+                except Exception:
+                    logger.warning(
+                        "F067: parent-episode fetch failed; falling back to "
+                        "legacy recall_deep output",
+                        exc_info=True,
+                    )
+                    parent_episodes = []
+            text = _format_pipeline_text(
+                results, stats, search_types, parent_episodes=parent_episodes,
+            )
 
             # F055: fire-and-forget record_surfaced so the request returns
             # immediately. record_surfaced opens its OWN DB session inside

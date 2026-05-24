@@ -136,10 +136,86 @@ class EpisodeSummarizer:
             if not summary:
                 return None
             await self._heart.update_episode_summary(episode_id, summary)
+            # F067: Optional transcript chunking for retrieval. Failures are
+            # logged + swallowed so they never block summary persistence.
+            if getattr(self._settings, "episode_chunks_enabled", False):
+                try:
+                    await self._chunk_and_store_transcript(
+                        episode_id=episode_id,
+                        agent_id=agent_id or self._settings.agent_id,
+                        transcript=transcript,
+                    )
+                except Exception:
+                    logger.warning(
+                        "F067: chunk-and-store failed for episode %s (non-fatal)",
+                        episode_id, exc_info=True,
+                    )
             return summary
         except Exception:
             logger.exception("F051.5: summarize_episode raised for %s", episode_id)
             return None
+
+    async def _chunk_and_store_transcript(
+        self,
+        episode_id: UUID,
+        agent_id: str,
+        transcript: str,
+    ) -> int:
+        """F067: chunk transcript, embed each chunk, insert into heart.episode_chunks.
+
+        Returns count of chunks written. Idempotent via the
+        (episode_id, chunk_index) unique constraint — re-running on the same
+        episode is a no-op (ON CONFLICT DO NOTHING).
+        """
+        from sqlalchemy import text as sa_text
+        from nous.heart.chunking import chunk_text
+
+        chunks = chunk_text(
+            transcript,
+            chunk_size=self._settings.episode_chunk_size,
+            overlap=self._settings.episode_chunk_overlap,
+            min_chars=self._settings.episode_chunk_min_transcript_chars,
+        )
+        if not chunks:
+            return 0
+
+        # Embed all chunks in one batched call when the embedder supports it.
+        embedder = getattr(self._heart, "_embeddings", None) or self._embedder
+        vectors: list[list[float]] | list[None] = [None] * len(chunks)
+        if embedder is not None:
+            try:
+                vectors = await embedder.embed_batch(chunks)
+            except Exception:
+                logger.warning(
+                    "F067: embed_batch failed for episode %s; storing chunks "
+                    "without vectors (keyword search still works)",
+                    episode_id, exc_info=True,
+                )
+                vectors = [None] * len(chunks)
+
+        async with self._heart.db.session() as s:
+            for idx, (content, vec) in enumerate(zip(chunks, vectors)):
+                vec_lit = ("[" + ",".join(f"{v:.6f}" for v in vec) + "]") if vec else None
+                params = {
+                    "agent_id": agent_id, "ep": str(episode_id),
+                    "idx": idx, "content": content, "vec": vec_lit,
+                }
+                if vec_lit is not None:
+                    await s.execute(sa_text(
+                        "INSERT INTO heart.episode_chunks "
+                        "(agent_id, episode_id, chunk_index, content, embedding) "
+                        "VALUES (:agent_id, :ep, :idx, :content, CAST(:vec AS vector)) "
+                        "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
+                    ), params)
+                else:
+                    await s.execute(sa_text(
+                        "INSERT INTO heart.episode_chunks "
+                        "(agent_id, episode_id, chunk_index, content) "
+                        "VALUES (:agent_id, :ep, :idx, :content) "
+                        "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
+                    ), params)
+            await s.commit()
+        return len(chunks)
 
     async def handle(self, event: Event) -> None:
         """Handle session_ended — summarize the episode if one exists."""
