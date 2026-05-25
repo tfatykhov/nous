@@ -575,6 +575,8 @@ class GraphDensifier:
                     relation="part_of",
                     weight=1.0,
                     session=session,
+                    # FK-derived anchor — deterministic, not cosine-inferred.
+                    provenance_source="structural",
                 )
                 if edge is not None:
                     total += 1
@@ -705,11 +707,14 @@ class GraphDensifier:
                 # weight matches the documented structural anchor.
                 weight = 1.0
                 multiplier_override: float | None = 1.0
+                # chunk_index ± 1 is structural, not cosine-inferred.
+                provenance: str = "structural"
             elif sim >= cosine_threshold:
                 # Non-adjacent but similar enough — cosine drives weight;
                 # let the global related_to multiplier (0.8) discount it.
                 weight = sim
                 multiplier_override = None
+                provenance = "auto_linker"
             else:
                 continue
             edge = await self._linker.create_edge(
@@ -721,6 +726,7 @@ class GraphDensifier:
                 weight=weight,
                 session=session,
                 weight_multiplier_override=multiplier_override,
+                provenance_source=provenance,
             )
             if edge is not None:
                 created += 1

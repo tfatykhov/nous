@@ -94,6 +94,7 @@ class GraphLinker:
         session: AsyncSession,
         *,
         weight_multiplier_override: float | None = None,
+        provenance_source: str = "auto_linker",
     ) -> GraphEdgeInfo | None:
         """Create a graph edge with relation-aware weight multiplier.
 
@@ -106,6 +107,13 @@ class GraphLinker:
         sequential chunk adjacency, which is structural (weight=1.0) but
         reuses the ``related_to`` relation (multiplier 0.8). Without the
         override, the persisted weight would be 0.8, not 1.0.
+
+        ``provenance_source`` is the writer-identity tag forwarded to F065's
+        ``classify(relation, source=...)`` to set ``extraction_method``.
+        Default ``"auto_linker"`` preserves existing behavior. Pass
+        ``"structural"`` for FK-derived / index-derived anchors (F070
+        chunk→episode part_of and chunk→chunk sequential adjacency) so
+        ``graph_inferred_edge_penalty`` does not down-weight them.
         """
         multiplier = (
             weight_multiplier_override
@@ -125,7 +133,7 @@ class GraphLinker:
                 relation=relation,
                 weight=adjusted_weight,
                 auto_linked=True,
-                extraction_method=classify(relation, source="auto_linker"),  # F065
+                extraction_method=classify(relation, source=provenance_source),  # F065
             )
             .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
         )

@@ -1078,6 +1078,56 @@ async def test_sequential_chunk_edge_persisted_at_weight_1_0(
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_structural_chunk_edges_tagged_deterministic(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070 (codex P2): structural chunk edges (chunk→episode part_of and
+    adjacent chunk→chunk) must persist with extraction_method='deterministic'
+    so `graph_inferred_edge_penalty` does not down-weight them at recall time.
+    Cosine-derived chunk→fact summarized_by stays 'inferred' (auto_linker)."""
+    agent_id = f"test-prov-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact": 0.5,
+        "graph_threshold_chunk_chunk_intra": 0.99,  # only adjacency fires
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "ep")
+        ident_emb = await mock_embeddings.embed("user likes dark roast coffee")
+        c0 = await _insert_chunk(s, agent_id, ep, 0, "coffee chunk", ident_emb)
+        c1 = await _insert_chunk(s, agent_id, ep, 1, "next chunk", ident_emb)
+        fact = await _insert_fact_with_episode(
+            s, agent_id, "user likes dark roast coffee", ident_emb, ep,
+        )
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT target_id::text, target_type, relation, extraction_method "
+            "FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_id = :c0 AND source_type = 'chunk'"
+        ), {"a": agent_id, "c0": c0})).all()
+    by_target = {(r.target_id, r.relation): r.extraction_method for r in rows}
+    assert by_target.get((str(ep), "part_of")) == "deterministic", (
+        f"chunk→episode part_of must be deterministic, got {by_target}"
+    )
+    assert by_target.get((str(c1), "related_to")) == "deterministic", (
+        f"adjacent chunk→chunk must be deterministic, got {by_target}"
+    )
+    assert by_target.get((str(fact), "summarized_by")) == "inferred", (
+        f"cosine-derived chunk→fact summarized_by must remain inferred, "
+        f"got {by_target}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_run_backfill_cycle_includes_chunks_key(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):
