@@ -1126,12 +1126,28 @@ class Brain:
         relation: str | None = None,
         limit: int = 10,
         session: AsyncSession | None = None,
+        *,
+        neighbor_type: str | None = None,
     ) -> list[NeighborResult]:
-        """Get nodes connected to the given node via graph edges."""
+        """Get nodes connected to the given node via graph edges.
+
+        ``neighbor_type`` filters the SQL union to a single target node
+        type (e.g. ``"decision"``). Required to prevent F070's chunk
+        edges from crowding decisions out of small ``LIMIT`` windows in
+        ``heart_graph_neighbors`` — without it, ``LIMIT 2`` over the
+        full union can return zero decisions when a fact also has
+        ``summarized_by`` chunk neighbors.
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._neighbors(node_id, node_type, relation, limit, session)
-        return await self._neighbors(node_id, node_type, relation, limit, session)
+                return await self._neighbors(
+                    node_id, node_type, relation, limit, session,
+                    neighbor_type=neighbor_type,
+                )
+        return await self._neighbors(
+            node_id, node_type, relation, limit, session,
+            neighbor_type=neighbor_type,
+        )
 
     async def _neighbors(
         self,
@@ -1140,6 +1156,8 @@ class Brain:
         relation: str | None,
         limit: int,
         session: AsyncSession,
+        *,
+        neighbor_type: str | None = None,
     ) -> list[NeighborResult]:
         # Find edges where this node is source or target, matching node type.
         # F065: SELECT extraction_method so neighbors carry provenance tier
@@ -1171,6 +1189,13 @@ class Brain:
         if relation:
             source_q = source_q.where(GraphEdge.relation == relation)
             target_q = target_q.where(GraphEdge.relation == relation)
+
+        # F070 fix: push the neighbor-type filter into SQL so LIMIT N
+        # returns N rows of the requested type, not N rows that may all
+        # be filtered out by a downstream Python check.
+        if neighbor_type:
+            source_q = source_q.where(GraphEdge.target_type == neighbor_type)
+            target_q = target_q.where(GraphEdge.source_type == neighbor_type)
 
         union_q = source_q.union_all(target_q).limit(limit)
         result = await session.execute(union_q)

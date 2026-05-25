@@ -365,10 +365,18 @@ async def _run_stages(
         for hr in acc.heart_results[:3]:
             if hr.type in ("fact", "episode"):
                 try:
+                    # F070 fix: push the decision filter into SQL so
+                    # ``LIMIT 2`` returns 2 decisions, not 2 of (decisions
+                    # + chunks + facts + ...) which the Python filter
+                    # below would then mostly discard. With F070 adding
+                    # ~37K chunk→fact summarized_by edges, the un-filtered
+                    # union frequently returned 2 chunks → 0 decisions →
+                    # silent decision-expansion loss.
                     neighbors = await brain.neighbors(
                         hr.id,
                         node_type=hr.type,
                         limit=2,
+                        neighbor_type="decision",
                     )
                     for n in neighbors:
                         if n.node_type == "decision" and n.id not in seen_graph_ids:

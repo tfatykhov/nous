@@ -478,6 +478,64 @@ async def test_neighbors(brain, session):
 
 
 # ---------------------------------------------------------------------------
+# 18a. test_neighbors_neighbor_type_filter
+# ---------------------------------------------------------------------------
+
+
+async def test_neighbors_neighbor_type_filter(brain, session):
+    """F070 fix: ``neighbor_type`` pushes the filter into SQL so a small
+    ``limit`` returns rows of the requested type, not rows of arbitrary
+    types that a downstream Python filter would discard.
+
+    Pre-fix: querying a fact with 5 chunk neighbors + 1 decision neighbor
+    at ``limit=2`` could return 2 chunks → caller's Python ``decision``
+    filter discarded both → 0 decisions surfaced even though one exists.
+    Post-fix: ``neighbor_type="decision"`` returns the 1 decision.
+    """
+    # Build a fact with mixed-type neighbors.
+    # We insert raw GraphEdge rows so we don't need Heart/chunks fixtures.
+    from uuid import uuid4
+
+    from nous.storage.models import GraphEdge
+
+    fact_id = uuid4()
+    decision = await brain.record(_record_input(description="real decision"), session=session)
+
+    # 5 chunk neighbors via summarized_by (the F070 case that crowds decisions).
+    chunk_ids = [uuid4() for _ in range(5)]
+    for cid in chunk_ids:
+        session.add(GraphEdge(
+            source_id=cid, target_id=fact_id,
+            source_type="chunk", target_type="fact",
+            agent_id=brain.agent_id, relation="summarized_by",
+            weight=0.8, auto_linked=True,
+            extraction_method="inferred",
+        ))
+    # 1 decision neighbor via informed_by.
+    session.add(GraphEdge(
+        source_id=fact_id, target_id=decision.id,
+        source_type="fact", target_type="decision",
+        agent_id=brain.agent_id, relation="informed_by",
+        weight=0.9, auto_linked=True,
+        extraction_method="heuristic",
+    ))
+    await session.flush()
+
+    # Without filter, limit=2 over 6 edges can return any mix.
+    # WITH filter, limit=2 must return only decisions (we have 1).
+    neighbors = await brain.neighbors(
+        fact_id, node_type="fact", limit=2, session=session,
+        neighbor_type="decision",
+    )
+    assert len(neighbors) == 1, (
+        f"neighbor_type='decision' must return only the decision row, "
+        f"got {[(n.node_type, n.id) for n in neighbors]}"
+    )
+    assert neighbors[0].node_type == "decision"
+    assert neighbors[0].id == decision.id
+
+
+# ---------------------------------------------------------------------------
 # 18b. test_link_with_types
 # ---------------------------------------------------------------------------
 
