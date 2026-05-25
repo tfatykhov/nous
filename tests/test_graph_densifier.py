@@ -24,7 +24,8 @@ from nous.config import Settings
 
 class TestEntityConfig:
     def test_all_types_present(self):
-        assert set(_ENTITY_CONFIG.keys()) == {"fact", "decision", "episode", "procedure"}
+        # F070 (2026-05-25): 'chunk' added for chunk-aware sleep consolidation.
+        assert set(_ENTITY_CONFIG.keys()) == {"fact", "decision", "episode", "procedure", "chunk"}
 
     def test_fact_config(self):
         table, type_name, content_col, extra = _ENTITY_CONFIG["fact"]
@@ -145,6 +146,55 @@ async def _insert_decision(session: AsyncSession, agent_id: str, description: st
         "embedding": embedding_str,
     })
     return dec_id
+
+
+async def _insert_episode(session: AsyncSession, agent_id: str, summary: str) -> str:
+    """F070 test helper: insert an episode and return its ID."""
+    ep_id = uuid4()
+    await session.execute(text("""
+        INSERT INTO heart.episodes (id, agent_id, summary, active, started_at)
+        VALUES (:id, :agent_id, :summary, true, NOW())
+    """), {
+        "id": ep_id, "agent_id": agent_id, "summary": summary,
+    })
+    return ep_id
+
+
+async def _insert_chunk(
+    session: AsyncSession, agent_id: str,
+    episode_id, chunk_index: int, content: str, embedding: list[float],
+) -> str:
+    """F070 test helper: insert an episode_chunks row and return its ID."""
+    chunk_id = uuid4()
+    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+    await session.execute(text("""
+        INSERT INTO heart.episode_chunks
+            (id, agent_id, episode_id, chunk_index, content, embedding)
+        VALUES
+            (:id, :agent_id, :ep_id, :idx, :content, CAST(:embedding AS vector))
+    """), {
+        "id": chunk_id, "agent_id": agent_id, "ep_id": episode_id,
+        "idx": chunk_index, "content": content, "embedding": embedding_str,
+    })
+    return chunk_id
+
+
+async def _insert_fact_with_episode(
+    session: AsyncSession, agent_id: str,
+    content: str, embedding: list[float], source_episode_id,
+) -> str:
+    """F070 test helper: insert a fact with source_episode_id set."""
+    fact_id = uuid4()
+    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+    await session.execute(text("""
+        INSERT INTO heart.facts
+            (id, agent_id, content, active, embedding, source_episode_id)
+        VALUES (:id, :agent_id, :content, true, CAST(:emb AS vector), :ep_id)
+    """), {
+        "id": fact_id, "agent_id": agent_id, "content": content,
+        "emb": embedding_str, "ep_id": source_episode_id,
+    })
+    return fact_id
 
 
 async def _insert_edge(session: AsyncSession, agent_id: str, source_id, target_id, source_type: str, target_type: str) -> None:
@@ -677,3 +727,180 @@ async def test_backfill_uses_ce_mode_threshold_end_to_end(
         f"CE-mode fact_fact=0.01 should always pass. Got {edges} edges, "
         f"ce_stats={ce_stats}."
     )
+
+
+# ============================================================================
+# F070 — Chunk-aware sleep consolidation
+# ============================================================================
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_chunk_consolidation_disabled_skips(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070: master flag off → backfill returns 0, no edges created."""
+    agent_id = f"test-chunk-disabled-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": False,
+        "graph_backfill_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "test")
+        emb = await mock_embeddings.embed("chunk content")
+        await _insert_chunk(s, agent_id, ep, 0, "chunk content", emb)
+        await s.commit()
+
+    edges = await d.backfill_orphan_chunks()
+    assert edges == 0
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_chunk_to_episode_edge_created(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070: orphan chunk gets a chunk→episode 'part_of' edge."""
+    agent_id = f"test-chunk-ep-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_backfill_max_chunks": 10,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "test")
+        emb = await mock_embeddings.embed("chunk content here is long enough to be real")
+        chunk_id = await _insert_chunk(s, agent_id, ep, 0, "chunk content here is long enough to be real", emb)
+        await s.commit()
+
+    edges_created = await d.backfill_orphan_chunks()
+    assert edges_created >= 1
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT source_id::text, target_id::text, source_type, target_type, relation "
+            "FROM brain.graph_edges WHERE agent_id = :a"
+        ), {"a": agent_id})).all()
+    # Should have a chunk→episode edge
+    chunk_ep = [r for r in rows
+                if r.source_type == "chunk" and r.target_type == "episode"]
+    assert len(chunk_ep) == 1
+    assert chunk_ep[0].source_id == str(chunk_id)
+    assert chunk_ep[0].target_id == str(ep)
+    assert chunk_ep[0].relation == "part_of"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_chunk_to_fact_same_episode_links(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070: chunk gets chunk→fact edge to facts with same source_episode_id
+    where cosine ≥ threshold. Cross-episode facts must NOT be linked."""
+    agent_id = f"test-chunk-fact-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact": 0.5,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "ep A")
+        ep_b = await _insert_episode(s, agent_id, "ep B")
+        # Same embedding for chunk and same-episode fact (high cosine)
+        ident_emb = await mock_embeddings.embed("user likes dark roast coffee")
+        chunk_a = await _insert_chunk(
+            s, agent_id, ep_a, 0,
+            "user likes dark roast coffee in this snippet",
+            ident_emb,
+        )
+        # Same-episode fact (should link)
+        same_ep_fact = await _insert_fact_with_episode(
+            s, agent_id, "user likes dark roast coffee", ident_emb, ep_a,
+        )
+        # Cross-episode fact (must NOT link even with same embedding)
+        cross_ep_fact = await _insert_fact_with_episode(
+            s, agent_id, "user likes dark roast coffee", ident_emb, ep_b,
+        )
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT target_id::text FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' "
+            "  AND target_type = 'fact' AND source_id = :c "
+        ), {"a": agent_id, "c": chunk_a})).all()
+    fact_targets = {r.target_id for r in rows}
+    assert str(same_ep_fact) in fact_targets, "same-episode fact should link"
+    assert str(cross_ep_fact) not in fact_targets, "cross-episode fact must NOT link"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_chunk_intra_episode_sequential_always_linked(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070: adjacent chunks (chunk_index ± 1) always get linked at weight=1.0
+    regardless of cosine similarity."""
+    agent_id = f"test-chunk-seq-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        # Very high threshold so cosine alone won't link adjacent chunks
+        "graph_threshold_chunk_chunk_intra": 0.99,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "test")
+        # Different embeddings — would NOT pass cosine threshold
+        emb_a = await mock_embeddings.embed("apple")
+        emb_b = await mock_embeddings.embed("zebra")
+        c0 = await _insert_chunk(s, agent_id, ep, 0, "apple chunk content here", emb_a)
+        c1 = await _insert_chunk(s, agent_id, ep, 1, "zebra chunk content here", emb_b)
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT source_id::text, target_id::text, weight "
+            "FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' AND target_type = 'chunk'"
+        ), {"a": agent_id})).all()
+    # Expect at least one chunk↔chunk edge between c0 and c1 (sequential)
+    pair = {(str(c0), str(c1)), (str(c1), str(c0))}
+    found = [(r.source_id, r.target_id, r.weight) for r in rows]
+    has_pair = any((s_id, t_id) in pair for s_id, t_id, _ in found)
+    assert has_pair, f"sequential adjacent chunks must link, got {found}"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_includes_chunks_key(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070: run_backfill_cycle results dict includes a 'chunks' entry."""
+    agent_id = f"test-cycle-chunks-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "graph_backfill_enabled": True,
+        "chunk_consolidation_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    result = await d.run_backfill_cycle()
+    assert "chunks" in result
+    # _ce_stats prefix-underscored — must not be confused with per-type entries
+    assert "chunks" in {k for k in result if not k.startswith("_")}

@@ -18,8 +18,10 @@ OutcomeType = Literal["pending", "success", "partial", "failure"]
 RelationType = Literal[
     "supports", "contradicts", "supersedes", "related_to", "caused_by",
     "informed_by", "evidence_for", "discussed_in", "extracted_from",
+    # F070 (2026-05-25): chunk graph edges
+    "part_of", "summarized_by",
 ]
-NodeType = Literal["decision", "fact", "episode", "procedure"]
+NodeType = Literal["decision", "fact", "episode", "procedure", "chunk"]
 ReasonType = Literal[
     "analysis",
     "pattern",

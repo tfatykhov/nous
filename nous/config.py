@@ -992,6 +992,35 @@ class Settings(BaseSettings):
         default=500,
         description="F067 per-parent-episode summary char truncation.",
     )
+    # =========================================================================
+    # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
+    # =========================================================================
+    chunk_consolidation_enabled: bool = Field(
+        default=False,
+        description=(
+            "F070 (2026-05-25). When true, sleep cycle and EpisodeSummarizer "
+            "build graph edges to/from heart.episode_chunks rows. Fixes the "
+            "gap that chunks have zero edges (audit 2026-05-25 found 1,775 "
+            "edges, all fact↔fact / procedure↔procedure). Required for "
+            "adjacency boost and F022 spreading activation to reach chunks."
+        ),
+    )
+    graph_backfill_max_chunks: int = Field(
+        default=100,
+        description="F070: max orphan chunks processed per sleep cycle (caps embedding/LLM cost).",
+    )
+    graph_threshold_chunk_fact: float = Field(
+        default=0.55,
+        description="F070: cosine floor for chunk→fact same-episode edges.",
+    )
+    graph_threshold_chunk_chunk_intra: float = Field(
+        default=0.70,
+        description="F070: cosine floor for non-adjacent intra-episode chunk↔chunk edges. Adjacent pairs always linked (sequential edge_type, weight=1.0).",
+    )
+    graph_threshold_chunk_chunk_cross: float = Field(
+        default=0.85,
+        description="F070: cosine floor for cross-episode chunk↔chunk dedup edges.",
+    )
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
