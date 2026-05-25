@@ -218,6 +218,7 @@ def _format_pipeline_text(
     stats: "Any",  # PipelineStats
     search_types: list[str],
     parent_episodes: list[tuple[str, str]] | None = None,
+    session_group_heart: bool = False,
 ) -> str:
     """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
 
@@ -247,11 +248,51 @@ def _format_pipeline_text(
     if heart_section_eligible:
         if heart_results:
             results_text.append("=== Heart Memory ===")
-            for i, result in enumerate(heart_results, 1):
-                results_text.append(
-                    f"{i}. [{result.type}] {result.description} "
-                    f"(id: {result.id}, score: {result.score:.3f})"
-                )
+            if session_group_heart:
+                # P1.1: group facts/chunks/episodes by source session_id so
+                # the LLM sees session boundaries — helps multi-session
+                # reasoning. Sessions ordered by first-appearance in the
+                # ranked list. Procedures/censors don't belong to a session
+                # and are appended flat at the end of the bucket.
+                session_buckets: "dict[str, list]" = {}
+                no_session: list = []
+                for result in heart_results:
+                    if result.type == "episode":
+                        sess = str(result.id)
+                    elif result.type in ("fact", "chunk"):
+                        sess = result.metadata.get("source_episode_id")
+                        sess = str(sess) if sess else None
+                    else:
+                        sess = None
+                    if sess:
+                        session_buckets.setdefault(sess, []).append(result)
+                    else:
+                        no_session.append(result)
+                i = 1
+                for sess_id, items in session_buckets.items():
+                    results_text.append(f"-- Session {sess_id[:8]} --")
+                    for result in items:
+                        results_text.append(
+                            f"{i}. [{result.type}] {result.description} "
+                            f"(id: {result.id}, score: {result.score:.3f})"
+                        )
+                        i += 1
+                if no_session:
+                    if session_buckets:
+                        results_text.append("-- Other --")
+                    for result in no_session:
+                        results_text.append(
+                            f"{i}. [{result.type}] {result.description} "
+                            f"(id: {result.id}, score: {result.score:.3f})"
+                        )
+                        i += 1
+            else:
+                # Legacy flat output (byte-identical to pre-P1.1)
+                for i, result in enumerate(heart_results, 1):
+                    results_text.append(
+                        f"{i}. [{result.type}] {result.description} "
+                        f"(id: {result.id}, score: {result.score:.3f})"
+                    )
         else:
             results_text.append("=== Heart Memory ===\nNo results found.")
 
@@ -672,6 +713,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     parent_episodes = []
             text = _format_pipeline_text(
                 results, stats, search_types, parent_episodes=parent_episodes,
+                session_group_heart=getattr(settings, "session_group_heart_section", False),
             )
 
             # F055: fire-and-forget record_surfaced so the request returns

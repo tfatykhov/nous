@@ -992,6 +992,29 @@ class Settings(BaseSettings):
         default=500,
         description="F067 per-parent-episode summary char truncation.",
     )
+    session_group_heart_section: bool = Field(
+        default=False,
+        description=(
+            "P1.1 (2026-05-25). When true, recall_deep groups Heart Memory "
+            "section items (facts/chunks/episodes) by source session_id, "
+            "with section headers ('-- Session abc12345 --'). Helps the LLM "
+            "synthesize across sessions for multi-session questions. "
+            "Validated on labeled LME eval; opt-in for prod until A/B confirms."
+        ),
+    )
+    graph_adjacency_boost_enabled: bool = Field(
+        default=False,
+        description=(
+            "P2 (2026-05-25). When true, retrieval applies a multiplicative "
+            "score boost to candidates connected via brain.graph_edges to "
+            "other candidates in the same batch. Inspired by gbrain's "
+            "adjacency-aware ranking. Leverages F040 sleep-built edges."
+        ),
+    )
+    graph_adjacency_boost_alpha: float = Field(
+        default=0.15,
+        description="P2: max boost as a fraction of original score (default 0.15 = +15% for the most-connected candidate).",
+    )
     # =========================================================================
     # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
     # =========================================================================

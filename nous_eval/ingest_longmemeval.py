@@ -88,7 +88,11 @@ class IngestLMEConfig:
     scratch_db_url: str = "postgresql+asyncpg://nous:nous_eval@localhost:5433/nous_eval_scratch"
     skip_download: bool = False
     seed: int = 0
-    max_sessions_per_question: int = 10  # F051.5: cost guardrail (devil P2)
+    # F051.5 cost guardrail. Bumped to 50 (2026-05-24) so the ingest covers
+    # the median-ish 48-session haystack the LongMemEval paper assumes.
+    # The earlier 10-cap masked a lot of distractor difficulty; re-running
+    # with chunks + parent episodes wants paper-realistic numbers.
+    max_sessions_per_question: int = 50
     # F051.5.x: paced batching. Default 0 = no sleep (matches original behavior).
     # When >0, replay sleeps for this many seconds after every
     # `inter_question_batch` questions complete, spreading Sonnet load and
@@ -105,6 +109,25 @@ class LMEIngestStats:
     n_sessions_reused: int = 0  # F051.5: cross-question episode dedup hits
     n_facts_extracted: int = 0
     n_episodes_summarised: int = 0
+
+
+def _parse_lme_date(date_str: str) -> "datetime | None":
+    """Parse a LongMemEval haystack date like '2023/05/20 (Sat) 02:21' to a
+    timezone-aware datetime (UTC). Returns None on parse failure.
+
+    Format observed in the cleaned dataset: ``YYYY/MM/DD (DayAbbrev) HH:MM``.
+    The day-of-week token is informational; we strip it before parsing.
+    """
+    import re
+    from datetime import datetime, timezone
+    # Drop the parenthetical day-of-week
+    cleaned = re.sub(r"\s*\([A-Za-z]+\)\s*", " ", date_str).strip()
+    try:
+        return datetime.strptime(cleaned, "%Y/%m/%d %H:%M").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
 
 
 def _session_to_transcript(session: list | dict) -> str:
@@ -232,7 +255,7 @@ def _stratify(
 async def _replay_sessions_into_scratch(
     picked: list[dict[str, Any]],
     scratch_db_url: str,
-    max_sessions_per_question: int = 10,
+    max_sessions_per_question: int = 50,
     inter_question_sleep_seconds: float = 0.0,
     inter_question_batch: int = 5,
 ) -> tuple[LMEIngestStats, dict[str, dict[int, dict[str, list]]]]:
@@ -328,6 +351,12 @@ async def _replay_sessions_into_scratch(
             # field — fall back to integer-index keying for back-compat.
             session_ids = q.get("haystack_session_ids") or []
             answer_sids = set(q.get("answer_session_ids") or [])
+            # 2026-05-24 fix: preserve LongMemEval's haystack_dates so temporal
+            # reasoning has real timestamps. Each session has its own date
+            # (e.g. "2023/05/20 (Sat) 02:21") spanning days/weeks/months
+            # apart; without this, all episodes land within minutes of ingest
+            # time and "which came first" becomes unanswerable. Parsed below.
+            haystack_dates = q.get("haystack_dates") or []
 
             # F051.5 hotfix: prioritize answer-bearing sessions when capping.
             # Without this, --max-sessions-per-question=10 drops most
@@ -377,6 +406,25 @@ async def _replay_sessions_into_scratch(
                     trigger="lme_replay",
                     tags=["longmemeval", q.get("question_type", "")],
                 ))
+                # 1a. 2026-05-24: backdate episode to the LongMemEval session
+                # date so temporal-reasoning questions get real timestamps.
+                # heart.start_episode sets started_at=now(); we overwrite via
+                # raw SQL because the Heart API doesn't expose started_at.
+                session_date_str = (
+                    haystack_dates[session_idx]
+                    if session_idx < len(haystack_dates)
+                    else None
+                )
+                if session_date_str:
+                    parsed_date = _parse_lme_date(session_date_str)
+                    if parsed_date is not None:
+                        from sqlalchemy import text as sa_text
+                        async with db.session() as ds:
+                            await ds.execute(sa_text(
+                                "UPDATE heart.episodes SET started_at = :t "
+                                "WHERE id = :i"
+                            ), {"t": parsed_date, "i": ep.id})
+                            await ds.commit()
 
                 # 2. Summarize directly. Returns None on early-return / LLM error.
                 summary = await summarizer.summarize_episode(
