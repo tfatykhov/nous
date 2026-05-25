@@ -92,14 +92,26 @@ class GraphLinker:
         relation: str,
         weight: float,
         session: AsyncSession,
+        *,
+        weight_multiplier_override: float | None = None,
     ) -> GraphEdgeInfo | None:
         """Create a graph edge with relation-aware weight multiplier.
 
         Applies RELATION_WEIGHT_MULTIPLIERS to the raw weight and uses
         ON CONFLICT DO NOTHING to skip duplicates.  Returns the edge info
         on success, or None if the edge already exists.
+
+        ``weight_multiplier_override`` skips the relation-table lookup for
+        callers that need to bypass the per-relation discount — e.g. F070
+        sequential chunk adjacency, which is structural (weight=1.0) but
+        reuses the ``related_to`` relation (multiplier 0.8). Without the
+        override, the persisted weight would be 0.8, not 1.0.
         """
-        multiplier = RELATION_WEIGHT_MULTIPLIERS.get(relation, 0.8)
+        multiplier = (
+            weight_multiplier_override
+            if weight_multiplier_override is not None
+            else RELATION_WEIGHT_MULTIPLIERS.get(relation, 0.8)
+        )
         adjusted_weight = weight * multiplier
 
         stmt = (

@@ -996,6 +996,88 @@ async def test_adjacent_chunk_links_even_when_sibling_embedding_null(
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_null_embedding_chunk_still_gets_part_of_edge(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070 (codex P2): chunks whose embed call failed (embedding IS NULL)
+    must still receive the structural chunk→episode part_of edge — that's
+    the whole point of v1 being 'edges only, embedding-tolerant'."""
+    agent_id = f"test-null-emb-orphan-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "ep")
+        # Chunk with NULL embedding (failed embed call scenario).
+        chunk = await _insert_chunk(s, agent_id, ep, 0, "content here", None)
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT target_id::text, relation FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_id = :c "
+            "  AND source_type = 'chunk'"
+        ), {"a": agent_id, "c": chunk})).all()
+    relations = {(r.target_id, r.relation) for r in rows}
+    assert (str(ep), "part_of") in relations, (
+        f"NULL-embedded chunk must still receive chunk→episode part_of edge, "
+        f"got {relations}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_sequential_chunk_edge_persisted_at_weight_1_0(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070 (codex P2): adjacent chunk→chunk edges use the related_to
+    relation (multiplier 0.8) but the documented structural weight is 1.0.
+    Verify the multiplier override on create_edge keeps the persisted
+    weight at 1.0 for sequential pairs."""
+    agent_id = f"test-seq-weight-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        # High cosine threshold so only the adjacency branch fires.
+        "graph_threshold_chunk_chunk_intra": 0.99,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "ep")
+        emb_a = await mock_embeddings.embed("apple")
+        emb_b = await mock_embeddings.embed("zebra")
+        c0 = await _insert_chunk(s, agent_id, ep, 0, "apple chunk", emb_a)
+        c1 = await _insert_chunk(s, agent_id, ep, 1, "zebra chunk", emb_b)
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT weight FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' "
+            "  AND target_type = 'chunk' "
+            "  AND ((source_id = :c0 AND target_id = :c1) "
+            "    OR (source_id = :c1 AND target_id = :c0))"
+        ), {"a": agent_id, "c0": c0, "c1": c1})).all()
+    assert rows, "sequential edge should exist"
+    weights = [float(r.weight) for r in rows]
+    assert all(abs(w - 1.0) < 1e-6 for w in weights), (
+        f"sequential chunk edges must persist at structural weight 1.0, "
+        f"got {weights}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_run_backfill_cycle_includes_chunks_key(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):

@@ -129,23 +129,31 @@ class GraphDensifier:
         entity_type: str,
         limit: int,
         session: AsyncSession,
+        *,
+        require_embedding: bool = True,
     ) -> list[tuple[UUID, str]]:
         """Find nodes with no graph edges (orphans).
 
         Returns list of (id, content_text) tuples for orphan nodes.
+
+        ``require_embedding=False`` allows F070 chunks whose embed call
+        failed to still receive structural edges (e.g. ``part_of``) that
+        don't depend on embeddings. Default keeps existing semantics for
+        all other entity types (cosine-driven backfill requires embeddings).
         """
         config = _ENTITY_CONFIG.get(entity_type)
         if not config:
             return []
 
         table, type_name, content_col, extra_where = config
+        embedding_clause = "AND t.embedding IS NOT NULL" if require_embedding else ""
 
         sql = text(f"""
             SELECT t.id, {content_col} AS content
             FROM {table} t
             WHERE t.agent_id = :agent_id
               AND {extra_where}
-              AND t.embedding IS NOT NULL
+              {embedding_clause}
               AND NOT EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :agent_id
@@ -537,7 +545,13 @@ class GraphDensifier:
         total = 0
 
         async with self.db.session() as session:
-            orphans = await self.find_orphans("chunk", limit, session)
+            # F070: chunks must always get the structural ``part_of`` edge,
+            # even when the embed call failed (heart.episode_chunks.embedding
+            # is nullable). Cosine-gated sub-stages return zero rows naturally
+            # when the source embedding is NULL.
+            orphans = await self.find_orphans(
+                "chunk", limit, session, require_embedding=False,
+            )
             for orphan_id, _content in orphans:
                 if self._interrupted:
                     break
@@ -686,11 +700,16 @@ class GraphDensifier:
             sim = float(row.sim or 0.0)
             is_adjacent = abs(sibling_idx - self_idx) == 1
             if is_adjacent:
-                # Sequential link — always create, weight=1.0
+                # Sequential link — always create, structural weight=1.0.
+                # Override the related_to multiplier (0.8) so the persisted
+                # weight matches the documented structural anchor.
                 weight = 1.0
+                multiplier_override: float | None = 1.0
             elif sim >= cosine_threshold:
-                # Non-adjacent but similar enough — use cosine as weight
+                # Non-adjacent but similar enough — cosine drives weight;
+                # let the global related_to multiplier (0.8) discount it.
                 weight = sim
+                multiplier_override = None
             else:
                 continue
             edge = await self._linker.create_edge(
@@ -701,6 +720,7 @@ class GraphDensifier:
                 relation="related_to",
                 weight=weight,
                 session=session,
+                weight_multiplier_override=multiplier_override,
             )
             if edge is not None:
                 created += 1
