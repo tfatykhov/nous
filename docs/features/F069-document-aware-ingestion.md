@@ -178,7 +178,7 @@ This work mostly lands in `_format_pipeline_text` and the existing chunk-recall 
 ## Open questions
 
 1. **Where to detect documents?** Tool-dispatch time vs. EpisodeSummarizer time. Tool-time is more precise (we know the tool name) but adds complexity to the tool path. Summarizer-time is simpler but harder to undo the soft-trim that already happened. Lean toward **tool-dispatch time** + an opt-out env flag.
-2. **Storage volume.** A typical arxiv paper at 50K words → ~40-50 chunks at 1500 chars. With Tim's avg ~10 papers/month, that's 500 chunks/month → 6K/year. At 1536d embeddings × 4 bytes × 6K = 36MB/year. Trivial.
+2. **Storage volume.** A typical arxiv paper at 50K words ≈ 250-300K characters. At 1500-char chunks with 200-char overlap (1300-char effective stride), that's **~190-230 chunks per paper**, not the ~40-50 I'd originally estimated. With Tim's avg ~10 papers/month, that's ~2000 chunks/month → ~24K/year. At 1536d embeddings × 4 bytes × 24K = ~140MB/year for vectors, plus similar for chunk text + indexes. Still well within Postgres comfort; not trivial enough to ignore in capacity planning. (Thanks Codex P2 for the corrected math.)
 3. **What's a "document"?** The heuristic above (host whitelist + length + content-look) is arbitrary. Probably need to refine after seeing real misclassifications. v1 ships with conservative detection (only obvious docs) + explicit override via tag.
 4. **Re-ingest existing prod content?** No — F069 is forward-looking only. Backfill is a separate question.
 
