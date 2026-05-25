@@ -659,7 +659,12 @@ class GraphDensifier:
             return 0
         self_idx = self_row.chunk_index
 
-        # Fetch sibling chunks (same episode, different chunk_index)
+        # Fetch sibling chunks (same episode, different chunk_index).
+        # Don't filter by embedding presence: adjacent siblings must link
+        # even when their embedding is NULL (sequential adjacency is
+        # structural, not embedding-derived). For non-adjacent siblings
+        # without an embedding, the cosine yields NULL → sim=0 → blocked
+        # by the threshold gate below.
         siblings = (await session.execute(
             text(
                 "SELECT id, chunk_index, "
@@ -670,8 +675,7 @@ class GraphDensifier:
                 "FROM heart.episode_chunks "
                 "WHERE episode_id = :ep_id "
                 "  AND agent_id = :a "
-                "  AND id != :i "
-                "  AND embedding IS NOT NULL"
+                "  AND id != :i"
             ),
             {"i": chunk_id, "ep_id": episode_id, "a": self._agent_id},
         )).all()

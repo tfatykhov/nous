@@ -162,20 +162,36 @@ async def _insert_episode(session: AsyncSession, agent_id: str, summary: str) ->
 
 async def _insert_chunk(
     session: AsyncSession, agent_id: str,
-    episode_id, chunk_index: int, content: str, embedding: list[float],
+    episode_id, chunk_index: int, content: str,
+    embedding: list[float] | None,
 ) -> str:
-    """F070 test helper: insert an episode_chunks row and return its ID."""
+    """F070 test helper: insert an episode_chunks row and return its ID.
+
+    Pass ``embedding=None`` to model the real-world case where embed
+    generation failed (column is nullable).
+    """
     chunk_id = uuid4()
-    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
-    await session.execute(text("""
-        INSERT INTO heart.episode_chunks
-            (id, agent_id, episode_id, chunk_index, content, embedding)
-        VALUES
-            (:id, :agent_id, :ep_id, :idx, :content, CAST(:embedding AS vector))
-    """), {
-        "id": chunk_id, "agent_id": agent_id, "ep_id": episode_id,
-        "idx": chunk_index, "content": content, "embedding": embedding_str,
-    })
+    if embedding is None:
+        await session.execute(text("""
+            INSERT INTO heart.episode_chunks
+                (id, agent_id, episode_id, chunk_index, content, embedding)
+            VALUES
+                (:id, :agent_id, :ep_id, :idx, :content, NULL)
+        """), {
+            "id": chunk_id, "agent_id": agent_id, "ep_id": episode_id,
+            "idx": chunk_index, "content": content,
+        })
+    else:
+        embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        await session.execute(text("""
+            INSERT INTO heart.episode_chunks
+                (id, agent_id, episode_id, chunk_index, content, embedding)
+            VALUES
+                (:id, :agent_id, :ep_id, :idx, :content, CAST(:embedding AS vector))
+        """), {
+            "id": chunk_id, "agent_id": agent_id, "ep_id": episode_id,
+            "idx": chunk_index, "content": content, "embedding": embedding_str,
+        })
     return chunk_id
 
 
@@ -934,6 +950,48 @@ async def test_chunk_intra_episode_sequential_always_linked(
     found = [(r.source_id, r.target_id, r.weight) for r in rows]
     has_pair = any((s_id, t_id) in pair for s_id, t_id, _ in found)
     assert has_pair, f"sequential adjacent chunks must link, got {found}"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_adjacent_chunk_links_even_when_sibling_embedding_null(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070 (codex P2): adjacency is structural, not embedding-derived.
+    When an adjacent sibling chunk has NULL embedding (e.g. embed call
+    failed), the guaranteed sequential edge must still be created."""
+    agent_id = f"test-chunk-null-emb-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_chunk_intra": 0.5,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "test-null-emb")
+        emb = await mock_embeddings.embed("apple")
+        # c0 has embedding (orphan that find_orphans will pick up),
+        # c1 is its adjacent sibling but has NULL embedding (embed failed).
+        c0 = await _insert_chunk(s, agent_id, ep, 0, "apple chunk", emb)
+        c1 = await _insert_chunk(s, agent_id, ep, 1, "zebra chunk", None)
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT source_id::text, target_id::text "
+            "FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type='chunk' AND target_type='chunk'"
+        ), {"a": agent_id})).all()
+    pair = {(str(c0), str(c1)), (str(c1), str(c0))}
+    found = {(r.source_id, r.target_id) for r in rows}
+    assert pair & found, (
+        f"adjacent chunks must link even when sibling embedding is NULL, "
+        f"got {found}"
+    )
 
 
 @pytest.mark.postgres_only
