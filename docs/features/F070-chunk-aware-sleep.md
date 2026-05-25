@@ -40,8 +40,19 @@ graph_edges: 1775
 
 - **Not** re-chunking — chunk content stays as-is.
 - **Not** changing the chunk ingest path (that's F067).
-- **Not** adding new chunk fields (no schema migration in v1).
+- **Not** adding new chunk fields (no schema migration in v1 — see scope below).
 - **Not** building cross-corpus chunk linking (single-agent only).
+
+### Scope split: v1 vs v2
+
+`heart.episode_chunks` today has NO `superseded_by` or `active` columns (unlike `heart.facts` which has both). Adding them is a real schema migration.
+
+To keep v1 shippable in one PR with no migration, **v1 only builds graph edges**. The two operations that would need new columns are deferred:
+
+- **Cross-episode dedup-marking** (would need `superseded_by` on chunks) → **deferred to F070.1**
+- **Stale-chunk soft-delete pruning** (would need `active` on chunks) → **deferred to F070.1**
+
+v1 still adds dedup *edges* (chunk↔chunk cross-episode at cosine ≥ 0.85), it just doesn't mark winners/losers persistently. Retrieval-time dedup (gbrain's 4-layer pattern) can use those edges without needing the column.
 
 ---
 
@@ -72,23 +83,33 @@ Current `nous/brain/graph_densifier.py` operates on fact/decision/episode/proced
 | `chunk → fact` | Same `source_episode_id` | One edge per (chunk, fact) pair within the same episode. Weight = cosine similarity between chunk embedding and fact embedding. Threshold: 0.55. |
 | `chunk → chunk` (intra-episode) | Same `episode_id`, sequential | Adjacent chunks (by `chunk_index`) auto-linked at weight=1.0 ("sequential" edge type). Non-adjacent linked at weight = cosine if > 0.7. |
 | `chunk → episode` | Always | Chunk's source episode (already FK; emit as explicit edge so graph traversal works). Weight=1.0. |
-| `chunk → chunk` (cross-episode) | Cosine > 0.85 | Dedup-style edges marking near-duplicates across sessions. Lowest-rated of the cluster gets `superseded_by` flag. |
+| `chunk → chunk` (cross-episode) | Cosine > 0.85 | Dedup-style edges marking near-duplicates across sessions. **v1 emits edges only**; persistent `superseded_by` flagging is deferred to F070.1 (requires schema migration). Retrieval-time dedup can still consume the edges. |
 
 ### 2. New sleep phase: `chunk_consolidation`
 
-Inserted between `graph_densification` and `relink_open_episodes`. Calls extended `GraphDensifier` for `chunk` node type. Caps:
+Inserted between `graph_densification` and `relink_open_episodes`. Calls extended `GraphDensifier` for `chunk` node type.
+
+**v1 settings (all in this PR):**
 
 | Param | Default | Purpose |
 |---|---|---|
+| `NOUS_CHUNK_CONSOLIDATION_ENABLED` | `false` | Master switch. |
 | `NOUS_GRAPH_BACKFILL_MAX_CHUNKS` | `100` | Max orphan chunks processed per cycle. Caps LLM/embedding cost. |
 | `NOUS_GRAPH_THRESHOLD_CHUNK_FACT` | `0.55` | Cosine floor for chunk→fact edges. |
 | `NOUS_GRAPH_THRESHOLD_CHUNK_CHUNK_INTRA` | `0.70` | Cosine floor for non-adjacent intra-episode chunk pairs. |
 | `NOUS_GRAPH_THRESHOLD_CHUNK_CHUNK_CROSS` | `0.85` | Cosine floor for cross-episode chunk dedup. |
-| `NOUS_CHUNK_CONSOLIDATION_ENABLED` | `false` | Master switch. |
 
-### 3. Chunk staleness pruning
+**Deferred to F070.1 (when staleness pruning lands):**
 
-Add a check in the existing `stale_scan` sleep phase: chunks whose source episode is older than `NOUS_CHUNK_STALE_MAX_AGE_DAYS` (default `730`, i.e. 2 years) AND has no incoming graph edges → soft-deleted via existing `active` flag pattern.
+| Param | Default | Purpose |
+|---|---|---|
+| `NOUS_CHUNK_STALE_MAX_AGE_DAYS` | `730` | Age (days) above which orphan chunks become eligible for soft-delete. Not in v1. |
+
+### 3. Chunk staleness pruning — **deferred to F070.1**
+
+Originally planned for v1: chunks whose source episode is older than a configurable threshold AND has no incoming graph edges → soft-deleted via an `active` flag. **Deferred because `heart.episode_chunks.active` does not exist today** — would need a schema migration that's out of v1 scope.
+
+F070.1 will add the column, the `NOUS_CHUNK_STALE_MAX_AGE_DAYS` setting, and the stale_scan extension. v1 ships without storage-bound pruning; growth is bounded only by ingest rate. At ~24K chunks/year (per F069 capacity estimate), prod can absorb that for at least a year before pruning becomes urgent.
 
 ### 4. Migration
 
