@@ -212,7 +212,10 @@ async def run_recall_pipeline(
     # formatter can session-group the Heart section. Episodes already carry
     # their id as the session; chunks got their episode_id from the chunk
     # search query. Facts need a follow-up lookup.
-    results = await _attach_fact_source_episodes(heart, results)
+    # Codex round-5 P2: gated behind the consumer flag so the extra
+    # DB round-trip doesn't run on every recall when the feature is off.
+    if getattr(settings, "session_group_heart_section", False):
+        results = await _attach_fact_source_episodes(heart, results)
 
     # P2: graph-adjacency boost (gbrain-inspired). When connected via
     # sleep-built edges (F040), candidates reinforce each other. Gated
@@ -575,10 +578,15 @@ async def _apply_graph_adjacency_boost(
     candidate_ids = [str(r.id) for r in results]
     try:
         async with brain.db.session() as s:
+            # Codex round-5 P2: exclude `contradicts` so mutually
+            # inconsistent candidates don't reinforce each other.
+            # Aligns with the spreading-activation filter at
+            # spreading_activation.py:103.
             rows = (await s.execute(sa_text(
                 "SELECT source_id::text, target_id::text, weight "
                 "FROM brain.graph_edges "
                 "WHERE agent_id = :a "
+                "  AND relation != 'contradicts' "
                 "  AND source_id = ANY(CAST(:ids AS uuid[])) "
                 "  AND target_id = ANY(CAST(:ids AS uuid[]))"
             ), {"a": brain.agent_id, "ids": candidate_ids})).all()

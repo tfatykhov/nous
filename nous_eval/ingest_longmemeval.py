@@ -593,9 +593,10 @@ def _parse_args(argv: list[str] | None) -> IngestLMEConfig:
     p.add_argument("--skip-download", action="store_true")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
-        "--max-sessions-per-question", type=int, default=10,
-        help="F051.5 cost guardrail. LongMemEval haystacks can have 30-50 sessions; "
-             "default 10 caps Sonnet spend at ~$15-25 for N=20.",
+        "--max-sessions-per-question", type=int, default=50,
+        help="F051.5 cost guardrail. Bumped to 50 (2026-05-25) so the ingest "
+             "covers the median ~48-session haystack the LongMemEval paper "
+             "assumes; the earlier cap of 10 masked distractor difficulty.",
     )
     p.add_argument(
         "--inter-question-sleep-seconds", type=float, default=0.0,
