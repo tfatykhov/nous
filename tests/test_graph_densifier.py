@@ -182,6 +182,7 @@ async def _insert_chunk(
 async def _insert_fact_with_episode(
     session: AsyncSession, agent_id: str,
     content: str, embedding: list[float], source_episode_id,
+    *, active: bool = True,
 ) -> str:
     """F070 test helper: insert a fact with source_episode_id set."""
     fact_id = uuid4()
@@ -189,9 +190,10 @@ async def _insert_fact_with_episode(
     await session.execute(text("""
         INSERT INTO heart.facts
             (id, agent_id, content, active, embedding, source_episode_id)
-        VALUES (:id, :agent_id, :content, true, CAST(:emb AS vector), :ep_id)
+        VALUES (:id, :agent_id, :content, :active, CAST(:emb AS vector), :ep_id)
     """), {
         "id": fact_id, "agent_id": agent_id, "content": content,
+        "active": active,
         "emb": embedding_str, "ep_id": source_episode_id,
     })
     return fact_id
@@ -843,6 +845,54 @@ async def test_chunk_to_fact_same_episode_links(
     fact_targets = {r.target_id for r in rows}
     assert str(same_ep_fact) in fact_targets, "same-episode fact should link"
     assert str(cross_ep_fact) not in fact_targets, "cross-episode fact must NOT link"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_chunk_to_fact_skips_inactive_facts(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070 (codex P2): inactive facts (active=false, e.g. superseded) must
+    NOT be linked even if they meet the cosine threshold."""
+    agent_id = f"test-chunk-inactive-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact": 0.5,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "ep")
+        ident_emb = await mock_embeddings.embed("user likes dark roast coffee")
+        chunk_id = await _insert_chunk(
+            s, agent_id, ep, 0,
+            "user likes dark roast coffee in this snippet", ident_emb,
+        )
+        active_fact = await _insert_fact_with_episode(
+            s, agent_id, "user likes dark roast coffee", ident_emb, ep,
+            active=True,
+        )
+        superseded_fact = await _insert_fact_with_episode(
+            s, agent_id, "user likes dark roast coffee", ident_emb, ep,
+            active=False,
+        )
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT target_id::text FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' "
+            "  AND target_type = 'fact' AND source_id = :c "
+        ), {"a": agent_id, "c": chunk_id})).all()
+    fact_targets = {r.target_id for r in rows}
+    assert str(active_fact) in fact_targets, "active fact should link"
+    assert str(superseded_fact) not in fact_targets, (
+        "inactive (superseded) fact must NOT link"
+    )
 
 
 @pytest.mark.postgres_only

@@ -605,6 +605,7 @@ class GraphDensifier:
                 "WHERE c.id = :chunk_id "
                 "  AND c.agent_id = :a "
                 "  AND f.agent_id = :a "
+                "  AND f.active = true "
                 "  AND f.source_episode_id = :ep_id "
                 "  AND f.embedding IS NOT NULL "
                 "  AND c.embedding IS NOT NULL "

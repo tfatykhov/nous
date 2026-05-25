@@ -36,6 +36,12 @@ RELATION_WEIGHT_MULTIPLIERS: dict[str, float] = {
     "evidence_for": 1.0,
     "discussed_in": 0.7,
     "extracted_from": 0.7,
+    # F070: chunk graph edges. `part_of` is a structural anchor (FK as edge);
+    # we want the full passed weight to survive. `summarized_by` already has
+    # cosine similarity baked into `weight` at the call site, so no extra
+    # discount needed beyond the (already empirical) cosine gating.
+    "part_of": 1.0,
+    "summarized_by": 1.0,
 }
 
 
