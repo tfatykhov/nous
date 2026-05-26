@@ -587,6 +587,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `recall_recent` | all | Retrieve recent memory items |
 | `learn_fact` | conversation, question, creative, task | Store a new fact |
 | `learn_skill` | conversation, question, task | Register a skill from URL, local path, or inline markdown |
+| `ingest_document` | conversation, question, task, debug | F069: chunk & persist a full document body (arxiv, PDF/.docx text, long markdown) to heart.episode_chunks with source_kind='document'. Use after extracting text yourself via run_python / web_fetch. |
 | `get_procedure` | all | Retrieve a specific procedure by ID |
 | `create_censor` | all | Create a guardrail censor |
 | `cache_retrieve` | all | Retrieve original content from SmartCompressed results |
