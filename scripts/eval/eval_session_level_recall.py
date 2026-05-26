@@ -404,7 +404,7 @@ async def main() -> int:
 
     print()
     print("=" * 90)
-    print(f"Session-level metrics @ K={args.k} — gbrain SOTA target hit@5 = 0.976")
+    print(f"Session-level metrics @ K={args.k}")
     print(f"mode={args.mode}   pipeline_limit={PIPELINE_LIMIT}   dedup-then-take-K-unique-sessions")
     n_q = len(overall_recall["baseline"])
     print(f"n_questions = {n_q}")
