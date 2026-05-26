@@ -92,7 +92,6 @@ Dashboard.registerView('graph', async function (container) {
         search: '',
     };
     var clusterMode = false;       // Phase 3: cluster-coloring toggle
-    var clusterIdByNodeId = {};    // populated after layout
 
     var cy = null; // Cytoscape instance
 
@@ -375,6 +374,10 @@ Dashboard.registerView('graph', async function (container) {
             // Edges follow their endpoints automatically when source/target
             // is display:none, so no per-edge work required by us.
         });
+        // Codex P2 round 3: if cluster mode is on, filters may have split
+        // the visible subgraph (e.g. by hiding a bridge node). Recompute
+        // and re-apply so colors match what the user sees.
+        if (clusterMode) applyClusterColors();
     }
 
     function applySearchHighlight() {
@@ -417,10 +420,20 @@ Dashboard.registerView('graph', async function (container) {
     // ───────────────────────────────────────────────────────────────────
 
     function computeClusters() {
-        // Connected-components clustering: every set of nodes reachable
-        // from each other via undirected edges. Cheap (O(V+E)) and matches
-        // what people perceive as "clusters" on this graph.
-        var components = cy.elements().components();
+        // Codex P2 round 3 (2026-05-26): derive components from the
+        // VISIBLE subgraph, not the full graph. Filters can hide bridge
+        // nodes — when they do, the visible graph splits into more
+        // components, and cluster colors must reflect that. Computing
+        // against cy.elements() once at render time meant filtered-out
+        // bridges silently misreported connectivity.
+        //
+        // Clear stale colors first so a node that became hidden (and
+        // thus dropped from the component graph) doesn't keep a color
+        // that no longer matches its visible neighbors.
+        cy.nodes().forEach(function (n) { n.removeData('clusterColor'); });
+
+        var visibleEls = cy.elements().filter(function (e) { return e.visible(); });
+        var components = visibleEls.components();
         var hues = [
             '#a78bfa', '#34d399', '#60a5fa', '#fb923c', '#fbbf24',
             '#f87171', '#06b6d4', '#22d3ee', '#a3e635', '#ec4899',
@@ -428,18 +441,16 @@ Dashboard.registerView('graph', async function (container) {
         ];
         components.forEach(function (comp, idx) {
             var hue = hues[idx % hues.length];
-            comp.nodes().forEach(function (n) {
-                clusterIdByNodeId[n.id()] = idx;
-                n.data('clusterColor', hue);
-            });
+            comp.nodes().forEach(function (n) { n.data('clusterColor', hue); });
         });
-        // Re-apply if toggle was on at compute time (initial render path).
-        if (clusterMode) applyClusterColors();
     }
 
     function applyClusterColors() {
         cy.batch(function () {
             if (clusterMode) {
+                // Recompute against the current visible subgraph so colors
+                // match what the user actually sees post-filter.
+                computeClusters();
                 cy.nodes().addClass('clustered');
             } else {
                 cy.nodes().removeClass('clustered');
