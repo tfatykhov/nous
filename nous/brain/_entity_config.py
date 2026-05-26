@@ -33,4 +33,8 @@ _ENTITY_CONFIG: dict[str, tuple[str, str, str, str]] = {
         "t.active = true",
     ),
     "procedure": ("heart.procedures", "procedure", "t.description", "t.active = true"),
+    # F070 (2026-05-25): chunk node type. heart.episode_chunks has no `active`
+    # column (deferred to F070.1), so the extra_where is the always-true
+    # placeholder. content_col is `t.content` (raw transcript fragment).
+    "chunk": ("heart.episode_chunks", "chunk", "t.content", "1=1"),
 }

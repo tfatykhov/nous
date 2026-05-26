@@ -687,7 +687,12 @@ class Settings(BaseSettings):
 
     # F042: Cross-encoder reranking
     cross_encoder_enabled: bool = False
-    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # BGE reranker-v2-m3 empirically beats MiniLM by +18.4pp chunks_off /
+    # +3.3pp baseline hit@5 on per_haystack K=5 (LME N=60, eval runs
+    # 2026-05-25T20-14-07 vs 22-34-46). Previously set via env var in
+    # ad-hoc shell sessions; now persisted as the default so the win
+    # doesn't silently regress when no override is supplied.
+    cross_encoder_model: str = "BAAI/bge-reranker-v2-m3"
     cross_encoder_max_candidates: int = 30
     cross_encoder_text_limit: int = 512
 
@@ -991,6 +996,78 @@ class Settings(BaseSettings):
     recall_parent_episode_truncate: int = Field(
         default=500,
         description="F067 per-parent-episode summary char truncation.",
+    )
+    session_group_heart_section: bool = Field(
+        default=False,
+        description=(
+            "P1.1 (2026-05-25). When true, recall_deep groups Heart Memory "
+            "section items (facts/chunks/episodes) by source session_id, "
+            "with section headers ('-- Session abc12345 --'). Helps the LLM "
+            "synthesize across sessions for multi-session questions. "
+            "Validated on labeled LME eval; opt-in for prod until A/B confirms."
+        ),
+    )
+    graph_adjacency_boost_enabled: bool = Field(
+        default=False,
+        description=(
+            "P2 (2026-05-25). When true, retrieval applies a multiplicative "
+            "score boost to candidates connected via brain.graph_edges to "
+            "other candidates in the same batch. Inspired by gbrain's "
+            "adjacency-aware ranking. Leverages F040 sleep-built edges."
+        ),
+    )
+    graph_adjacency_boost_alpha: float = Field(
+        default=0.15,
+        description="P2: max boost as a fraction of original score (default 0.15 = +15% for the most-connected candidate).",
+    )
+    heart_graph_all_types_enabled: bool = Field(
+        default=False,
+        description=(
+            "When true, the heart_graph_neighbors stage expands fact/episode "
+            "seeds to neighbors of ALL node types (fact, episode, chunk, "
+            "procedure, decision) instead of decisions only. Required to "
+            "activate F022 cross-type + F040 densification + F070 chunk edges "
+            "that today have no consumer in retrieval. Opt-in until eval "
+            "validates on the F051 harness; ships disabled in prod."
+        ),
+    )
+    heart_graph_neighbors_per_seed: int = Field(
+        default=3,
+        description=(
+            "When heart_graph_all_types_enabled is true, this is the per-seed "
+            "neighbor limit (vs the 2 used by the decision-only path). Higher "
+            "default reflects the larger candidate pool when all types are "
+            "surfaced."
+        ),
+    )
+    # =========================================================================
+    # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
+    # =========================================================================
+    chunk_consolidation_enabled: bool = Field(
+        default=False,
+        description=(
+            "F070 (2026-05-25). When true, sleep cycle and EpisodeSummarizer "
+            "build graph edges to/from heart.episode_chunks rows. Fixes the "
+            "gap that chunks have zero edges (audit 2026-05-25 found 1,775 "
+            "edges, all fact↔fact / procedure↔procedure). Required for "
+            "adjacency boost and F022 spreading activation to reach chunks."
+        ),
+    )
+    graph_backfill_max_chunks: int = Field(
+        default=100,
+        description="F070: max orphan chunks processed per sleep cycle (caps embedding/LLM cost).",
+    )
+    graph_threshold_chunk_fact: float = Field(
+        default=0.55,
+        description="F070: cosine floor for chunk→fact same-episode edges.",
+    )
+    graph_threshold_chunk_chunk_intra: float = Field(
+        default=0.70,
+        description="F070: cosine floor for non-adjacent intra-episode chunk↔chunk edges. Adjacent pairs always linked (sequential edge_type, weight=1.0).",
+    )
+    graph_threshold_chunk_chunk_cross: float = Field(
+        default=0.85,
+        description="F070: cosine floor for cross-episode chunk↔chunk dedup edges.",
     )
 
     @model_validator(mode="after")

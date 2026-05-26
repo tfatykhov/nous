@@ -40,6 +40,10 @@ _RELATION_MAP: dict[tuple[str, str], str] = {
     ("episode", "episode"): "related_to",
     ("episode", "procedure"): "related_to",
     ("procedure", "procedure"): "related_to",
+    # F070 (2026-05-25): chunk relations
+    ("chunk", "fact"): "summarized_by",       # chunk text → fact extracted from same episode
+    ("chunk", "episode"): "part_of",          # chunk → its source episode
+    ("chunk", "chunk"): "related_to",         # intra/cross-episode chunk similarity
 }
 
 
@@ -125,23 +129,31 @@ class GraphDensifier:
         entity_type: str,
         limit: int,
         session: AsyncSession,
+        *,
+        require_embedding: bool = True,
     ) -> list[tuple[UUID, str]]:
         """Find nodes with no graph edges (orphans).
 
         Returns list of (id, content_text) tuples for orphan nodes.
+
+        ``require_embedding=False`` allows F070 chunks whose embed call
+        failed to still receive structural edges (e.g. ``part_of``) that
+        don't depend on embeddings. Default keeps existing semantics for
+        all other entity types (cosine-driven backfill requires embeddings).
         """
         config = _ENTITY_CONFIG.get(entity_type)
         if not config:
             return []
 
         table, type_name, content_col, extra_where = config
+        embedding_clause = "AND t.embedding IS NOT NULL" if require_embedding else ""
 
         sql = text(f"""
             SELECT t.id, {content_col} AS content
             FROM {table} t
             WHERE t.agent_id = :agent_id
               AND {extra_where}
-              AND t.embedding IS NOT NULL
+              {embedding_clause}
               AND NOT EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :agent_id
@@ -501,6 +513,225 @@ class GraphDensifier:
         logger.info("F040: backfill_orphan_episodes created %d edges from %d orphans", total, len(orphans))
         return total
 
+    async def backfill_orphan_chunks(
+        self,
+        max_count: int | None = None,
+    ) -> int:
+        """F070: find orphan chunks and build their graph edges.
+
+        Chunks live in ``heart.episode_chunks`` and are tightly coupled to a
+        source episode (``episode_id`` FK). Unlike facts/decisions/episodes
+        which use hybrid search to find candidates, chunk-backfill is
+        structurally local: edges target same-episode facts and same-episode
+        chunks. v1 builds:
+
+          - chunk → episode (always, weight=1.0)
+          - chunk → fact same-episode (cosine ≥ threshold_chunk_fact)
+          - chunk ↔ chunk intra-episode (sequential at weight=1.0 +
+            non-adjacent at cosine ≥ threshold_chunk_chunk_intra)
+
+        v1 does NOT build cross-episode chunk↔chunk dedup edges yet —
+        that requires hybrid search across the full chunks table and is
+        deferred to F070.1 along with the persistent-dedup column.
+        """
+        if not self._settings.chunk_consolidation_enabled:
+            return 0
+        if not self._settings.graph_backfill_enabled:
+            return 0
+
+        limit = max_count or self._settings.graph_backfill_max_chunks
+        thresh_chunk_fact = self._settings.graph_threshold_chunk_fact
+        thresh_chunk_chunk_intra = self._settings.graph_threshold_chunk_chunk_intra
+        total = 0
+
+        async with self.db.session() as session:
+            # F070: chunks must always get the structural ``part_of`` edge,
+            # even when the embed call failed (heart.episode_chunks.embedding
+            # is nullable). Cosine-gated sub-stages return zero rows naturally
+            # when the source embedding is NULL.
+            orphans = await self.find_orphans(
+                "chunk", limit, session, require_embedding=False,
+            )
+            for orphan_id, _content in orphans:
+                if self._interrupted:
+                    break
+
+                # 1. chunk → episode (always; FK guarantees the episode exists)
+                ep_row = (await session.execute(
+                    text(
+                        "SELECT episode_id FROM heart.episode_chunks "
+                        "WHERE id = :i AND agent_id = :a"
+                    ),
+                    {"i": orphan_id, "a": self._agent_id},
+                )).first()
+                if not ep_row or not ep_row.episode_id:
+                    continue
+                episode_id: UUID = ep_row.episode_id
+                edge = await self._linker.create_edge(
+                    source_id=orphan_id,
+                    target_id=episode_id,
+                    source_type="chunk",
+                    target_type="episode",
+                    relation="part_of",
+                    weight=1.0,
+                    session=session,
+                    # FK-derived anchor — deterministic, not cosine-inferred.
+                    provenance_source="structural",
+                )
+                if edge is not None:
+                    total += 1
+
+                # 2. chunk → fact same-episode (cosine-ranked)
+                fact_edges = await self._link_chunk_to_same_episode_facts(
+                    orphan_id, episode_id, thresh_chunk_fact, session,
+                )
+                total += fact_edges
+
+                # 3. chunk ↔ chunk intra-episode (sequential + non-adjacent)
+                chunk_edges = await self._link_chunk_to_intra_episode_chunks(
+                    orphan_id, episode_id, thresh_chunk_chunk_intra, session,
+                )
+                total += chunk_edges
+
+            await session.commit()
+
+        logger.info(
+            "F070: backfill_orphan_chunks created %d edges from %d orphans",
+            total, len(orphans),
+        )
+        return total
+
+    async def _link_chunk_to_same_episode_facts(
+        self,
+        chunk_id: UUID,
+        episode_id: UUID,
+        threshold: float,
+        session: AsyncSession,
+    ) -> int:
+        """Link a chunk to facts extracted from the same episode.
+
+        Cosine similarity between chunk embedding and fact embedding; one
+        edge per fact above ``threshold``. Returns count of edges created.
+        """
+        rows = (await session.execute(
+            text(
+                "SELECT f.id, "
+                "  1 - (c.embedding <=> f.embedding) AS sim "
+                "FROM heart.episode_chunks c, heart.facts f "
+                "WHERE c.id = :chunk_id "
+                "  AND c.agent_id = :a "
+                "  AND f.agent_id = :a "
+                "  AND f.active = true "
+                "  AND f.source_episode_id = :ep_id "
+                "  AND f.embedding IS NOT NULL "
+                "  AND c.embedding IS NOT NULL "
+                "  AND (1 - (c.embedding <=> f.embedding)) >= :thresh "
+                "ORDER BY sim DESC"
+            ),
+            {
+                "chunk_id": chunk_id, "ep_id": episode_id,
+                "a": self._agent_id, "thresh": threshold,
+            },
+        )).all()
+        created = 0
+        for row in rows:
+            edge = await self._linker.create_edge(
+                source_id=chunk_id,
+                target_id=row.id,
+                source_type="chunk",
+                target_type="fact",
+                relation="summarized_by",
+                weight=float(row.sim),
+                session=session,
+            )
+            if edge is not None:
+                created += 1
+        return created
+
+    async def _link_chunk_to_intra_episode_chunks(
+        self,
+        chunk_id: UUID,
+        episode_id: UUID,
+        cosine_threshold: float,
+        session: AsyncSession,
+    ) -> int:
+        """Link a chunk to other chunks in the same episode.
+
+        Two edge types:
+        - Adjacent chunks (chunk_index ± 1): always linked, weight=1.0
+        - Non-adjacent: cosine ≥ ``cosine_threshold``
+
+        Returns count of edges created.
+        """
+        # Fetch this chunk's index for sequential check
+        self_row = (await session.execute(
+            text(
+                "SELECT chunk_index FROM heart.episode_chunks "
+                "WHERE id = :i AND agent_id = :a"
+            ),
+            {"i": chunk_id, "a": self._agent_id},
+        )).first()
+        if not self_row:
+            return 0
+        self_idx = self_row.chunk_index
+
+        # Fetch sibling chunks (same episode, different chunk_index).
+        # Don't filter by embedding presence: adjacent siblings must link
+        # even when their embedding is NULL (sequential adjacency is
+        # structural, not embedding-derived). For non-adjacent siblings
+        # without an embedding, the cosine yields NULL → sim=0 → blocked
+        # by the threshold gate below.
+        siblings = (await session.execute(
+            text(
+                "SELECT id, chunk_index, "
+                "  1 - (embedding <=> ("
+                "    SELECT embedding FROM heart.episode_chunks "
+                "    WHERE id = :i AND agent_id = :a"
+                "  )) AS sim "
+                "FROM heart.episode_chunks "
+                "WHERE episode_id = :ep_id "
+                "  AND agent_id = :a "
+                "  AND id != :i"
+            ),
+            {"i": chunk_id, "ep_id": episode_id, "a": self._agent_id},
+        )).all()
+
+        created = 0
+        for row in siblings:
+            sibling_idx = row.chunk_index
+            sim = float(row.sim or 0.0)
+            is_adjacent = abs(sibling_idx - self_idx) == 1
+            if is_adjacent:
+                # Sequential link — always create, structural weight=1.0.
+                # Override the related_to multiplier (0.8) so the persisted
+                # weight matches the documented structural anchor.
+                weight = 1.0
+                multiplier_override: float | None = 1.0
+                # chunk_index ± 1 is structural, not cosine-inferred.
+                provenance: str = "structural"
+            elif sim >= cosine_threshold:
+                # Non-adjacent but similar enough — cosine drives weight;
+                # let the global related_to multiplier (0.8) discount it.
+                weight = sim
+                multiplier_override = None
+                provenance = "auto_linker"
+            else:
+                continue
+            edge = await self._linker.create_edge(
+                source_id=chunk_id,
+                target_id=row.id,
+                source_type="chunk",
+                target_type="chunk",
+                relation="related_to",
+                weight=weight,
+                session=session,
+                weight_multiplier_override=multiplier_override,
+                provenance_source=provenance,
+            )
+            if edge is not None:
+                created += 1
+        return created
+
     async def backfill_orphan_procedures(
         self,
         max_count: int | None = None,
@@ -577,6 +808,13 @@ class GraphDensifier:
             return _log_and_return(aborted=True)
 
         results["procedures"] = await self.backfill_orphan_procedures(ce_stats=ce_stats)
+        if self._interrupted:
+            return _log_and_return(aborted=True)
+
+        # F070 (2026-05-25): chunk consolidation. Gated by separate flag
+        # (chunk_consolidation_enabled) so it can ship independently of the
+        # main F040 backfill master switch.
+        results["chunks"] = await self.backfill_orphan_chunks()
         return _log_and_return(aborted=False)
 
     async def discover_clusters(self, max_bridges: int = 20) -> int:

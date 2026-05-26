@@ -36,6 +36,12 @@ RELATION_WEIGHT_MULTIPLIERS: dict[str, float] = {
     "evidence_for": 1.0,
     "discussed_in": 0.7,
     "extracted_from": 0.7,
+    # F070: chunk graph edges. `part_of` is a structural anchor (FK as edge);
+    # we want the full passed weight to survive. `summarized_by` already has
+    # cosine similarity baked into `weight` at the call site, so no extra
+    # discount needed beyond the (already empirical) cosine gating.
+    "part_of": 1.0,
+    "summarized_by": 1.0,
 }
 
 
@@ -86,14 +92,34 @@ class GraphLinker:
         relation: str,
         weight: float,
         session: AsyncSession,
+        *,
+        weight_multiplier_override: float | None = None,
+        provenance_source: str = "auto_linker",
     ) -> GraphEdgeInfo | None:
         """Create a graph edge with relation-aware weight multiplier.
 
         Applies RELATION_WEIGHT_MULTIPLIERS to the raw weight and uses
         ON CONFLICT DO NOTHING to skip duplicates.  Returns the edge info
         on success, or None if the edge already exists.
+
+        ``weight_multiplier_override`` skips the relation-table lookup for
+        callers that need to bypass the per-relation discount — e.g. F070
+        sequential chunk adjacency, which is structural (weight=1.0) but
+        reuses the ``related_to`` relation (multiplier 0.8). Without the
+        override, the persisted weight would be 0.8, not 1.0.
+
+        ``provenance_source`` is the writer-identity tag forwarded to F065's
+        ``classify(relation, source=...)`` to set ``extraction_method``.
+        Default ``"auto_linker"`` preserves existing behavior. Pass
+        ``"structural"`` for FK-derived / index-derived anchors (F070
+        chunk→episode part_of and chunk→chunk sequential adjacency) so
+        ``graph_inferred_edge_penalty`` does not down-weight them.
         """
-        multiplier = RELATION_WEIGHT_MULTIPLIERS.get(relation, 0.8)
+        multiplier = (
+            weight_multiplier_override
+            if weight_multiplier_override is not None
+            else RELATION_WEIGHT_MULTIPLIERS.get(relation, 0.8)
+        )
         adjusted_weight = weight * multiplier
 
         stmt = (
@@ -107,7 +133,7 @@ class GraphLinker:
                 relation=relation,
                 weight=adjusted_weight,
                 auto_linked=True,
-                extraction_method=classify(relation, source="auto_linker"),  # F065
+                extraction_method=classify(relation, source=provenance_source),  # F065
             )
             .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
         )

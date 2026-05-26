@@ -478,6 +478,205 @@ async def test_neighbors(brain, session):
 
 
 # ---------------------------------------------------------------------------
+# 18a. test_neighbors_neighbor_type_filter
+# ---------------------------------------------------------------------------
+
+
+async def test_neighbors_neighbor_type_filter(brain, session):
+    """F070 fix: ``neighbor_type`` pushes the filter into SQL so a small
+    ``limit`` returns rows of the requested type, not rows of arbitrary
+    types that a downstream Python filter would discard.
+
+    Pre-fix: querying a fact with 5 chunk neighbors + 1 decision neighbor
+    at ``limit=2`` could return 2 chunks → caller's Python ``decision``
+    filter discarded both → 0 decisions surfaced even though one exists.
+    Post-fix: ``neighbor_type="decision"`` returns the 1 decision.
+    """
+    # Build a fact with mixed-type neighbors.
+    # We insert raw GraphEdge rows so we don't need Heart/chunks fixtures.
+    from uuid import uuid4
+
+    from nous.storage.models import GraphEdge
+
+    fact_id = uuid4()
+    decision = await brain.record(_record_input(description="real decision"), session=session)
+
+    # 5 chunk neighbors via summarized_by (the F070 case that crowds decisions).
+    chunk_ids = [uuid4() for _ in range(5)]
+    for cid in chunk_ids:
+        session.add(GraphEdge(
+            source_id=cid, target_id=fact_id,
+            source_type="chunk", target_type="fact",
+            agent_id=brain.agent_id, relation="summarized_by",
+            weight=0.8, auto_linked=True,
+            extraction_method="inferred",
+        ))
+    # 1 decision neighbor via informed_by.
+    session.add(GraphEdge(
+        source_id=fact_id, target_id=decision.id,
+        source_type="fact", target_type="decision",
+        agent_id=brain.agent_id, relation="informed_by",
+        weight=0.9, auto_linked=True,
+        extraction_method="heuristic",
+    ))
+    await session.flush()
+
+    # Without filter, limit=2 over 6 edges can return any mix.
+    # WITH filter, limit=2 must return only decisions (we have 1).
+    neighbors = await brain.neighbors(
+        fact_id, node_type="fact", limit=2, session=session,
+        neighbor_type="decision",
+    )
+    assert len(neighbors) == 1, (
+        f"neighbor_type='decision' must return only the decision row, "
+        f"got {[(n.node_type, n.id) for n in neighbors]}"
+    )
+    assert neighbors[0].node_type == "decision"
+    assert neighbors[0].id == decision.id
+
+
+# ---------------------------------------------------------------------------
+# 18a-Path-A. test_neighbors_resolves_content_for_all_node_types
+# ---------------------------------------------------------------------------
+
+
+async def test_neighbors_resolves_content_for_all_node_types(brain, session):
+    """Path A: brain._neighbors must resolve real description text for
+    fact / episode / chunk / procedure / decision neighbors, not the
+    pre-Path-A ``f'[{ntype}] {uuid}'`` placeholder. Without this, every
+    chunk-edge consumer would receive useless placeholder strings."""
+    from uuid import uuid4
+
+    from nous.storage.models import (
+        Episode, EpisodeChunk, Fact, GraphEdge, Procedure,
+    )
+
+    seed = await brain.record(
+        _record_input(description="Seed decision text"), session=session,
+    )
+
+    # Build one of each non-decision node type with known content.
+    fact_id = uuid4()
+    session.add(Fact(
+        id=fact_id, agent_id=brain.agent_id, content="FACT_CONTENT_TOKEN",
+        active=True,
+    ))
+    ep_id = uuid4()
+    session.add(Episode(
+        id=ep_id, agent_id=brain.agent_id, summary="EPISODE_SUMMARY_TOKEN",
+        active=True,
+    ))
+    chunk_id = uuid4()
+    session.add(EpisodeChunk(
+        id=chunk_id, agent_id=brain.agent_id, episode_id=ep_id,
+        chunk_index=0, content="CHUNK_CONTENT_TOKEN",
+    ))
+    proc_id = uuid4()
+    session.add(Procedure(
+        id=proc_id, agent_id=brain.agent_id, name="proc",
+        description="PROCEDURE_DESC_TOKEN", active=True,
+    ))
+    # Link seed decision to each via graph_edges.
+    for tgt_id, tgt_type, rel in [
+        (fact_id, "fact", "informed_by"),
+        (ep_id, "episode", "discussed_in"),
+        (chunk_id, "chunk", "summarized_by"),
+        (proc_id, "procedure", "related_to"),
+    ]:
+        session.add(GraphEdge(
+            source_id=seed.id, target_id=tgt_id,
+            source_type="decision", target_type=tgt_type,
+            agent_id=brain.agent_id, relation=rel,
+            weight=0.8, auto_linked=True, extraction_method="heuristic",
+        ))
+    await session.flush()
+
+    neighbors = await brain.neighbors(
+        seed.id, node_type="decision", limit=10, session=session,
+    )
+    by_type = {n.node_type: n.description for n in neighbors}
+
+    assert by_type.get("fact") == "FACT_CONTENT_TOKEN", (
+        f"fact content unresolved: {by_type.get('fact')!r}"
+    )
+    assert by_type.get("episode") == "EPISODE_SUMMARY_TOKEN", (
+        f"episode summary unresolved: {by_type.get('episode')!r}"
+    )
+    assert by_type.get("chunk") == "CHUNK_CONTENT_TOKEN", (
+        f"chunk content unresolved: {by_type.get('chunk')!r}"
+    )
+    assert by_type.get("procedure") == "PROCEDURE_DESC_TOKEN", (
+        f"procedure description unresolved: {by_type.get('procedure')!r}"
+    )
+    # Tighter assertion: every resolved description must NOT be the
+    # placeholder format ``[<ntype>] <uuid>``. Pre-Path-A code emitted that
+    # for all non-decision types; this regression-tests against reverting.
+    for n in neighbors:
+        assert not (n.description or "").startswith(f"[{n.node_type}]"), (
+            f"placeholder leaked for {n.node_type}: {n.description!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 18a-Path-A.2. test_neighbors_falls_back_to_placeholder_for_empty_content
+# ---------------------------------------------------------------------------
+
+
+async def test_neighbors_falls_back_to_placeholder_for_empty_content(
+    brain, session, caplog,
+):
+    """Path A defensive: when a resolved row has empty/NULL content (the
+    NOT-NULL bypass / data corruption case), _neighbors falls back to the
+    ``[<ntype>] <uuid>`` placeholder AND logs WARNING — silent passthrough
+    would let a useless candidate land in rerank with no operator signal."""
+    import logging
+    from uuid import uuid4
+
+    from nous.storage.models import Episode, Fact, GraphEdge
+
+    seed = await brain.record(
+        _record_input(description="seed"), session=session,
+    )
+    # Fact with empty content (simulates NOT-NULL bypass via empty string).
+    bad_fact_id = uuid4()
+    session.add(Fact(
+        id=bad_fact_id, agent_id=brain.agent_id, content="", active=True,
+    ))
+    # Episode with empty summary.
+    bad_ep_id = uuid4()
+    session.add(Episode(
+        id=bad_ep_id, agent_id=brain.agent_id, summary="", active=True,
+    ))
+    for tgt_id, tgt_type in [(bad_fact_id, "fact"), (bad_ep_id, "episode")]:
+        session.add(GraphEdge(
+            source_id=seed.id, target_id=tgt_id,
+            source_type="decision", target_type=tgt_type,
+            agent_id=brain.agent_id, relation="related_to",
+            weight=0.8, auto_linked=True, extraction_method="heuristic",
+        ))
+    await session.flush()
+
+    with caplog.at_level(logging.WARNING, logger="nous.brain.brain"):
+        neighbors = await brain.neighbors(
+            seed.id, node_type="decision", limit=10, session=session,
+        )
+
+    by_id = {n.id: n for n in neighbors}
+    # Both fall back to placeholder rather than empty string.
+    assert by_id[bad_fact_id].description == f"[fact] {bad_fact_id}"
+    assert by_id[bad_ep_id].description == f"[episode] {bad_ep_id}"
+    # And both emit a WARN (one per offending row).
+    warns = [r for r in caplog.records if r.levelname == "WARNING"]
+    warn_texts = "\n".join(r.getMessage() for r in warns)
+    assert "fact" in warn_texts and str(bad_fact_id) in warn_texts, (
+        f"expected WARN for empty fact, got: {warn_texts!r}"
+    )
+    assert "episode" in warn_texts and str(bad_ep_id) in warn_texts, (
+        f"expected WARN for empty episode, got: {warn_texts!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 18b. test_link_with_types
 # ---------------------------------------------------------------------------
 

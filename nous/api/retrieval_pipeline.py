@@ -126,6 +126,13 @@ class _PipelineAccumulator:
 
     # Stage 2: cross-type graph neighbors from Heart seeds (F022 Phase 2)
     heart_graph_decisions: list["NeighborResult"] = field(default_factory=list)
+    # Stage 2b: non-decision graph neighbors from Heart/chunk seeds.
+    # Path A (heart_graph_all_types_enabled): when set, this collects
+    # fact/episode/chunk/procedure neighbors that previously had no consumer.
+    # Kept distinct from heart_graph_decisions so the existing
+    # decision-focused stage's downstream formatter/scorer shape is
+    # unchanged when the flag is off.
+    heart_graph_memory_neighbors: list["NeighborResult"] = field(default_factory=list)
 
     # Stage 3: Brain decision results
     decision_results: list["DecisionSummary"] = field(default_factory=list)
@@ -136,8 +143,9 @@ class _PipelineAccumulator:
     # Stage 5: contradiction edges (source_id, source_type, target_id, target_type)
     contradictions: list[tuple[UUID, str, UUID, str]] = field(default_factory=list)
 
-    # F067 Stage 1.5: chunk-recall results (id, content, score)
-    chunk_results: list[tuple[UUID, str, float]] = field(default_factory=list)
+    # F067 Stage 1.5: chunk-recall results
+    # Shape: (id, content, score, episode_id) — see _search_episode_chunks.
+    chunk_results: list[tuple[UUID, str, float, UUID]] = field(default_factory=list)
 
     # Flags
     searched_decisions: bool = False
@@ -207,7 +215,30 @@ async def run_recall_pipeline(
     # naturally co-displayed). Empty when feature flag is off.
     results.extend(_chunks_to_pipeline(acc.chunk_results))
     results.extend(_heart_graph_to_pipeline(acc.heart_graph_decisions, settings))
+    # Path A: non-decision neighbors land in the same stage-order slot as the
+    # decision-only graph results so subsequent ``rerank_by_score`` reorders
+    # them uniformly with everything else.
+    results.extend(_heart_graph_memory_to_pipeline(
+        acc.heart_graph_memory_neighbors, settings,
+    ))
     results.extend(_decisions_to_pipeline(acc.decision_results))
+    # P1.1: batch-resolve source_episode_id for fact-type results so the
+    # formatter can session-group the Heart section. Episodes already carry
+    # their id as the session; chunks got their episode_id from the chunk
+    # search query. Facts need a follow-up lookup.
+    # Codex round-5 P2: gated behind the consumer flag so the extra
+    # DB round-trip doesn't run on every recall when the feature is off.
+    if getattr(settings, "session_group_heart_section", False):
+        results = await _attach_fact_source_episodes(heart, results)
+
+    # P2: graph-adjacency boost (gbrain-inspired). When connected via
+    # sleep-built edges (F040), candidates reinforce each other. Gated
+    # by feature flag; default off.
+    if getattr(settings, "graph_adjacency_boost_enabled", False):
+        alpha = float(getattr(settings, "graph_adjacency_boost_alpha", 0.15))
+        results = await _apply_graph_adjacency_boost(
+            brain, results, alpha=alpha,
+        )
     results.extend(_graph_expanded_to_pipeline(acc.graph_expanded, settings))
 
     # Attach contradiction links to matching results
@@ -348,10 +379,18 @@ async def _run_stages(
         for hr in acc.heart_results[:3]:
             if hr.type in ("fact", "episode"):
                 try:
+                    # F070 fix: push the decision filter into SQL so
+                    # ``LIMIT 2`` returns 2 decisions, not 2 of (decisions
+                    # + chunks + facts + ...) which the Python filter
+                    # below would then mostly discard. With F070 adding
+                    # ~37K chunk→fact summarized_by edges, the un-filtered
+                    # union frequently returned 2 chunks → 0 decisions →
+                    # silent decision-expansion loss.
                     neighbors = await brain.neighbors(
                         hr.id,
                         node_type=hr.type,
                         limit=2,
+                        neighbor_type="decision",
                     )
                     for n in neighbors:
                         if n.node_type == "decision" and n.id not in seen_graph_ids:
@@ -363,6 +402,86 @@ async def _run_stages(
                     acc.stage_errors["heart_graph_neighbors"] = (
                         acc.stage_errors.get("heart_graph_neighbors", 0) + 1
                     )
+
+        # ------------------------------------------------------------------
+        # Stage 2b (Path A): non-decision graph neighbors from Heart seeds.
+        # Path-A activates F022 cross-type / F040 / F070 edges that today
+        # have no consumer beyond adjacency_boost. Each fact/episode/chunk
+        # seed fans out one ``brain.neighbors`` call per target neighbor
+        # type so a small ``LIMIT`` returns N rows of THAT type, not N
+        # rows that the dedup below would mostly throw away. Mirrors the
+        # Stage 2 SQL-pushdown fix (F070 review round 6) one floor up.
+        # Flag-gated so prod retrieval shape is unchanged by default.
+        # ------------------------------------------------------------------
+        if settings.heart_graph_all_types_enabled:
+            mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
+            seen_mem_ids: set[UUID] = set()
+            heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
+            # acc.chunk_results carries (id, content, score, episode_id) per
+            # _search_episode_chunks at line 825. Use star-unpack so future
+            # tuple shape changes don't crash this hot loop.
+            chunk_ids: set[UUID] = {item[0] for item in acc.chunk_results}
+            # Heart seeds: top-K fact/episode results.
+            mem_seeds: list[tuple[UUID, str]] = [
+                (hr.id, hr.type) for hr in acc.heart_results[:3]
+                if hr.type in ("fact", "episode")
+            ]
+            # Chunk seeds: top-K F067 chunk-recall results (when present).
+            # Chunks have rich same-episode neighborhoods via F070.
+            mem_seeds.extend(
+                (item[0], "chunk") for item in acc.chunk_results[:3]
+            )
+            # Per-type fan-out — one ``LIMIT`` window per neighbor type so
+            # chunks don't crowd facts/episodes (or vice versa) out of a
+            # single small union limit. Order is irrelevant; the global
+            # rerank handles final ordering.
+            mem_neighbor_types = ("fact", "episode", "chunk", "procedure")
+            for seed_id, seed_type in mem_seeds:
+                for nbr_type in mem_neighbor_types:
+                    try:
+                        mem_neighbors = await brain.neighbors(
+                            seed_id,
+                            node_type=seed_type,
+                            limit=mem_limit,
+                            neighbor_type=nbr_type,
+                        )
+                    except Exception:
+                        # Mirror chunk-recall (Stage 1.5) pattern: log + count.
+                        # ``stage_errors`` is discarded by prod callers
+                        # (recall_deep tool), so the log is the operator's
+                        # only signal that Path A is broken in prod.
+                        logger.warning(
+                            "Path A: heart_graph_memory_neighbors brain.neighbors "
+                            "failed for agent=%s seed=%s seed_type=%s nbr_type=%s "
+                            "(non-fatal, this fan-out path contributes nothing this turn)",
+                            brain.agent_id, seed_id, seed_type, nbr_type,
+                            exc_info=True,
+                        )
+                        acc.stage_errors["heart_graph_memory_neighbors"] = (
+                            acc.stage_errors.get("heart_graph_memory_neighbors", 0) + 1
+                        )
+                        continue
+                    for n in mem_neighbors:
+                        # Decision neighbors are handled by Stage 2 above; even
+                        # though we passed neighbor_type=nbr_type (non-decision),
+                        # keep the guard for defense against future filter drift.
+                        if n.node_type == "decision":
+                            continue
+                        if n.id in seen_mem_ids:
+                            continue
+                        # Skip duplicates against existing candidate pool. Track
+                        # duplicates as a separate counter so eval can distinguish
+                        # "graph found nothing new" from "graph corroborated a
+                        # direct hit" — the latter is signal, not noise.
+                        if n.id in heart_ids or n.id in chunk_ids:
+                            acc.stage_errors["heart_graph_memory_duplicates"] = (
+                                acc.stage_errors.get(
+                                    "heart_graph_memory_duplicates", 0,
+                                ) + 1
+                            )
+                            continue
+                        acc.heart_graph_memory_neighbors.append(n)
+                        seen_mem_ids.add(n.id)
 
     # ------------------------------------------------------------------
     # Stage 3+4: Brain decisions + graph expansion
@@ -530,24 +649,148 @@ def _heart_results_to_pipeline(
     ]
 
 
+async def _apply_graph_adjacency_boost(
+    brain: "Brain",
+    results: list[PipelineResult],
+    *,
+    alpha: float = 0.15,
+) -> list[PipelineResult]:
+    """Boost candidates connected to other candidates via graph edges.
+
+    Hypothesis (gbrain-inspired): when several retrieved items belong to
+    the same semantic cluster (connected by sleep-built inferred edges,
+    F040 graph densification), they reinforce each other — the cluster
+    is more likely to be the right answer.
+
+    Algorithm:
+        1. Find edges in ``brain.graph_edges`` where BOTH endpoints are in
+           the candidate set.
+        2. Sum edge weights per candidate to get an "adjacency degree".
+        3. Apply multiplicative boost: ``score *= (1 + alpha * d/max_d)``.
+        4. Re-sort by boosted score.
+
+    Fails open: any DB error returns the original list unchanged.
+    """
+    from dataclasses import replace
+    from sqlalchemy import text as sa_text
+
+    if not results or len(results) < 2:
+        return results
+
+    candidate_ids = [str(r.id) for r in results]
+    try:
+        async with brain.db.session() as s:
+            # Codex round-5 P2: exclude `contradicts` so mutually
+            # inconsistent candidates don't reinforce each other.
+            # Aligns with the spreading-activation filter at
+            # spreading_activation.py:103.
+            rows = (await s.execute(sa_text(
+                "SELECT source_id::text, target_id::text, weight "
+                "FROM brain.graph_edges "
+                "WHERE agent_id = :a "
+                "  AND relation != 'contradicts' "
+                "  AND source_id = ANY(CAST(:ids AS uuid[])) "
+                "  AND target_id = ANY(CAST(:ids AS uuid[]))"
+            ), {"a": brain.agent_id, "ids": candidate_ids})).all()
+    except Exception:
+        return results  # fail-open — adjacency boost is a refinement
+
+    degree: dict[str, float] = {}
+    for src, tgt, w in rows:
+        w = float(w or 0.0)
+        degree[src] = degree.get(src, 0.0) + w
+        degree[tgt] = degree.get(tgt, 0.0) + w
+
+    if not degree:
+        return results
+    max_deg = max(degree.values())
+    if max_deg <= 0:
+        return results
+
+    boosted = []
+    for r in results:
+        d = degree.get(str(r.id), 0.0)
+        boost = 1.0 + alpha * (d / max_deg)
+        boosted.append(replace(r, score=(r.score or 0.0) * boost))
+    boosted.sort(key=lambda r: r.score or 0.0, reverse=True)
+    return boosted
+
+
+async def _attach_fact_source_episodes(
+    heart: "Heart", results: list[PipelineResult],
+) -> list[PipelineResult]:
+    """P1.1: batch-attach source_episode_id to fact-type PipelineResults.
+
+    Used by the formatter to session-group the Heart Memory section. One
+    SQL query for all fact IDs; failures (DB error, missing fact) leave
+    metadata unchanged so the formatter falls back to flat listing.
+
+    Chunks already carry source_episode_id from _search_episode_chunks.
+    Episodes use their own id as the session. Procedures/decisions don't
+    belong to a session — left untouched.
+    """
+    from dataclasses import replace
+    from sqlalchemy import text as sa_text
+    fact_ids = [str(r.id) for r in results if r.type == "fact"]
+    if not fact_ids:
+        return results
+    src_map: dict[str, str | None] = {}
+    try:
+        async with heart.db.session() as s:
+            res = await s.execute(sa_text(
+                "SELECT id::text, source_episode_id::text FROM heart.facts "
+                "WHERE id = ANY(CAST(:ids AS uuid[])) AND agent_id = :a"
+            ), {"ids": fact_ids, "a": heart.agent_id})
+            rows = res.all()
+        for fid, src in rows:
+            src_map[fid] = src
+    except Exception:
+        # Fail-open: formatter will fall back to flat listing.
+        # Also catches test fixtures where heart.db.session() returns mocks
+        # that don't fully implement the async context-manager protocol.
+        return results
+
+    out = []
+    for r in results:
+        if r.type == "fact":
+            src = src_map.get(str(r.id))
+            if src and not r.metadata.get("source_episode_id"):
+                new_md = dict(r.metadata)
+                new_md["source_episode_id"] = src
+                out.append(replace(r, metadata=new_md))
+            else:
+                out.append(r)
+        else:
+            out.append(r)
+    return out
+
+
 def _chunks_to_pipeline(
-    chunk_results: list[tuple[UUID, str, float]],
+    chunk_results: list,
 ) -> list[PipelineResult]:
     """F067: convert chunk-search rows into PipelineResult.
 
     Chunks are tagged ``type="chunk"`` and ``source="heart"`` so they appear
     in the legacy Heart Memory section of the formatter without extra logic.
+
+    P1.1: accepts both 3-tuples ``(id, content, score)`` (legacy) and
+    4-tuples ``(id, content, score, episode_id)`` (new from
+    _search_episode_chunks). When episode_id is present, stash it in
+    metadata so the formatter can session-group.
     """
-    return [
-        PipelineResult(
-            id=cid,
-            type="chunk",
-            description=content,
-            score=score,
-            source="heart",
-        )
-        for cid, content, score in chunk_results
-    ]
+    out = []
+    for row in chunk_results:
+        if len(row) >= 4:
+            cid, content, score, episode_id = row[0], row[1], row[2], row[3]
+            md = {"source_episode_id": episode_id} if episode_id else {}
+        else:
+            cid, content, score = row[0], row[1], row[2]
+            md = {}
+        out.append(PipelineResult(
+            id=cid, type="chunk", description=content, score=score,
+            source="heart", metadata=md,
+        ))
+    return out
 
 
 async def _search_episode_chunks(
@@ -575,14 +818,15 @@ async def _search_episode_chunks(
         return []
     vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
     async with heart.db.session() as s:
+        # P1.1: include episode_id so the formatter can session-group chunks.
         rows = (await s.execute(sa_text(
-            "SELECT id, content, 1 - (embedding <=> CAST(:v AS vector)) AS sim "
+            "SELECT id, content, 1 - (embedding <=> CAST(:v AS vector)) AS sim, episode_id "
             "FROM heart.episode_chunks "
             "WHERE agent_id = :a AND embedding IS NOT NULL "
             "ORDER BY embedding <=> CAST(:v AS vector) "
             "LIMIT :k"
         ), {"v": vec_lit, "a": agent_id, "k": limit})).all()
-    return [(r[0], r[1], float(r[2])) for r in rows]
+    return [(r[0], r[1], float(r[2]), r[3]) for r in rows]
 
 
 def _f065_provenance_penalty(
@@ -633,6 +877,31 @@ def _heart_graph_to_pipeline(
             metadata={"stage_origin": "heart_graph"},
         )
         for n in heart_graph
+    ]
+
+
+def _heart_graph_memory_to_pipeline(
+    memory_neighbors: list["NeighborResult"], settings: "Settings"
+) -> list[PipelineResult]:
+    """Path A: non-decision graph-neighbor results.
+
+    Carries the neighbor's actual ``node_type`` (fact/episode/chunk/procedure)
+    so the formatter and downstream scorers can route them like any other
+    memory candidate. Scoring uses the same decay + F065 provenance penalty
+    pattern as the decision-neighbor path.
+    """
+    decay = settings.graph_recall_decay
+    return [
+        PipelineResult(
+            id=n.id,
+            type=n.node_type,
+            description=n.description,
+            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
+            source="graph_expanded",
+            edge_relation=n.edge_relation,
+            metadata={"stage_origin": "heart_graph_memory"},
+        )
+        for n in memory_neighbors
     ]
 
 
