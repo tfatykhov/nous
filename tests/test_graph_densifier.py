@@ -1376,3 +1376,94 @@ async def test_cross_episode_idempotent_rerun(
     assert second == 0, (
         f"second run must be a no-op (idempotent), created {second}"
     )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_finder_excludes_null_embedding_chunks(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1 (codex round-2 P2): chunks without embeddings can never
+    produce cross-episode edges (both link queries require embedding
+    NOT NULL). The finder must exclude them so they don't occupy the
+    LIMIT window forever."""
+    agent_id = f"test-f070-1-nullemb-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "ep A")
+        ep_b = await _insert_episode(s, agent_id, "ep B")
+        emb = await mock_embeddings.embed("topic")
+        null_emb_chunk = await _insert_chunk(
+            s, agent_id, ep_a, 0, "missing embedding", None,
+        )
+        ok_chunk = await _insert_chunk(s, agent_id, ep_b, 0, "ok content", emb)
+        await _insert_edge(s, agent_id, null_emb_chunk, ep_a, "chunk", "episode")
+        await _insert_edge(s, agent_id, ok_chunk, ep_b, "chunk", "episode")
+        await s.commit()
+
+    async with db.session() as s:
+        candidates = await d.find_chunks_lacking_cross_episode_edges(
+            limit=100, session=s,
+        )
+    candidate_ids = {str(cid) for cid, _content, _ep in candidates}
+    assert str(null_emb_chunk) not in candidate_ids, (
+        f"NULL-embedded chunk must NOT be returned by finder; got "
+        f"{candidate_ids}"
+    )
+    assert str(ok_chunk) in candidate_ids, (
+        f"embedded chunk must be returned by finder; got {candidate_ids}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_finder_honors_offset(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1 (codex round-2 P1): the finder accepts an ``offset`` so
+    the script can paginate past hard-negative windows. With 3 candidates
+    inserted, offset=0/1/2 each return a distinct leading row and
+    offset=3 returns empty."""
+    agent_id = f"test-f070-1-offset-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "ep")
+        emb = await mock_embeddings.embed("topic")
+        chunk_ids = []
+        for i in range(3):
+            cid = await _insert_chunk(s, agent_id, ep, i, f"chunk {i}", emb)
+            await _insert_edge(s, agent_id, cid, ep, "chunk", "episode")
+            chunk_ids.append(str(cid))
+        await s.commit()
+
+    seen_first: set[str] = set()
+    async with db.session() as s:
+        for offset in (0, 1, 2):
+            results = await d.find_chunks_lacking_cross_episode_edges(
+                limit=1, session=s, offset=offset,
+            )
+            assert len(results) == 1, (
+                f"offset={offset} must return 1, got {len(results)}"
+            )
+            seen_first.add(str(results[0][0]))
+        empty = await d.find_chunks_lacking_cross_episode_edges(
+            limit=1, session=s, offset=3,
+        )
+        assert empty == [], f"offset=3 must be empty, got {empty}"
+
+    assert seen_first == set(chunk_ids), (
+        f"offsets 0/1/2 must expose each chunk once; got {seen_first} "
+        f"vs expected {set(chunk_ids)}"
+    )

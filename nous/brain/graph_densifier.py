@@ -740,29 +740,43 @@ class GraphDensifier:
         self,
         limit: int,
         session: AsyncSession,
+        offset: int = 0,
     ) -> list[tuple[UUID, str, UUID]]:
         """F070.1: chunks that have at least one edge but no cross-episode one.
 
         Returns ``(chunk_id, content, episode_id)`` tuples.
 
-        Cross-episode detection covers THREE paths (codex P1 review): chunk
-        may be source OR target of a chunk↔chunk cross-edge, plus chunk→fact.
-        Missing any path would re-process already-linked chunks on every
-        run, defeating idempotency.
+        Cross-episode detection covers THREE paths (codex round-1 P1):
+        chunk may be source OR target of a chunk↔chunk cross-edge, plus
+        chunk→fact. Missing any path would re-process already-linked chunks
+        on every run, defeating idempotency.
 
-        Implementation note: uses three separate ``NOT EXISTS`` clauses
-        correlated on ``c.id``. This lets the Postgres planner short-circuit
-        per row — as soon as ANY one cross-episode path matches for a given
-        chunk, the row is excluded without evaluating the others. The
-        earlier attempts (UNION + NOT IN, big NOT EXISTS with multi-table
-        LEFT JOIN) materialized intermediate sets and stalled on the
-        real eval corpus (35K chunks × 229K edges).
+        Codex round-2 P2: also filters ``c.embedding IS NOT NULL`` because
+        both cross-episode link queries require embeddings — NULL-embedded
+        chunks could never produce cross-episode edges and would otherwise
+        occupy the LIMIT window forever, blocking progress.
+
+        Codex round-2 P1: ``offset`` parameter so the caller can paginate
+        past hard-negative windows. Without it, if the newest LIMIT
+        candidates all happen to have no above-threshold cross-episode
+        neighbors, the backfill loop's no-progress break fires and
+        terminates with older candidates still un-linked. The script
+        advances ``offset += batch_size`` each iteration to expose new
+        candidates.
+
+        Implementation note: three separate ``NOT EXISTS`` clauses
+        correlated on ``c.id``. This lets the Postgres planner short-
+        circuit per row — as soon as ANY one cross-episode path matches
+        for a given chunk, the row is excluded. Earlier attempts (UNION
+        + NOT IN, big NOT EXISTS with multi-table LEFT JOIN) materialized
+        intermediate sets and stalled on real corpus sizes.
         """
         sql = text(
             """
             SELECT c.id, c.content, c.episode_id
             FROM heart.episode_chunks c
             WHERE c.agent_id = :a
+              AND c.embedding IS NOT NULL
               AND EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :a
@@ -804,10 +818,13 @@ class GraphDensifier:
                     AND other.episode_id != c.episode_id
               )
             ORDER BY c.created_at DESC NULLS LAST
-            LIMIT :lim
+            LIMIT :lim OFFSET :off
             """
         )
-        result = await session.execute(sql, {"a": self._agent_id, "lim": limit})
+        result = await session.execute(
+            sql,
+            {"a": self._agent_id, "lim": limit, "off": offset},
+        )
         return [(row.id, row.content or "", row.episode_id) for row in result.all()]
 
     async def _link_chunk_to_cross_episode_facts(
@@ -922,6 +939,7 @@ class GraphDensifier:
     async def backfill_orphan_chunks_cross_episode(
         self,
         max_count: int | None = None,
+        offset: int = 0,
     ) -> int:
         """F070.1: add cross-episode summarized_by + related_to edges.
 
@@ -929,6 +947,13 @@ class GraphDensifier:
         chunk that already has cross-episode edges; create_edge uses
         ON CONFLICT DO NOTHING under the hood. Re-running after a partial
         run continues from where the last batch stopped.
+
+        ``offset`` lets the caller paginate past hard-negative windows
+        (codex round-2 P1). When all candidates in the current LIMIT
+        window have no above-threshold neighbors, the caller advances
+        ``offset += max_count`` and tries the next slice. Without this,
+        the script's no-progress break would terminate the whole job
+        even though older candidates may still be linkable.
 
         Returns count of edges created.
         """
@@ -945,7 +970,7 @@ class GraphDensifier:
 
         async with self.db.session() as session:
             candidates = await self.find_chunks_lacking_cross_episode_edges(
-                limit, session,
+                limit, session, offset=offset,
             )
             for chunk_id, _content, episode_id in candidates:
                 if self._interrupted:

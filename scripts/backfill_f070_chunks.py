@@ -87,13 +87,16 @@ async def _count_chunks_lacking_cross_episode_edges(
     """F070.1: count chunks that have edges but no cross-episode ones.
 
     Mirrors the row-correlated NOT-EXISTS shape used in
-    ``GraphDensifier.find_chunks_lacking_cross_episode_edges`` so the
-    planner short-circuits per chunk instead of materializing a UNION.
+    ``GraphDensifier.find_chunks_lacking_cross_episode_edges``. Codex
+    round-2 P2: filters ``c.embedding IS NOT NULL`` because chunks
+    without embeddings can't be cross-episode-linked and would otherwise
+    inflate the count + occupy LIMIT slots indefinitely.
     """
     sql = text(
         """
         SELECT COUNT(*) FROM heart.episode_chunks c
         WHERE c.agent_id = :a
+          AND c.embedding IS NOT NULL
           AND EXISTS (
               SELECT 1 FROM brain.graph_edges e
               WHERE e.agent_id = :a
@@ -286,7 +289,18 @@ async def run_backfill(
             if before == 0:
                 print("Nothing to backfill in cross-episode phase.")
             else:
+                # Codex round-2 P1: advance an offset window per batch so
+                # a hard-negative slice (no above-threshold neighbors for
+                # ANY chunk in the window) doesn't terminate the whole
+                # phase. The previous break-on-no-progress treated such
+                # slices as "done" even when older candidates remained.
+                # When a chunk in an earlier window successfully links,
+                # subsequent counts shift down; the offset is intentionally
+                # NOT decremented for that case — the worst case is that
+                # we skip the just-vacated slot, which is fine since the
+                # next batch's window covers it via the offset advance.
                 batch_n = 0
+                offset = 0
                 while True:
                     if max_batches is not None and batch_n >= max_batches:
                         print(f"--max-batches={max_batches} hit; stopping cross-episode phase.")
@@ -296,10 +310,25 @@ async def run_backfill(
                     )
                     if candidates_before == 0:
                         break
+                    if offset >= candidates_before:
+                        # Walked past every remaining candidate without
+                        # producing a single edge in this pass. Stop.
+                        print(
+                            "WARN: cross-episode phase walked the full "
+                            "candidate pool without creating any new edges. "
+                            "Likely threshold too strict — every chunk's "
+                            "top-K cosine fell below "
+                            "NOUS_GRAPH_THRESHOLD_CHUNK_FACT_CROSS and "
+                            "NOUS_GRAPH_THRESHOLD_CHUNK_CHUNK_CROSS. Consider "
+                            "lowering thresholds and re-running.",
+                            file=sys.stderr,
+                        )
+                        break
                     batch_n += 1
                     t0 = time.time()
                     created = await densifier.backfill_orphan_chunks_cross_episode(
                         max_count=effective_batch,
+                        offset=offset,
                     )
                     dt = time.time() - t0
                     total_edges += created
@@ -312,20 +341,16 @@ async def run_backfill(
                         f"  cross-ep batch {batch_n:3d}: candidates "
                         f"{candidates_before:>7d} -> {candidates_after:>7d}  "
                         f"(-{processed:>5d})  +{created:>6d} edges in "
-                        f"{dt:5.1f}s  [total {total_edges:>7d} edges, "
-                        f"{elapsed:.1f} min]",
+                        f"{dt:5.1f}s  offset={offset}  "
+                        f"[total {total_edges:>7d} edges, {elapsed:.1f} min]",
                         flush=True,
                     )
-                    if created == 0 and processed == 0:
-                        print(
-                            "WARN: cross-episode batch made no progress. "
-                            "Stopping phase. (May indicate threshold too "
-                            "strict — every candidate's top-K cosine fell "
-                            "below NOUS_GRAPH_THRESHOLD_CHUNK_FACT_CROSS and "
-                            "NOUS_GRAPH_THRESHOLD_CHUNK_CHUNK_CROSS.)",
-                            file=sys.stderr,
-                        )
-                        break
+                    # Advance the window regardless of progress. If the
+                    # batch did produce edges, those chunks dropped out
+                    # of the pool and the next window naturally exposes
+                    # new candidates anyway. If it produced zero, the
+                    # advance moves us past the hard-negative slice.
+                    offset += effective_batch
 
         breakdown = await _summarize_chunk_edges(db, agent_id)
         print()
