@@ -1097,14 +1097,51 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 logger.exception("ingest_document: embed_batch failed")
                 return {"content": [{"type": "text", "text": f"Error embedding chunks: {exc}"}]}
 
-            # 4. Idempotency check (Codex P1, 2026-05-26): if any chunks
-            # already exist for this (episode_id, source_ref), refuse to
-            # re-ingest. Without this, retries or repeated tool calls
-            # would duplicate content indefinitely because chunk_index is
-            # computed as MAX+1 — ON CONFLICT can never fire on fresh
-            # indices. Conservative semantics: the agent must use a
-            # different source_ref or delete existing rows to re-ingest.
+            # Codex P2 round 3 (2026-05-26): guard against embedder returning
+            # fewer vectors than chunks. zip() would silently truncate and
+            # drop tail chunks. Mirrors the F067 writer at
+            # handlers/episode_summarizer.py:205-211.
+            if len(embeddings) != len(chunks):
+                logger.warning(
+                    "ingest_document: embedder returned %d vectors for %d chunks "
+                    "(episode=%s, source_ref=%s); aborting to avoid partial ingest",
+                    len(embeddings), len(chunks), target_episode_id, source_ref,
+                )
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Error: embedder returned {len(embeddings)} vectors "
+                                f"for {len(chunks)} chunks; refusing to write a "
+                                f"partial ingest. Retry."
+                            ),
+                        }
+                    ]
+                }
+
+            # 4. Atomic idempotency + insert (Codex P1 round 3, 2026-05-26):
+            # the prior fix did the existence check in one session and the
+            # inserts in another, leaving a race where two concurrent calls
+            # for the same (episode_id, source_ref) could both pass the
+            # check and then both append fresh chunk_index ranges.
+            #
+            # Now: single transaction with pg_advisory_xact_lock keyed on
+            # (episode_id, source_ref). Concurrent callers for the same key
+            # serialize at the DB; only the first one's COUNT sees 0 rows,
+            # so only it inserts. The second one waits, then sees the rows
+            # and returns the "already ingested" response. Vector literal
+            # format mirrors handlers/episode_summarizer.py:219.
+            lock_key = f"ingest_document:{target_episode_id}:{source_ref}"
             async with heart.db.session() as session:
+                # Advisory lock — released at COMMIT / ROLLBACK.
+                await session.execute(
+                    _sql_text(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
+                    ),
+                    {"k": lock_key},
+                )
+
                 existing_row = await session.execute(
                     _sql_text(
                         "SELECT COUNT(*) AS cnt FROM heart.episode_chunks "
@@ -1118,27 +1155,24 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     },
                 )
                 existing_cnt = int(existing_row.scalar() or 0)
-            if existing_cnt > 0:
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Already ingested: {existing_cnt} chunks exist for "
-                                f"source_ref={source_ref!r} under episode "
-                                f"{target_episode_id}. Use a different source_ref "
-                                f"or delete existing rows to re-ingest."
-                            ),
-                        }
-                    ]
-                }
 
-            # Insert into heart.episode_chunks. ON CONFLICT skips re-
-            # ingestion of identical (episode_id, chunk_index) pairs so the
-            # call is idempotent for a given episode. Vector literal format
-            # mirrors handlers/episode_summarizer.py:219 — CAST AS vector
-            # avoids the pgvector.utils dependency.
-            async with heart.db.session() as session:
+                if existing_cnt > 0:
+                    # Release the lock by committing (no writes happened).
+                    await session.commit()
+                    return {
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"Already ingested: {existing_cnt} chunks exist for "
+                                    f"source_ref={source_ref!r} under episode "
+                                    f"{target_episode_id}. Use a different source_ref "
+                                    f"or delete existing rows to re-ingest."
+                                ),
+                            }
+                        ]
+                    }
+
                 # Determine starting chunk_index: append after any existing
                 # chunks for this episode so dialogue chunks (F067) +
                 # document chunks (different source_ref) under the same

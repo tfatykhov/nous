@@ -54,7 +54,9 @@ async def test_ingest_document_creates_chunks(db, agent_id, fixture_episode):
 
     # Mock embeddings to return a 1536-dim zero vector per chunk (cheap).
     mock_embedder = MagicMock()
-    mock_embedder.embed_batch = AsyncMock(return_value=[[0.0] * 1536 for _ in range(20)])
+    # Dynamic mock: return one zero-vector per input chunk so the new
+    # length-check guard in ingest_document doesn't refuse the ingest.
+    mock_embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536 for _ in texts])
 
     heart_stub = MagicMock()
     heart_stub.db = db
@@ -151,7 +153,9 @@ async def test_ingest_document_idempotent_for_same_source_ref(db, agent_id, fixt
 
     settings = Settings().model_copy(update={"agent_id": agent_id, "document_chunk_min_chars": 50})
     mock_embedder = MagicMock()
-    mock_embedder.embed_batch = AsyncMock(return_value=[[0.0] * 1536 for _ in range(20)])
+    # Dynamic mock: return one zero-vector per input chunk so the new
+    # length-check guard in ingest_document doesn't refuse the ingest.
+    mock_embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536 for _ in texts])
     heart_stub = MagicMock()
     heart_stub.db = db
     heart_stub.agent_id = agent_id
@@ -216,6 +220,59 @@ async def test_ingest_document_idempotent_for_same_source_ref(db, agent_id, fixt
             text("DELETE FROM heart.episode_chunks WHERE agent_id = :a"),
             {"a": agent_id},
         )
+        await session.execute(
+            text("DELETE FROM heart.episodes WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+        await session.commit()
+
+
+async def test_ingest_document_rejects_partial_embed_batch(db, agent_id, fixture_episode):
+    """Codex P2 round 3 (2026-05-26): if embedder returns fewer vectors
+    than chunks, the tool must refuse to write a partial ingest rather
+    than silently zip-truncate."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.api.tools import create_nous_tools
+    from nous.config import Settings
+
+    settings = Settings().model_copy(update={"agent_id": agent_id, "document_chunk_min_chars": 50})
+    # Return ONE vector for many chunks → length mismatch.
+    mock_embedder = MagicMock()
+    mock_embedder.embed_batch = AsyncMock(return_value=[[0.0] * 1536])
+    heart_stub = MagicMock()
+    heart_stub.db = db
+    heart_stub.agent_id = agent_id
+    heart_stub._embeddings = mock_embedder
+    brain_stub = MagicMock()
+    tools = create_nous_tools(brain_stub, heart_stub, settings)
+    ingest_document = tools["ingest_document"]
+
+    # Content large enough to produce several chunks (>1 vector required).
+    content = "Sentence sentence sentence. " * 200  # ~5.6K chars
+    result = await ingest_document(
+        content=content,
+        source_ref="test://partial-embed",
+        episode_id=str(fixture_episode),
+    )
+
+    text_out = result["content"][0]["text"]
+    assert "refusing to write a partial ingest" in text_out, f"unexpected: {text_out!r}"
+
+    # No rows should have been written.
+    async with db.session() as session:
+        cnt_row = await session.execute(
+            text(
+                "SELECT COUNT(*) FROM heart.episode_chunks "
+                "WHERE agent_id = :a AND episode_id = :e"
+            ),
+            {"a": agent_id, "e": fixture_episode},
+        )
+        n = cnt_row.scalar() or 0
+    assert n == 0, f"partial ingest wrote {n} rows when it should have refused"
+
+    # Cleanup
+    async with db.session() as session:
         await session.execute(
             text("DELETE FROM heart.episodes WHERE agent_id = :a"),
             {"a": agent_id},
