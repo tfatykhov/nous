@@ -111,36 +111,40 @@ def _recursive_split(
 ) -> list[str]:
     """Walk the delimiter hierarchy until every piece <= target_size.
 
-    Returns a flat list of pieces; their concatenation (after re-joining
-    with the discarded delimiters' inferred presence) is *not* exactly
-    ``text``, because the splitter does not re-insert the separator
-    characters. The packer downstream handles that by reading ``text``
-    boundaries when overlap is applied.
+    Returns a flat list of pieces. The original delimiter characters are
+    PRESERVED by right-attaching the delimiter to each piece (except the
+    last, which had no trailing delimiter in the source). Codex P2
+    (2026-05-26) caught the prior version that lost periods / paragraph
+    breaks because ``text.split(sep)`` discards ``sep`` tokens.
     """
     if len(text) <= target_size or not delimiters:
         return [text]
 
     head, *rest = delimiters
-    parts = text.split(head)
+    raw_parts = text.split(head)
     out: list[str] = []
-    for part in parts:
-        if not part:
+    last_idx = len(raw_parts) - 1
+    for i, part in enumerate(raw_parts):
+        # Right-attach the delimiter to every part except the final one,
+        # so the chunk content faithfully represents the source text.
+        attached = part + head if i < last_idx else part
+        if not attached:
             continue
-        if len(part) <= target_size:
-            out.append(part)
+        if len(attached) <= target_size:
+            out.append(attached)
         else:
-            out.extend(_recursive_split(part, rest, target_size))
+            out.extend(_recursive_split(attached, rest, target_size))
     return out
 
 
 def _pack(pieces: list[str], *, target_size: int, overlap: int) -> list[str]:
     """Pack pieces into chunks of approximately ``target_size`` chars.
 
-    Joins consecutive pieces with ``" "`` (a single space — deliberately
-    lossy, since the recursive splitter discarded the original delimiters).
-    Pieces that exceed target_size on their own get emitted standalone.
-    Overlap is realized by carrying the trailing ``overlap`` chars of the
-    last emitted chunk into the head of the next.
+    Concatenates consecutive pieces with NO extra separator because the
+    splitter now right-attaches the original delimiter to each piece
+    (Codex P2 fix). Pieces that exceed target_size on their own get
+    emitted standalone. Overlap is realized by carrying the trailing
+    ``overlap`` chars of the last emitted chunk into the head of the next.
     """
     chunks: list[str] = []
     buf = ""
@@ -157,7 +161,7 @@ def _pack(pieces: list[str], *, target_size: int, overlap: int) -> list[str]:
             buf = ""
             continue
 
-        candidate = piece if not buf else f"{buf} {piece}"
+        candidate = piece if not buf else f"{buf}{piece}"
         if len(candidate) <= target_size:
             buf = candidate
         else:
@@ -166,7 +170,7 @@ def _pack(pieces: list[str], *, target_size: int, overlap: int) -> list[str]:
             # with this one across the boundary.
             chunks.append(buf)
             tail = _overlap_tail(buf, overlap)
-            seeded = f"{tail} {piece}" if tail else piece
+            seeded = f"{tail}{piece}" if tail else piece
             # Codex P2 (2026-05-26): re-check size after seeding. If the
             # overlap tail + new piece pushes us back over target_size,
             # drop the tail rather than violate the chunk-size contract.

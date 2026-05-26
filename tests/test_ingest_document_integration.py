@@ -140,6 +140,89 @@ async def test_ingest_document_rejects_missing_episode(db, agent_id):
     assert "no active episode" in result["content"][0]["text"].lower()
 
 
+async def test_ingest_document_idempotent_for_same_source_ref(db, agent_id, fixture_episode):
+    """Codex P1 (2026-05-26): a second call with the same source_ref under
+    the same episode must NOT duplicate content. Pre-check rejects with
+    a clear message; row count stays stable."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.api.tools import create_nous_tools
+    from nous.config import Settings
+
+    settings = Settings().model_copy(update={"agent_id": agent_id, "document_chunk_min_chars": 50})
+    mock_embedder = MagicMock()
+    mock_embedder.embed_batch = AsyncMock(return_value=[[0.0] * 1536 for _ in range(20)])
+    heart_stub = MagicMock()
+    heart_stub.db = db
+    heart_stub.agent_id = agent_id
+    heart_stub._embeddings = mock_embedder
+    brain_stub = MagicMock()
+    tools = create_nous_tools(brain_stub, heart_stub, settings)
+    ingest_document = tools["ingest_document"]
+
+    content = "Lorem ipsum dolor sit amet. " * 100  # 2.7K chars
+
+    # First call: succeeds, writes chunks.
+    r1 = await ingest_document(
+        content=content,
+        source_ref="https://example.com/dup-test.pdf",
+        episode_id=str(fixture_episode),
+    )
+    assert "Ingested" in r1["content"][0]["text"]
+
+    async with db.session() as session:
+        cnt_row = await session.execute(
+            text(
+                "SELECT COUNT(*) FROM heart.episode_chunks "
+                "WHERE agent_id = :a AND episode_id = :e AND source_ref = :r"
+            ),
+            {"a": agent_id, "e": fixture_episode, "r": "https://example.com/dup-test.pdf"},
+        )
+        n_after_first = cnt_row.scalar() or 0
+    assert n_after_first > 0, "first call should have written chunks"
+
+    # Second call with SAME source_ref: must be rejected, no new rows.
+    r2 = await ingest_document(
+        content=content,
+        source_ref="https://example.com/dup-test.pdf",
+        episode_id=str(fixture_episode),
+    )
+    assert "Already ingested" in r2["content"][0]["text"]
+
+    async with db.session() as session:
+        cnt_row = await session.execute(
+            text(
+                "SELECT COUNT(*) FROM heart.episode_chunks "
+                "WHERE agent_id = :a AND episode_id = :e AND source_ref = :r"
+            ),
+            {"a": agent_id, "e": fixture_episode, "r": "https://example.com/dup-test.pdf"},
+        )
+        n_after_second = cnt_row.scalar() or 0
+    assert n_after_second == n_after_first, (
+        f"second call duplicated rows: {n_after_first} -> {n_after_second}"
+    )
+
+    # Third call with DIFFERENT source_ref: should succeed (different doc).
+    r3 = await ingest_document(
+        content=content,
+        source_ref="https://example.com/different-doc.pdf",
+        episode_id=str(fixture_episode),
+    )
+    assert "Ingested" in r3["content"][0]["text"]
+
+    # Cleanup
+    async with db.session() as session:
+        await session.execute(
+            text("DELETE FROM heart.episode_chunks WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+        await session.execute(
+            text("DELETE FROM heart.episodes WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+        await session.commit()
+
+
 async def test_ingest_document_rejects_short_content(db, agent_id, fixture_episode):
     """Content below min_chars → reject without DB write."""
     from unittest.mock import AsyncMock, MagicMock

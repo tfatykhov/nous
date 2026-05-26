@@ -143,6 +143,44 @@ class TestOverlap:
             )
 
 
+class TestDelimiterPreservation:
+    """Codex P2 (round 2): the original delimiters (periods, paragraph
+    breaks, sentence punctuation) must survive chunking. The prior
+    implementation dropped them via text.split(sep) + rejoin-with-space."""
+
+    def test_periods_preserved_across_chunks(self):
+        # Two sentences forced to split. The sentence-ending period after
+        # "long" must survive — pre-fix, text.split(". ") discarded it.
+        text = "Sentence one is moderately long. Sentence two is also long enough."
+        chunks = chunk_document(text, target_size=40, overlap=0, min_chars=10)
+        joined = "".join(chunks)
+        # The sentence-boundary period after "long" must survive.
+        assert "long." in joined, f"period after 'long' dropped: {joined!r}"
+        # Final period preserved (was true even pre-fix; defensive).
+        assert "enough." in joined, f"trailing period dropped: {joined!r}"
+        # And the boundary should appear with a space after the period
+        # (i.e. ". " is reconstructed, not collapsed to ".").
+        assert ". " in joined, f"period+space boundary collapsed: {joined!r}"
+
+    def test_paragraph_break_preserved(self):
+        # Two paragraphs split on \n\n; the double newline must appear
+        # somewhere in the chunk stream so the source structure is
+        # not silently flattened.
+        para_a = "Alpha. " * 30  # ~210 chars
+        para_b = "Beta. " * 30   # ~180 chars
+        text = f"{para_a.strip()}\n\n{para_b.strip()}"
+        chunks = chunk_document(text, target_size=200, overlap=0, min_chars=50)
+        joined = "".join(chunks)
+        assert "\n\n" in joined, f"paragraph break dropped: {joined!r}"
+
+    def test_short_text_passthrough_preserves_exact(self):
+        # Below target_size short-circuit — original text must be byte-
+        # for-byte preserved (this was already true; defensive check).
+        text = "Hello world. Goodbye world.\n\nNew paragraph."
+        chunks = chunk_document(text, target_size=1500, overlap=200, min_chars=10)
+        assert chunks == [text]
+
+
 class TestRealisticDocument:
     def test_arxiv_paper_shape(self):
         # Synthetic arxiv-shaped doc: abstract, intro, methods, results.

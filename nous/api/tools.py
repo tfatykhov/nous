@@ -1097,15 +1097,52 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 logger.exception("ingest_document: embed_batch failed")
                 return {"content": [{"type": "text", "text": f"Error embedding chunks: {exc}"}]}
 
-            # 4. Insert into heart.episode_chunks. ON CONFLICT skips re-
+            # 4. Idempotency check (Codex P1, 2026-05-26): if any chunks
+            # already exist for this (episode_id, source_ref), refuse to
+            # re-ingest. Without this, retries or repeated tool calls
+            # would duplicate content indefinitely because chunk_index is
+            # computed as MAX+1 — ON CONFLICT can never fire on fresh
+            # indices. Conservative semantics: the agent must use a
+            # different source_ref or delete existing rows to re-ingest.
+            async with heart.db.session() as session:
+                existing_row = await session.execute(
+                    _sql_text(
+                        "SELECT COUNT(*) AS cnt FROM heart.episode_chunks "
+                        "WHERE agent_id = :a AND episode_id = :e "
+                        "  AND source_ref = :r"
+                    ),
+                    {
+                        "a": heart.agent_id,
+                        "e": target_episode_id,
+                        "r": source_ref,
+                    },
+                )
+                existing_cnt = int(existing_row.scalar() or 0)
+            if existing_cnt > 0:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Already ingested: {existing_cnt} chunks exist for "
+                                f"source_ref={source_ref!r} under episode "
+                                f"{target_episode_id}. Use a different source_ref "
+                                f"or delete existing rows to re-ingest."
+                            ),
+                        }
+                    ]
+                }
+
+            # Insert into heart.episode_chunks. ON CONFLICT skips re-
             # ingestion of identical (episode_id, chunk_index) pairs so the
             # call is idempotent for a given episode. Vector literal format
             # mirrors handlers/episode_summarizer.py:219 — CAST AS vector
             # avoids the pgvector.utils dependency.
             async with heart.db.session() as session:
                 # Determine starting chunk_index: append after any existing
-                # chunks for this episode so re-ingest of a different doc
-                # under the same episode does not collide.
+                # chunks for this episode so dialogue chunks (F067) +
+                # document chunks (different source_ref) under the same
+                # episode do not collide.
                 next_idx_row = await session.execute(
                     _sql_text(
                         "SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next_idx "
