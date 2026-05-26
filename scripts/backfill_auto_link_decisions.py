@@ -10,7 +10,7 @@ similarity-based decision<->decision edges have ever been written.
 Sleep cycle's ``backfill_orphan_decisions`` only recovers TOTAL orphans
 (decisions with zero edges). Most prod decisions acquired F022 cross-type
 edges (``evidence_for`` from facts, ``discussed_in`` from episodes) right
-after creation, making them non-orphans → sleep cycle skips them → the
+after creation, making them non-orphans -> sleep cycle skips them -> the
 missing similarity edges stay permanently missing.
 
 This script iterates every decision for an agent and calls
@@ -113,7 +113,19 @@ async def run_backfill(
             return 0
 
         embedder = EmbeddingProvider(settings)
-        brain = Brain(db, settings, embedder)
+        # Codex P1: Brain reads agent_id from settings (Brain.__init__),
+        # and _auto_link filters/inserts under self.agent_id. If we pass
+        # the env-default Settings here, the script silently writes
+        # graph_edges rows under the WRONG agent — and reads similar
+        # decisions from a different tenant — even though we loaded
+        # decision IDs from --agent-id. Construct a Settings copy with
+        # the requested agent_id so Brain operates in the right tenant.
+        scoped_settings = settings.model_copy(update={"agent_id": agent_id})
+        brain = Brain(db, scoped_settings, embedder)
+        assert brain.agent_id == agent_id, (
+            f"Brain.agent_id ({brain.agent_id!r}) must match --agent-id "
+            f"({agent_id!r}) — refusing to write cross-tenant edges."
+        )
 
         created = 0
         failed = 0
@@ -135,7 +147,7 @@ async def run_backfill(
                 elapsed = (time.time() - start) / 60.0
                 print(
                     f"  processed {i:>5d} / {len(ids):>5d}  "
-                    f"created≈{created:>5d}  failed={failed}  "
+                    f"created={created:>5d}  failed={failed}  "
                     f"[{elapsed:.1f} min]",
                     flush=True,
                 )
@@ -143,7 +155,7 @@ async def run_backfill(
         after = await _count_existing_auto_link_edges(db, agent_id)
         print()
         print(
-            f"Done. auto_linked dec↔dec edges: {before} -> {after}  "
+            f"Done. auto_linked dec<->dec edges: {before} -> {after}  "
             f"(+{after - before} new). Per-call edges reported by auto_link "
             f"totaled {created} (some may collide via ON CONFLICT)."
         )
