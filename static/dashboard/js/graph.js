@@ -26,6 +26,17 @@
 /* global Dashboard, cytoscape, escapeHtml */
 
 Dashboard.registerView('graph', async function (container) {
+    // Codex P2 (2026-05-26): destroy any prior Cytoscape instance before
+    // creating a new one. Dashboard.loadView() handles teardown on
+    // navigation transitions, but Dashboard.reloadView('graph') re-runs
+    // this function without firing the leave-view branch. Without this
+    // belt-and-suspenders cleanup, repeated reloads accumulate canvas
+    // contexts + event listeners + RAF callbacks.
+    if (Dashboard._cyInstance) {
+        try { Dashboard._cyInstance.destroy(); } catch (e) { /* ignore */ }
+        Dashboard._cyInstance = null;
+    }
+
     Dashboard.showLoading(container);
 
     var data;
@@ -91,6 +102,8 @@ Dashboard.registerView('graph', async function (container) {
 
     // ── Initial render ─────────────────────────────────────────────────
     cy = buildCytoscape(graphEl, data.nodes, data.edges);
+    // Publish on Dashboard so loadView() can destroy() on navigation away.
+    Dashboard._cyInstance = cy;
     cy.ready(function () {
         runLayout();
         computeClusters();
