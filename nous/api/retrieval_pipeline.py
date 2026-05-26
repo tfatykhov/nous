@@ -102,6 +102,11 @@ class PipelineStats:
     contradiction_edges: list[tuple[UUID, str, UUID, str]] = field(
         default_factory=list
     )
+    # F071: count of results dropped because their id was in the current turn's
+    # system prompt (cross-context dedup). 0 when feature flag is off / no
+    # exclusion set was passed. Surfaced in recall_deep INFO log so the
+    # duplication-tax measurement is grep-able from prod.
+    excluded_in_context: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +180,7 @@ async def run_recall_pipeline(
     residual_activations: dict[UUID, float] | None = None,
     apply_mmr: bool | None = None,
     rerank_by_score: bool = False,
+    exclude_ids: dict[str, set[str]] | None = None,
 ) -> tuple[list[PipelineResult], PipelineStats]:
     """Run the full retrieval pipeline.
 
@@ -264,6 +270,21 @@ async def run_recall_pipeline(
     if rerank_by_score:
         results.sort(key=lambda r: r.score or 0.0, reverse=True)
 
+    # F071: drop results whose id is already in the system prompt for this
+    # turn. Applied AFTER all scoring (rerank, MMR, CE inside heart.recall)
+    # so the LLM sees the next-best alternatives — not the items below the
+    # now-excluded head. Type-keyed so a UUID collision across types
+    # (defensive, won't happen in practice) doesn't cross-filter.
+    # Counter is per-PipelineStats (per-call), so concurrent calls don't race.
+    excluded_in_context = 0
+    if exclude_ids:
+        before = len(results)
+        results = [
+            r for r in results
+            if str(r.id) not in exclude_ids.get(r.type, set())
+        ]
+        excluded_in_context = before - len(results)
+
     stats = PipelineStats(
         ce_reranked=False,  # CE rerank happens inside heart.recall already
         mmr_applied=False,  # MMR happens inside heart.recall already
@@ -276,6 +297,7 @@ async def run_recall_pipeline(
         n_graph_expanded=len(acc.graph_expanded),
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
+        excluded_in_context=excluded_in_context,  # F071
     )
     return results, stats
 

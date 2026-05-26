@@ -311,6 +311,7 @@ def _make_mock_cognitive():
     turn_context.recalled_decision_ids = []
     turn_context.recalled_fact_ids = []
     turn_context.recalled_episode_ids = []
+    turn_context.recalled_procedure_ids = []
     turn_context.censor_blocked = False
     turn_context.censor_block_reason = None
     cognitive.pre_turn.return_value = turn_context
@@ -334,6 +335,7 @@ def _make_mock_settings():
     settings.keep_last_tool_results = 2
     settings.tool_timeout = 120
     settings.keepalive_interval = 10
+    settings.recall_exclude_context_ids = False  # F071: bare MagicMock truthy by default
     return settings
 
 
