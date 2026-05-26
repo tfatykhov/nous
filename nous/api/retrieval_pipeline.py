@@ -126,6 +126,13 @@ class _PipelineAccumulator:
 
     # Stage 2: cross-type graph neighbors from Heart seeds (F022 Phase 2)
     heart_graph_decisions: list["NeighborResult"] = field(default_factory=list)
+    # Stage 2b: non-decision graph neighbors from Heart/chunk seeds.
+    # Path A (heart_graph_all_types_enabled): when set, this collects
+    # fact/episode/chunk/procedure neighbors that previously had no consumer.
+    # Kept distinct from heart_graph_decisions so the existing
+    # decision-focused stage's downstream formatter/scorer shape is
+    # unchanged when the flag is off.
+    heart_graph_memory_neighbors: list["NeighborResult"] = field(default_factory=list)
 
     # Stage 3: Brain decision results
     decision_results: list["DecisionSummary"] = field(default_factory=list)
@@ -207,6 +214,12 @@ async def run_recall_pipeline(
     # naturally co-displayed). Empty when feature flag is off.
     results.extend(_chunks_to_pipeline(acc.chunk_results))
     results.extend(_heart_graph_to_pipeline(acc.heart_graph_decisions, settings))
+    # Path A: non-decision neighbors land in the same stage-order slot as the
+    # decision-only graph results so subsequent ``rerank_by_score`` reorders
+    # them uniformly with everything else.
+    results.extend(_heart_graph_memory_to_pipeline(
+        acc.heart_graph_memory_neighbors, settings,
+    ))
     results.extend(_decisions_to_pipeline(acc.decision_results))
     # P1.1: batch-resolve source_episode_id for fact-type results so the
     # formatter can session-group the Heart section. Episodes already carry
@@ -388,6 +401,83 @@ async def _run_stages(
                     acc.stage_errors["heart_graph_neighbors"] = (
                         acc.stage_errors.get("heart_graph_neighbors", 0) + 1
                     )
+
+        # ------------------------------------------------------------------
+        # Stage 2b (Path A): non-decision graph neighbors from Heart seeds.
+        # Path-A activates F022 cross-type / F040 / F070 edges that today
+        # have no consumer beyond adjacency_boost. Each fact/episode/chunk
+        # seed fans out one ``brain.neighbors`` call per target neighbor
+        # type so a small ``LIMIT`` returns N rows of THAT type, not N
+        # rows that the dedup below would mostly throw away. Mirrors the
+        # Stage 2 SQL-pushdown fix (F070 review round 6) one floor up.
+        # Flag-gated so prod retrieval shape is unchanged by default.
+        # ------------------------------------------------------------------
+        if settings.heart_graph_all_types_enabled:
+            mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
+            seen_mem_ids: set[UUID] = set()
+            heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
+            chunk_ids: set[UUID] = {cid for cid, _, _ in acc.chunk_results}
+            # Heart seeds: top-K fact/episode results.
+            mem_seeds: list[tuple[UUID, str]] = [
+                (hr.id, hr.type) for hr in acc.heart_results[:3]
+                if hr.type in ("fact", "episode")
+            ]
+            # Chunk seeds: top-K F067 chunk-recall results (when present).
+            # Chunks have rich same-episode neighborhoods via F070.
+            mem_seeds.extend(
+                (cid, "chunk") for cid, _content, _score in acc.chunk_results[:3]
+            )
+            # Per-type fan-out — one ``LIMIT`` window per neighbor type so
+            # chunks don't crowd facts/episodes (or vice versa) out of a
+            # single small union limit. Order is irrelevant; the global
+            # rerank handles final ordering.
+            mem_neighbor_types = ("fact", "episode", "chunk", "procedure")
+            for seed_id, seed_type in mem_seeds:
+                for nbr_type in mem_neighbor_types:
+                    try:
+                        mem_neighbors = await brain.neighbors(
+                            seed_id,
+                            node_type=seed_type,
+                            limit=mem_limit,
+                            neighbor_type=nbr_type,
+                        )
+                    except Exception:
+                        # Mirror chunk-recall (Stage 1.5) pattern: log + count.
+                        # ``stage_errors`` is discarded by prod callers
+                        # (recall_deep tool), so the log is the operator's
+                        # only signal that Path A is broken in prod.
+                        logger.warning(
+                            "Path A: heart_graph_memory_neighbors brain.neighbors "
+                            "failed for agent=%s seed=%s seed_type=%s nbr_type=%s "
+                            "(non-fatal, this fan-out path contributes nothing this turn)",
+                            brain.agent_id, seed_id, seed_type, nbr_type,
+                            exc_info=True,
+                        )
+                        acc.stage_errors["heart_graph_memory_neighbors"] = (
+                            acc.stage_errors.get("heart_graph_memory_neighbors", 0) + 1
+                        )
+                        continue
+                    for n in mem_neighbors:
+                        # Decision neighbors are handled by Stage 2 above; even
+                        # though we passed neighbor_type=nbr_type (non-decision),
+                        # keep the guard for defense against future filter drift.
+                        if n.node_type == "decision":
+                            continue
+                        if n.id in seen_mem_ids:
+                            continue
+                        # Skip duplicates against existing candidate pool. Track
+                        # duplicates as a separate counter so eval can distinguish
+                        # "graph found nothing new" from "graph corroborated a
+                        # direct hit" — the latter is signal, not noise.
+                        if n.id in heart_ids or n.id in chunk_ids:
+                            acc.stage_errors["heart_graph_memory_duplicates"] = (
+                                acc.stage_errors.get(
+                                    "heart_graph_memory_duplicates", 0,
+                                ) + 1
+                            )
+                            continue
+                        acc.heart_graph_memory_neighbors.append(n)
+                        seen_mem_ids.add(n.id)
 
     # ------------------------------------------------------------------
     # Stage 3+4: Brain decisions + graph expansion
@@ -783,6 +873,31 @@ def _heart_graph_to_pipeline(
             metadata={"stage_origin": "heart_graph"},
         )
         for n in heart_graph
+    ]
+
+
+def _heart_graph_memory_to_pipeline(
+    memory_neighbors: list["NeighborResult"], settings: "Settings"
+) -> list[PipelineResult]:
+    """Path A: non-decision graph-neighbor results.
+
+    Carries the neighbor's actual ``node_type`` (fact/episode/chunk/procedure)
+    so the formatter and downstream scorers can route them like any other
+    memory candidate. Scoring uses the same decay + F065 provenance penalty
+    pattern as the decision-neighbor path.
+    """
+    decay = settings.graph_recall_decay
+    return [
+        PipelineResult(
+            id=n.id,
+            type=n.node_type,
+            description=n.description,
+            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
+            source="graph_expanded",
+            edge_relation=n.edge_relation,
+            metadata={"stage_origin": "heart_graph_memory"},
+        )
+        for n in memory_neighbors
     ]
 
 

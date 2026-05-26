@@ -159,16 +159,37 @@ class _FakeSession:
         return _FakeExecuteResult(self._contradictions)
 
 
-def _make_brain(*, neighbors_by_node, contradictions, decision_results):
-    """Build a MagicMock Brain whose .neighbors and .query are AsyncMocks."""
+def _make_brain(
+    *, neighbors_by_node, contradictions, decision_results,
+    neighbors_side_effect_override=None,
+):
+    """Build a MagicMock Brain whose .neighbors and .query are AsyncMocks.
+
+    ``neighbors_by_node`` maps node_id → list[NeighborResult]. When the caller
+    passes a ``neighbor_type``, the mock honors the SQL pushdown contract by
+    filtering the per-node list down to that type — exactly as
+    ``Brain._neighbors`` does in real life. This is critical for Path A's
+    Stage 2b fan-out test, which calls ``brain.neighbors`` once per neighbor
+    type at a small LIMIT.
+
+    ``neighbors_side_effect_override`` accepts a custom async callable that
+    fully replaces the lookup logic — used by the exception-path test.
+    """
     brain = MagicMock()
     brain.agent_id = "nous-test-agent"
     brain.query = AsyncMock(return_value=decision_results)
 
-    async def neighbors_side_effect(node_id, node_type="decision", limit=10):
-        return neighbors_by_node.get(node_id, [])
+    async def neighbors_side_effect(
+        node_id, node_type="decision", limit=10, *, neighbor_type=None,
+    ):
+        rows = neighbors_by_node.get(node_id, [])
+        if neighbor_type:
+            rows = [r for r in rows if r.node_type == neighbor_type]
+        return rows[:limit]
 
-    brain.neighbors = AsyncMock(side_effect=neighbors_side_effect)
+    brain.neighbors = AsyncMock(
+        side_effect=neighbors_side_effect_override or neighbors_side_effect,
+    )
 
     # brain.db.session() returns an async context manager; same _FakeSession
     # is used for the (skipped) density check AND the contradictions SELECT.
@@ -192,6 +213,10 @@ def _make_settings(
     graph_recall_decay=0.7,
     graph_recall_max_expand=5,
     graph_recall_max_neighbors=3,
+    heart_graph_all_types_enabled=False,
+    heart_graph_neighbors_per_seed=3,
+    episode_chunks_enabled=False,
+    episode_chunk_recall_limit=10,
 ):
     return SimpleNamespace(
         graph_recall_enabled=graph_recall_enabled,
@@ -201,6 +226,10 @@ def _make_settings(
         graph_recall_decay=graph_recall_decay,
         graph_recall_max_expand=graph_recall_max_expand,
         graph_recall_max_neighbors=graph_recall_max_neighbors,
+        heart_graph_all_types_enabled=heart_graph_all_types_enabled,
+        heart_graph_neighbors_per_seed=heart_graph_neighbors_per_seed,
+        episode_chunks_enabled=episode_chunks_enabled,
+        episode_chunk_recall_limit=episode_chunk_recall_limit,
     )
 
 
@@ -385,6 +414,223 @@ class TestRunRecallPipeline:
         assert len(results) == 1
         assert results[0].type == "fact"
         assert stats.n_brain_results == 0
+
+
+# ---------------------------------------------------------------------------
+# Path A Stage 2b: heart_graph_memory_neighbors
+# ---------------------------------------------------------------------------
+
+
+class TestPathAStage2b:
+    """Path A (heart_graph_all_types_enabled) — Stage 2b emits non-decision
+    graph neighbors from fact/episode/chunk seeds. All tests use real Settings
+    flag via _make_settings(heart_graph_all_types_enabled=True)."""
+
+    @pytest.mark.asyncio
+    async def test_flag_off_byte_identical_to_baseline(self):
+        """Path A must be invisible when the flag is off — no extra items,
+        no extra brain.neighbors calls beyond the decision-only Stage 2."""
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={
+                FACT_ID: _make_neighbors_for_heart_seed(),
+                EPISODE_ID: [],
+            },
+            contradictions=[],
+            decision_results=[],
+        )
+        settings = _make_settings(heart_graph_all_types_enabled=False)
+
+        results, stats = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=10,
+        )
+        # No memory-neighbor results in pipeline output
+        assert all(
+            r.metadata.get("stage_origin") != "heart_graph_memory"
+            for r in results
+        ), "Stage 2b emitted results with flag off"
+        # No memory-neighbor stage_errors created
+        assert "heart_graph_memory_neighbors" not in stats.n_stage_errors
+        assert "heart_graph_memory_duplicates" not in stats.n_stage_errors
+
+    @pytest.mark.asyncio
+    async def test_flag_on_appends_mixed_type_neighbors(self):
+        """Path A happy path: with the flag on, fact-seed mem_neighbors of
+        every non-decision type land in pipeline output with the correct
+        ``type`` (not hardcoded to 'decision'), source='graph_expanded',
+        and stage_origin='heart_graph_memory'."""
+        from uuid import uuid4
+
+        fact_nbr_id = uuid4()
+        ep_nbr_id = uuid4()
+        chunk_nbr_id = uuid4()
+        proc_nbr_id = uuid4()
+        # Mix of types neighboring FACT_ID seed.
+        nbrs = [
+            NeighborResult(
+                id=fact_nbr_id, node_type="fact",
+                description="FACT-NBR-DESC",
+                edge_relation="related_to", edge_weight=0.8,
+                created_at=datetime.now(UTC),
+            ),
+            NeighborResult(
+                id=ep_nbr_id, node_type="episode",
+                description="EP-NBR-DESC",
+                edge_relation="discussed_in", edge_weight=0.7,
+                created_at=datetime.now(UTC),
+            ),
+            NeighborResult(
+                id=chunk_nbr_id, node_type="chunk",
+                description="CHUNK-NBR-DESC",
+                edge_relation="summarized_by", edge_weight=0.9,
+                created_at=datetime.now(UTC),
+            ),
+            NeighborResult(
+                id=proc_nbr_id, node_type="procedure",
+                description="PROC-NBR-DESC",
+                edge_relation="related_to", edge_weight=0.6,
+                created_at=datetime.now(UTC),
+            ),
+        ]
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={FACT_ID: nbrs, EPISODE_ID: nbrs},
+            contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(heart_graph_all_types_enabled=True)
+
+        results, _stats = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=20,
+        )
+        memory_results = [
+            r for r in results
+            if r.metadata.get("stage_origin") == "heart_graph_memory"
+        ]
+        types = {r.type for r in memory_results}
+        # All four non-decision types present.
+        assert types == {"fact", "episode", "chunk", "procedure"}, (
+            f"expected all 4 non-decision types, got {types}"
+        )
+        # Each entry has source='graph_expanded' and a real description
+        # (proves we're not emitting placeholders).
+        for r in memory_results:
+            assert r.source == "graph_expanded"
+            assert "NBR-DESC" in (r.description or ""), (
+                f"description not propagated for {r.type}: {r.description!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_skips_decisions_and_dedups_against_pool(self):
+        """Stage 2b must (1) skip neighbors of type='decision' (already
+        handled by Stage 2), (2) skip duplicates already in heart_results,
+        (3) skip duplicates already in chunk_results, (4) count the
+        chunk/heart duplicates as heart_graph_memory_duplicates so eval
+        can distinguish corroboration from noise."""
+        from uuid import uuid4
+
+        dup_chunk_id = uuid4()  # will already be in chunk_results
+        fresh_fact_id = uuid4()  # should make it through
+        decision_neighbor_id = uuid4()  # must be skipped
+        nbrs = [
+            NeighborResult(
+                id=fresh_fact_id, node_type="fact", description="FRESH",
+                edge_relation="related_to", edge_weight=0.8,
+                created_at=datetime.now(UTC),
+            ),
+            NeighborResult(
+                id=FACT_ID, node_type="fact", description="DUP-HEART",
+                edge_relation="related_to", edge_weight=0.7,
+                created_at=datetime.now(UTC),
+            ),
+            NeighborResult(
+                id=dup_chunk_id, node_type="chunk", description="DUP-CHUNK",
+                edge_relation="summarized_by", edge_weight=0.9,
+                created_at=datetime.now(UTC),
+            ),
+            NeighborResult(
+                id=decision_neighbor_id, node_type="decision",
+                description="MUST-SKIP-DECISION",
+                edge_relation="informed_by", edge_weight=0.9,
+                created_at=datetime.now(UTC),
+            ),
+        ]
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={FACT_ID: nbrs, EPISODE_ID: nbrs},
+            contradictions=[], decision_results=[],
+        )
+        # Enable the F067 chunk-search leg so acc.chunk_results gets populated,
+        # exercising Stage 2b's chunk-result dedup branch.
+        settings = _make_settings(
+            heart_graph_all_types_enabled=True,
+            episode_chunks_enabled=True,
+        )
+        # Pre-load a chunk result that matches dup_chunk_id to test the
+        # chunk_results dedup branch.
+        original_search_chunks_path = (
+            "nous.api.retrieval_pipeline._search_episode_chunks"
+        )
+        with patch(original_search_chunks_path, new=AsyncMock(
+            return_value=[(dup_chunk_id, "dup chunk content", 0.5)],
+        )):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=20,
+            )
+
+        mem = [
+            r for r in results
+            if r.metadata.get("stage_origin") == "heart_graph_memory"
+        ]
+        mem_ids = {r.id for r in mem}
+        assert fresh_fact_id in mem_ids, "fresh non-dup fact must pass"
+        assert FACT_ID not in mem_ids, "heart-result dup must be filtered"
+        assert dup_chunk_id not in mem_ids, "chunk-result dup must be filtered"
+        assert decision_neighbor_id not in mem_ids, (
+            "decision neighbor must be skipped (Stage 2's territory)"
+        )
+        # Duplicate counter fired (FACT_ID + dup_chunk_id each observed
+        # once per seed × once per neighbor_type they match).
+        dup_count = stats.n_stage_errors.get("heart_graph_memory_duplicates", 0)
+        assert dup_count >= 2, (
+            f"expected >=2 dedup events (heart + chunk), got {dup_count}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_brain_neighbors_exception_increments_counter(self):
+        """When brain.neighbors raises, Stage 2b logs+counts per-(seed, nbr_type)
+        and continues with the next seed. Counter must surface to stats."""
+        async def always_raise(*args, **kwargs):
+            raise RuntimeError("simulated brain.neighbors failure")
+
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={},
+            contradictions=[],
+            decision_results=[],
+            neighbors_side_effect_override=always_raise,
+        )
+        settings = _make_settings(heart_graph_all_types_enabled=True)
+
+        # Should NOT propagate the exception — pipeline returns normally.
+        results, stats = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=10,
+        )
+        # Heart results still flow through; only Stage 2 + 2b were affected.
+        assert any(r.source == "heart" for r in results), (
+            "heart_results must still arrive when brain.neighbors fails"
+        )
+        # Counter incremented at least once. The fan-out runs N seeds ×
+        # 4 nbr_types per seed; with 2 heart seeds (fact + episode), that's
+        # 8 expected exception events.
+        count = stats.n_stage_errors.get("heart_graph_memory_neighbors", 0)
+        assert count >= 1, (
+            f"expected heart_graph_memory_neighbors counter to increment, "
+            f"got {stats.n_stage_errors}"
+        )
 
 
 # ---------------------------------------------------------------------------

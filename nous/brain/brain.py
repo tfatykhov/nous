@@ -44,8 +44,12 @@ from nous.storage.models import (
     DecisionBridge,
     DecisionReason,
     DecisionTag,
+    Episode,
+    EpisodeChunk,
     Event,
+    Fact,
     GraphEdge,
+    Procedure,
     Thought,
 )
 
@@ -1210,23 +1214,98 @@ class Brain:
             method = r.extraction_method or "heuristic"  # F065: NULL → fail-open heuristic
             edge_map[r.neighbor_id] = (r.neighbor_type, r.edge_relation, r.edge_weight or 1.0, method)
 
-        # Resolve decision neighbors
-        decision_ids = [r.neighbor_id for r in rows if r.neighbor_type == "decision"]
+        # Resolve content per node type via one batched SELECT per type.
+        # Pre-Path-A, only ``decision`` was resolved and other types were
+        # rendered as ``"[<ntype>] <uuid>"`` placeholders — useful for
+        # decision-only consumers but useless once we let fact/episode/chunk/
+        # procedure neighbors reach retrieval (heart_graph_all_types_enabled).
+        ids_by_type: dict[str, list[UUID]] = defaultdict(list)
+        for r in rows:
+            ids_by_type[r.neighbor_type].append(r.neighbor_id)
+
         descriptions: dict[UUID, tuple[str, datetime]] = {}
-        if decision_ids:
+
+        # Decision: existing behavior, kept verbatim so consumers that only
+        # use decision neighbors observe no change.
+        if ids_by_type.get("decision"):
             dec_result = await session.execute(
                 select(Decision.id, Decision.description, Decision.created_at)
-                .where(Decision.id.in_(decision_ids))
+                .where(Decision.id.in_(ids_by_type["decision"]))
             )
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
 
+        # Fact: heart.facts.content
+        if ids_by_type.get("fact"):
+            f_result = await session.execute(
+                select(Fact.id, Fact.content, Fact.created_at)
+                .where(Fact.id.in_(ids_by_type["fact"]))
+            )
+            for f in f_result.all():
+                descriptions[f.id] = (f.content, f.created_at)
+
+        # Episode: heart.episodes.summary (matches _ENTITY_CONFIG fallback;
+        # structured_summary preferred at densifier time but plain summary
+        # is always populated).
+        if ids_by_type.get("episode"):
+            e_result = await session.execute(
+                select(Episode.id, Episode.summary, Episode.created_at)
+                .where(Episode.id.in_(ids_by_type["episode"]))
+            )
+            for e in e_result.all():
+                descriptions[e.id] = (e.summary, e.created_at)
+
+        # Chunk: heart.episode_chunks.content (F067 raw transcript fragment).
+        if ids_by_type.get("chunk"):
+            c_result = await session.execute(
+                select(EpisodeChunk.id, EpisodeChunk.content, EpisodeChunk.created_at)
+                .where(EpisodeChunk.id.in_(ids_by_type["chunk"]))
+            )
+            for c in c_result.all():
+                descriptions[c.id] = (c.content, c.created_at)
+
+        # Procedure: heart.procedures.description
+        if ids_by_type.get("procedure"):
+            p_result = await session.execute(
+                select(Procedure.id, Procedure.description, Procedure.created_at)
+                .where(Procedure.id.in_(ids_by_type["procedure"]))
+            )
+            for p in p_result.all():
+                # Procedure.description is nullable — fall back to placeholder
+                # so consumers don't get None.
+                desc_text = p.description or f"[procedure] {p.id}"
+                descriptions[p.id] = (desc_text, p.created_at)
+
         # Build results
+        # Node types where the content column is declared NOT NULL in models.py
+        # (Fact.content, Episode.summary, EpisodeChunk.content). An empty
+        # resolved description for these types means a data integrity issue
+        # (NOT NULL bypass, or a manual insert with empty string) — log it
+        # rather than silently shipping a placeholder candidate to rerank.
+        _NOT_NULL_CONTENT_TYPES = {"fact", "episode", "chunk"}
         results = []
         for r in rows:
             ntype, rel, weight, method = edge_map[r.neighbor_id]
-            if ntype == "decision" and r.neighbor_id in descriptions:
+            if r.neighbor_id in descriptions:
                 desc, created = descriptions[r.neighbor_id]
+                # Defensive: keep placeholder if resolved description is empty
+                # (DB rows with NULL/empty content shouldn't crash retrieval).
+                if not desc:
+                    if ntype in _NOT_NULL_CONTENT_TYPES:
+                        logger.warning(
+                            "brain._neighbors: empty/NULL content on "
+                            "%s id=%s (column is declared NOT NULL — "
+                            "data integrity issue)",
+                            ntype, r.neighbor_id,
+                        )
+                    desc = f"[{ntype}] {r.neighbor_id}"
+                if created is None:
+                    logger.warning(
+                        "brain._neighbors: NULL created_at on %s id=%s "
+                        "(column has server_default — possible migration bug)",
+                        ntype, r.neighbor_id,
+                    )
+                    created = datetime.now(UTC)
             else:
                 desc = f"[{ntype}] {r.neighbor_id}"
                 created = datetime.now(UTC)

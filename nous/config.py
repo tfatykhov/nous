@@ -1015,6 +1015,26 @@ class Settings(BaseSettings):
         default=0.15,
         description="P2: max boost as a fraction of original score (default 0.15 = +15% for the most-connected candidate).",
     )
+    heart_graph_all_types_enabled: bool = Field(
+        default=False,
+        description=(
+            "When true, the heart_graph_neighbors stage expands fact/episode "
+            "seeds to neighbors of ALL node types (fact, episode, chunk, "
+            "procedure, decision) instead of decisions only. Required to "
+            "activate F022 cross-type + F040 densification + F070 chunk edges "
+            "that today have no consumer in retrieval. Opt-in until eval "
+            "validates on the F051 harness; ships disabled in prod."
+        ),
+    )
+    heart_graph_neighbors_per_seed: int = Field(
+        default=3,
+        description=(
+            "When heart_graph_all_types_enabled is true, this is the per-seed "
+            "neighbor limit (vs the 2 used by the decision-only path). Higher "
+            "default reflects the larger candidate pool when all types are "
+            "surfaced."
+        ),
+    )
     # =========================================================================
     # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
     # =========================================================================
