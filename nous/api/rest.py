@@ -482,7 +482,20 @@ def create_app(
             return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
 
         q = request.query_params.get("q")
-        episode_id = request.query_params.get("episode_id")
+        episode_id_raw = request.query_params.get("episode_id")
+        # Validate episode_id is a real UUID before it reaches Postgres —
+        # otherwise the type-cast error surfaces as a 500 via the generic
+        # except below. Codex P2 (2026-05-26).
+        episode_id: str | None = None
+        if episode_id_raw:
+            import uuid as _uuid
+            try:
+                episode_id = str(_uuid.UUID(episode_id_raw))
+            except ValueError:
+                return JSONResponse(
+                    {"error": "episode_id must be a UUID"},
+                    status_code=400,
+                )
 
         from sqlalchemy import text as _sql_text
         params: dict[str, Any] = {"agent_id": settings.agent_id, "limit": limit, "offset": offset}
