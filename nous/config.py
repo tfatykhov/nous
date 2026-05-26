@@ -687,7 +687,12 @@ class Settings(BaseSettings):
 
     # F042: Cross-encoder reranking
     cross_encoder_enabled: bool = False
-    cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # BGE reranker-v2-m3 empirically beats MiniLM by +18.4pp chunks_off /
+    # +3.3pp baseline hit@5 on per_haystack K=5 (LME N=60, eval runs
+    # 2026-05-25T20-14-07 vs 22-34-46). Previously set via env var in
+    # ad-hoc shell sessions; now persisted as the default so the win
+    # doesn't silently regress when no override is supplied.
+    cross_encoder_model: str = "BAAI/bge-reranker-v2-m3"
     cross_encoder_max_candidates: int = 30
     cross_encoder_text_limit: int = 512
 
