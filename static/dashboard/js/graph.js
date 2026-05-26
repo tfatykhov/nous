@@ -61,7 +61,7 @@ Dashboard.registerView('graph', async function(container) {
     var allEdges = data.edges;
     var stats = data.stats || {};
     var filters = {
-        types: { fact: true, episode: true, decision: true, procedure: true },
+        types: { fact: true, episode: true, decision: true, procedure: true, chunk: true },
         minEdges: 0,
         search: ''
     };
@@ -94,7 +94,7 @@ Dashboard.registerView('graph', async function(container) {
         checksDiv.style.borderRadius = '8px';
         checksDiv.style.border = '1px solid var(--border)';
 
-        var types = ['fact', 'episode', 'decision', 'procedure'];
+        var types = ['fact', 'episode', 'decision', 'procedure', 'chunk'];
         types.forEach(function(type) {
             var label = document.createElement('label');
             label.className = 'filter-check';
@@ -208,12 +208,22 @@ Dashboard.registerView('graph', async function(container) {
             .enter().append('line')
             .attr('stroke', function(d) { return relationColor(d.relation); })
             .attr('stroke-width', function(d) { return Math.max(1, (d.weight || 0.5) * 2); })
-            .attr('stroke-opacity', 0.5)
-            .attr('stroke-dasharray', function(d) { return (d.weight || 0.5) < 0.3 ? '4,4' : 'none'; });
+            .attr('stroke-opacity', function(d) {
+                // F065: inferred edges drawn lighter than heuristic/deterministic.
+                return d.extraction_method === 'inferred' ? 0.3 : 0.5;
+            })
+            .attr('stroke-dasharray', function(d) {
+                // Dash by either low weight OR inferred provenance.
+                if (d.extraction_method === 'inferred') return '2,3';
+                return (d.weight || 0.5) < 0.3 ? '4,4' : 'none';
+            });
 
         // Link hover titles
         links.append('title')
-            .text(function(d) { return d.relation + ' (w=' + (d.weight || 0).toFixed(2) + ')'; });
+            .text(function(d) {
+                var prov = d.extraction_method ? ' · ' + d.extraction_method : '';
+                return d.relation + ' (w=' + (d.weight || 0).toFixed(2) + ')' + prov;
+            });
 
         // Nodes
         nodeGroup = g.append('g').attr('class', 'nodes');
@@ -298,7 +308,10 @@ Dashboard.registerView('graph', async function(container) {
             contradicts: '#f87171',
             supersedes: '#fb923c',
             caused_by: '#e2e2f0',
-            discussed_in: '#6b6b8a'
+            discussed_in: '#6b6b8a',
+            // F070: chunk-graph relations
+            part_of: '#22d3ee',
+            summarized_by: '#06b6d4'
         };
         return colors[relation] || '#6b6b8a';
     }

@@ -237,7 +237,8 @@ const Dashboard = {
             episode: '#34d399',
             decision: '#a78bfa',
             procedure: '#fb923c',
-            censor: '#f87171'
+            censor: '#f87171',
+            chunk: '#06b6d4'
         };
         return colors[type] || '#6b6b8a';
     },

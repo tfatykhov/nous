@@ -19,6 +19,7 @@
     --procedure-color: #fb923c;
     --censor-color: #f87171;
     --heartbeat-color: #22d3ee;
+    --chunk-color: #06b6d4;
 
     --sidebar-width: 220px;
     --sidebar-collapsed: 56px;
@@ -537,6 +538,7 @@ body {
 .badge-decision  { background: rgba(167, 139, 250, 0.15); color: var(--decision-color); }
 .badge-procedure { background: rgba(251, 146, 60, 0.15); color: var(--procedure-color); }
 .badge-censor    { background: rgba(248, 113, 113, 0.15); color: var(--censor-color); }
+.badge-chunk     { background: rgba(6, 182, 212, 0.15);  color: var(--chunk-color); }
 
 .badge-success { background: rgba(52, 211, 153, 0.15); color: var(--green); }
 .badge-failure { background: rgba(248, 113, 113, 0.15); color: var(--red); }
