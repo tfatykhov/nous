@@ -230,6 +230,43 @@ async def test_clear(heart, session):
 # ---------------------------------------------------------------------------
 
 
+async def test_to_state_accepts_chunk_type_residual_row(
+    heart, session,
+):
+    """F055's record_surfaced passes PipelineResult.type through verbatim,
+    which since F067 includes ``"chunk"``. MemoryType used to be just
+    {fact, procedure, decision, censor, episode} so any chunk-typed
+    residual row would 500 _to_state on the Literal validation. Verify
+    chunk is now an accepted MemoryType."""
+    from sqlalchemy import select
+    from nous.storage.models import WorkingMemory
+
+    sid = f"test-chunk-type-{uuid.uuid4().hex[:8]}"
+    await heart.get_or_create_working_memory(sid, session=session)
+
+    chunk_item = {
+        "type": "chunk",
+        "ref_id": str(uuid.uuid4()),
+        "summary": "residual chunk",
+        "relevance": 0.5,
+        "loaded_at": datetime.now(UTC).isoformat(),
+    }
+    result = await session.execute(
+        select(WorkingMemory)
+        .where(WorkingMemory.session_id == sid)
+        .where(WorkingMemory.agent_id == heart.agent_id)
+    )
+    wm = result.scalars().one()
+    wm.items = [chunk_item]
+    await session.flush()
+
+    state = await heart.get_working_memory(sid, session=session)
+    assert state is not None
+    assert len(state.items) == 1
+    assert state.items[0].type == "chunk"
+    assert state.items[0].summary == "residual chunk"
+
+
 async def test_to_state_tolerates_null_loaded_at_residual_row(
     heart, session, caplog,
 ):
