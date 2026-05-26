@@ -499,6 +499,16 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RECALL_INCLUDE_PARENT_EPISODES` | `false` | F067 Phase 2. When true, `recall_deep` appends up to `recall_max_parent_episodes` parent episode summaries to its text output. **Validated on per-question isolation only; opt-in for prod.** |
 | `NOUS_RECALL_MAX_PARENT_EPISODES` | `2` | F067 cap on parent episode summaries appended (deduplicated). |
 | `NOUS_RECALL_PARENT_EPISODE_TRUNCATE` | `500` | F067 per-parent-episode summary char truncation. |
+| `NOUS_CHUNK_CONSOLIDATION_ENABLED` | `false` | F070 master switch. When true, `GraphDensifier.run_backfill_cycle` (and the standalone `scripts/backfill_f070_chunks.py`) build chunk→episode `part_of`, chunk→fact `summarized_by` (same-episode), and chunk↔chunk `related_to` edges. Required to populate the chunk-graph that Path A's Stage 2b consumes. |
+| `NOUS_GRAPH_BACKFILL_MAX_CHUNKS` | `100` | F070 per-cycle cap on orphan chunks the densifier picks up. Used as the default batch size by `backfill_orphan_chunks` when no `max_count` override is passed. |
+| `NOUS_GRAPH_THRESHOLD_CHUNK_FACT` | `0.55` | F070 cosine threshold for chunk→fact `summarized_by` edges (same-episode only in v1). |
+| `NOUS_GRAPH_THRESHOLD_CHUNK_CHUNK_INTRA` | `0.70` | F070 cosine threshold for non-adjacent intra-episode chunk↔chunk edges. Adjacent chunks (chunk_index ± 1) always link at structural weight 1.0 regardless. |
+| `NOUS_GRAPH_THRESHOLD_CHUNK_CHUNK_CROSS` | `0.85` | F070 cosine threshold for cross-episode chunk↔chunk edges. Reserved; v1 does not yet write these (deferred to F070.1). |
+| `NOUS_HEART_GRAPH_ALL_TYPES_ENABLED` | `false` | F070 Path A master switch. When true, `run_recall_pipeline` Stage 2b expands fact/episode/chunk seeds to neighbors of all non-decision types (fact, episode, chunk, procedure) — required to activate F022 cross-type + F040 + F070 edges that today have no other consumer. Stage 2 (decision-only) is unaffected. |
+| `NOUS_HEART_GRAPH_NEIGHBORS_PER_SEED` | `3` | Path A per-(seed, neighbor_type) LIMIT for Stage 2b's `brain.neighbors` fan-out. Each fact/episode/chunk seed pulls up to N rows of each of {fact, episode, chunk, procedure} via separate calls (mirrors the SQL-pushdown discipline from Stage 2). |
+| `NOUS_SESSION_GROUP_HEART_SECTION` | `false` | When true, `_format_pipeline_text` groups Heart Memory items by source session_id with `-- Session abc12345 --` headers. Helps multi-session LLM synthesis. `_attach_fact_source_episodes` only fires when this flag is on (otherwise the source-episode lookup is a wasted DB roundtrip). |
+| `NOUS_GRAPH_ADJACENCY_BOOST_ENABLED` | `false` | When true, `run_recall_pipeline` applies a gbrain-style multiplicative boost to candidates connected via `brain.graph_edges` to other candidates in the same batch. Excludes `contradicts` edges. Inert until enough cross-candidate edges exist (F040/F070 backfill is the prereq). |
+| `NOUS_GRAPH_ADJACENCY_BOOST_ALPHA` | `0.15` | Max boost as a fraction of original score for the most-connected candidate. |
 
 ### REST Endpoints
 
