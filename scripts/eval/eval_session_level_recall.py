@@ -318,8 +318,12 @@ async def main() -> int:
     hit_records: dict[str, dict] = {
         v: collections.defaultdict(list) for v in variants
     }
+    mrr_records: dict[str, dict] = {
+        v: collections.defaultdict(list) for v in variants
+    }
     overall_recall: dict[str, list] = {v: [] for v in variants}
     overall_hit: dict[str, list] = {v: [] for v in variants}
+    overall_mrr: dict[str, list] = {v: [] for v in variants}
 
     # Per BLOCKERS #2+#3 fix: pull a wider candidate pool, dedup to unique
     # sessions IN RANK ORDER, then take the top-K unique sessions.
@@ -385,11 +389,19 @@ async def main() -> int:
                 recall = len(hit_eps) / len(gold_eps)
                 # hit@K: binary, any gold session in top-K unique (gbrain metric)
                 hit = 1.0 if hit_eps else 0.0
+                # MRR@K: 1/rank of first gold session (0 if no gold in top-K)
+                mrr = 0.0
+                for pos, sess in enumerate(top_unique_sessions, 1):
+                    if sess in gold_eps:
+                        mrr = 1.0 / pos
+                        break
 
                 recall_records[vname][qtype].append(recall)
                 hit_records[vname][qtype].append(hit)
+                mrr_records[vname][qtype].append(mrr)
                 overall_recall[vname].append(recall)
                 overall_hit[vname].append(hit)
+                overall_mrr[vname].append(mrr)
 
             if (i + 1) % 10 == 0:
                 logger.info("Progress %d/%d", i + 1, len(qrels))
@@ -409,14 +421,15 @@ async def main() -> int:
     n_q = len(overall_recall["baseline"])
     print(f"n_questions = {n_q}")
     print("=" * 90)
-    print(f"\n{'VARIANT':<24} {'hit@K':>8} {'recall@K':>10} {'n':>5}")
-    print("-" * 54)
+    print(f"\n{'VARIANT':<24} {'hit@K':>8} {'recall@K':>10} {'MRR@K':>8} {'n':>5}")
+    print("-" * 63)
     for v in variants:
         if not overall_hit[v]:
             continue
         h = mean(overall_hit[v])
         r = mean(overall_recall[v])
-        print(f"{v:<24} {h:>8.3f} {r:>10.3f} {len(overall_hit[v]):>5}")
+        m = mean(overall_mrr[v])
+        print(f"{v:<24} {h:>8.3f} {r:>10.3f} {m:>8.3f} {len(overall_hit[v]):>5}")
 
     print(f"\n{'PER QUESTION TYPE — hit@K (gbrain-comparable)':<24}")
     qtypes = sorted({q["notes"]["question_type"] for q in qrels})
@@ -450,12 +463,17 @@ async def main() -> int:
         "agent_id": AGENT_ID,
         "overall_hit": {v: mean(overall_hit[v]) if overall_hit[v] else 0.0 for v in variants},
         "overall_recall": {v: mean(overall_recall[v]) if overall_recall[v] else 0.0 for v in variants},
+        "overall_mrr": {v: mean(overall_mrr[v]) if overall_mrr[v] else 0.0 for v in variants},
         "per_type_hit": {
             v: {qt: mean(hits) for qt, hits in hit_records[v].items()}
             for v in variants
         },
         "per_type_recall": {
             v: {qt: mean(recs) for qt, recs in recall_records[v].items()}
+            for v in variants
+        },
+        "per_type_mrr": {
+            v: {qt: mean(mrrs) for qt, mrrs in mrr_records[v].items()}
             for v in variants
         },
     }, indent=2), encoding="utf-8")
