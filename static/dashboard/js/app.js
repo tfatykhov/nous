@@ -62,10 +62,20 @@ const Dashboard = {
             }
         }
 
-        // Stop D3 simulation if leaving graph view
-        if (this.currentView === 'graph' && this._graphSimulation) {
-            this._graphSimulation.stop();
-            this._graphSimulation = null;
+        // Tear down graph view resources when leaving. Pre-Cytoscape we
+        // only had a D3 simulation; the rewrite landed a Cytoscape core
+        // that holds canvas + event listeners + animation frames, so we
+        // must destroy() it too. Both branches no-op cleanly when the
+        // respective handle is null.
+        if (this.currentView === 'graph') {
+            if (this._graphSimulation) {
+                this._graphSimulation.stop();
+                this._graphSimulation = null;
+            }
+            if (this._cyInstance) {
+                try { this._cyInstance.destroy(); } catch (e) { /* ignore */ }
+                this._cyInstance = null;
+            }
         }
 
         // Hide all views
