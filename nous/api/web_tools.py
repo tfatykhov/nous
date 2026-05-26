@@ -349,8 +349,14 @@ _WEB_FETCH_SCHEMA: dict[str, Any] = {
         "url": {"type": "string", "description": "URL to fetch (must be http or https)"},
         "max_chars": {
             "type": "integer",
-            "description": "Maximum characters to return (default from config, max 50000)",
-            "maximum": 50000,
+            "description": (
+                "Maximum characters to return. Default 50000 (good for "
+                "most pages). Pass up to 200000 (hard ceiling) when "
+                "fetching a full document body to hand off to "
+                "ingest_document — F069 raised the ceiling so doc-ingest "
+                "calls are not silently truncated."
+            ),
+            "maximum": 200000,
         },
     },
     "required": ["url"],

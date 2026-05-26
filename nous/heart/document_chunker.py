@@ -166,7 +166,16 @@ def _pack(pieces: list[str], *, target_size: int, overlap: int) -> list[str]:
             # with this one across the boundary.
             chunks.append(buf)
             tail = _overlap_tail(buf, overlap)
-            buf = f"{tail} {piece}" if tail else piece
+            seeded = f"{tail} {piece}" if tail else piece
+            # Codex P2 (2026-05-26): re-check size after seeding. If the
+            # overlap tail + new piece pushes us back over target_size,
+            # drop the tail rather than violate the chunk-size contract.
+            # The overlap is a nice-to-have for boundary context, not a
+            # hard guarantee — the size contract IS hard.
+            if len(seeded) > target_size:
+                buf = piece
+            else:
+                buf = seeded
     if buf:
         chunks.append(buf)
     return chunks

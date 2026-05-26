@@ -85,6 +85,35 @@ class TestRecursiveSplit:
         assert a == b
 
 
+class TestChunkSizeContract:
+    """Codex P2 regression: every chunk under target_size, including
+    cases where overlap-tail seeding would otherwise push the new buffer
+    above the limit. The size contract is hard; overlap is best-effort."""
+
+    def test_overlap_tail_does_not_violate_size_contract(self):
+        # Construct pieces so the second piece + overlap tail of the first
+        # chunk would exceed target_size if not re-checked.
+        # 92-char piece + 30-char tail + 1 space would be 123 > 100 target.
+        target_size = 100
+        overlap = 30
+        # First long piece flushes via paragraph break; second is ~90 chars.
+        first = ("aaa " * 25).strip()   # 99 chars
+        second = ("bbb " * 25).strip()  # 99 chars (similar)
+        text = f"{first}\n\n{second}"
+
+        chunks = chunk_document(
+            text,
+            target_size=target_size,
+            overlap=overlap,
+            min_chars=10,
+        )
+
+        for c in chunks:
+            assert len(c) <= target_size, (
+                f"chunk size {len(c)} > target_size {target_size}: {c[:60]!r}"
+            )
+
+
 class TestOverlap:
     def test_overlap_zero_no_shared_content(self):
         text = (
