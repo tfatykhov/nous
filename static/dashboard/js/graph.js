@@ -371,16 +371,29 @@ Dashboard.registerView('graph', async function (container) {
                 cy.elements().removeClass('faded searchHit');
                 return;
             }
+            // Codex P2 (2026-05-26): two-pass to avoid order-dependence.
+            // The prior loop toggled edge fade per-node, so an edge could
+            // be faded by its non-matching endpoint AFTER being un-faded
+            // by its matching endpoint, depending on iteration order.
+            // Now: pass 1 classifies nodes; pass 2 decides each edge
+            // exactly once based on whether either endpoint matches.
+            var matchSet = {};
             cy.nodes().forEach(function (n) {
                 var label = (n.data('label') || '').toLowerCase();
                 if (label.indexOf(q) >= 0) {
                     n.removeClass('faded');
                     n.addClass('searchHit');
-                    n.connectedEdges().removeClass('faded');
+                    matchSet[n.id()] = true;
                 } else {
                     n.removeClass('searchHit');
                     n.addClass('faded');
-                    n.connectedEdges().addClass('faded');
+                }
+            });
+            cy.edges().forEach(function (e) {
+                if (matchSet[e.source().id()] || matchSet[e.target().id()]) {
+                    e.removeClass('faded');
+                } else {
+                    e.addClass('faded');
                 }
             });
         });
