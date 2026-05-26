@@ -326,7 +326,13 @@ class Settings(BaseSettings):
     # Web tools
     brave_search_api_key: str = Field("", validation_alias="BRAVE_SEARCH_API_KEY")
     web_search_daily_limit: int = 100  # Max web searches per day
-    web_fetch_max_chars: int = 10000  # Default max chars for web_fetch
+    # F069 (2026-05-26): bumped from 10000 -> 50000 so an arxiv paper /
+    # long doc page is not silently truncated to 1-2 sections. Hard ceiling
+    # in _web_fetch raised to 200000 in lockstep so callers can pass an
+    # explicit max_chars=200000 when they intend to ingest a full document
+    # (e.g. before calling ingest_document). Pure dialogue web_fetch calls
+    # are still soft-trimmed downstream by tool_soft_trim_chars.
+    web_fetch_max_chars: int = 50000
     tavily_api_key: str = Field("", validation_alias="TAVILY_API_KEY")
     exa_api_key: str = Field("", validation_alias="EXA_API_KEY")
     search_provider: str = "auto"  # auto, tavily, exa, brave
@@ -980,6 +986,37 @@ class Settings(BaseSettings):
     episode_chunk_min_transcript_chars: int = Field(
         default=50,
         description="F067 minimum transcript length to chunk (shorter transcripts are skipped).",
+    )
+
+    # ── F069: document-aware ingestion ───────────────────────────────────
+    # Distinct from F067 because document bodies (arxiv papers, doc pages,
+    # parsed PDF/.docx text) benefit from larger, structure-aware chunks
+    # than the dialogue chunker provides. Opt-in surface: the agent calls
+    # `ingest_document(content, source_ref)` with text it has already
+    # extracted (e.g. via run_python + pypdf).
+    document_ingest_enabled: bool = Field(
+        default=True,
+        description=(
+            "F069 master switch for the ingest_document tool. When false, "
+            "the tool refuses calls; existing dialogue chunks (F067) are "
+            "unaffected. Default ON because the tool is opt-in at call "
+            "time — no auto-classification in v1."
+        ),
+    )
+    document_chunk_size: int = Field(
+        default=1500,
+        ge=200,
+        description="F069 target chunk size in chars (~250 words).",
+    )
+    document_chunk_overlap: int = Field(
+        default=200,
+        ge=0,
+        description="F069 overlap chars between document chunks.",
+    )
+    document_chunk_min_chars: int = Field(
+        default=100,
+        ge=10,
+        description="F069 minimum doc length to chunk (shorter ingests rejected).",
     )
     recall_include_parent_episodes: bool = Field(
         default=False,

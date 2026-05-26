@@ -231,7 +231,10 @@ async def _web_fetch(
         if not is_safe:
             return _mcp_response(f"Blocked: {error}")
 
-        effective_max = min(max_chars or _settings.web_fetch_max_chars, 50000)
+        # F069 (2026-05-26): hard ceiling bumped from 50,000 -> 200,000.
+        # Lets explicit doc-ingest callers (ingest_document path) pull a
+        # full arxiv paper into one fetch instead of paginating.
+        effective_max = min(max_chars or _settings.web_fetch_max_chars, 200000)
 
         # Manual redirect following with SSRF check on each hop (P1-1 fix)
         max_redirects = 5

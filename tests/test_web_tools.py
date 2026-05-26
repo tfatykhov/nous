@@ -31,7 +31,10 @@ def _make_settings(**overrides) -> MagicMock:
     defaults = {
         "brave_search_api_key": "test-brave-key",
         "web_search_daily_limit": 100,
-        "web_fetch_max_chars": 10000,
+        # F069: production default bumped 10K -> 50K. Tests can override
+        # via _make_settings(web_fetch_max_chars=...) when they need the
+        # tighter window.
+        "web_fetch_max_chars": 50000,
     }
     defaults.update(overrides)
     mock = MagicMock()
@@ -572,12 +575,12 @@ class TestWebFetch:
         assert "connect" in text.lower() or "Could not" in text
 
     @pytest.mark.asyncio
-    async def test_max_chars_capped_at_50000(self):
-        """max_chars parameter is capped at 50000 even if higher value passed."""
+    async def test_max_chars_capped_at_hard_ceiling(self):
+        """max_chars parameter is capped at the 200K hard ceiling (F069 bumped 50K -> 200K)."""
         wt = _import_web_tools()
-        settings = _make_settings(web_fetch_max_chars=100000)
-        # Content just over 50000 chars
-        long_text = "B" * 60000
+        settings = _make_settings(web_fetch_max_chars=300000)
+        # Content just over the 200K ceiling
+        long_text = "B" * 210000
         response = _mock_response(
             status_code=200,
             text=long_text,
@@ -586,7 +589,7 @@ class TestWebFetch:
         client = _mock_http_client(response)
 
         with patch.object(wt, "_is_url_safe", return_value=(True, "")):
-            result = await wt._web_fetch("https://example.com/huge", max_chars=100000, _settings=settings, _http=client)
+            result = await wt._web_fetch("https://example.com/huge", max_chars=300000, _settings=settings, _http=client)
 
         text = _extract_text(result)
         assert "truncated" in text.lower()

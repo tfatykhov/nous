@@ -76,6 +76,10 @@ class ToolDispatcher:
                 args = {**args, "session_id": session_id}
             if session_id is not None and name == "run_python":
                 args = {**args, "_session_id": session_id}
+            if session_id is not None and name == "ingest_document":
+                # F069: inject session_id so the tool can resolve the
+                # active episode when the caller omits episode_id.
+                args = {**args, "_session_id": session_id}
             if session_id is not None and name == "recall_deep":
                 # F051.4 / F055: inject session_id into recall_deep so
                 # F055's Cross-Turn Residual Activation can read it via
@@ -1011,6 +1015,153 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("recall_hubs tool failed")
             return {"content": [{"type": "text", "text": f"Error fetching hubs: {e}"}]}
 
+    async def ingest_document(
+        content: str,
+        source_ref: str,
+        episode_id: str | None = None,
+        _session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """F069: chunk and persist a full document body to heart.episode_chunks.
+
+        Unlike F067 transcript chunking (600-char dialogue window), this uses
+        the document_chunker (1500-char structure-aware split, 200-char
+        overlap). The handler writes chunks directly to the DB at full
+        fidelity, so conversation-history soft-trim does not lose content.
+
+        Args:
+            content: Full document text. The agent extracts this itself
+                (e.g. via run_python + pypdf for PDFs, python-docx for
+                .docx, plain str for arxiv HTML). Must be >= configured
+                document_chunk_min_chars.
+            source_ref: URL or workspace path the content came from.
+                Stored on every chunk for traceability.
+            episode_id: Optional explicit episode UUID. If omitted, the
+                handler attaches chunks to the active episode of the
+                current session.
+            _session_id: Auto-injected by ToolDispatcher; used to resolve
+                the active episode when episode_id is not provided.
+        """
+        from uuid import UUID as _UUID
+        from sqlalchemy import text as _sql_text
+
+        from nous.heart.document_chunker import chunk_document
+
+        if not settings.document_ingest_enabled:
+            return {"content": [{"type": "text", "text": "ingest_document is disabled (NOUS_DOCUMENT_INGEST_ENABLED=false)."}]}
+        if not content or not content.strip():
+            return {"content": [{"type": "text", "text": "Error: content is empty."}]}
+        if not source_ref or not source_ref.strip():
+            return {"content": [{"type": "text", "text": "Error: source_ref is required (URL or file path)."}]}
+
+        try:
+            # 1. Resolve target episode.
+            target_episode_id: _UUID
+            if episode_id:
+                try:
+                    target_episode_id = _UUID(episode_id)
+                except ValueError:
+                    return {"content": [{"type": "text", "text": f"Error: episode_id must be a UUID, got {episode_id!r}."}]}
+            else:
+                if not _session_id:
+                    return {"content": [{"type": "text", "text": "Error: no episode_id provided and no active session — pass episode_id explicitly."}]}
+                async with heart.db.session() as session:
+                    row = await session.execute(
+                        _sql_text(
+                            "SELECT id FROM heart.episodes "
+                            "WHERE agent_id = :a AND session_id = :s AND active = true "
+                            "ORDER BY started_at DESC LIMIT 1"
+                        ),
+                        {"a": heart.agent_id, "s": _session_id},
+                    )
+                    found = row.scalar()
+                if not found:
+                    return {"content": [{"type": "text", "text": f"Error: no active episode for session {_session_id}; pass episode_id explicitly."}]}
+                target_episode_id = found
+
+            # 2. Chunk the document.
+            chunks = chunk_document(
+                content,
+                target_size=settings.document_chunk_size,
+                overlap=settings.document_chunk_overlap,
+                min_chars=settings.document_chunk_min_chars,
+            )
+            if not chunks:
+                return {"content": [{"type": "text", "text": (
+                    f"Ingest skipped: content shorter than min_chars ({settings.document_chunk_min_chars})."
+                )}]}
+
+            # 3. Embed in one batch (cheaper than per-chunk).
+            try:
+                embeddings = await heart._embeddings.embed_batch(chunks)
+            except Exception as exc:
+                logger.exception("ingest_document: embed_batch failed")
+                return {"content": [{"type": "text", "text": f"Error embedding chunks: {exc}"}]}
+
+            # 4. Insert into heart.episode_chunks. ON CONFLICT skips re-
+            # ingestion of identical (episode_id, chunk_index) pairs so the
+            # call is idempotent for a given episode. Vector literal format
+            # mirrors handlers/episode_summarizer.py:219 — CAST AS vector
+            # avoids the pgvector.utils dependency.
+            async with heart.db.session() as session:
+                # Determine starting chunk_index: append after any existing
+                # chunks for this episode so re-ingest of a different doc
+                # under the same episode does not collide.
+                next_idx_row = await session.execute(
+                    _sql_text(
+                        "SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next_idx "
+                        "FROM heart.episode_chunks "
+                        "WHERE agent_id = :a AND episode_id = :e"
+                    ),
+                    {"a": heart.agent_id, "e": target_episode_id},
+                )
+                start_idx = int(next_idx_row.scalar() or 0)
+
+                inserted = 0
+                for offset, (chunk_text, emb) in enumerate(zip(chunks, embeddings)):
+                    if not emb:
+                        # Defensive — embed_batch should never return None,
+                        # but a single bad vector should not crash the batch.
+                        continue
+                    vec_lit = "[" + ",".join(f"{v:.6f}" for v in emb) + "]"
+                    await session.execute(
+                        _sql_text(
+                            "INSERT INTO heart.episode_chunks "
+                            "(agent_id, episode_id, chunk_index, content, embedding, "
+                            " source_kind, source_ref) "
+                            "VALUES (:a, :e, :i, :c, CAST(:emb AS vector), "
+                            " 'document', :ref) "
+                            "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
+                        ),
+                        {
+                            "a": heart.agent_id,
+                            "e": str(target_episode_id),
+                            "i": start_idx + offset,
+                            "c": chunk_text,
+                            "emb": vec_lit,
+                            "ref": source_ref,
+                        },
+                    )
+                    inserted += 1
+                await session.commit()
+
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Ingested {inserted} chunks from {source_ref!r} "
+                            f"into episode {target_episode_id} "
+                            f"(start_index={start_idx}, source_kind=document, "
+                            f"target_size={settings.document_chunk_size})."
+                        ),
+                    }
+                ]
+            }
+
+        except Exception as e:
+            logger.exception("ingest_document tool failed")
+            return {"content": [{"type": "text", "text": f"Error ingesting document: {e}"}]}
+
     return {
         "record_decision": record_decision,
         "learn_fact": learn_fact,
@@ -1020,6 +1171,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "learn_skill": learn_skill,
         "get_procedure": get_procedure,
         "recall_hubs": recall_hubs,
+        "ingest_document": ingest_document,
     }
 
 
@@ -1245,6 +1397,47 @@ _RECALL_HUBS_SCHEMA: dict[str, Any] = {
 }
 
 
+_INGEST_DOCUMENT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "F069: chunk and persist a full document body (arxiv paper, doc "
+        "page, parsed PDF/.docx text) to long-term memory at full fidelity. "
+        "Use after you have extracted text yourself (e.g. via run_python "
+        "with pypdf for PDFs, python-docx for .docx, or after fetching "
+        "with web_fetch at max_chars=200000 for a large HTML page). "
+        "Unlike web_fetch + dialogue chunking which retains ~1% of a paper, "
+        "this writes the full content to heart.episode_chunks with "
+        "source_kind='document' using a 1500-char structure-aware chunker."
+    ),
+    "properties": {
+        "content": {
+            "type": "string",
+            "description": (
+                "Full document body to ingest. Should already be plain text "
+                "(decode binary formats client-side via run_python). Must be "
+                "at least document_chunk_min_chars (default 100) chars."
+            ),
+        },
+        "source_ref": {
+            "type": "string",
+            "description": (
+                "URL or workspace path the document came from. Persisted on "
+                "every chunk for traceability and so the agent can recall "
+                "where a fact was sourced."
+            ),
+        },
+        "episode_id": {
+            "type": "string",
+            "description": (
+                "Optional explicit episode UUID. If omitted, chunks are "
+                "attached to the active episode of the current session."
+            ),
+        },
+    },
+    "required": ["content", "source_ref"],
+}
+
+
 def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, settings: Settings | None = None) -> None:
     """Create Nous memory tools and register them with the dispatcher.
 
@@ -1261,6 +1454,7 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
     dispatcher.register("learn_skill", closures["learn_skill"], _LEARN_SKILL_SCHEMA)
     dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
     dispatcher.register("recall_hubs", closures["recall_hubs"], _RECALL_HUBS_SCHEMA)
+    dispatcher.register("ingest_document", closures["ingest_document"], _INGEST_DOCUMENT_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

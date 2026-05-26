@@ -430,6 +430,15 @@ class EpisodeChunk(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     embedding = mapped_column(Vector(1536), nullable=True)
     # search_tsv is GENERATED ALWAYS — read-only DB-side
+    # F069 (migration 052): distinguishes F067 dialogue transcript chunks
+    # from F069 document-body chunks (and reserves 'code' for future).
+    # Default 'dialogue' covers every row written before migration 052.
+    source_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="dialogue"
+    )
+    # F069: optional URL or workspace path for document chunks. NULL for
+    # dialogue chunks (transcripts have no external referent).
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
