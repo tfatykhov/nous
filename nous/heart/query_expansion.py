@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_QUERY_LEN = 500
 _MAX_VARIANT_LEN = 200
+# Observability: emit an INFO line every Nth successful expansion so a
+# normal log tail confirms F050 is alive in prod (the per-call DEBUG
+# would be a firehose). 100 picked as a balance between visibility and
+# noise — at a few recall_deep calls per minute, this lands ~one log
+# every 30-60 min during normal use.
+_SUCCESS_LOG_SAMPLE = 100
 
 _INJECTION_PREFIXES: tuple[str, ...] = (
     "ignore ",
@@ -138,6 +144,11 @@ class QueryExpander:
         self._budget_lock = asyncio.Lock()
         self._bucket_count: dict[int, int] = {}
         self._budget_warned_bucket: int | None = None
+        # Observability sample counter — one INFO log per N successful
+        # expansions so operators tailing logs see F050 is alive without
+        # the per-call DEBUG firehose. Query text is NOT logged (privacy
+        # — matches gbrain's expansion.ts pattern).
+        self._success_count: int = 0
 
     # ------------------------------------------------------------------
     # Public entrypoint
@@ -168,6 +179,7 @@ class QueryExpander:
         h = canonical_input_hash(query)
         cached = await self._cache_get(h)
         if cached is not None:
+            self._maybe_log_success(source="cache", n_variants=len(cached))
             return cached
 
         # Tier 3: single-flight — coalesce concurrent calls for the same hash
@@ -210,13 +222,19 @@ class QueryExpander:
                 return [query]
 
             # Tier 6: sanitize -> Haiku -> sanitize -> fuse
+            import time
+            t_start = time.monotonic()
             sanitized = self._sanitize_for_prompt(query)
             variants = await self._call_haiku(sanitized)
             cleaned = self._sanitize_output(variants)
             final = self._fuse([query, *cleaned])
+            elapsed_ms = (time.monotonic() - t_start) * 1000.0
 
             # Tier 7: cache put (best-effort)
             await self._cache_put(h, query, final)
+            self._maybe_log_success(
+                source="haiku", n_variants=len(final), elapsed_ms=elapsed_ms,
+            )
             return final
         except asyncio.CancelledError:
             # Never swallow CancelledError — let it propagate so the runtime
@@ -314,6 +332,36 @@ class QueryExpander:
                     return []
                 return [v for v in raw if isinstance(v, str)]
         return []
+
+    def _maybe_log_success(
+        self,
+        *,
+        source: str,
+        n_variants: int,
+        elapsed_ms: float | None = None,
+    ) -> None:
+        """INFO log every Nth successful expansion.
+
+        Operators tailing prod logs at INFO see a periodic confirmation
+        that F050 is alive without the per-call DEBUG firehose. Query
+        text is intentionally omitted (privacy — matches gbrain).
+        """
+        self._success_count += 1
+        if self._success_count % _SUCCESS_LOG_SAMPLE != 0:
+            return
+        if elapsed_ms is not None:
+            logger.info(
+                "F050: expansion success [sample 1/%d, count=%d, source=%s, "
+                "variants=%d, elapsed=%.0fms]",
+                _SUCCESS_LOG_SAMPLE, self._success_count, source,
+                n_variants, elapsed_ms,
+            )
+        else:
+            logger.info(
+                "F050: expansion success [sample 1/%d, count=%d, source=%s, "
+                "variants=%d]",
+                _SUCCESS_LOG_SAMPLE, self._success_count, source, n_variants,
+            )
 
     def _log_haiku_error(self, exc: Exception) -> None:
         """WARN-once-per-status-code on auth failures, DEBUG on transients."""
