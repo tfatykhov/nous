@@ -183,6 +183,63 @@ async def test_record_auto_links(brain_with_embeddings, session):
     assert isinstance(edges, list)
 
 
+@pytest.mark.postgres_only
+async def test_auto_link_uses_existing_constraint_not_bogus_name(
+    brain, session,
+):
+    """Regression: Brain._auto_link used to reference
+    ``constraint="uq_edges_src_tgt_rel"`` which doesn't exist. Every call
+    raised ``UndefinedObject`` and was silently swallowed by record()'s
+    ``except Exception``. The prior test_record_auto_links assertion
+    (``isinstance(edges, list)``) was too lenient — it passed even when
+    auto_link 100% no-op'd. This test directly invokes ``auto_link``
+    with two near-identical embeddings and asserts that an edge IS
+    inserted, which proves the ON CONFLICT clause references a real
+    constraint.
+    """
+    from uuid import uuid4
+
+    from nous.storage.models import Decision
+
+    # Two decisions with identical embeddings — cosine similarity = 1.0,
+    # easily clears auto_link_threshold (default 0.85).
+    emb = [1.0] + [0.0] * 1535
+    emb_str = "[" + ",".join(str(float(v)) for v in emb) + "]"
+    d1_id = uuid4()
+    d2_id = uuid4()
+    for did in (d1_id, d2_id):
+        session.add(Decision(
+            id=did, agent_id=brain.agent_id,
+            description=f"decision {did}",
+            confidence=0.8, category="architecture", stakes="low",
+        ))
+    await session.flush()
+    # Backfill embeddings via raw SQL (model field is JSON in some test
+    # configs; this guarantees the pgvector column is set).
+    await session.execute(text(
+        "UPDATE brain.decisions SET embedding = CAST(:e AS vector) "
+        "WHERE id IN (:a, :b)"
+    ), {"e": emb_str, "a": d1_id, "b": d2_id})
+    await session.flush()
+
+    # Call auto_link directly — if the constraint name is wrong this
+    # raises UndefinedObject and the test fails.
+    edges = await brain.auto_link(d1_id, threshold=0.5, session=session)
+
+    # And verify the edge actually persisted.
+    rows = (await session.execute(text(
+        "SELECT source_id::text, target_id::text, relation "
+        "FROM brain.graph_edges "
+        "WHERE agent_id = :a AND relation = 'related_to' "
+        "  AND ((source_id = :d1 AND target_id = :d2) "
+        "    OR (source_id = :d2 AND target_id = :d1))"
+    ), {"a": brain.agent_id, "d1": d1_id, "d2": d2_id})).all()
+    assert len(rows) >= 1, (
+        "auto_link must persist at least one edge between two cosine=1.0 "
+        f"decisions; got {rows}. Returned edges from auto_link: {edges}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 6. test_think
 # ---------------------------------------------------------------------------

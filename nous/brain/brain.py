@@ -418,7 +418,15 @@ class Brain:
             async with session.begin_nested():
                 await self._auto_link(decision.id, session)
         except Exception:
-            logger.warning("auto_link failed for decision %s, continuing", decision.id)
+            # exc_info=True so the actual failure mode is visible in prod
+            # logs. The prior log line gave no clue why auto-linking was
+            # silently a no-op (it was the missing constraint name; see
+            # _auto_link). Keep the WARN-level since auto-link is best-
+            # effort and we don't want to fail the parent record() call.
+            logger.warning(
+                "auto_link failed for decision %s, continuing",
+                decision.id, exc_info=True,
+            )
 
         # Re-fetch with eager loading to avoid lazy-load issues
         decision = await self._get_decision_orm(decision.id, session)
@@ -1564,7 +1572,19 @@ class Brain:
                     auto_linked=True,
                     extraction_method=classify("related_to", source="auto_linker"),
                 )
-                .on_conflict_do_nothing(constraint="uq_edges_src_tgt_rel")
+                .on_conflict_do_nothing(
+                    # Match the unique constraint by columns, not by name.
+                    # The actual constraint is auto-named
+                    # ``graph_edges_source_id_target_id_relation_key`` (init.sql:205,
+                    # ``UNIQUE(source_id, target_id, relation)``). The previous
+                    # ``constraint="uq_edges_src_tgt_rel"`` referenced a name that
+                    # never existed, so every ``_auto_link`` call raised
+                    # ``UndefinedObject`` and was silently swallowed by the
+                    # ``except Exception`` at line 420 — meaning auto-linking
+                    # has been a no-op since this code was written. Mirrors the
+                    # pattern used by ``GraphLinker.create_edge``.
+                    index_elements=["source_id", "target_id", "relation"],
+                )
             )
             await session.execute(stmt)
 
