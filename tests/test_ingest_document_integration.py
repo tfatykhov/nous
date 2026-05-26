@@ -227,6 +227,98 @@ async def test_ingest_document_idempotent_for_same_source_ref(db, agent_id, fixt
         await session.commit()
 
 
+async def test_ingest_document_concurrent_different_source_refs_no_collision(db, agent_id, fixture_episode):
+    """Codex P1 round 4 (2026-05-26): two concurrent ingest_document
+    calls targeting the same episode with DIFFERENT source_refs must
+    not collide on chunk_index. Pre-fix: separate (episode,source_ref)
+    locks let both see the same MAX+1 start_idx, both INSERT, ON CONFLICT
+    silently dropped one caller's rows. Episode-scoped lock fixes this.
+
+    Verifies: both calls return success AND all chunks from both docs
+    end up in the DB with disjoint chunk_index ranges (no row loss).
+    """
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.api.tools import create_nous_tools
+    from nous.config import Settings
+
+    settings = Settings().model_copy(update={"agent_id": agent_id, "document_chunk_min_chars": 50})
+    mock_embedder = MagicMock()
+    mock_embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536 for _ in texts])
+    heart_stub = MagicMock()
+    heart_stub.db = db
+    heart_stub.agent_id = agent_id
+    heart_stub._embeddings = mock_embedder
+    brain_stub = MagicMock()
+    tools = create_nous_tools(brain_stub, heart_stub, settings)
+    ingest_document = tools["ingest_document"]
+
+    content_a = "Alpha alpha alpha. " * 150  # ~2.8K chars
+    content_b = "Beta beta beta. " * 150     # ~2.4K chars
+
+    # Fire both concurrently against the same episode.
+    r_a, r_b = await asyncio.gather(
+        ingest_document(
+            content=content_a,
+            source_ref="test://doc-A.pdf",
+            episode_id=str(fixture_episode),
+        ),
+        ingest_document(
+            content=content_b,
+            source_ref="test://doc-B.pdf",
+            episode_id=str(fixture_episode),
+        ),
+    )
+
+    # Both should have succeeded (no "Already ingested" since different source_refs).
+    assert "Ingested" in r_a["content"][0]["text"], f"A: {r_a['content'][0]['text']!r}"
+    assert "Ingested" in r_b["content"][0]["text"], f"B: {r_b['content'][0]['text']!r}"
+
+    # Pull all chunks for this episode and verify (1) disjoint chunk_index
+    # ranges per source_ref, (2) no duplicate chunk_index across the two.
+    async with db.session() as session:
+        rows = await session.execute(
+            text(
+                "SELECT chunk_index, source_ref FROM heart.episode_chunks "
+                "WHERE agent_id = :a AND episode_id = :e "
+                "ORDER BY chunk_index"
+            ),
+            {"a": agent_id, "e": fixture_episode},
+        )
+        all_chunks = rows.fetchall()
+
+    chunk_indices = [c.chunk_index for c in all_chunks]
+    assert len(chunk_indices) == len(set(chunk_indices)), (
+        f"duplicate chunk_index detected (ON CONFLICT silently dropped rows): {chunk_indices}"
+    )
+
+    by_source = {}
+    for c in all_chunks:
+        by_source.setdefault(c.source_ref, []).append(c.chunk_index)
+
+    assert "test://doc-A.pdf" in by_source, "doc A wrote no chunks"
+    assert "test://doc-B.pdf" in by_source, "doc B wrote no chunks"
+
+    a_indices = sorted(by_source["test://doc-A.pdf"])
+    b_indices = sorted(by_source["test://doc-B.pdf"])
+    assert not (set(a_indices) & set(b_indices)), (
+        f"chunk_index overlap between docs: A={a_indices} B={b_indices}"
+    )
+
+    # Cleanup
+    async with db.session() as session:
+        await session.execute(
+            text("DELETE FROM heart.episode_chunks WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+        await session.execute(
+            text("DELETE FROM heart.episodes WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+        await session.commit()
+
+
 async def test_ingest_document_rejects_partial_embed_batch(db, agent_id, fixture_episode):
     """Codex P2 round 3 (2026-05-26): if embedder returns fewer vectors
     than chunks, the tool must refuse to write a partial ingest rather

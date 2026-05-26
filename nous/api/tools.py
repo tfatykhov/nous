@@ -1120,19 +1120,25 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     ]
                 }
 
-            # 4. Atomic idempotency + insert (Codex P1 round 3, 2026-05-26):
-            # the prior fix did the existence check in one session and the
-            # inserts in another, leaving a race where two concurrent calls
-            # for the same (episode_id, source_ref) could both pass the
-            # check and then both append fresh chunk_index ranges.
+            # 4. Atomic idempotency + insert.
             #
-            # Now: single transaction with pg_advisory_xact_lock keyed on
-            # (episode_id, source_ref). Concurrent callers for the same key
-            # serialize at the DB; only the first one's COUNT sees 0 rows,
-            # so only it inserts. The second one waits, then sees the rows
-            # and returns the "already ingested" response. Vector literal
-            # format mirrors handlers/episode_summarizer.py:219.
-            lock_key = f"ingest_document:{target_episode_id}:{source_ref}"
+            # Lock is keyed on episode_id ONLY (Codex P1 round 4, 2026-05-26),
+            # NOT (episode_id, source_ref). Reason: chunk_index is allocated
+            # per-episode via MAX(chunk_index)+1. If two concurrent ingests
+            # for the same episode but DIFFERENT source_refs took separate
+            # locks, they could both pick the same start_idx, both INSERT,
+            # and ON CONFLICT (episode_id, chunk_index) DO NOTHING would
+            # silently drop one caller's rows — silent data loss.
+            #
+            # By locking at episode scope, both concurrent ingests serialize
+            # so their start_idx allocations are disjoint. The idempotency
+            # COUNT (filtered by source_ref) still works correctly inside
+            # the same transaction.
+            #
+            # Single transaction guarded by pg_advisory_xact_lock; lock
+            # auto-releases on COMMIT/ROLLBACK. Vector literal format
+            # mirrors handlers/episode_summarizer.py:219.
+            lock_key = f"ingest_document:{target_episode_id}"
             async with heart.db.session() as session:
                 # Advisory lock — released at COMMIT / ROLLBACK.
                 await session.execute(
