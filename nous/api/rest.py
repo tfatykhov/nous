@@ -238,6 +238,10 @@ def create_app(
                     ("heart.facts", "total_facts"),
                     ("heart.episodes", "total_episodes"),
                     ("heart.procedures", "total_procedures"),
+                    # F067: surface chunked transcripts on /status so the
+                    # Overview tab has a parity stat card next to facts/
+                    # episodes/decisions/procedures.
+                    ("heart.episode_chunks", "total_chunks"),
                 ]:
                     result = await session.execute(
                         text(f"SELECT COUNT(*) FROM {table} WHERE agent_id = :agent_id"),
@@ -296,6 +300,7 @@ def create_app(
                         "total_facts": counts["total_facts"],
                         "total_episodes": counts["total_episodes"],
                         "total_procedures": counts["total_procedures"],
+                        "total_chunks": counts["total_chunks"],
                     },
                     "working_memory": working_memory_sessions,
                     "execution_integrity": {
@@ -462,6 +467,72 @@ def create_app(
                 })
         except Exception as e:
             logger.error("Search/browse facts error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def list_chunks(request: Request) -> JSONResponse:
+        """GET /chunks?q=&episode_id=&limit=&offset= — browse F067 episode chunks.
+
+        Parity with /facts browse mode but read-only and direct-SQL (no
+        Heart accessor — chunk rows aren't part of the recall surface).
+        """
+        try:
+            limit = int(request.query_params.get("limit", "50"))
+            offset = int(request.query_params.get("offset", "0"))
+        except ValueError:
+            return JSONResponse({"error": "limit and offset must be integers"}, status_code=400)
+
+        q = request.query_params.get("q")
+        episode_id = request.query_params.get("episode_id")
+
+        from sqlalchemy import text as _sql_text
+        params: dict[str, Any] = {"agent_id": settings.agent_id, "limit": limit, "offset": offset}
+        where = ["agent_id = :agent_id"]
+        if q:
+            where.append("content ILIKE :q")
+            params["q"] = f"%{q}%"
+        if episode_id:
+            where.append("episode_id = :episode_id")
+            params["episode_id"] = episode_id
+        where_sql = " AND ".join(where)
+
+        try:
+            async with database.session() as session:
+                rows = await session.execute(
+                    _sql_text(f"""
+                        SELECT id::text, episode_id::text, chunk_index, content, created_at
+                        FROM heart.episode_chunks
+                        WHERE {where_sql}
+                        ORDER BY created_at DESC, chunk_index ASC
+                        LIMIT :limit OFFSET :offset
+                    """),
+                    params,
+                )
+                items = [
+                    {
+                        "id": r.id,
+                        "episode_id": r.episode_id,
+                        "chunk_index": r.chunk_index,
+                        "content": r.content,
+                        "created_at": r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in rows
+                ]
+                # Total count under the same filters (drop limit/offset).
+                count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
+                total_row = await session.execute(
+                    _sql_text(f"SELECT COUNT(*) AS cnt FROM heart.episode_chunks WHERE {where_sql}"),
+                    count_params,
+                )
+                total = total_row.scalar() or 0
+
+            return JSONResponse({
+                "chunks": items,
+                "total": int(total),
+                "limit": limit,
+                "offset": offset,
+            })
+        except Exception as e:
+            logger.error("List chunks error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def list_censors(request: Request) -> JSONResponse:
@@ -2387,6 +2458,7 @@ def create_app(
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
         Route("/facts", search_facts),
+        Route("/chunks", list_chunks),
         Route("/censors/{id}", update_censor, methods=["PUT"]),
         Route("/censors", list_censors),
         Route("/procedures", list_procedures),
