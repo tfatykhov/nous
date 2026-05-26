@@ -247,7 +247,14 @@ class QueryExpander:
             return False
         if len(query) > _MAX_QUERY_LEN:
             return False
-        return len(query.split()) >= self._settings.query_expansion_min_words
+        # CJK-aware word count (mirrors gbrain's expansion gate). A pure
+        # Chinese/Japanese/Korean query has no whitespace, so plain
+        # ``.split()`` collapses it to 1 word and the min-words gate
+        # rejects every CJK query. ``count_cjk_aware_words`` switches to
+        # char-counting when CJK density >= 30%, treating mixed-Latin
+        # queries as whitespace-tokenized.
+        from nous.heart.cjk import count_cjk_aware_words
+        return count_cjk_aware_words(query) >= self._settings.query_expansion_min_words
 
     # ------------------------------------------------------------------
     # Stage 2: input sanitization (spec §3 + devil P3 trim-leading-WS first)
