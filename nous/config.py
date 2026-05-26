@@ -1034,6 +1034,14 @@ class Settings(BaseSettings):
         default=500,
         description="F067 per-parent-episode summary char truncation.",
     )
+    recall_exclude_context_ids: bool = Field(
+        default=False,
+        description=(
+            "F071. When true, recall_deep filters out items already loaded "
+            "into the current turn's system prompt (facts, decisions, "
+            "episodes, procedures). Land dark; flip in dev for measurement."
+        ),
+    )
     session_group_heart_section: bool = Field(
         default=False,
         description=(

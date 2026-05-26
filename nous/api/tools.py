@@ -604,6 +604,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         """
         from nous.api.retrieval_pipeline import run_recall_pipeline
 
+        # F071: lazy import to avoid runner.py <-> tools.py circular dependency.
+        # Mirrors the existing `from nous.api.runner import FRAME_TOOLS`
+        # pattern used elsewhere in this module. Returns None when the feature
+        # flag is off or no turn is active (e.g. F051 eval harness), and the
+        # pipeline's `if exclude_ids:` short-circuit keeps output byte-identical.
+        from nous.api.runner import CURRENT_TURN_EXCLUDE_IDS
+        _f071_exclude_ids = CURRENT_TURN_EXCLUDE_IDS.get()
+
         try:
             search_types = memory_types or ["all"]
 
@@ -659,6 +667,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 memory_types=memory_types,
                 residual_activations=residual_activations or None,  # F055
                 rerank_by_score=chunks_rerank,
+                exclude_ids=_f071_exclude_ids,  # F071
             )
             # F067 observability: one INFO line per recall_deep call so
             # operators can grep for chunk surfacing in prod without
@@ -681,6 +690,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 "recall_deep agent=%s query_chars=%d limit=%d "
                 "chunks_enabled=%s chunks_searched=%s "
                 "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
+                "excluded_in_context=%d "  # F071
                 "n_total=%d",
                 brain.agent_id,
                 len(query or ""),
@@ -690,6 +700,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 n_chunks_total,
                 n_chunks_top10,
                 first_chunk_rank if first_chunk_rank is not None else "n/a",
+                stats.excluded_in_context,  # F071
                 len(results),
             )
             # F067 Phase 2: optionally fetch parent episode summaries for

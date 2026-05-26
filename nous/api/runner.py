@@ -13,6 +13,7 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
+from contextvars import ContextVar
 from typing import Any, Callable
 from uuid import UUID
 
@@ -47,6 +48,40 @@ __all__ = ["AgentRunner", "StreamEvent", "FRAME_TOOLS"]
 # Frame types where record_decision is expected
 _REQUIRED_DECISION_FRAMES = frozenset({"decision"})
 _OPTIONAL_DECISION_FRAMES = frozenset({"task", "debug"})
+
+
+# F071: per-turn exclusion set for cross-context dedup. Set by AgentRunner
+# before the tool loop, read by the recall_deep tool closure, reset in
+# `finally`. ContextVar guarantees per-asyncio-Task isolation so concurrent
+# turns never share state.
+CURRENT_TURN_EXCLUDE_IDS: ContextVar[dict[str, set[str]] | None] = ContextVar(
+    "CURRENT_TURN_EXCLUDE_IDS", default=None,
+)
+
+
+def _build_exclude_ids(
+    settings: Settings,
+    turn_context: TurnContext | None,
+) -> dict[str, set[str]] | None:
+    """F071: pack TurnContext recalled IDs into a type-keyed dict for
+    recall_deep dedup.
+
+    Returns None when the feature flag is off or no turn_context is
+    available, so the pipeline's `if exclude_ids:` short-circuit fires
+    and run_recall_pipeline output stays byte-identical with pre-F071
+    behavior. ``getattr(..., False)`` keeps tests that mock Settings
+    from having to populate the new field.
+    """
+    if not getattr(settings, "recall_exclude_context_ids", False):
+        return None
+    if turn_context is None:
+        return None
+    return {
+        "fact":      set(turn_context.recalled_fact_ids or []),
+        "decision":  set(turn_context.recalled_decision_ids or []),
+        "episode":   set(turn_context.recalled_episode_ids or []),
+        "procedure": set(turn_context.recalled_procedure_ids or []),
+    }
 
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
@@ -441,22 +476,33 @@ class AgentRunner:
                     turn_context.frame.frame_id if turn_context else "unknown",
                 )
 
-                response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
-                    system_prompt=system_prompt,
-                    conversation=conversation,
-                    frame_id=turn_context.frame.frame_id,
-                    session_id=session_id,
-                    is_subtask=is_subtask,
-                    max_tool_calls=max_tool_calls,
-                    model_override=model_override,
-                    user_message=user_message,
-                    ledger=ledger,
-                    tool_filter=tool_filter,
-                    is_background=is_background,
-                    extra_tools=extra_tools,
-                    force_tool_on_penultimate=force_tool_on_penultimate,
-                    dag_node_id=dag_node_id,
+                # F071: scope the per-turn exclusion set to the tool loop —
+                # the only call site that invokes recall_deep. set just before
+                # entry, reset in `finally` so the contextvar restores even on
+                # raise. Concurrent turns each get an isolated copy (ContextVar
+                # is per-asyncio-Task).
+                _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
+                    _build_exclude_ids(self._settings, turn_context)
                 )
+                try:
+                    response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
+                        system_prompt=system_prompt,
+                        conversation=conversation,
+                        frame_id=turn_context.frame.frame_id,
+                        session_id=session_id,
+                        is_subtask=is_subtask,
+                        max_tool_calls=max_tool_calls,
+                        model_override=model_override,
+                        user_message=user_message,
+                        ledger=ledger,
+                        tool_filter=tool_filter,
+                        is_background=is_background,
+                        extra_tools=extra_tools,
+                        force_tool_on_penultimate=force_tool_on_penultimate,
+                        dag_node_id=dag_node_id,
+                    )
+                finally:
+                    CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
                 conversation.messages.append(Message(role="assistant", content=response_text))
             except Exception as e:
                 logger.error("API call error: %s", e)
@@ -990,6 +1036,13 @@ class AgentRunner:
             response_text = ""
             error = None
 
+            # F071: scope the per-turn exclusion set to the streaming tool
+            # loop — recall_deep can be dispatched inside the for-turn
+            # iteration. Reset lives in the existing `finally:` below so
+            # we don't add new nesting (single source of cleanup).
+            _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
+                _build_exclude_ids(self._settings, turn_context)
+            )
             try:
                 for turn in range(self._settings.max_turns):
                     # Unified block accumulator: keyed by block_index, preserves
@@ -1277,6 +1330,9 @@ class AgentRunner:
                 # F026: Post-response claim verification (streaming: warn+inject only)
                 self._verify_claims(session_id, response_text, all_tool_results, ledger)
             finally:
+                # F071: reset the per-turn exclusion set first — restoring the
+                # contextvar must not depend on post_turn's success.
+                CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
