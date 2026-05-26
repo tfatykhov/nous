@@ -183,6 +183,7 @@ async def test_record_auto_links(brain_with_embeddings, session):
     assert isinstance(edges, list)
 
 
+@pytest.mark.postgres_only
 async def test_auto_link_uses_existing_constraint_not_bogus_name(
     brain, session,
 ):
