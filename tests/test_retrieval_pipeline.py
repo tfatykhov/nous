@@ -572,8 +572,17 @@ class TestPathAStage2b:
         original_search_chunks_path = (
             "nous.api.retrieval_pipeline._search_episode_chunks"
         )
+        # _search_episode_chunks returns 4-tuples (id, content, score,
+        # episode_id) — see retrieval_pipeline.py:825. The earlier draft
+        # of this test used a 3-tuple, which prevented the test from
+        # catching the production unpacking bug (`{cid for cid, _, _ in
+        # acc.chunk_results}` against 4-tuples). Match the real shape.
+        from uuid import uuid4 as _u
+        dup_chunk_episode_id = _u()
         with patch(original_search_chunks_path, new=AsyncMock(
-            return_value=[(dup_chunk_id, "dup chunk content", 0.5)],
+            return_value=[(
+                dup_chunk_id, "dup chunk content", 0.5, dup_chunk_episode_id,
+            )],
         )):
             results, stats = await run_recall_pipeline(
                 query="anything", heart=heart, brain=brain,

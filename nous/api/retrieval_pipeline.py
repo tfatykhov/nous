@@ -143,8 +143,9 @@ class _PipelineAccumulator:
     # Stage 5: contradiction edges (source_id, source_type, target_id, target_type)
     contradictions: list[tuple[UUID, str, UUID, str]] = field(default_factory=list)
 
-    # F067 Stage 1.5: chunk-recall results (id, content, score)
-    chunk_results: list[tuple[UUID, str, float]] = field(default_factory=list)
+    # F067 Stage 1.5: chunk-recall results
+    # Shape: (id, content, score, episode_id) — see _search_episode_chunks.
+    chunk_results: list[tuple[UUID, str, float, UUID]] = field(default_factory=list)
 
     # Flags
     searched_decisions: bool = False
@@ -416,7 +417,10 @@ async def _run_stages(
             mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
             seen_mem_ids: set[UUID] = set()
             heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
-            chunk_ids: set[UUID] = {cid for cid, _, _ in acc.chunk_results}
+            # acc.chunk_results carries (id, content, score, episode_id) per
+            # _search_episode_chunks at line 825. Use star-unpack so future
+            # tuple shape changes don't crash this hot loop.
+            chunk_ids: set[UUID] = {item[0] for item in acc.chunk_results}
             # Heart seeds: top-K fact/episode results.
             mem_seeds: list[tuple[UUID, str]] = [
                 (hr.id, hr.type) for hr in acc.heart_results[:3]
@@ -425,7 +429,7 @@ async def _run_stages(
             # Chunk seeds: top-K F067 chunk-recall results (when present).
             # Chunks have rich same-episode neighborhoods via F070.
             mem_seeds.extend(
-                (cid, "chunk") for cid, _content, _score in acc.chunk_results[:3]
+                (item[0], "chunk") for item in acc.chunk_results[:3]
             )
             # Per-type fan-out — one ``LIMIT`` window per neighbor type so
             # chunks don't crowd facts/episodes (or vice versa) out of a
