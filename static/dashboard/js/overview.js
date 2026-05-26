@@ -50,6 +50,7 @@ Dashboard.registerView('overview', async function(container) {
     html += '<div class="stat-grid">';
     html += buildStatCard('Total Facts', mem.total_facts || 0, factsDelta, 'var(--fact-color)');
     html += buildStatCard('Total Episodes', mem.total_episodes || 0, episodesDelta, 'var(--episode-color)');
+    html += buildStatCard('Total Chunks', mem.total_chunks || 0, null, 'var(--chunk-color)');
     html += buildStatCard('Total Decisions', mem.total_decisions || 0, decisionsDelta, 'var(--decision-color)');
     html += buildStatCard('Active Censors', mem.active_censors || 0, null, 'var(--censor-color)');
     html += buildDensityCard(density);

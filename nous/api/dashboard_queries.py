@@ -146,7 +146,7 @@ async def get_graph_data(
     result = await session.execute(
         text("""
             SELECT id, source_id, target_id, source_type, target_type,
-                   relation, weight, auto_linked, created_at
+                   relation, weight, auto_linked, extraction_method, created_at
             FROM brain.graph_edges
             WHERE agent_id = :agent_id
             ORDER BY created_at DESC
@@ -172,6 +172,8 @@ async def get_graph_data(
             "relation": e.relation,
             "weight": e.weight,
             "auto_linked": e.auto_linked,
+            # F065: deterministic / heuristic / inferred provenance.
+            "extraction_method": e.extraction_method,
         })
 
     # Build nodes from source tables
@@ -192,6 +194,14 @@ async def get_graph_data(
         "procedure": (
             "heart.procedures",
             "LEFT(name, 120) AS label, domain AS category",
+        ),
+        # F067: chunked raw transcripts. No category column on the table —
+        # surface chunk_index instead so the detail panel has something
+        # meaningful to show, but cast to text to keep the column shape
+        # uniform across types.
+        "chunk": (
+            "heart.episode_chunks",
+            "LEFT(content, 120) AS label, chunk_index::text AS category",
         ),
     }
 
@@ -223,6 +233,9 @@ async def get_graph_data(
         ("facts", "heart.facts"),
         ("episodes", "heart.episodes"),
         ("procedures", "heart.procedures"),
+        # F067: chunks are orphaned when no F070 part_of/summarized_by/related_to
+        # backfill has linked them yet.
+        ("chunks", "heart.episode_chunks"),
     ]
     for key, table in orphan_queries:
         result = await session.execute(
@@ -666,6 +679,9 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
         ("facts", "heart.facts"),
         ("episodes", "heart.episodes"),
         ("procedures", "heart.procedures"),
+        # F067: include chunked transcripts so the health card reflects
+        # F070/F070.1 backfill coverage, not just the legacy 4 types.
+        ("chunks", "heart.episode_chunks"),
     ]
     for key, table in orphan_queries:
         result = await session.execute(
@@ -782,6 +798,10 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                 SELECT id, created_at FROM heart.episodes WHERE agent_id = :agent_id
                 UNION ALL
                 SELECT id, created_at FROM heart.procedures WHERE agent_id = :agent_id AND active = true
+                UNION ALL
+                -- F067: chunks must count in the daily orphan trend so the
+                -- post-F070 backfill curve is visible.
+                SELECT id, created_at FROM heart.episode_chunks WHERE agent_id = :agent_id
             ),
             daily_new_total AS (
                 SELECT CAST(created_at AS date) AS day, COUNT(*) AS cnt
@@ -1662,6 +1682,9 @@ async def get_density_data(session: AsyncSession, agent_id: str) -> dict:
         ("decision", "brain.decisions", "decision", "1=1"),
         ("episode", "heart.episodes", "episode", "1=1"),
         ("procedure", "heart.procedures", "procedure", "active = true"),
+        # F067: chunks are matched via source/target_type = 'chunk' on
+        # F070's part_of / summarized_by / related_to edges.
+        ("chunk", "heart.episode_chunks", "chunk", "1=1"),
     ]
 
     total_nodes = 0

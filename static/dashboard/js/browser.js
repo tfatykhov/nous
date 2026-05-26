@@ -13,6 +13,7 @@ Dashboard.registerView('browser', async function(container) {
         '<div class="tab-bar" id="browser-tabs">' +
             '<button class="tab-btn active" data-tab="facts">Facts</button>' +
             '<button class="tab-btn" data-tab="episodes">Episodes</button>' +
+            '<button class="tab-btn" data-tab="chunks">Chunks</button>' +
             '<button class="tab-btn" data-tab="decisions">Decisions</button>' +
             '<button class="tab-btn" data-tab="procedures">Procedures</button>' +
             '<button class="tab-btn" data-tab="censors">Censors</button>' +
@@ -133,6 +134,7 @@ Dashboard.registerView('browser', async function(container) {
         var endpoints = {
             facts: '/facts',
             episodes: '/episodes',
+            chunks: '/chunks',
             decisions: '/decisions',
             procedures: '/procedures',
             censors: '/censors'
@@ -251,6 +253,13 @@ Dashboard.registerView('browser', async function(container) {
                     { key: 'activation_count', label: 'Activations' },
                     { key: 'active', label: 'Active', format: 'boolean' }
                 ];
+            case 'chunks':
+                return [
+                    { key: 'content', label: 'Content', cls: 'cell-truncate', truncate: 100 },
+                    { key: 'chunk_index', label: 'Idx', badge: 'badge-chunk' },
+                    { key: 'episode_id', label: 'Episode', cls: 'mono', truncate: 8 },
+                    { key: 'created_at', label: 'Created', format: 'date' }
+                ];
             default:
                 return [];
         }
@@ -336,6 +345,13 @@ Dashboard.registerView('browser', async function(container) {
                 html += detailRow('Domain', item.domain);
                 html += detailRow('Activations', item.activation_count);
                 html += detailRow('False Positives', item.false_positive_count);
+                html += detailRow('ID', null, '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
+                break;
+            case 'chunks':
+                html += detailRow('Content', item.content);
+                html += detailRow('Chunk Index', item.chunk_index);
+                html += detailRow('Episode', null, '<span class="mono">' + escapeHtml(item.episode_id || '') + '</span>');
+                html += detailRow('Created', Dashboard.formatDateTime(item.created_at));
                 html += detailRow('ID', null, '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
                 break;
         }
