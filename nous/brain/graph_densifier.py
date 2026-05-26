@@ -740,7 +740,7 @@ class GraphDensifier:
         self,
         limit: int,
         session: AsyncSession,
-        offset: int = 0,
+        exclude_ids: set[UUID] | frozenset[UUID] | None = None,
     ) -> list[tuple[UUID, str, UUID]]:
         """F070.1: chunks that have at least one edge but no cross-episode one.
 
@@ -756,13 +756,14 @@ class GraphDensifier:
         chunks could never produce cross-episode edges and would otherwise
         occupy the LIMIT window forever, blocking progress.
 
-        Codex round-2 P1: ``offset`` parameter so the caller can paginate
-        past hard-negative windows. Without it, if the newest LIMIT
-        candidates all happen to have no above-threshold cross-episode
-        neighbors, the backfill loop's no-progress break fires and
-        terminates with older candidates still un-linked. The script
-        advances ``offset += batch_size`` each iteration to expose new
-        candidates.
+        Codex round-3 P1: ``exclude_ids`` is the correct abstraction for
+        paginating past hard-negative chunks. The earlier ``offset``
+        approach skipped real candidates when a batch successfully linked
+        some rows — those linked rows shifted out of the result set, and
+        an offset advance jumped past their (still-unlinked) neighbors.
+        Caller tracks the ``attempted`` set across batches and passes it
+        here; every chunk is visited at most once per run, regardless of
+        whether linking succeeded or failed.
 
         Implementation note: three separate ``NOT EXISTS`` clauses
         correlated on ``c.id``. This lets the Postgres planner short-
@@ -771,12 +772,23 @@ class GraphDensifier:
         + NOT IN, big NOT EXISTS with multi-table LEFT JOIN) materialized
         intermediate sets and stalled on real corpus sizes.
         """
+        params: dict[str, object] = {"a": self._agent_id, "lim": limit}
+        exclude_clause = ""
+        if exclude_ids:
+            # Cast each UUID to text for a TEXT[] parameter so asyncpg
+            # binds it as a single array — avoids the "expanding IN list
+            # via SQL string interpolation" footgun.
+            params["excl"] = [str(uid) for uid in exclude_ids]
+            exclude_clause = (
+                "AND c.id::text != ALL(CAST(:excl AS text[]))"
+            )
         sql = text(
-            """
+            f"""
             SELECT c.id, c.content, c.episode_id
             FROM heart.episode_chunks c
             WHERE c.agent_id = :a
               AND c.embedding IS NOT NULL
+              {exclude_clause}
               AND EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :a
@@ -818,13 +830,10 @@ class GraphDensifier:
                     AND other.episode_id != c.episode_id
               )
             ORDER BY c.created_at DESC NULLS LAST
-            LIMIT :lim OFFSET :off
+            LIMIT :lim
             """
         )
-        result = await session.execute(
-            sql,
-            {"a": self._agent_id, "lim": limit, "off": offset},
-        )
+        result = await session.execute(sql, params)
         return [(row.id, row.content or "", row.episode_id) for row in result.all()]
 
     async def _link_chunk_to_cross_episode_facts(
@@ -939,42 +948,48 @@ class GraphDensifier:
     async def backfill_orphan_chunks_cross_episode(
         self,
         max_count: int | None = None,
-        offset: int = 0,
-    ) -> int:
+        exclude_ids: set[UUID] | frozenset[UUID] | None = None,
+    ) -> tuple[int, list[UUID]]:
         """F070.1: add cross-episode summarized_by + related_to edges.
 
-        Idempotent: ``find_chunks_lacking_cross_episode_edges`` skips any
-        chunk that already has cross-episode edges; create_edge uses
-        ON CONFLICT DO NOTHING under the hood. Re-running after a partial
-        run continues from where the last batch stopped.
+        Returns ``(edges_created, attempted_chunk_ids)``. The caller is
+        expected to extend its ``attempted`` set with the returned IDs
+        and pass that set back as ``exclude_ids`` on the next call —
+        ensures every chunk is visited at most once per run regardless
+        of per-batch link success/failure (codex round-3 P1; the prior
+        offset-based pagination skipped chunks when batches succeeded).
 
-        ``offset`` lets the caller paginate past hard-negative windows
-        (codex round-2 P1). When all candidates in the current LIMIT
-        window have no above-threshold neighbors, the caller advances
-        ``offset += max_count`` and tries the next slice. Without this,
-        the script's no-progress break would terminate the whole job
-        even though older candidates may still be linkable.
+        Idempotent across runs: ``find_chunks_lacking_cross_episode_edges``
+        skips any chunk that already has cross-episode edges; ``create_edge``
+        uses ON CONFLICT DO NOTHING under the hood. Re-running after a
+        partial run picks up where the last run left off.
 
-        Returns count of edges created.
+        Returns ``(0, [])`` when ``chunk_consolidation_enabled`` or
+        ``graph_backfill_enabled`` is False.
         """
         if not self._settings.chunk_consolidation_enabled:
-            return 0
+            return 0, []
         if not self._settings.graph_backfill_enabled:
-            return 0
+            return 0, []
 
         limit = max_count or self._settings.graph_backfill_max_chunks_cross_episode
         thresh_fact = self._settings.graph_threshold_chunk_fact_cross
         thresh_chunk = self._settings.graph_threshold_chunk_chunk_cross
         top_k = self._settings.chunk_cross_episode_top_k
         total = 0
+        attempted: list[UUID] = []
 
         async with self.db.session() as session:
             candidates = await self.find_chunks_lacking_cross_episode_edges(
-                limit, session, offset=offset,
+                limit, session, exclude_ids=exclude_ids,
             )
             for chunk_id, _content, episode_id in candidates:
                 if self._interrupted:
                     break
+                # Track attempted regardless of skip/fail/success so the
+                # caller can exclude these chunks from the next batch
+                # (codex round-3 P1 — every chunk visited at most once).
+                attempted.append(chunk_id)
                 if episode_id is None:
                     continue  # chunk with no parent episode — skip
 
@@ -995,7 +1010,7 @@ class GraphDensifier:
             "from %d candidates",
             total, len(candidates),
         )
-        return total
+        return total, attempted
 
     async def backfill_orphan_procedures(
         self,

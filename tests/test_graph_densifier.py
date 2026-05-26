@@ -1185,7 +1185,7 @@ async def test_cross_episode_links_chunk_to_fact_in_other_episode(
         await _insert_edge(s, agent_id, chunk_a, ep_a, "chunk", "episode")
         await s.commit()
 
-    created = await d.backfill_orphan_chunks_cross_episode()
+    created, _attempted = await d.backfill_orphan_chunks_cross_episode()
     assert created >= 1, "expected at least 1 cross-episode chunk→fact edge"
 
     async with db.session() as s:
@@ -1229,7 +1229,7 @@ async def test_cross_episode_links_chunk_to_chunk_in_other_episode(
         await _insert_edge(s, agent_id, c_b, ep_b, "chunk", "episode")
         await s.commit()
 
-    created = await d.backfill_orphan_chunks_cross_episode()
+    created, _attempted = await d.backfill_orphan_chunks_cross_episode()
     assert created >= 1
 
     async with db.session() as s:
@@ -1278,7 +1278,7 @@ async def test_cross_episode_skips_below_threshold(
         await _insert_edge(s, agent_id, c_b, ep_b, "chunk", "episode")
         await s.commit()
 
-    created = await d.backfill_orphan_chunks_cross_episode()
+    created, _attempted = await d.backfill_orphan_chunks_cross_episode()
 
     async with db.session() as s:
         rows = (await s.execute(text(
@@ -1370,11 +1370,15 @@ async def test_cross_episode_idempotent_rerun(
         await _insert_edge(s, agent_id, c_a, ep_a, "chunk", "episode")
         await s.commit()
 
-    first = await d.backfill_orphan_chunks_cross_episode()
-    second = await d.backfill_orphan_chunks_cross_episode()
-    assert first >= 1, "first run must create edges"
-    assert second == 0, (
-        f"second run must be a no-op (idempotent), created {second}"
+    first_created, _first_attempted = await d.backfill_orphan_chunks_cross_episode()
+    second_created, second_attempted = await d.backfill_orphan_chunks_cross_episode()
+    assert first_created >= 1, "first run must create edges"
+    assert second_created == 0, (
+        f"second run must be a no-op (idempotent), created {second_created}"
+    )
+    assert second_attempted == [], (
+        f"second run must report no attempted chunks (all already linked), "
+        f"got {second_attempted}"
     )
 
 
@@ -1423,14 +1427,14 @@ async def test_cross_episode_finder_excludes_null_embedding_chunks(
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_cross_episode_finder_honors_offset(
+async def test_cross_episode_finder_honors_exclude_ids(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):
-    """F070.1 (codex round-2 P1): the finder accepts an ``offset`` so
-    the script can paginate past hard-negative windows. With 3 candidates
-    inserted, offset=0/1/2 each return a distinct leading row and
-    offset=3 returns empty."""
-    agent_id = f"test-f070-1-offset-{uuid4().hex[:8]}"
+    """F070.1 (codex round-3 P1): the finder accepts an ``exclude_ids``
+    set so callers can paginate without skipping unprocessed candidates.
+    Insert 3 candidates and verify each batch with cumulative exclusion
+    returns a previously-unseen row, with the 4th call empty."""
+    agent_id = f"test-f070-1-excl-{uuid4().hex[:8]}"
     settings_local = settings.model_copy(update={
         "chunk_consolidation_enabled": True,
         "graph_backfill_enabled": True,
@@ -1445,25 +1449,91 @@ async def test_cross_episode_finder_honors_offset(
         for i in range(3):
             cid = await _insert_chunk(s, agent_id, ep, i, f"chunk {i}", emb)
             await _insert_edge(s, agent_id, cid, ep, "chunk", "episode")
-            chunk_ids.append(str(cid))
+            chunk_ids.append(cid)
         await s.commit()
 
-    seen_first: set[str] = set()
+    seen: set = set()
     async with db.session() as s:
-        for offset in (0, 1, 2):
+        for _ in range(3):
             results = await d.find_chunks_lacking_cross_episode_edges(
-                limit=1, session=s, offset=offset,
+                limit=1, session=s, exclude_ids=seen,
             )
             assert len(results) == 1, (
-                f"offset={offset} must return 1, got {len(results)}"
+                f"expected 1 row with exclude_ids={seen}, got {len(results)}"
             )
-            seen_first.add(str(results[0][0]))
+            seen.add(results[0][0])
         empty = await d.find_chunks_lacking_cross_episode_edges(
-            limit=1, session=s, offset=3,
+            limit=1, session=s, exclude_ids=seen,
         )
-        assert empty == [], f"offset=3 must be empty, got {empty}"
+        assert empty == [], f"empty result expected with all excluded, got {empty}"
 
-    assert seen_first == set(chunk_ids), (
-        f"offsets 0/1/2 must expose each chunk once; got {seen_first} "
-        f"vs expected {set(chunk_ids)}"
+    assert seen == set(chunk_ids), (
+        f"three exclusion-paginated batches must expose each chunk once; "
+        f"got {seen} vs expected {set(chunk_ids)}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_backfill_visits_every_chunk_even_when_some_link(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1 (codex round-3 P1): regression for the bug where
+    successful batches caused the offset-based pager to skip
+    still-unlinked candidates. Scenario: 3 candidates A, B, C.
+    A and C have matching cross-episode neighbors (will link);
+    B does NOT (hard negative — only same-episode neighbors).
+    With ``effective_batch=2`` over multiple batches and
+    ``exclude_ids`` tracking, all 3 chunks must be ATTEMPTED — the
+    backfill must not exit while B is still un-visited.
+    """
+    agent_id = f"test-f070-1-visit-all-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact_cross": 0.4,
+        "graph_threshold_chunk_chunk_cross": 0.4,
+        "chunk_cross_episode_top_k": 10,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "ep A")
+        ep_b = await _insert_episode(s, agent_id, "ep B")
+        # Three chunks in ep_a. A and C share embedding with a fact in
+        # ep_b → both will link cross-episode. B has a unique embedding
+        # with no cross-episode neighbor → hard negative.
+        emb_shared = await mock_embeddings.embed("shared topic")
+        emb_unique = await mock_embeddings.embed("zebra unique content")
+        chunk_a = await _insert_chunk(s, agent_id, ep_a, 0, "shared A", emb_shared)
+        chunk_b = await _insert_chunk(s, agent_id, ep_a, 1, "zebra B", emb_unique)
+        chunk_c = await _insert_chunk(s, agent_id, ep_a, 2, "shared C", emb_shared)
+        # Cross-episode fact in ep_b that matches A and C.
+        await _insert_fact_with_episode(
+            s, agent_id, "shared topic content", emb_shared, ep_b,
+        )
+        for cid, ep in [(chunk_a, ep_a), (chunk_b, ep_a), (chunk_c, ep_a)]:
+            await _insert_edge(s, agent_id, cid, ep, "chunk", "episode")
+        await s.commit()
+
+    # Simulate the script's loop with effective_batch=2 + exclude_ids tracking.
+    attempted: set = set()
+    total_created = 0
+    seen_attempted: list = []
+    for _ in range(5):  # safety cap
+        created, attempted_ids = await d.backfill_orphan_chunks_cross_episode(
+            max_count=2, exclude_ids=attempted,
+        )
+        if not attempted_ids:
+            break
+        attempted.update(attempted_ids)
+        seen_attempted.extend(attempted_ids)
+        total_created += created
+
+    attempted_str = {str(x) for x in attempted}
+    expected = {str(chunk_a), str(chunk_b), str(chunk_c)}
+    assert attempted_str == expected, (
+        f"every candidate must be attempted at least once across batches; "
+        f"got {attempted_str} vs expected {expected} (created={total_created})"
     )
