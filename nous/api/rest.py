@@ -2571,8 +2571,21 @@ def create_app(
         "static", "dashboard",
     )
     if os.path.isdir(dashboard_dir):
+        class _NoCacheStaticFiles(StaticFiles):
+            """StaticFiles wrapper that forces ETag re-validation on every
+            request. Every dashboard PR was hitting stale-bundle issues
+            because the default StaticFiles response has no Cache-Control
+            header — browsers cache aggressively via heuristic freshness.
+            ETag is already set, so re-validation is cheap (304 when
+            unchanged); we just need to tell the browser to revalidate."""
+
+            async def get_response(self, path, scope):
+                response = await super().get_response(path, scope)
+                response.headers["Cache-Control"] = "no-cache, must-revalidate"
+                return response
+
         routes.append(
-            Mount("/dashboard", app=StaticFiles(directory=dashboard_dir, html=True)),
+            Mount("/dashboard", app=_NoCacheStaticFiles(directory=dashboard_dir, html=True)),
         )
 
     kwargs: dict[str, Any] = {"routes": routes}
