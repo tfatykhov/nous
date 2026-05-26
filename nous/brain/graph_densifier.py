@@ -732,6 +732,246 @@ class GraphDensifier:
                 created += 1
         return created
 
+    # ------------------------------------------------------------------
+    # F070.1 — Cross-episode chunk graph edges
+    # ------------------------------------------------------------------
+
+    async def find_chunks_lacking_cross_episode_edges(
+        self,
+        limit: int,
+        session: AsyncSession,
+    ) -> list[tuple[UUID, str, UUID]]:
+        """F070.1: chunks that have at least one edge but no cross-episode one.
+
+        Returns ``(chunk_id, content, episode_id)`` tuples.
+
+        Cross-episode detection covers THREE paths (codex P1 review): chunk
+        may be source OR target of a chunk↔chunk cross-edge, plus chunk→fact.
+        Missing any path would re-process already-linked chunks on every
+        run, defeating idempotency.
+
+        Implementation note: uses three separate ``NOT EXISTS`` clauses
+        correlated on ``c.id``. This lets the Postgres planner short-circuit
+        per row — as soon as ANY one cross-episode path matches for a given
+        chunk, the row is excluded without evaluating the others. The
+        earlier attempts (UNION + NOT IN, big NOT EXISTS with multi-table
+        LEFT JOIN) materialized intermediate sets and stalled on the
+        real eval corpus (35K chunks × 229K edges).
+        """
+        sql = text(
+            """
+            SELECT c.id, c.content, c.episode_id
+            FROM heart.episode_chunks c
+            WHERE c.agent_id = :a
+              AND EXISTS (
+                  SELECT 1 FROM brain.graph_edges e
+                  WHERE e.agent_id = :a
+                    AND ((e.source_id = c.id AND e.source_type = 'chunk')
+                         OR (e.target_id = c.id AND e.target_type = 'chunk'))
+              )
+              -- Path 1: chunk → fact in another episode
+              AND NOT EXISTS (
+                  SELECT 1 FROM brain.graph_edges e
+                  JOIN heart.facts f
+                      ON e.target_id = f.id AND f.agent_id = :a
+                  WHERE e.agent_id = :a
+                    AND e.source_id = c.id
+                    AND e.source_type = 'chunk'
+                    AND e.target_type = 'fact'
+                    AND f.source_episode_id IS NOT NULL
+                    AND f.source_episode_id != c.episode_id
+              )
+              -- Path 2: chunk → other-chunk where current chunk is SOURCE
+              AND NOT EXISTS (
+                  SELECT 1 FROM brain.graph_edges e
+                  JOIN heart.episode_chunks other
+                      ON e.target_id = other.id AND other.agent_id = :a
+                  WHERE e.agent_id = :a
+                    AND e.source_id = c.id
+                    AND e.source_type = 'chunk'
+                    AND e.target_type = 'chunk'
+                    AND other.episode_id != c.episode_id
+              )
+              -- Path 3: chunk → other-chunk where current chunk is TARGET
+              AND NOT EXISTS (
+                  SELECT 1 FROM brain.graph_edges e
+                  JOIN heart.episode_chunks other
+                      ON e.source_id = other.id AND other.agent_id = :a
+                  WHERE e.agent_id = :a
+                    AND e.target_id = c.id
+                    AND e.target_type = 'chunk'
+                    AND e.source_type = 'chunk'
+                    AND other.episode_id != c.episode_id
+              )
+            ORDER BY c.created_at DESC NULLS LAST
+            LIMIT :lim
+            """
+        )
+        result = await session.execute(sql, {"a": self._agent_id, "lim": limit})
+        return [(row.id, row.content or "", row.episode_id) for row in result.all()]
+
+    async def _link_chunk_to_cross_episode_facts(
+        self,
+        chunk_id: UUID,
+        source_episode_id: UUID,
+        threshold: float,
+        top_k: int,
+        session: AsyncSession,
+    ) -> int:
+        """F070.1: chunk → fact summarized_by ACROSS episodes.
+
+        HNSW-bounded scan: take the top_k facts (excluding the source's own
+        episode) by cosine, then threshold-gate. Returns count of edges created.
+        Inferred provenance — cosine-derived, not structural.
+        """
+        rows = (await session.execute(
+            text(
+                "SELECT f.id, "
+                "  1 - (c.embedding <=> f.embedding) AS sim "
+                "FROM heart.episode_chunks c, heart.facts f "
+                "WHERE c.id = :chunk_id "
+                "  AND c.agent_id = :a "
+                "  AND f.agent_id = :a "
+                "  AND f.active = true "
+                "  AND f.source_episode_id IS NOT NULL "
+                "  AND f.source_episode_id != :ep_id "
+                "  AND f.embedding IS NOT NULL "
+                "  AND c.embedding IS NOT NULL "
+                "ORDER BY c.embedding <=> f.embedding "
+                "LIMIT :top_k"
+            ),
+            {
+                "chunk_id": chunk_id, "ep_id": source_episode_id,
+                "a": self._agent_id, "top_k": top_k,
+            },
+        )).all()
+        created = 0
+        for row in rows:
+            sim = float(row.sim or 0.0)
+            if sim < threshold:
+                continue
+            edge = await self._linker.create_edge(
+                source_id=chunk_id,
+                target_id=row.id,
+                source_type="chunk",
+                target_type="fact",
+                relation="summarized_by",
+                weight=sim,
+                session=session,
+                # Cosine-derived → 'inferred' tier (matches v1 same-episode).
+                provenance_source="auto_linker",
+            )
+            if edge is not None:
+                created += 1
+        return created
+
+    async def _link_chunk_to_cross_episode_chunks(
+        self,
+        chunk_id: UUID,
+        source_episode_id: UUID,
+        threshold: float,
+        top_k: int,
+        session: AsyncSession,
+    ) -> int:
+        """F070.1: chunk ↔ chunk related_to ACROSS episodes (dedup).
+
+        Same HNSW pattern. Excludes the source chunk's own id (so a chunk
+        doesn't link to itself) and same-episode siblings (handled by v1
+        intra-episode method). Cosine-derived → inferred provenance.
+        """
+        rows = (await session.execute(
+            text(
+                "SELECT other.id, other.episode_id, "
+                "  1 - (c.embedding <=> other.embedding) AS sim "
+                "FROM heart.episode_chunks c, heart.episode_chunks other "
+                "WHERE c.id = :chunk_id "
+                "  AND c.agent_id = :a "
+                "  AND other.agent_id = :a "
+                "  AND other.id != :chunk_id "
+                "  AND other.episode_id != :ep_id "
+                "  AND other.embedding IS NOT NULL "
+                "  AND c.embedding IS NOT NULL "
+                "ORDER BY c.embedding <=> other.embedding "
+                "LIMIT :top_k"
+            ),
+            {
+                "chunk_id": chunk_id, "ep_id": source_episode_id,
+                "a": self._agent_id, "top_k": top_k,
+            },
+        )).all()
+        created = 0
+        for row in rows:
+            sim = float(row.sim or 0.0)
+            if sim < threshold:
+                continue
+            edge = await self._linker.create_edge(
+                source_id=chunk_id,
+                target_id=row.id,
+                source_type="chunk",
+                target_type="chunk",
+                relation="related_to",
+                weight=sim,
+                session=session,
+                # Cross-episode chunk↔chunk is cosine-only → inferred.
+                provenance_source="auto_linker",
+            )
+            if edge is not None:
+                created += 1
+        return created
+
+    async def backfill_orphan_chunks_cross_episode(
+        self,
+        max_count: int | None = None,
+    ) -> int:
+        """F070.1: add cross-episode summarized_by + related_to edges.
+
+        Idempotent: ``find_chunks_lacking_cross_episode_edges`` skips any
+        chunk that already has cross-episode edges; create_edge uses
+        ON CONFLICT DO NOTHING under the hood. Re-running after a partial
+        run continues from where the last batch stopped.
+
+        Returns count of edges created.
+        """
+        if not self._settings.chunk_consolidation_enabled:
+            return 0
+        if not self._settings.graph_backfill_enabled:
+            return 0
+
+        limit = max_count or self._settings.graph_backfill_max_chunks_cross_episode
+        thresh_fact = self._settings.graph_threshold_chunk_fact_cross
+        thresh_chunk = self._settings.graph_threshold_chunk_chunk_cross
+        top_k = self._settings.chunk_cross_episode_top_k
+        total = 0
+
+        async with self.db.session() as session:
+            candidates = await self.find_chunks_lacking_cross_episode_edges(
+                limit, session,
+            )
+            for chunk_id, _content, episode_id in candidates:
+                if self._interrupted:
+                    break
+                if episode_id is None:
+                    continue  # chunk with no parent episode — skip
+
+                fact_edges = await self._link_chunk_to_cross_episode_facts(
+                    chunk_id, episode_id, thresh_fact, top_k, session,
+                )
+                total += fact_edges
+
+                chunk_edges = await self._link_chunk_to_cross_episode_chunks(
+                    chunk_id, episode_id, thresh_chunk, top_k, session,
+                )
+                total += chunk_edges
+
+            await session.commit()
+
+        logger.info(
+            "F070.1: backfill_orphan_chunks_cross_episode created %d edges "
+            "from %d candidates",
+            total, len(candidates),
+        )
+        return total
+
     async def backfill_orphan_procedures(
         self,
         max_count: int | None = None,

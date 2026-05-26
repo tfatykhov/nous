@@ -1144,3 +1144,235 @@ async def test_run_backfill_cycle_includes_chunks_key(
     assert "chunks" in result
     # _ce_stats prefix-underscored — must not be confused with per-type entries
     assert "chunks" in {k for k in result if not k.startswith("_")}
+
+
+# ---------------------------------------------------------------------------
+# F070.1 — Cross-episode chunk graph edges
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_links_chunk_to_fact_in_other_episode(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1: chunk → fact summarized_by must fire for facts in
+    OTHER episodes when cosine ≥ threshold. Same-episode facts handled
+    by F070 v1 path; cross-episode is the new code path."""
+    agent_id = f"test-f070-1-cef-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact_cross": 0.4,
+        "chunk_cross_episode_top_k": 10,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "episode A")
+        ep_b = await _insert_episode(s, agent_id, "episode B")
+        ident_emb = await mock_embeddings.embed("coffee preferences")
+        chunk_a = await _insert_chunk(
+            s, agent_id, ep_a, 0, "user likes coffee strong", ident_emb,
+        )
+        # Fact lives in DIFFERENT episode (ep_b) — must still link.
+        other_ep_fact = await _insert_fact_with_episode(
+            s, agent_id, "user prefers dark roast coffee", ident_emb, ep_b,
+        )
+        # Give chunk_a a part_of edge so it's NOT classified as same-ep
+        # orphan (avoids it being picked up by the wrong path).
+        await _insert_edge(s, agent_id, chunk_a, ep_a, "chunk", "episode")
+        await s.commit()
+
+    created = await d.backfill_orphan_chunks_cross_episode()
+    assert created >= 1, "expected at least 1 cross-episode chunk→fact edge"
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT target_id::text, relation, extraction_method "
+            "FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_id = :c "
+            "  AND source_type = 'chunk' AND target_type = 'fact'"
+        ), {"a": agent_id, "c": chunk_a})).all()
+    edges = {(r.target_id, r.relation, r.extraction_method) for r in rows}
+    assert (str(other_ep_fact), "summarized_by", "inferred") in edges, (
+        f"cross-episode chunk→fact missing or wrong tier: {edges}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_links_chunk_to_chunk_in_other_episode(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1: chunk ↔ chunk related_to ACROSS episodes when cosine ≥
+    threshold. Same-episode siblings handled by F070 v1 intra path."""
+    agent_id = f"test-f070-1-cec-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_chunk_cross": 0.4,
+        "chunk_cross_episode_top_k": 10,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "episode A")
+        ep_b = await _insert_episode(s, agent_id, "episode B")
+        emb = await mock_embeddings.embed("shared topic")
+        c_a = await _insert_chunk(s, agent_id, ep_a, 0, "topic content A", emb)
+        c_b = await _insert_chunk(s, agent_id, ep_b, 0, "topic content B", emb)
+        # Both already have a part_of edge → cross-episode orphans, not v1 orphans.
+        await _insert_edge(s, agent_id, c_a, ep_a, "chunk", "episode")
+        await _insert_edge(s, agent_id, c_b, ep_b, "chunk", "episode")
+        await s.commit()
+
+    created = await d.backfill_orphan_chunks_cross_episode()
+    assert created >= 1
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT source_id::text, target_id::text "
+            "FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' "
+            "  AND target_type = 'chunk' AND relation = 'related_to'"
+        ), {"a": agent_id})).all()
+    pair = {(str(c_a), str(c_b)), (str(c_b), str(c_a))}
+    found = {(r.source_id, r.target_id) for r in rows}
+    assert pair & found, (
+        f"cross-episode chunk↔chunk missing, got {found}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_skips_below_threshold(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1: candidates below the cosine threshold must NOT be linked
+    even when they're in the top-K HNSW scan."""
+    agent_id = f"test-f070-1-thr-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact_cross": 0.99,  # very high — nothing should pass
+        "graph_threshold_chunk_chunk_cross": 0.99,
+        "chunk_cross_episode_top_k": 10,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "ep A")
+        ep_b = await _insert_episode(s, agent_id, "ep B")
+        emb_a = await mock_embeddings.embed("apple")
+        emb_b = await mock_embeddings.embed("zebra")  # different embedding
+        c_a = await _insert_chunk(s, agent_id, ep_a, 0, "apple", emb_a)
+        f_b = await _insert_fact_with_episode(
+            s, agent_id, "zebra story", emb_b, ep_b,
+        )
+        c_b = await _insert_chunk(s, agent_id, ep_b, 0, "zebra", emb_b)
+        await _insert_edge(s, agent_id, c_a, ep_a, "chunk", "episode")
+        await _insert_edge(s, agent_id, c_b, ep_b, "chunk", "episode")
+        await s.commit()
+
+    created = await d.backfill_orphan_chunks_cross_episode()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT COUNT(*) AS n FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' "
+            "  AND (target_type = 'fact' OR target_type = 'chunk') "
+            "  AND relation IN ('summarized_by', 'related_to')"
+        ), {"a": agent_id})).all()
+    assert rows[0].n == 0, (
+        f"expected 0 cross-ep edges with 0.99 threshold and dissimilar "
+        f"embeddings, got {rows[0].n} (created counter said {created})"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_finder_covers_both_chunk_chunk_directions(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1 (codex P1): find_chunks_lacking_cross_episode_edges must
+    detect cross-episode connectivity whether the chunk is on the SOURCE
+    or TARGET side of a chunk→chunk edge. Otherwise idempotency breaks
+    and the script re-processes the same chunk forever."""
+    agent_id = f"test-f070-1-dir-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "ep A")
+        ep_b = await _insert_episode(s, agent_id, "ep B")
+        emb = await mock_embeddings.embed("x")
+        # c_a has cross-episode edge where c_a is SOURCE (c_a → c_b).
+        c_a = await _insert_chunk(s, agent_id, ep_a, 0, "A", emb)
+        # c_b has cross-episode edge where c_b is TARGET (c_a → c_b).
+        c_b = await _insert_chunk(s, agent_id, ep_b, 0, "B", emb)
+        # Both have at-least-one-edge (the cross-episode edge itself
+        # satisfies the EXISTS clause).
+        await _insert_edge(s, agent_id, c_a, c_b, "chunk", "chunk")
+        await s.commit()
+
+    async with db.session() as s:
+        candidates = await d.find_chunks_lacking_cross_episode_edges(
+            limit=100, session=s,
+        )
+    candidate_ids = {str(cid) for cid, _content, _ep in candidates}
+    assert str(c_a) not in candidate_ids, (
+        f"c_a (source of cross-ep edge) wrongly classified as lacking "
+        f"cross-ep edges: {candidate_ids}"
+    )
+    assert str(c_b) not in candidate_ids, (
+        f"c_b (target of cross-ep edge) wrongly classified as lacking "
+        f"cross-ep edges: {candidate_ids}"
+    )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_idempotent_rerun(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """F070.1: re-running backfill_orphan_chunks_cross_episode must NOT
+    create duplicate edges (ON CONFLICT DO NOTHING) and the second call
+    must return 0 since find_chunks_lacking_cross_episode_edges now
+    excludes already-linked chunks."""
+    agent_id = f"test-f070-1-idem-{uuid4().hex[:8]}"
+    settings_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_fact_cross": 0.4,
+        "graph_threshold_chunk_chunk_cross": 0.4,
+        "chunk_cross_episode_top_k": 10,
+    })
+    linker = GraphLinker(db, mock_embeddings, settings_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, settings_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "ep A")
+        ep_b = await _insert_episode(s, agent_id, "ep B")
+        emb = await mock_embeddings.embed("shared")
+        c_a = await _insert_chunk(s, agent_id, ep_a, 0, "shared content A", emb)
+        f_b = await _insert_fact_with_episode(
+            s, agent_id, "shared content B", emb, ep_b,
+        )
+        # Pre-existing part_of edges (post-F070 v1 backfill state).
+        await _insert_edge(s, agent_id, c_a, ep_a, "chunk", "episode")
+        await s.commit()
+
+    first = await d.backfill_orphan_chunks_cross_episode()
+    second = await d.backfill_orphan_chunks_cross_episode()
+    assert first >= 1, "first run must create edges"
+    assert second == 0, (
+        f"second run must be a no-op (idempotent), created {second}"
+    )

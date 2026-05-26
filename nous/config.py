@@ -1069,6 +1069,34 @@ class Settings(BaseSettings):
         default=0.85,
         description="F070: cosine floor for cross-episode chunk↔chunk dedup edges.",
     )
+    # =========================================================================
+    # F070.1 — Cross-episode chunk graph edges (extends F070 v1 same-episode)
+    # =========================================================================
+    graph_threshold_chunk_fact_cross: float = Field(
+        default=0.75,
+        description=(
+            "F070.1: cosine floor for chunk → fact summarized_by edges ACROSS "
+            "episodes. Stricter than same-episode (0.55) because cross-episode "
+            "is a noisier candidate pool — only strong semantic matches should "
+            "bridge sessions."
+        ),
+    )
+    graph_backfill_max_chunks_cross_episode: int = Field(
+        default=2000,
+        description=(
+            "F070.1: per-cycle cap on chunks processed by the cross-episode "
+            "backfill (mirrors graph_backfill_max_chunks for v1's same-episode "
+            "pass)."
+        ),
+    )
+    chunk_cross_episode_top_k: int = Field(
+        default=20,
+        description=(
+            "F070.1: HNSW-bounded LIMIT for the cross-episode cosine scan "
+            "per chunk. Higher = more candidates to threshold-gate; lower = "
+            "tighter. 20 lands ~5 surviving neighbors per chunk in eval."
+        ),
+    )
 
     @model_validator(mode="after")
     def _detect_explicit_overrides(self) -> "Settings":
