@@ -340,10 +340,16 @@ async def main() -> int:
                     query=query, heart=heart, brain=brain, settings=settings,
                     limit=PIPELINE_LIMIT, rerank_by_score=True,
                 )
+                # Codex round-1 P2 (PR #454): both variants must run with the
+                # same ranking strategy for the chunks-on-vs-off comparison
+                # to be apples-to-apples. Pre-fix, chunks_off used stage
+                # order (rerank_by_score=False) while baseline used score
+                # order, so the comparison conflated two variables. Now both
+                # use rerank_by_score=True.
                 raw_off, _ = await run_recall_pipeline(
                     query=query, heart=heart_off, brain=brain_off,
                     settings=settings_off, limit=PIPELINE_LIMIT,
-                    rerank_by_score=False,
+                    rerank_by_score=True,
                 )
             except Exception as e:
                 logger.exception("recall failed for qid=%s: %s", qid, e)

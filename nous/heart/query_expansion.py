@@ -232,9 +232,17 @@ class QueryExpander:
 
             # Tier 7: cache put (best-effort)
             await self._cache_put(h, query, final)
-            self._maybe_log_success(
-                source="haiku", n_variants=len(final), elapsed_ms=elapsed_ms,
-            )
+            # Codex round-1 P2 (PR #454): only log a successful Haiku
+            # expansion if Haiku actually returned variants. ``_call_haiku``
+            # returns ``[]`` on API / auth / timeout failures, after which
+            # ``final == [query]`` (fail-open to baseline). Logging
+            # "F050: expansion success" in that mode would mislead operators
+            # into thinking expansion is healthy when it's silently
+            # fail-opening on every call.
+            if len(cleaned) > 0:
+                self._maybe_log_success(
+                    source="haiku", n_variants=len(final), elapsed_ms=elapsed_ms,
+                )
             return final
         except asyncio.CancelledError:
             # Never swallow CancelledError — let it propagate so the runtime
