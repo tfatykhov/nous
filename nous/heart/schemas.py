@@ -12,7 +12,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 # Type aliases using Literal for compile-time validation (P3-2)
-MemoryType = Literal["fact", "procedure", "decision", "censor", "episode"]
+MemoryType = Literal["fact", "procedure", "decision", "censor", "episode", "chunk"]
 CensorAction = Literal["warn", "block", "absolute"]
 EpisodeOutcome = Literal["success", "partial", "failure", "ongoing", "abandoned"]
 ProcedureOutcome = Literal["success", "failure", "neutral"]

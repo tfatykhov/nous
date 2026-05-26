@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -238,6 +239,14 @@ class ResidualActivator:
             max_score = max((s for _id, _t, s in surfaced), default=0.0)
             if max_score <= 0:
                 return
+            # ``loaded_at`` is a required ``datetime`` on WorkingMemoryItem
+            # (heart/schemas.py:305). Previously this was written as ``None``,
+            # which the JSONB roundtrip via ``_to_state`` rejected with a
+            # pydantic ValidationError, breaking /status?dashboard=true and
+            # the pre_turn working-memory init in prod. Use the surface time
+            # as the load time — semantically correct since residual surfacing
+            # IS a load event into WM.
+            now_iso = datetime.now(UTC).isoformat()
             entries: list[dict] = []
             for node_id, node_type, score in surfaced[:top_k]:
                 entries.append({
@@ -245,7 +254,7 @@ class ResidualActivator:
                     "ref_id": str(node_id),
                     "summary": f"residual {node_type}",
                     "relevance": float(score) / max_score,
-                    "loaded_at": None,
+                    "loaded_at": now_iso,
                     "activation": float(score) / max_score,
                     "last_surfaced_turn": current_turn,
                 })

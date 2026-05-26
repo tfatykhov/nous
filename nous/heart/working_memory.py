@@ -486,7 +486,27 @@ class WorkingMemoryManager:
         raw_items = wm.items or []
         raw_threads = wm.open_threads or []
 
-        items = [WorkingMemoryItem(**i) for i in raw_items]
+        # Defensive coercion: ``loaded_at`` is a required datetime on
+        # WorkingMemoryItem, but F055's ``record_surfaced`` historically
+        # wrote ``None``, causing a pydantic ValidationError that 500'd
+        # /status?dashboard=true and the pre_turn WM init. Patch
+        # in-memory so existing bad rows self-heal on read; the writer
+        # bug is fixed at residual_activation.py:248 in the same change.
+        # F049 sweep eventually evicts the underlying bad JSONB rows.
+        now = datetime.now(UTC)
+        cleaned_items: list[dict] = []
+        for i in raw_items:
+            if i.get("loaded_at") is None:
+                logger.warning(
+                    "WorkingMemoryItem with loaded_at=None in session=%s "
+                    "agent=%s ref_id=%s — coercing to now() (F055 residual "
+                    "writer historically wrote None; bad row will be "
+                    "evicted by F049 sweep)",
+                    wm.session_id, wm.agent_id, i.get("ref_id"),
+                )
+                i = {**i, "loaded_at": now.isoformat()}
+            cleaned_items.append(i)
+        items = [WorkingMemoryItem(**i) for i in cleaned_items]
         threads = [OpenThread(**t) for t in raw_threads]
 
         return WorkingMemoryState(
