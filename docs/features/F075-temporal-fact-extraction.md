@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review feedback
+**Status:** 📝 Draft **v2.1** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review feedback + codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.1 changelog (codex PR review)
+
+Codex flagged 2 P1s on PR #460 against the v2 spec; both incorporated here:
+
+- **Codex P1 — `brain.graph_edges` schema constraints.** Layer 2's INSERT was missing `agent_id` (`NOT NULL` per `sql/init.sql:197`) and the existing relation CHECK constraint (last extended by migration `051_f070_chunk_graph_edges.sql:34-45`) does not allow `'happened_before'`. v2.1 §Schema migration now extends the CHECK to add the new relation (mirroring F070's pattern verbatim), and the INSERT includes `agent_id` + `auto_linked=TRUE`.
+- **Codex P1 — backfill starvation.** v2's eligibility predicate `WHERE event_date IS NULL` meant non-event rows (stable facts the classifier correctly returned `None` for) stayed eligible forever — the script would loop on the newest-N stable facts and never advance to older dated rows. F047 doesn't have this problem because every actionability classification produces a non-NULL TRUE/FALSE. v2.1 adds an `event_date_classified_at TIMESTAMPTZ` column written on every classification attempt regardless of outcome; eligibility becomes `event_date_classified_at IS NULL`. The live-path extractor also writes the marker so freshly-ingested facts skip backfill.
 
 ## v2 changelog
 
@@ -178,9 +185,11 @@ Per Arch P1-1's enumeration:
 | 2 | `fact_extractor.py:251-256` | `_store_candidate_facts` reads `event_date = item.get("event_date")` from dict |
 | 3 | `nous/heart/schemas.py:85-98` | `FactInput` adds `event_date: date \| None = None` |
 | 4 | `nous/heart/facts.py:428-449` | `FactManager._learn` passes `event_date` to `Fact()` ORM constructor |
-| 5 | `nous/storage/models.py:469-511` | `Fact` ORM adds `event_date: Mapped[date \| None] = mapped_column(Date, nullable=True)` |
-| 6 | `sql/migrations/053_temporal_fact_extraction.sql` | `ALTER TABLE heart.facts ADD COLUMN event_date DATE` + partial index |
+| 5 | `nous/storage/models.py:469-511` | `Fact` ORM adds `event_date: Mapped[date \| None] = mapped_column(Date, nullable=True)` AND `event_date_classified_at: Mapped[datetime \| None] = mapped_column(DateTime(timezone=True), nullable=True)` |
+| 6 | `sql/migrations/053_temporal_fact_extraction.sql` | `ALTER TABLE heart.facts ADD COLUMN event_date DATE + event_date_classified_at TIMESTAMPTZ` + partial indexes + extend `brain.graph_edges` relation CHECK to add `'happened_before'` |
 | 7 | `nous/heart/schemas.py:114-165` | `FactDetail` and `FactSummary` add `event_date: date \| None = None` |
+
+**Plus**: `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write whose extraction path can produce dates (i.e., the new summarizer/extractor codepath always marks the row classified, even when `event_date` ends up `None`). This keeps newly-ingested facts out of the Layer 4 backfill eligibility set.
 
 **Plus** Heart.recall surface (Python P1-4): when serializing recall results, `RecallResult.metadata["event_date"]` must be populated with the iso string (or absent if None). Without this, Layer 3 is silent no-op.
 
@@ -215,11 +224,14 @@ def _parse_event_date(cls, v):
 
 **Edge build (in `GraphDensifier.run_backfill_cycle`):**
 
+`brain.graph_edges` requires `agent_id NOT NULL` (`sql/init.sql:197`) and constrains `relation` via a CHECK clause that currently allows only the existing relation set (`sql/init.sql:198-201` + migration `051_f070_chunk_graph_edges.sql:34-45`). The schema migration (§Schema migration) must extend the CHECK to add `'happened_before'`, mirroring the pattern F070 used to add `'part_of'` and `'summarized_by'`.
+
 ```sql
 -- For all (fact_a, fact_b) pairs in same episode, chronologically adjacent
 -- on event_date — chain through ordered events, not all pairs.
-INSERT INTO brain.graph_edges (source_id, source_type, target_id, target_type, relation, weight)
-SELECT a.id, 'fact', b.id, 'fact', 'happened_before', 1.0
+INSERT INTO brain.graph_edges
+    (source_id, source_type, target_id, target_type, agent_id, relation, weight, auto_linked)
+SELECT a.id, 'fact', b.id, 'fact', a.agent_id, 'happened_before', 1.0, TRUE
 FROM heart.facts a
 JOIN heart.facts b
   ON a.agent_id = b.agent_id
@@ -237,7 +249,7 @@ WHERE a.agent_id = $1
 ON CONFLICT (source_id, target_id, relation) DO NOTHING;
 ```
 
-Result: at most N-1 edges per episode (a chain through ordered events). O(N), not O(N²).
+Result: at most N-1 edges per episode (a chain through ordered events). O(N), not O(N²). `auto_linked=TRUE` mirrors F040's sleep-cycle convention.
 
 **Consumer (already-shipped):**
 
@@ -311,9 +323,11 @@ def _advisory_lock_key(agent_id: str) -> int:
 
 `async with db.transaction()` + `SELECT pg_try_advisory_xact_lock($1)` with this key. Mirrors F047 + F049 patterns exactly.
 
-#### Per-row UPDATE (Python P1-2 fix)
+#### Per-row UPDATE (Python P1-2 fix) + classification-state marker (Codex P1 fix)
 
-v1's `WHERE id = (SELECT id FROM batch)` was broken for `LIMIT > 1`. v2 copies F047's `actionability_backfill.py:198-216` shape:
+v1's `WHERE id = (SELECT id FROM batch)` was broken for `LIMIT > 1`. v2 copies F047's `actionability_backfill.py:198-216` shape AND fixes a starvation bug Codex flagged on the spec-v2 review: F047 works because every row gets a non-NULL `actionable` verdict. F075 has a third state ("classified, no date found") that looks identical to "never classified" if we use `event_date IS NULL` as the eligibility predicate — so the script would re-process the same newest-N stable facts forever and never advance to older dated rows.
+
+Fix: the schema adds `event_date_classified_at TIMESTAMPTZ` (see §Schema migration). The backfill writes it on every classification attempt regardless of outcome. Eligibility uses `event_date_classified_at IS NULL` (not `event_date IS NULL`).
 
 ```python
 # Pseudo-code; concrete sites verified against F047
@@ -321,7 +335,9 @@ async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
     rows = await conn.fetch("""
         SELECT id, content, source_episode_id
         FROM heart.facts
-        WHERE agent_id = $1 AND event_date IS NULL AND active = TRUE
+        WHERE agent_id = $1
+          AND event_date_classified_at IS NULL  -- eligibility = "never tried"
+          AND active = TRUE
         ORDER BY learned_at DESC
         LIMIT $2
     """, agent_id, batch_size)
@@ -329,18 +345,22 @@ async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
     updated = 0
     for row in rows:
         result = await _classify_event_date(row)  # returns date | None
-        if result is None:
-            # Still mark as "processed" to avoid re-classification — use a
-            # sentinel? Or accept that NULL stays NULL and re-runs re-process.
-            # Per F047 pattern: NULL stays NULL; idempotent re-runs are fine.
-            continue
-        await conn.execute(
-            "UPDATE heart.facts SET event_date = $1, updated_at = NOW() WHERE id = $2",
-            result, row["id"],
-        )
+        # ALWAYS mark classified — even when no date found. This is what
+        # prevents re-processing the same stable facts on subsequent batches.
+        await conn.execute("""
+            UPDATE heart.facts
+            SET event_date = $1,
+                event_date_classified_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $2
+        """, result, row["id"])  # $1 may be NULL — that's correct
         updated += 1
     return updated
 ```
+
+This makes the script terminate cleanly (every batch advances the eligibility cursor) and remains idempotent (re-runs only pick up rows still at `event_date_classified_at IS NULL`, which by definition haven't been tried).
+
+The live-path Layer 1 extractor also writes `event_date_classified_at = NOW()` whenever it stores a fact (whether or not it found a date), so newly-ingested facts never enter the backfill eligibility set.
 
 #### Classification LLM call (Python P2 — guaranteed JSON)
 
@@ -389,22 +409,51 @@ At end-of-script (post Layer 1 column populated), call `GraphDensifier.run_backf
 ```sql
 BEGIN;
 
--- F075: add event_date column to heart.facts
+-- F075: add event_date + classification-state columns to heart.facts
 ALTER TABLE heart.facts
-    ADD COLUMN IF NOT EXISTS event_date DATE DEFAULT NULL;
+    ADD COLUMN IF NOT EXISTS event_date DATE DEFAULT NULL,
+    ADD COLUMN IF NOT EXISTS event_date_classified_at TIMESTAMPTZ DEFAULT NULL;
 
 -- Index for date-range queries (Layer 3 + Layer 2 edge build)
 CREATE INDEX IF NOT EXISTS idx_facts_event_date_agent
     ON heart.facts(agent_id, event_date)
     WHERE event_date IS NOT NULL;
 
+-- Index for backfill eligibility scan (event_date_classified_at IS NULL)
+CREATE INDEX IF NOT EXISTS idx_facts_event_date_unclassified_agent
+    ON heart.facts(agent_id, learned_at)
+    WHERE event_date_classified_at IS NULL;
+
 COMMENT ON COLUMN heart.facts.event_date IS
     'F075: ISO date of the event this fact describes. NULL = stable fact (not event-anchored) OR pre-F075 row pending backfill.';
+COMMENT ON COLUMN heart.facts.event_date_classified_at IS
+    'F075: timestamp the backfill (or live extractor) classified this row for event_date. NULL = never classified, eligible for backfill. NOT NULL with event_date IS NULL = classified but no date found (terminal state, do NOT re-classify).';
+
+-- F075 Layer 2: extend brain.graph_edges relation CHECK to allow 'happened_before'.
+-- Mirrors migration 051_f070_chunk_graph_edges.sql:34-45 pattern.
+ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS ck_edges_relation;
+ALTER TABLE brain.graph_edges DROP CONSTRAINT IF EXISTS graph_edges_relation_check;
+ALTER TABLE brain.graph_edges
+    ADD CONSTRAINT ck_edges_relation CHECK (
+        relation IN (
+            'supports', 'contradicts', 'supersedes', 'related_to', 'caused_by',
+            'informed_by', 'evidence_for', 'discussed_in', 'extracted_from',
+            'part_of', 'summarized_by',
+            -- F075 additions:
+            'happened_before'
+        )
+    );
 
 COMMIT;
 ```
 
-Partial index excludes NULL rows. Lookups for date-arithmetic queries scan only the small event-fact subset. Style matches `052_f069_document_source_kind.sql:22,34`.
+Partial indexes:
+- `idx_facts_event_date_agent` excludes NULL rows so date-arithmetic queries scan only the event-fact subset.
+- `idx_facts_event_date_unclassified_agent` accelerates backfill's eligibility query (`WHERE event_date_classified_at IS NULL ORDER BY learned_at DESC LIMIT N`).
+
+The relation CHECK extension is required by Layer 2's INSERT — without it the edge build raises a constraint violation. The pattern matches F070's migration 051 verbatim.
+
+Style matches `052_f069_document_source_kind.sql:22,34`.
 
 ---
 
