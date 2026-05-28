@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.13** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 13 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.14** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 14 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,14 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.14 changelog (codex re-review round 14)
+
+Codex flagged 1 P1 (lock-leak STILL not fully resolved) + 2 P2s on v2.13:
+
+- **P1 — Per-batch commit pattern still leaks the lock at batch boundaries.** Round-13 switched per-row → per-batch commits to address the round-12 lock-leak finding. Codex now points out that with MULTIPLE batches, the same problem recurs: the first batch's commit ends its transaction, the underlying connection can return to the pool, and the second batch's `execute()` may bind a *different* connection. The session-scoped advisory lock was acquired on the original connection — it stays held there while subsequent `execute()` (and the eventual `pg_advisory_unlock`) run on different connections. Lock leaks for the rest of the original connection's pool lifetime. Fixed: switched to a **two-connection pattern**. One checked-out raw connection (`engine.connect()`) holds the advisory lock for the script's full lifetime, never commits, never returns to the pool. Per-batch work uses fresh `session_factory()` sessions that DO commit per batch but never touch the lock. This eliminates the failure mode across any number of batches.
+- **P2 — Chunk-lookup cosine query missing `WHERE embedding IS NOT NULL`.** v2.13 added Python-side null-guards on `episode_id` and `embedding` (fact-side) but didn't filter chunk-side NULL embeddings. For legacy episodes whose chunks have NULL embeddings, `embedding <=> CAST(:embedding AS vector)` produces NULL distances; `LIMIT 1` can return an arbitrary chunk to the classifier → bad date stamped during backfill. Fixed: added `AND embedding IS NOT NULL` to the chunk lookup SQL. Now 3 guards: fact `episode_id is None`, fact `embedding is None`, chunk `embedding IS NOT NULL`.
+- **P2 — `happened_before` INSERT still used asyncpg `$1` placeholder.** Round-12 fixed `_process_batch` to `:name` binds and round-13 fixed the chunk lookup, but the Layer 2 `happened_before` INSERT SQL still had `WHERE a.agent_id = $1`. GraphDensifier uses `session.execute(text(...), params)` throughout — `$1` is not bound, the edge build would fail before writing any edges. Fixed: `$1` → `:agent_id` with explanatory comment.
 
 ## v2.13 changelog (codex re-review round 13)
 
@@ -398,7 +406,9 @@ JOIN LATERAL (
     ORDER BY b.event_date ASC, b.id ASC   -- deterministic tiebreaker
     LIMIT 1
 ) b ON TRUE
-WHERE a.agent_id = $1
+WHERE a.agent_id = :agent_id                -- SQLAlchemy :name bind — GraphDensifier
+                                              -- executes via session.execute(text(...), ...)
+                                              -- and does NOT support asyncpg $1 placeholders
   AND a.event_date IS NOT NULL
   AND a.active = TRUE                       -- active sources only (Heart recall default)
 ON CONFLICT (source_id, target_id, relation) DO NOTHING;
@@ -488,24 +498,54 @@ def _advisory_lock_key(agent_id: str) -> int:
 
 **Use session-scoped `pg_try_advisory_lock` + explicit `pg_advisory_unlock` at end-of-`_run_batches`, NOT the transaction-scoped `xact` variant.** Codex round-6 catch: this script's batch loop spans many per-row UPDATE transactions, each committing independently. A `pg_try_advisory_xact_lock` would release at the end of every per-row UPDATE transaction, letting a second concurrent CLI invocation acquire the lock mid-loop and interleave. F047's `actionability_backfill.py:79, 97` uses the session-scoped variant for exactly this reason. F049's working_memory sweep uses xact_lock correctly because it does all work inside one short transaction — different shape.
 
+**Hold the lock on a CHECKED-OUT raw connection, NOT an `AsyncSession`** (Codex rounds 13 + 14 catch). Session-scoped advisory locks are bound to the specific PHYSICAL connection that acquired them. With `AsyncSession`, every `commit()` ends the transaction and the underlying connection can return to the pool — leaving the lock held on a connection that's about to be reused. Subsequent `execute()` calls (next batch, eventual `pg_advisory_unlock`) may bind a *different* connection where the unlock is a no-op. The lock leaks for the rest of the original connection's pool lifetime; future invocations skip indefinitely. Round-13's per-batch commit fix is also insufficient because the same risk reappears at every batch boundary in a multi-batch run.
+
+Two-session pattern: one connection holds the lock for the script's full lifetime; row work uses separate sessions per batch (which CAN safely commit per batch since they don't hold the lock).
+
 ```python
-# Pattern (mirrors actionability_backfill.py:79-97 verbatim):
-async with db.session() as session:
-    locked = await session.execute(
-        text("SELECT pg_try_advisory_lock(:k)"),
-        {"k": _advisory_lock_key(agent_id)},
-    )
-    if not locked.scalar():
-        logger.info("F075 backfill: another process holds the lock for %s, exiting", agent_id)
-        return
-    try:
-        await _run_batches(session, agent_id, batch_size, token_budget)
-    finally:
-        await session.execute(
-            text("SELECT pg_advisory_unlock(:k)"),
-            {"k": _advisory_lock_key(agent_id)},
+# v2.14 pattern. The lock-holding connection is checked out for the
+# entire script lifetime via `engine.connect()`; per-batch work uses
+# fresh sessions that don't touch the lock.
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+
+async def _run_with_lock(
+    engine: AsyncEngine,
+    session_factory,            # async_sessionmaker(engine)
+    agent_id: str,
+    batch_size: int,
+    token_budget: int,
+) -> None:
+    key = _advisory_lock_key(agent_id)
+    # engine.connect() checks out one specific connection and holds it
+    # until the `async with` exits. Per-row/per-batch commits below DO
+    # NOT happen on this connection, so the pool cannot release it.
+    async with engine.connect() as lock_conn:
+        locked = await lock_conn.execute(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": key},
         )
+        if not locked.scalar():
+            logger.info("F075 backfill: another process holds the lock for %s, exiting", agent_id)
+            return
+        try:
+            budget = BudgetTracker(token_budget // _TOKENS_PER_LLM_CALL)
+            while True:
+                # Each batch opens a FRESH session against the same engine.
+                # Per-batch commit on this session is safe; it doesn't
+                # touch lock_conn.
+                async with session_factory() as work_session:
+                    updated, stop = await _process_batch(
+                        work_session, agent_id, batch_size, budget,
+                    )
+                if stop or updated == 0:
+                    break
+        finally:
+            # Unlock on the SAME connection that acquired the lock.
+            await lock_conn.execute(
+                text("SELECT pg_advisory_unlock(:k)"), {"k": key},
+            )
 ```
+
+The lock-holding connection (`lock_conn`) never commits any data, never returns to the pool, and is the only handle that ever touches `pg_try_advisory_lock` / `pg_advisory_unlock`. The work sessions handle batch SELECT/UPDATE/commit independently. This eliminates the lock-leak failure mode across any number of batches.
 
 #### Per-row UPDATE (Python P1-2 fix) + classification-state marker (Codex P1 fix)
 
@@ -570,23 +610,16 @@ async def _process_batch(
         )
         updated += 1
 
-    # Commit ONCE per batch, not per-row. Codex round-13 P2 catch: in
-    # AsyncSession with a connection pool, session.commit() can release the
-    # underlying connection back to the pool. The session-scoped advisory
-    # lock (held on the original physical connection) would stay held until
-    # the pooled connection is finally closed, while the next execute() —
-    # including the eventual pg_advisory_unlock — could bind a DIFFERENT
-    # connection where the unlock is a no-op. Per-batch commit keeps the
-    # session bound to the same connection throughout the lock+batch
-    # lifetime. Trade-off: a crash mid-batch loses the current batch's
-    # in-flight UPDATEs (≤ batch_size rows). Since eligibility is
-    # `event_date_classified_at IS NULL`, re-running the script picks up
-    # exactly those rows again — no data loss, just retry cost.
+    # Per-batch commit on the work session is safe because this session
+    # does NOT hold the advisory lock — that lives on lock_conn in
+    # _run_with_lock above. Trade-off: a crash mid-batch loses in-flight
+    # UPDATEs (≤ batch_size rows). Idempotent re-runs pick them up via
+    # event_date_classified_at IS NULL.
     await session.commit()
     return (updated, False)
 ```
 
-Single SQLAlchemy session is used for the lock acquisition (`_run_batches`), the batch SELECT, the per-row UPDATE, and the lock release — consistent API throughout. F047 follows the exact same per-batch commit pattern at `actionability_backfill.py:78-205`.
+The work session is short-lived (one batch) and never touches `pg_advisory_lock`. The lock-holding `lock_conn` (in `_run_with_lock`) is the only connection that ever issues lock/unlock calls — never commits data.
 
 `BudgetTracker` is a tiny class mirroring F047's bookkeeping (`actionability_backfill.py:48-65, 162-167`): initialized with `token_budget // _TOKENS_PER_LLM_CALL = max_calls`; `ok()` returns `remaining_calls > 0`; `consume(tokens)` decrements. The outer `_run_batches` loop exits cleanly when `_process_batch` returns `stop_requested=True`.
 
@@ -627,6 +660,12 @@ async def _fetch_chunk_context(
             FROM heart.episode_chunks
             WHERE agent_id = :agent_id
               AND episode_id = :episode_id
+              AND embedding IS NOT NULL    -- Codex round-14: legacy chunks
+                                            -- with NULL embedding produce NULL
+                                            -- cosine distances and LIMIT 1 then
+                                            -- returns an arbitrary chunk →
+                                            -- classifier sees wrong context →
+                                            -- bad date stamped at backfill time
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
         """),
@@ -640,7 +679,7 @@ async def _fetch_chunk_context(
     return row[0] if row else None
 ```
 
-Feeds raw chunk text (up to ~600 chars) to the classifier instead of the lossy 500-char summary slice. Works even when the subject is a paraphrase of the underlying transcript event — the embedding already captures semantic similarity. Two explicit null-guards (`episode_id is None`, `embedding is None`) protect legacy rows from issuing a malformed cosine query.
+Feeds raw chunk text (up to ~600 chars) to the classifier instead of the lossy 500-char summary slice. Three guards protect against legacy/malformed data: (1) `episode_id is None` → return None upfront; (2) `embedding is None` → return None upfront; (3) `WHERE embedding IS NOT NULL` in SQL → exclude chunks where chunk-side embedding is missing. Falls back to `fact.content` as primary classifier signal when any guard fires.
 
 #### CLI shape
 
