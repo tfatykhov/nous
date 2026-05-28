@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.1** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review feedback + codex PR review fixes
+**Status:** 📝 Draft **v2.2** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 2 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,15 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.2 changelog (codex re-review round 2)
+
+After v2.1 push, codex re-reviewed and flagged 5 more findings. All incorporated:
+
+- **P1 — stale eligibility predicate in §Idempotence.** The v2.1 fix updated the per-batch SELECT to `event_date_classified_at IS NULL` but left the §Idempotence one-liner saying `WHERE event_date IS NULL`. Same starvation bug, separate doc location. Fixed: §Idempotence now matches the SELECT predicate.
+- **P2 — quadratic happened_before edges.** The `NOT EXISTS (intermediate-date)` formulation links every fact on date D to every fact on date D+1 because it excludes intermediate *dates*, not intermediate *facts*. 20 facts on Jan 1 + 20 on Jan 2 = 400 edges, not 20. Fixed: §Layer 2 INSERT now uses `LATERAL ... LIMIT 1` to pick exactly one representative successor per source fact.
+- **P2 — `EPISODE_START_TIMESTAMP` not wired through summarizer.** The Layer 1 prompt directs the LLM to resolve relative dates against `EPISODE_START_TIMESTAMP`, but `_summarize_single(transcript, decision_context)` at `episode_summarizer.py:394` doesn't receive it. Fixed: §Layer 1a wire path adds 3 hops to thread `Episode.started_at` from `summarize_episode` → `_summarize_single` → prompt template.
+- **P2 — backfill SELECT missing `subject` column.** The chunk-context lookup in §Layer 4 uses `$3 = subject keywords` but the batch SELECT only returns `(id, content, source_episode_id)`. Fixed: SELECT now includes `subject`.
 
 ## v2.1 changelog (codex PR review)
 
@@ -191,6 +200,16 @@ Per Arch P1-1's enumeration:
 
 **Plus**: `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write whose extraction path can produce dates (i.e., the new summarizer/extractor codepath always marks the row classified, even when `event_date` ends up `None`). This keeps newly-ingested facts out of the Layer 4 backfill eligibility set.
 
+**Plus (Codex v2.1 review):** the summarizer's LLM call must receive `Episode.started_at` so it can resolve relative dates ("yesterday", "last Tuesday") deterministically. Current signature `_summarize_single(transcript, decision_context)` at `episode_summarizer.py:394` doesn't take it. Wire path additions for relative-date resolution:
+
+| File:Line | Change |
+|---|---|
+| `episode_summarizer.py:377, 383` | Pass `started_at=episode.started_at` to `_summarize_single` calls |
+| `episode_summarizer.py:394` | `_summarize_single(transcript, decision_context, started_at: datetime)` signature |
+| `episode_summarizer.py:50-77` | Prompt template includes `EPISODE_START_TIMESTAMP: {started_at.isoformat()}` block above the transcript so the LLM has a deterministic anchor for relative-date resolution |
+
+Without this thread-through, the prompt's "resolve relative phrases against EPISODE_START_TIMESTAMP" instruction has no value to anchor against and dates from transcripts like "deployed yesterday" become guesses.
+
 **Plus** Heart.recall surface (Python P1-4): when serializing recall results, `RecallResult.metadata["event_date"]` must be populated with the iso string (or absent if None). Without this, Layer 3 is silent no-op.
 
 #### Pydantic v2 validator
@@ -227,29 +246,34 @@ def _parse_event_date(cls, v):
 `brain.graph_edges` requires `agent_id NOT NULL` (`sql/init.sql:197`) and constrains `relation` via a CHECK clause that currently allows only the existing relation set (`sql/init.sql:198-201` + migration `051_f070_chunk_graph_edges.sql:34-45`). The schema migration (§Schema migration) must extend the CHECK to add `'happened_before'`, mirroring the pattern F070 used to add `'part_of'` and `'summarized_by'`.
 
 ```sql
--- For all (fact_a, fact_b) pairs in same episode, chronologically adjacent
--- on event_date — chain through ordered events, not all pairs.
+-- Each dated fact gets at most ONE outgoing happened_before edge,
+-- pointing to a single representative fact on the next-distinct date
+-- in the same episode. LATERAL with LIMIT 1 prevents the quadratic
+-- explosion that would occur when multiple facts share the same
+-- event_date (a NOT EXISTS-on-dates approach would link every fact
+-- on date D to every fact on date D+1, producing O(N²) edges per
+-- adjacent-date pair).
 INSERT INTO brain.graph_edges
     (source_id, source_type, target_id, target_type, agent_id, relation, weight, auto_linked)
-SELECT a.id, 'fact', b.id, 'fact', a.agent_id, 'happened_before', 1.0, TRUE
+SELECT a.id, 'fact', b.id, 'fact',
+       a.agent_id, 'happened_before', 1.0, TRUE
 FROM heart.facts a
-JOIN heart.facts b
-  ON a.agent_id = b.agent_id
- AND a.source_episode_id = b.source_episode_id
- AND a.event_date < b.event_date
+JOIN LATERAL (
+    SELECT b.id
+    FROM heart.facts b
+    WHERE b.agent_id = a.agent_id
+      AND b.source_episode_id = a.source_episode_id
+      AND b.event_date IS NOT NULL
+      AND b.event_date > a.event_date
+    ORDER BY b.event_date ASC, b.id ASC   -- deterministic tiebreaker
+    LIMIT 1
+) b ON TRUE
 WHERE a.agent_id = $1
   AND a.event_date IS NOT NULL
-  AND b.event_date IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM heart.facts c
-    WHERE c.source_episode_id = a.source_episode_id
-      AND c.event_date > a.event_date
-      AND c.event_date < b.event_date
-  )
 ON CONFLICT (source_id, target_id, relation) DO NOTHING;
 ```
 
-Result: at most N-1 edges per episode (a chain through ordered events). O(N), not O(N²). `auto_linked=TRUE` mirrors F040's sleep-cycle convention.
+Edge count per episode: at most N (where N = facts with non-NULL `event_date` in the episode). When multiple facts share the same `event_date`, all of them get a single outgoing edge pointing to the *same* representative successor — a 20-on-Jan-1 / 20-on-Jan-2 cluster produces 20 edges (Jan-1 facts → one Jan-2 fact), not 400. `auto_linked=TRUE` mirrors F040's sleep-cycle convention. Same-date facts deliberately get no edges between each other (we don't claim ordering on concurrent events).
 
 **Consumer (already-shipped):**
 
@@ -333,7 +357,7 @@ Fix: the schema adds `event_date_classified_at TIMESTAMPTZ` (see §Schema migrat
 # Pseudo-code; concrete sites verified against F047
 async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
     rows = await conn.fetch("""
-        SELECT id, content, source_episode_id
+        SELECT id, subject, content, source_episode_id
         FROM heart.facts
         WHERE agent_id = $1
           AND event_date_classified_at IS NULL  -- eligibility = "never tried"
@@ -394,7 +418,7 @@ uv run python scripts/backfill_temporal_facts.py \
 
 #### Idempotence
 
-`WHERE event_date IS NULL` predicate makes re-runs safe. NULL rows only.
+`WHERE event_date_classified_at IS NULL` predicate makes re-runs safe — only rows that have NEVER been classified are picked up. Stable facts that were classified and intentionally left with `event_date = NULL` (because the classifier correctly found no date) are NOT eligible for re-processing. This is the same column the per-batch SELECT above uses; the predicate stays consistent everywhere.
 
 #### Edge-build trigger
 
