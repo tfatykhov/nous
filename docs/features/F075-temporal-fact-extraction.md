@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.4** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 4 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.5** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 5 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,16 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.5 changelog (codex re-review round 5)
+
+Codex flagged 5 more P2s on v2.4. All incorporated:
+
+- **P2 — happened_before edges may target inactive facts.** Original SQL filtered neither side for `active=TRUE`. With superseded facts in the corpus, an active Jan-1 fact could point at an inactive Jan-2 successor while the active Jan-2 siblings get no edge — dead-weight reinforcement because Heart recall only returns active rows. Fixed: both `a` and `b` filter `active=TRUE`.
+- **P2 — Layer 1b direct FactInput path missing.** Wire path covered `_store_candidate_facts` (step 2) but the FactExtractor's direct LLM fallback path at `fact_extractor.py:189-196` builds `FactInput(...)` directly without going through `_store_candidate_facts`. For eval / direct-ingest traffic that bypasses the summarizer, the extracted `event_date` would still be silently discarded. Fixed: wire path adds row 11 covering the direct construction.
+- **P2 — ORM source_type/target_type constraints also stale.** v2.3 brought `ck_edges_relation` current but left `ck_edges_source_type` and `ck_edges_target_type` at their init.sql values — both omit `'chunk'` (added by F070 migration 051). ORM-driven fresh schemas reject every F070 chunk edge today. Fixed: §Schema migration now updates all three ORM constraints in one pass.
+- **P2 — PipelineResult conversion drops metadata.** Layer 3 boost reads `r.metadata.get("event_date")` from `PipelineResult`, but `_heart_results_to_pipeline` at `retrieval_pipeline.py:659-669` doesn't copy `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Even with Layer 1 correctly populating the source-side metadata, the boost reads `None` after conversion and is a silent no-op. Fixed: wire path adds row 12 for the conversion step.
+- **P2 — Layer 1 prompt change unconditional, violating dark-launch.** v2.4 said all flags default OFF but the wire path changes were unconditional — the summarizer prompt and dict-unpacks would emit/consume `event_date` regardless of the flag. Rollback claim was unreliable. Fixed: §Layer 1a now explicitly notes the prompt addition, schema slot, dict-unpacks, and `event_date_classified_at` live-path write are ALL gated on `settings.temporal_extraction_enabled`. Backfill script unaffected (governed by explicit invocation, not the flag).
 
 ## v2.4 changelog (codex re-review round 4)
 
@@ -194,6 +204,8 @@ the date.
 
 **Critical wiring detail (Arch P1-2):** the summarizer already passes the transcript content into the LLM call when constructing the summary. The prompt addition above directs the same LLM to also extract dates from that transcript — no new data is needed; the LLM just needs the instruction. This is why we target the summarizer rather than the downstream extractor.
 
+**Flag-gating (Codex round 5 fix):** the prompt addition, the `event_date` schema field on the candidate_facts dict, and the `_store_candidate_facts` / direct-path `FactInput` dict-unpacks are ALL gated on `settings.temporal_extraction_enabled`. When the flag is `False` (default), the summarizer emits the legacy prompt without the date instruction, the candidate_facts dict carries no `event_date` key, the dict-unpacks ignore the field if present, and `event_date_classified_at` is NOT written by the live path. This makes the dark-launch rollback in §Rollback honest end-to-end: setting the flag false truly stops new ingests from producing event_date facts. The Layer 4 backfill script is unaffected by the flag (it runs explicitly when invoked; the flag governs live ingest only).
+
 #### Layer 1b (defense-in-depth): FactExtractor
 
 `nous/handlers/fact_extractor.py:_EXTRACT_PROMPT` is the fallback path used when `candidate_facts` are absent (eval shortcuts, direct ingest tools). Same instruction block as 1a, adapted for the fact-extractor's output schema. Lower priority because production traffic always has summarizer-emitted candidates.
@@ -214,6 +226,8 @@ Per Arch P1-1's enumeration:
 | 8 | `nous/heart/facts.py:1046, 1160, 1256, 1355` | Each `FactSummary(...)` constructor passes `event_date=fact.event_date` (4 sites). Optional field defaults to None silently otherwise → recall surface returns None even when DB column populated |
 | 9 | `nous/heart/facts.py:1459` (`_to_detail`) | Pass `event_date=fact.event_date` to `FactDetail` construction |
 | 10 | `nous/heart/facts.py` `_to_recall_result` path | `RecallResult.metadata["event_date"] = fact.event_date.isoformat() if fact.event_date else None` so Layer 3 boost has the field to read |
+| 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")`. This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
+| 12 | `nous/api/retrieval_pipeline.py:659-669` (`_heart_results_to_pipeline`) | Copy `event_date` from `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Today the conversion drops metadata entirely. Layer 3's `r.metadata.get("event_date")` reads from `PipelineResult`, so the field must survive the conversion. |
 
 **Plus**: `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write whose extraction path can produce dates (i.e., the new summarizer/extractor codepath always marks the row classified, even when `event_date` ends up `None`). This keeps newly-ingested facts out of the Layer 4 backfill eligibility set.
 
@@ -284,15 +298,17 @@ JOIN LATERAL (
       AND b.source_episode_id = a.source_episode_id
       AND b.event_date IS NOT NULL
       AND b.event_date > a.event_date
+      AND b.active = TRUE                  -- never link to superseded/inactive
     ORDER BY b.event_date ASC, b.id ASC   -- deterministic tiebreaker
     LIMIT 1
 ) b ON TRUE
 WHERE a.agent_id = $1
   AND a.event_date IS NOT NULL
+  AND a.active = TRUE                       -- active sources only (Heart recall default)
 ON CONFLICT (source_id, target_id, relation) DO NOTHING;
 ```
 
-Edge count per episode: at most N (where N = facts with non-NULL `event_date` in the episode). When multiple facts share the same `event_date`, all of them get a single outgoing edge pointing to the *same* representative successor — a 20-on-Jan-1 / 20-on-Jan-2 cluster produces 20 edges (Jan-1 facts → one Jan-2 fact), not 400. `auto_linked=TRUE` mirrors F040's sleep-cycle convention. Same-date facts deliberately get no edges between each other (we don't claim ordering on concurrent events).
+Edge count per episode: at most N (where N = active facts with non-NULL `event_date` in the episode). When multiple facts share the same `event_date`, all of them get a single outgoing edge pointing to the *same* representative successor — a 20-on-Jan-1 / 20-on-Jan-2 cluster produces 20 edges (Jan-1 facts → one Jan-2 fact), not 400. `auto_linked=TRUE` mirrors F040's sleep-cycle convention. Same-date facts deliberately get no edges between each other (we don't claim ordering on concurrent events). Both sides filter `active = TRUE` — otherwise an inactive successor could become the only target while the active siblings get no `happened_before` reinforcement (Heart recall returns only active rows, so the edge would be dead weight).
 
 **Consumer (already-shipped):**
 
@@ -510,7 +526,7 @@ The relation CHECK extension is required by Layer 2's INSERT — without it the 
 
 **ORM CheckConstraint must also be updated** (`nous/storage/models.py:239-244`). The SQLAlchemy `GraphEdge.__table_args__` declares its own `ck_edges_relation` constraint that is currently **stale** — it still lists only the init.sql-era relations and was not updated when F070's migration 051 added `part_of` and `summarized_by`. Any fresh-schema path (tests using `Base.metadata.create_all`, future Alembic autogenerate) would reject all three relations.
 
-F075 brings the ORM fully current:
+F075 brings the ORM fully current for **all three** stale check constraints — `ck_edges_relation`, `ck_edges_source_type`, and `ck_edges_target_type`. `'chunk'` was added to the SQL source/target_type constraints by migration 051 (F070) but the ORM was never updated; fresh ORM-driven schemas reject every F070 chunk edge today. F075 fixes all three in one pass:
 
 ```python
 # nous/storage/models.py — GraphEdge.__table_args__
@@ -520,6 +536,14 @@ CheckConstraint(
     "'part_of', 'summarized_by', "             # F070 catch-up
     "'happened_before')",                       # F075 addition
     name="ck_edges_relation",
+),
+CheckConstraint(
+    "source_type IN ('decision', 'fact', 'episode', 'procedure', 'chunk')",  # F070 catch-up
+    name="ck_edges_source_type",
+),
+CheckConstraint(
+    "target_type IN ('decision', 'fact', 'episode', 'procedure', 'chunk')",  # F070 catch-up
+    name="ck_edges_target_type",
 ),
 ```
 
