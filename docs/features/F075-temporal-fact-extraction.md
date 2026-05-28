@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.16** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 16 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.17** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 17 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,12 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.17 changelog (codex re-review round 17)
+
+Codex flagged 1 P2 on v2.16, validated by tracing the unit math:
+
+- **P2 — BudgetTracker unit mismatch.** v2.15-v2.16 initialized with `BudgetTracker(token_budget // _TOKENS_PER_LLM_CALL)` (CALL count, e.g. 200 calls for a 50K-token budget) but `_process_batch` called `budget.consume(_TOKENS_PER_LLM_CALL)` (TOKEN count, e.g. 250). After the first classification, the counter went `200 - 250 = -50`, `ok()` returned False, the loop exited with ~199 calls unused. At `--token-budget 50000` only ~1 row got processed. Fixed: `consume()` is now no-arg and decrements `remaining_calls` by 1; added explicit class definition to the spec so units are unambiguous.
 
 ## v2.16 changelog (codex re-review round 16)
 
@@ -625,7 +631,7 @@ async def _process_batch(
             row["embedding"],
         )
         classified = await _classify_event_date(row, chunk_context=chunk_ctx)  # date | None
-        budget.consume(_TOKENS_PER_LLM_CALL)
+        budget.consume()  # decrement remaining_calls by 1
 
         # ALWAYS mark classified — even when no date found. This is what
         # prevents re-processing the same stable facts on subsequent batches.
@@ -652,7 +658,25 @@ async def _process_batch(
 
 The work session is short-lived (one batch) and never touches `pg_advisory_lock`. The lock-holding `lock_conn` (in `_run_with_lock`) is the only connection that ever issues lock/unlock calls — never commits data.
 
-`BudgetTracker` is a tiny class mirroring F047's bookkeeping (`actionability_backfill.py:48-65, 162-167`): initialized with `token_budget // _TOKENS_PER_LLM_CALL = max_calls`; `ok()` returns `remaining_calls > 0`; `consume(tokens)` decrements. The outer `_run_batches` loop exits cleanly when `_process_batch` returns `stop_requested=True`.
+`BudgetTracker` is a tiny class mirroring F047's bookkeeping (`actionability_backfill.py:48-65, 162-167`): initialized with `remaining_calls = token_budget // _TOKENS_PER_LLM_CALL`; `ok()` returns `remaining_calls > 0`; `consume()` (no-arg) decrements `remaining_calls` by 1. The outer `_run_batches` loop exits cleanly when `_process_batch` returns `stop_requested=True`.
+
+```python
+# Codex round-17 P2 catch: units must match. v2.15-v2.16 init'd with
+# call-count (token_budget // _TOKENS_PER_LLM_CALL) but consume() took
+# a token count. First classification subtracted _TOKENS_PER_LLM_CALL
+# from a counter sized in calls (e.g. consume(250) on a 200-call cap)
+# → ok() goes false after one call → ~199 calls unused at budget=50000.
+
+class BudgetTracker:
+    def __init__(self, max_calls: int) -> None:
+        self.remaining_calls = max_calls
+
+    def ok(self) -> bool:
+        return self.remaining_calls > 0
+
+    def consume(self) -> None:
+        self.remaining_calls -= 1
+```
 
 This makes the script terminate cleanly (every batch advances the eligibility cursor) and remains idempotent (re-runs only pick up rows still at `event_date_classified_at IS NULL`, which by definition haven't been tried).
 
