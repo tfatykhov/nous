@@ -161,8 +161,17 @@ async def sqlite_find_duplicate(
     embedding: list[float],
     exclude_ids: list[UUID],
     session: AsyncSession,
+    candidate_event_date=None,
 ):
-    """Pure-Python duplicate finding using cosine similarity."""
+    """Pure-Python duplicate finding using cosine similarity.
+
+    F075: mirrors the production ORDER BY in facts.py::_find_duplicate —
+    among above-threshold matches, prefer the one whose event_date equals
+    ``candidate_event_date`` (NULL==NULL counts as equal) before falling
+    back to the highest cosine. Without this preference, a March-10
+    candidate could match a March-12 fact, trigger the F075 bypass, and
+    insert a duplicate of an already-stored March-10 fact.
+    """
     from nous.storage.models import Fact
 
     query = select(Fact).where(
@@ -175,13 +184,19 @@ async def sqlite_find_duplicate(
     result = await session.execute(query)
     facts = result.scalars().all()
 
+    matches = []  # (date_match: bool, sim: float, fact)
     for fact in facts:
         fact_emb = _parse_embedding(fact.embedding)
         if fact_emb:
             sim = cosine_similarity(embedding, fact_emb)
             if sim > 0.95:
-                return fact
-    return None
+                date_match = fact.event_date == candidate_event_date
+                matches.append((date_match, sim, fact))
+    if not matches:
+        return None
+    # date-match first (True > False), then highest cosine
+    matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
+    return matches[0][2]
 
 
 async def sqlite_find_contradiction(

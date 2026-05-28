@@ -659,16 +659,31 @@ async def _run_stages(
 def _heart_results_to_pipeline(
     heart_results: list["RecallResult"],
 ) -> list[PipelineResult]:
-    return [
-        PipelineResult(
-            id=r.id,
-            type=r.type,
-            description=r.summary,
-            score=r.score,
-            source="heart",
+    """Convert Heart RecallResults into PipelineResults.
+
+    Forwards the full ``RecallResult.metadata`` dict so future consumers
+    don't have to amend this conversion when they add new keys. Strips
+    only the ``event_date`` value when it's None (F075: avoid a False-y
+    placeholder that breaks ``"event_date" in metadata`` consumer checks).
+    """
+    out: list[PipelineResult] = []
+    for r in heart_results:
+        meta = dict(r.metadata) if r.metadata else {}
+        # F075: omit the key entirely when None so ``in metadata``
+        # presence checks correctly distinguish "no date" from "present".
+        if meta.get("event_date") is None:
+            meta.pop("event_date", None)
+        out.append(
+            PipelineResult(
+                id=r.id,
+                type=r.type,
+                description=r.summary,
+                score=r.score,
+                source="heart",
+                metadata=meta,
+            )
         )
-        for r in heart_results
-    ]
+    return out
 
 
 async def _apply_graph_adjacency_boost(

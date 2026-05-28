@@ -25,6 +25,13 @@ DEFAULT_TYPE_PRIORS = {
     "rule": 0.95,
     "preference": 0.90,
     "person": 0.85,
+    # F075: date-anchored events are first-class facts. Without this entry,
+    # _score_type_prior fell back to 0.50, causing admission to reject
+    # date-distinct events that the new dedup-bypass was trying to preserve.
+    # Prior set at 0.75 — between technical and person, since temporal
+    # events (e.g. "User obtained API key on March 10") are concrete,
+    # date-anchored, and unlikely to be noise. Codex PR #461 P2 fix.
+    "event": 0.75,
     "technical": 0.70,
     "tool": 0.65,
     "concept": 0.60,

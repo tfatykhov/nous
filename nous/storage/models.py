@@ -1,12 +1,13 @@
 """SQLAlchemy ORM models for all 20 Nous tables across 3 schemas."""
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -239,15 +240,17 @@ class GraphEdge(Base):
         UniqueConstraint("source_id", "target_id", "relation", name="uq_edges_src_tgt_rel"),
         CheckConstraint(
             "relation IN ('supports', 'contradicts', 'supersedes', 'related_to', 'caused_by', "
-            "'informed_by', 'evidence_for', 'discussed_in', 'extracted_from')",
+            "'informed_by', 'evidence_for', 'discussed_in', 'extracted_from', "
+            "'part_of', 'summarized_by', "             # F070 catch-up (migration 051)
+            "'happened_before')",                       # F075 (migration 053)
             name="ck_edges_relation",
         ),
         CheckConstraint(
-            "source_type IN ('decision', 'fact', 'episode', 'procedure')",
+            "source_type IN ('decision', 'fact', 'episode', 'procedure', 'chunk')",  # F070 catch-up
             name="ck_edges_source_type",
         ),
         CheckConstraint(
-            "target_type IN ('decision', 'fact', 'episode', 'procedure')",
+            "target_type IN ('decision', 'fact', 'episode', 'procedure', 'chunk')",  # F070 catch-up
             name="ck_edges_target_type",
         ),
         # F065: provenance tier — see edge_provenance.classify().
@@ -503,6 +506,12 @@ class Fact(Base):
     # F047: Actionability classification (learn-time verdict)
     actionable: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
     actionable_confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
+    # F075: Temporal fact extraction (learn-time event date + classification marker)
+    event_date: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
+    event_date_classified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
 
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])

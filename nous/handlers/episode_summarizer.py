@@ -77,6 +77,50 @@ For candidate_facts: Extract concrete, reusable knowledge (tool configs, prefere
 architectural decisions, API behaviors) that should persist as standalone facts."""
 
 
+# F075: optional addendum appended to _SUMMARY_PROMPT when
+# settings.temporal_extraction_enabled is True. Directs the summarizer's LLM
+# to extract date-anchored events from the TRANSCRIPT text (not the prose
+# summary it's about to generate). When the episode start timestamp is
+# known, it's also injected so relative date phrases can be resolved.
+#
+# NOTE: this string is CONCATENATED (not .format()'d) to the prompt at
+# _summarize_single. Single braces (not {{ }}) — code-review round 1 P1.
+_F075_TEMPORAL_INSTRUCTION = """
+
+DATE-ANCHORED EVENTS (F075):
+When the TRANSCRIPT above describes an event happening on a specific date —
+particularly something the user did or completed — capture it as a SEPARATE
+candidate_fact with the date attached. Extend the candidate_facts schema
+above with an optional 4th field "event_date":
+
+  {
+    "subject": "<short descriptor of the event>",
+    "content": "<entity> <action verb> <object> on <full date>.",
+    "category": "event",
+    "event_date": "YYYY-MM-DD"
+  }
+
+Examples:
+  - User says "I got my OpenWeather API key on March 10" →
+    {"subject": "OpenWeather API key acquisition",
+     "content": "Christina obtained the OpenWeather API key on March 10, 2024.",
+     "category": "event", "event_date": "2024-03-10"}
+  - User says "we deployed v2.1 last Tuesday" (EPISODE_START_TIMESTAMP = 2024-04-11) →
+    {"subject": "v2.1 deployment", "content": "Team deployed v2.1 to staging on 2024-04-09.",
+     "category": "event", "event_date": "2024-04-09"}
+
+CRITICAL: extract dates from the TRANSCRIPT text (above), not from any summary
+you have generated. Dates mentioned in passing — inside code blocks, user
+asides, scheduling discussions — are just as important as headline dates.
+Resolve relative phrases ("yesterday", "last week", "3 days ago") against
+the EPISODE_START_TIMESTAMP block when one is provided. If a date is
+ambiguous or unresolvable, OMIT event_date (set null) but still extract the
+fact without the date field — it becomes a stable fact."""
+
+
+_F075_EPISODE_TS_BLOCK = "EPISODE_START_TIMESTAMP: {iso}\n\n"
+
+
 class EpisodeSummarizer:
     """Generates episode summaries on session end.
 
@@ -132,7 +176,9 @@ class EpisodeSummarizer:
                 logger.debug("F051.5: episode %s transcript too short, skipping", episode_id)
                 return None
             decision_context = await self._build_decision_context(str(episode_id))
-            summary = await self._generate_summary(transcript, decision_context)
+            summary = await self._generate_summary(
+                transcript, decision_context, started_at=episode.started_at,
+            )
             if not summary:
                 return None
             await self._heart.update_episode_summary(episode_id, summary)
@@ -358,11 +404,20 @@ class EpisodeSummarizer:
             logger.debug("F040: Episode semantic linking failed for %s", episode_id)
             return 0
 
-    async def _generate_summary(self, transcript: str, decision_context: str = "") -> dict[str, Any] | None:
+    async def _generate_summary(
+        self,
+        transcript: str,
+        decision_context: str = "",
+        started_at: datetime | None = None,
+    ) -> dict[str, Any] | None:
         """Generate structured summary from transcript using LLM.
 
         F025 P3-B: For transcripts exceeding the limit, split into chunks,
         summarize each independently, then merge results.
+
+        F075: ``started_at`` (episode start timestamp) is threaded through
+        to ``_summarize_single`` so the LLM can resolve relative date phrases
+        when ``settings.temporal_extraction_enabled`` is on.
         """
         if not self._llm:
             logger.warning("No LLM client for episode summarizer")
@@ -374,13 +429,13 @@ class EpisodeSummarizer:
         if len(chunks) == 1:
             # Single chunk: truncate and summarize directly (original path)
             truncated = self._truncate_transcript(chunks[0], max_chars=max_chars)
-            return await self._summarize_single(truncated, decision_context)
+            return await self._summarize_single(truncated, decision_context, started_at=started_at)
 
         # Multi-chunk: summarize each chunk, then merge
         chunk_summaries = []
         for chunk in chunks:
             truncated = self._truncate_transcript(chunk, max_chars=max_chars)
-            summary = await self._summarize_single(truncated, decision_context)
+            summary = await self._summarize_single(truncated, decision_context, started_at=started_at)
             if summary:
                 chunk_summaries.append(summary)
 
@@ -391,9 +446,24 @@ class EpisodeSummarizer:
 
         return self._merge_summaries(chunk_summaries)
 
-    async def _summarize_single(self, transcript: str, decision_context: str) -> dict[str, Any] | None:
-        """Summarize a single transcript chunk via LLM."""
+    async def _summarize_single(
+        self,
+        transcript: str,
+        decision_context: str,
+        started_at: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        """Summarize a single transcript chunk via LLM.
+
+        F075: when ``settings.temporal_extraction_enabled`` is True, the
+        ``_F075_TEMPORAL_INSTRUCTION`` block is appended to the prompt and
+        the episode start timestamp (when known) is injected so relative
+        date phrases resolve deterministically.
+        """
         prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
+        if getattr(self._settings, "temporal_extraction_enabled", False):
+            if started_at is not None:
+                prompt = _F075_EPISODE_TS_BLOCK.format(iso=started_at.isoformat()) + prompt
+            prompt = prompt + _F075_TEMPORAL_INSTRUCTION
 
         text = await call_background_llm(
             self._llm,
@@ -460,11 +530,24 @@ class EpisodeSummarizer:
             merged_candidate_facts.extend(s.get("candidate_facts", []))
             merged_topics.update(s.get("topics", []))
 
+        # F075: split dated and stable candidates into separate pools with
+        # independent caps. Dated events from later chunks must survive the
+        # truncation — F075 specifically targets long multi-chunk transcripts
+        # where temporal_reasoning failures originate. Stable cap stays at 5.
+        # Double-getattr handles test fixtures that construct the summarizer
+        # without _settings (test_f025_chunked.py uses EpisodeSummarizer.__new__).
+        dated = [c for c in merged_candidate_facts if isinstance(c, dict) and c.get("event_date")]
+        stable = [c for c in merged_candidate_facts if not (isinstance(c, dict) and c.get("event_date"))]
+        event_limit = getattr(
+            getattr(self, "_settings", None), "candidate_facts_event_limit", 30,
+        )
+        merged_candidate_facts = dated[:event_limit] + stable[:5]
+
         return {
             "title": summaries[0].get("title", "Multi-part episode"),
             "summary": " ".join(merged_summary_parts),
             "key_points": merged_key_points[:10],
-            "candidate_facts": merged_candidate_facts[:5],
+            "candidate_facts": merged_candidate_facts,
             "outcome": summaries[-1].get("outcome", "informational"),
             "outcome_rationale": summaries[-1].get("outcome_rationale", ""),
             "topics": sorted(merged_topics),

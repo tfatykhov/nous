@@ -5,11 +5,20 @@ These models define the public contract for the Heart module.
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+import re
+from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
+
+# F075: strict YYYY-MM-DD shape gate. Python 3.12's date.fromisoformat()
+# accepts alternate ISO forms ('20240310', '2024-W10-7') — the regex
+# enforces the prompt/schema contract before the calendar-validity check.
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Type aliases using Literal for compile-time validation (P3-2)
 MemoryType = Literal["fact", "procedure", "decision", "censor", "episode", "chunk"]
@@ -96,6 +105,38 @@ class FactInput(BaseModel):
     tags: list[str] = []
     source_timestamp: datetime | None = None  # F023: when the source info was produced
     source_text: str | None = None  # F025 P2-E: original transcript for admission grounding (not persisted)
+    # F075: date-anchored event (ISO YYYY-MM-DD); None = stable fact
+    event_date: date | None = None
+    # F075: classification marker — set by F075-aware producer paths only
+    # (summarizer/extractor with the temporal flag on, or backfill script).
+    # Non-F075 callers leave this None so the backfill remains eligible.
+    event_date_classified_at: datetime | None = None
+
+    @field_validator("event_date", mode="before")
+    @classmethod
+    def _parse_event_date(cls, v):
+        if v is None:
+            return v
+        # Order matters: datetime IS-A date in Python's stdlib, so test
+        # datetime FIRST. A datetime input gets explicitly coerced to date
+        # (DB column is DATE, not DATETIME).
+        if isinstance(v, datetime):
+            return v.date()
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            # Regex enforces surface shape (strictly YYYY-MM-DD).
+            if not _DATE_PATTERN.fullmatch(v):
+                # F075: log dropped dates so LLM format drift is observable
+                # rather than vanishing silently (SFH final-review Medium).
+                logger.warning("F075: dropped non-YYYY-MM-DD event_date %r", v[:32])
+                return None
+            try:
+                return date.fromisoformat(v)
+            except ValueError:
+                logger.warning("F075: dropped invalid-calendar event_date %r", v[:32])
+                return None  # fail-soft: drop bad date, keep fact
+        return None
 
 
 class ContradictionWarning(BaseModel):
@@ -135,6 +176,8 @@ class FactDetail(BaseModel):
     # F047: Actionability classification
     actionable: bool | None = None
     actionable_confidence: float | None = None
+    # F075: Temporal event date (None for stable facts)
+    event_date: date | None = None
 
 
 class FactRejected(BaseModel):
@@ -164,6 +207,9 @@ class FactSummary(BaseModel):
     actionable: bool | None = None
     actionable_confidence: float | None = None
     tags: list[str] = []
+    # F075: Propagated from ORM for the dedup-bypass rule + Layer 3 boost.
+    # Distinct event_dates between candidate and existing => distinct events.
+    event_date: date | None = None
 
 
 # --- Procedures ---

@@ -1106,6 +1106,10 @@ class Heart:
                     "category": item.category,
                     "subject": item.subject,
                     "confidence": item.confidence,
+                    # F075: surface event_date so Layer 3 boost (in
+                    # _heart_results_to_pipeline) + downstream consumers
+                    # see the iso string. None for stable facts.
+                    "event_date": item.event_date.isoformat() if item.event_date else None,
                 },
             )
         elif isinstance(item, ProcedureSummary):
