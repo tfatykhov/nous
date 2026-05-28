@@ -373,9 +373,14 @@ class FactManager:
             except Exception:
                 logger.warning("Embedding generation failed for fact learn")
 
-        # Near-duplicate detection: cosine similarity > 0.95
+        # Near-duplicate detection: cosine similarity > 0.95.
+        # F075: pass candidate's event_date so _find_duplicate prefers same-date
+        # matches over different-date ones above threshold.
         if embedding is not None:
-            dupe = await self._find_duplicate(embedding, exclude_ids, session)
+            dupe = await self._find_duplicate(
+                embedding, exclude_ids, session,
+                candidate_event_date=input.event_date,
+            )
             if dupe is not None:
                 # F075 dedup bypass: distinct event_dates = distinct events.
                 # Same entity, same content shape, but on different dates is
@@ -761,12 +766,22 @@ class FactManager:
         embedding: list[float],
         exclude_ids: list[UUID],
         session: AsyncSession,
+        candidate_event_date: date | None = None,
     ) -> Fact | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
 
         Threshold is `Settings.fact_native_cosine_threshold` (default 0.95;
         F056 #377 made this env-tunable via NOUS_FACT_NATIVE_COSINE_THRESHOLD
         because the dedup eval showed 0.95 misses all semantic paraphrases).
+
+        F075 (codex PR #461 P2): when ``candidate_event_date`` is provided,
+        prefer above-threshold matches with the same event_date over those
+        with a different (or NULL) date. ``IS NOT DISTINCT FROM`` treats
+        NULL=NULL as equal, so an undated candidate matches an undated
+        existing first. Without this preference, a March-10-candidate
+        could see a March-12 fact as the top vector hit, trigger the F075
+        bypass, and silently insert a duplicate of an already-stored
+        March-10 fact lurking just below it.
         """
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
@@ -780,6 +795,7 @@ class FactManager:
             "embedding": embedding_str,
             "agent_id": self.agent_id,
             "threshold": threshold,
+            "candidate_event_date": candidate_event_date,
         }
         if exclude_ids:
             placeholders = ", ".join(f":excl_{i}" for i in range(len(exclude_ids)))
@@ -787,6 +803,9 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # Order by:
+        # 1. date-match first (NOT DISTINCT = TRUE sorts before FALSE in DESC)
+        # 2. cosine distance (smaller = closer)
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
@@ -795,7 +814,9 @@ class FactManager:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
               {exclude_clause}
-            ORDER BY embedding <=> CAST(:embedding AS vector)
+            ORDER BY
+                (event_date IS NOT DISTINCT FROM :candidate_event_date) DESC,
+                embedding <=> CAST(:embedding AS vector)
             LIMIT 1
         """)
 

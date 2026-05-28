@@ -123,15 +123,20 @@ def test_merge_summaries_dated_partition_preserves_more_than_5_dated():
     assert len(stable) == 5, f"expected 5 stable facts after merge, got {len(stable)}"
 
 
-def test_pre_learn_dedup_bypass_polarity_extracted_facts():
+@pytest.mark.asyncio
+async def test_pre_learn_dedup_bypass_polarity_extracted_facts():
     """Mock-based polarity verification for _store_extracted_facts dedup.
 
     A polarity inversion would silently break the feature. Covers the
     invariant: distinct event_dates with high embedding similarity must
     NOT dedup. Same-date or one-side-NULL must still dedup.
+
+    Uses ``@pytest.mark.asyncio`` (not ``asyncio.run`` directly) — calling
+    asyncio.run() multiple times in a sync test leaves the event-loop
+    policy in a state where ``asyncio.get_event_loop()`` raises in later
+    sync tests collected after this one (notably test_subtasks.py).
     """
     # Defer import to avoid heavy module-level loading in pure-validator tests.
-    import asyncio
     from unittest.mock import AsyncMock, MagicMock
     from uuid import uuid4
 
@@ -184,10 +189,10 @@ def test_pre_learn_dedup_bypass_polarity_extracted_facts():
             )
             assert existing_id in stored_ids
 
-    asyncio.run(run_case("2024-03-10", date(2024, 3, 12), dates_should_differ=True))
-    asyncio.run(run_case("2024-03-10", date(2024, 3, 10), dates_should_differ=False))
-    asyncio.run(run_case(None, date(2024, 3, 10), dates_should_differ=False))
-    asyncio.run(run_case("2024-03-10", None, dates_should_differ=False))
+    await run_case("2024-03-10", date(2024, 3, 12), dates_should_differ=True)
+    await run_case("2024-03-10", date(2024, 3, 10), dates_should_differ=False)
+    await run_case(None, date(2024, 3, 10), dates_should_differ=False)
+    await run_case("2024-03-10", None, dates_should_differ=False)
 
 
 def test_factsummary_carries_event_date():

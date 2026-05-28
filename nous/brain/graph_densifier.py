@@ -1104,7 +1104,12 @@ class GraphDensifier:
         # NOUS_GRAPH_ADJACENCY_BOOST_ENABLED=true (consumer at
         # retrieval_pipeline.py:243-247) — spec line 443 documents that
         # operators must flip the boost flag for Layer 2 to take effect.
-        results["happened_before"] = await self._build_happened_before_edges()
+        #
+        # Leading underscore on `_happened_before` keeps this temporal-chain
+        # count out of the per-entity "orphan_edges_created" aggregation in
+        # sleep_handler._phase_graph_densification (same convention as
+        # `_ce_stats`). Codex PR #461 P2 fix.
+        results["_happened_before"] = await self._build_happened_before_edges()
         return _log_and_return(aborted=False)
 
     async def _build_happened_before_edges(self) -> int:
