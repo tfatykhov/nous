@@ -534,9 +534,13 @@ class EpisodeSummarizer:
         # independent caps. Dated events from later chunks must survive the
         # truncation — F075 specifically targets long multi-chunk transcripts
         # where temporal_reasoning failures originate. Stable cap stays at 5.
+        # Double-getattr handles test fixtures that construct the summarizer
+        # without _settings (test_f025_chunked.py uses EpisodeSummarizer.__new__).
         dated = [c for c in merged_candidate_facts if isinstance(c, dict) and c.get("event_date")]
         stable = [c for c in merged_candidate_facts if not (isinstance(c, dict) and c.get("event_date"))]
-        event_limit = getattr(self._settings, "candidate_facts_event_limit", 30)
+        event_limit = getattr(
+            getattr(self, "_settings", None), "candidate_facts_event_limit", 30,
+        )
         merged_candidate_facts = dated[:event_limit] + stable[:5]
 
         return {
