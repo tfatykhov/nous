@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.5** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 5 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.6** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 6 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,14 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.6 changelog (codex re-review round 6)
+
+Codex flagged 3 more P2s on v2.5. All incorporated:
+
+- **P2 — Layer 3 tests in required set but Layer 3 is deferred.** v2.5 §Tests listed `tests/test_date_aware_boost.py` as required even though §Layer 3 is explicitly "If implemented later" deferred. CI would either fail against missing date-boost code or force the implementer to ship the deferred feature. Fixed: `test_date_aware_boost.py` now explicitly tagged as DEFERRED with Layer 3 — it ships when Layer 3 does.
+- **P2 — `event_date_classified_at` write also needs flag-gating.** v2.5's §Layer 1 thread-through unconditionally stamps the marker on every fact write, but when the flag is OFF the row was NOT actually classified (legacy prompt was used). A later flag-flip + backfill would skip those rows forever via `event_date_classified_at IS NULL`. Fixed: live-path write is gated on `settings.temporal_extraction_enabled` — flag-off keeps the column NULL so rows remain eligible for catch-up classification.
+- **P2 — Advisory lock variant wrong for multi-batch backfill.** v2.5 specified `pg_try_advisory_xact_lock` but that releases at the end of each per-row UPDATE transaction, letting concurrent CLI invocations interleave mid-loop. F047's `actionability_backfill.py:79, 97` uses session-scoped `pg_try_advisory_lock` + explicit `pg_advisory_unlock` for exactly this multi-batch shape. F049 uses xact_lock correctly because all work is in one short sweep — different pattern. Fixed: §Layer 4 advisory lock section now shows the F047 session-scoped pattern verbatim with explicit unlock in a try/finally.
 
 ## v2.5 changelog (codex re-review round 5)
 
@@ -229,7 +237,7 @@ Per Arch P1-1's enumeration:
 | 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")`. This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
 | 12 | `nous/api/retrieval_pipeline.py:659-669` (`_heart_results_to_pipeline`) | Copy `event_date` from `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Today the conversion drops metadata entirely. Layer 3's `r.metadata.get("event_date")` reads from `PipelineResult`, so the field must survive the conversion. |
 
-**Plus**: `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write whose extraction path can produce dates (i.e., the new summarizer/extractor codepath always marks the row classified, even when `event_date` ends up `None`). This keeps newly-ingested facts out of the Layer 4 backfill eligibility set.
+**Plus**: when `settings.temporal_extraction_enabled = True`, `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write (the new codepath always marks the row classified, even when `event_date` ends up `None`). When the flag is `False`, `event_date_classified_at` stays `NULL` — the row was NOT actually classified (legacy prompt was used) so it must remain eligible for the Layer 4 backfill when the flag is later flipped on. Without this gating, dark-launched ingests would stamp the marker on rows that never saw the new extractor, then a post-launch backfill would skip them forever via the `event_date_classified_at IS NULL` predicate.
 
 **Plus (Codex v2.1 review):** the summarizer's LLM call must receive `Episode.started_at` so it can resolve relative dates ("yesterday", "last Tuesday") deterministically. Current chain `summarize_episode → _generate_summary(transcript, decision_context) → _summarize_single(transcript, decision_context)` (lines 135, 361, 394) carries neither the episode object nor `started_at`. Wire path additions for relative-date resolution — every hop must be touched, including the intermediate `_generate_summary` boundary that codex flagged in round 4:
 
@@ -380,7 +388,26 @@ def _advisory_lock_key(agent_id: str) -> int:
     return int.from_bytes(digest, byteorder="big", signed=True)
 ```
 
-`async with db.transaction()` + `SELECT pg_try_advisory_xact_lock($1)` with this key. Mirrors F047 + F049 patterns exactly.
+**Use session-scoped `pg_try_advisory_lock` + explicit `pg_advisory_unlock` at end-of-`_run_batches`, NOT the transaction-scoped `xact` variant.** Codex round-6 catch: this script's batch loop spans many per-row UPDATE transactions, each committing independently. A `pg_try_advisory_xact_lock` would release at the end of every per-row UPDATE transaction, letting a second concurrent CLI invocation acquire the lock mid-loop and interleave. F047's `actionability_backfill.py:79, 97` uses the session-scoped variant for exactly this reason. F049's working_memory sweep uses xact_lock correctly because it does all work inside one short transaction — different shape.
+
+```python
+# Pattern (mirrors actionability_backfill.py:79-97 verbatim):
+async with db.session() as session:
+    locked = await session.execute(
+        text("SELECT pg_try_advisory_lock(:k)"),
+        {"k": _advisory_lock_key(agent_id)},
+    )
+    if not locked.scalar():
+        logger.info("F075 backfill: another process holds the lock for %s, exiting", agent_id)
+        return
+    try:
+        await _run_batches(session, agent_id, batch_size, token_budget)
+    finally:
+        await session.execute(
+            text("SELECT pg_advisory_unlock(:k)"),
+            {"k": _advisory_lock_key(agent_id)},
+        )
+```
 
 #### Per-row UPDATE (Python P1-2 fix) + classification-state marker (Codex P1 fix)
 
@@ -605,18 +632,20 @@ temporal_backfill_default_token_budget: int = Field(
 - ON CONFLICT DO NOTHING prevents duplicate edges on re-run
 
 **`tests/test_temporal_backfill.py`** (new):
-- Advisory lock (mocked `pg_try_advisory_xact_lock`) prevents concurrent backfills
+- Advisory lock (mocked `pg_try_advisory_lock` + `pg_advisory_unlock`) prevents concurrent backfills
 - Token budget exhausted → clean halt, no partial-row corruption
 - Dry-run produces estimate without LLM calls
 - NULL-only filter means re-running picks up only unprocessed rows
 - Chunk context source (not summary) — verified via mock chunk lookup
 
-**`tests/test_date_aware_boost.py`** (new, Layer 3 deferred but tests stay):
+**`tests/test_date_aware_boost.py`** — DEFERRED with Layer 3 (codex round-6 fix). The test set above and acceptance criterion #1 cover Layers 1+2+4 only. When Layer 3 ships (after measurement gate), its impl PR adds:
 - Query "how many days between" detects as date-arithmetic
 - Query "OpenWeather endpoints" produces no window
 - Fact with event_date in window: `(score or 0.0) * factor`
 - Fact outside window untouched
 - Re-sort stable when no boosts applied; missing scores coalesce to 0.0
+
+This keeps F075 v1 internally consistent — the required test set matches the implemented scope, so CI doesn't fail against missing date-boost code or force the deferred feature to ship.
 
 **Integration test in `tests/test_f075_end_to_end.py`:**
 - Ingest a fixture conversation with explicit date references
