@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.12** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 12 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.13** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 13 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.13 changelog (codex re-review round 13)
+
+Codex flagged 2 P2s on v2.12 — both SQLAlchemy idiom carryovers from the round-12 AsyncSession rewrite:
+
+- **P2 — Per-row `session.commit()` can release the lock-holding connection.** In AsyncSession with a connection pool, `commit()` can return the underlying physical connection to the pool. The session-scoped advisory lock (held on the original connection) would stay held until that pooled connection eventually closes, while the next `execute()` — including the final `pg_advisory_unlock` — could bind a *different* connection where the unlock is a no-op for the held lock. Result: lock leak; future runs skip indefinitely. Fixed: per-row commit replaced with per-batch commit. The session stays bound to a single physical connection through the lock+batch+unlock lifetime. Trade-off documented: a crash mid-batch loses ≤ batch_size in-flight UPDATEs, but re-runs pick them up via `event_date_classified_at IS NULL` (no data loss, just retry cost).
+- **P2 — Chunk-lookup SQL still used asyncpg `$1/$2/$3` placeholders.** Round-12 fixed `_process_batch` SELECT/UPDATE to SQLAlchemy `:name` binds, but the chunk-lookup snippet in §Layer 4 §Context source was missed. With `session.execute(text("..."), {...})`, `$1` placeholders are not bound and the query either fails or runs without parameters. Fixed: rewrote the snippet as an async helper using `:agent_id`, `:episode_id`, `:embedding` binds with explicit null-guards on `episode_id` and `embedding` for legacy rows.
 
 ## v2.12 changelog (codex re-review round 12)
 
@@ -561,12 +568,25 @@ async def _process_batch(
             """),
             {"event_date": classified, "id": row["id"]},  # event_date may be NULL
         )
-        await session.commit()  # per-row commit so a crash mid-loop preserves progress
         updated += 1
+
+    # Commit ONCE per batch, not per-row. Codex round-13 P2 catch: in
+    # AsyncSession with a connection pool, session.commit() can release the
+    # underlying connection back to the pool. The session-scoped advisory
+    # lock (held on the original physical connection) would stay held until
+    # the pooled connection is finally closed, while the next execute() —
+    # including the eventual pg_advisory_unlock — could bind a DIFFERENT
+    # connection where the unlock is a no-op. Per-batch commit keeps the
+    # session bound to the same connection throughout the lock+batch
+    # lifetime. Trade-off: a crash mid-batch loses the current batch's
+    # in-flight UPDATEs (≤ batch_size rows). Since eligibility is
+    # `event_date_classified_at IS NULL`, re-running the script picks up
+    # exactly those rows again — no data loss, just retry cost.
+    await session.commit()
     return (updated, False)
 ```
 
-Single SQLAlchemy session is used for the lock acquisition (`_run_batches`), the batch SELECT, the per-row UPDATE, and the lock release — consistent API throughout. F047 follows the exact same pattern at `actionability_backfill.py:78-205`.
+Single SQLAlchemy session is used for the lock acquisition (`_run_batches`), the batch SELECT, the per-row UPDATE, and the lock release — consistent API throughout. F047 follows the exact same per-batch commit pattern at `actionability_backfill.py:78-205`.
 
 `BudgetTracker` is a tiny class mirroring F047's bookkeeping (`actionability_backfill.py:48-65, 162-167`): initialized with `token_budget // _TOKENS_PER_LLM_CALL = max_calls`; `ok()` returns `remaining_calls > 0`; `consume(tokens)` decrements. The outer `_run_batches` loop exits cleanly when `_process_batch` returns `stop_requested=True`.
 
@@ -582,18 +602,45 @@ Use `call_background_llm_structured` from `nous/handlers/__init__.py:86` (or whe
 
 v1 fed `episode.summary[:500]` to the classifier. That suffers the same lossy-prose problem as Layer 1. v2 fetches the most-relevant `heart.episode_chunks` row for the fact. Codex round-10 catch: an ILIKE-on-`fact.subject` lookup is too brittle because LLM-generated subjects are descriptors, not verbatim transcript substrings — the spec's own example subject `OpenWeather API key acquisition` would not match the chunk text "I got my OpenWeather API key on March 10" because `acquisition` is absent. v2 uses **cosine similarity against the fact's existing embedding**, which is the matching strategy the rest of the codebase already uses for fact↔chunk relation:
 
-```sql
--- Per-row: nearest chunk in the source episode by embedding cosine distance.
--- pgvector <=> operator returns cosine distance (smaller = closer);
--- fact.embedding is already SELECTed in the batch query above and passed as $3.
-SELECT content
-FROM heart.episode_chunks
-WHERE agent_id = $1 AND episode_id = $2
-ORDER BY embedding <=> $3::vector
-LIMIT 1;
+```python
+# Codex round-13 P2 catch: SQLAlchemy text() requires :name binds, not
+# asyncpg $1/$2/$3. The chunk lookup runs on the same locked AsyncSession
+# from _run_batches, so it must use the same binding style as the
+# _process_batch SELECT/UPDATE above.
+async def _fetch_chunk_context(
+    session: AsyncSession,
+    agent_id: str,
+    episode_id: UUID | None,
+    embedding,            # fact.embedding from the batch row; may be None
+) -> str | None:
+    """Nearest chunk in the source episode by cosine to fact.embedding.
+
+    Returns None when episode_id is NULL (legacy facts without source
+    episode), embedding is NULL (pre-large-embedding-rollout rows), or
+    no chunk matches. Callers fall back to fact.content as primary signal.
+    """
+    if episode_id is None or embedding is None:
+        return None
+    result = await session.execute(
+        text("""
+            SELECT content
+            FROM heart.episode_chunks
+            WHERE agent_id = :agent_id
+              AND episode_id = :episode_id
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT 1
+        """),
+        {
+            "agent_id": agent_id,
+            "episode_id": episode_id,
+            "embedding": embedding,
+        },
+    )
+    row = result.first()
+    return row[0] if row else None
 ```
 
-Feeds raw chunk text (up to ~600 chars) to the classifier instead of the lossy 500-char summary slice. Works even when the subject is a paraphrase of the underlying transcript event — the embedding already captures semantic similarity. Falls back to no chunk only when the fact has no embedding (legacy rows pre-text-embedding-3-large rollout) or the episode has zero chunks; in either case the classifier still gets `fact.content` as primary signal.
+Feeds raw chunk text (up to ~600 chars) to the classifier instead of the lossy 500-char summary slice. Works even when the subject is a paraphrase of the underlying transcript event — the embedding already captures semantic similarity. Two explicit null-guards (`episode_id is None`, `embedding is None`) protect legacy rows from issuing a malformed cosine query.
 
 #### CLI shape
 
