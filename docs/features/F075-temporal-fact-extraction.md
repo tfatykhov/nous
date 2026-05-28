@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.3** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 3 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.4** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 4 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.4 changelog (codex re-review round 4)
+
+Codex flagged 2 more P2s on v2.3, both wire-path completeness issues. All incorporated:
+
+- **P2 — `_generate_summary` boundary missing from started_at wire path.** v2.2 added `episode_summarizer.py:377, 383, 394` to thread `started_at`, but skipped `summarize_episode → _generate_summary` (lines 135 and 361). `episode.started_at` is in scope at the outer boundary but never reaches `_summarize_single` without threading through the intermediate `_generate_summary` signature. Fixed: wire path now has 5 hops covering every boundary in the chain (135, 361, 377, 383, 394 + prompt template at 50-77).
+- **P2 — FactSummary / FactDetail constructors silently default `event_date=None`.** Adding `event_date` to the schemas isn't enough; each manual `FactSummary(...)` call at 4 sites in `nous/heart/facts.py` (lines 1046, 1160, 1256, 1355) plus `_to_detail` (line 1459) must pass `event_date=fact.event_date`. Without these, the recall surface returns None even when the DB column is populated, making Layer 3 boost and the end-to-end integration test silent failures. Fixed: wire-path table extended with rows 8-10 covering all construction sites + `RecallResult.metadata["event_date"]` serialization.
 
 ## v2.3 changelog (codex re-review round 3)
 
@@ -204,18 +211,23 @@ Per Arch P1-1's enumeration:
 | 5 | `nous/storage/models.py:469-511` | `Fact` ORM adds `event_date: Mapped[date \| None] = mapped_column(Date, nullable=True)` AND `event_date_classified_at: Mapped[datetime \| None] = mapped_column(DateTime(timezone=True), nullable=True)` |
 | 6 | `sql/migrations/053_temporal_fact_extraction.sql` | `ALTER TABLE heart.facts ADD COLUMN event_date DATE + event_date_classified_at TIMESTAMPTZ` + partial indexes + extend `brain.graph_edges` relation CHECK to add `'happened_before'` |
 | 7 | `nous/heart/schemas.py:114-165` | `FactDetail` and `FactSummary` add `event_date: date \| None = None` |
+| 8 | `nous/heart/facts.py:1046, 1160, 1256, 1355` | Each `FactSummary(...)` constructor passes `event_date=fact.event_date` (4 sites). Optional field defaults to None silently otherwise → recall surface returns None even when DB column populated |
+| 9 | `nous/heart/facts.py:1459` (`_to_detail`) | Pass `event_date=fact.event_date` to `FactDetail` construction |
+| 10 | `nous/heart/facts.py` `_to_recall_result` path | `RecallResult.metadata["event_date"] = fact.event_date.isoformat() if fact.event_date else None` so Layer 3 boost has the field to read |
 
 **Plus**: `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write whose extraction path can produce dates (i.e., the new summarizer/extractor codepath always marks the row classified, even when `event_date` ends up `None`). This keeps newly-ingested facts out of the Layer 4 backfill eligibility set.
 
-**Plus (Codex v2.1 review):** the summarizer's LLM call must receive `Episode.started_at` so it can resolve relative dates ("yesterday", "last Tuesday") deterministically. Current signature `_summarize_single(transcript, decision_context)` at `episode_summarizer.py:394` doesn't take it. Wire path additions for relative-date resolution:
+**Plus (Codex v2.1 review):** the summarizer's LLM call must receive `Episode.started_at` so it can resolve relative dates ("yesterday", "last Tuesday") deterministically. Current chain `summarize_episode → _generate_summary(transcript, decision_context) → _summarize_single(transcript, decision_context)` (lines 135, 361, 394) carries neither the episode object nor `started_at`. Wire path additions for relative-date resolution — every hop must be touched, including the intermediate `_generate_summary` boundary that codex flagged in round 4:
 
 | File:Line | Change |
 |---|---|
-| `episode_summarizer.py:377, 383` | Pass `started_at=episode.started_at` to `_summarize_single` calls |
-| `episode_summarizer.py:394` | `_summarize_single(transcript, decision_context, started_at: datetime)` signature |
-| `episode_summarizer.py:50-77` | Prompt template includes `EPISODE_START_TIMESTAMP: {started_at.isoformat()}` block above the transcript so the LLM has a deterministic anchor for relative-date resolution |
+| `episode_summarizer.py:135` | Pass `started_at=episode.started_at` to `_generate_summary` call from `summarize_episode` |
+| `episode_summarizer.py:361` | `_generate_summary(transcript, decision_context, started_at: datetime \| None = None)` signature |
+| `episode_summarizer.py:377, 383` | Pass `started_at=started_at` through to `_summarize_single` calls |
+| `episode_summarizer.py:394` | `_summarize_single(transcript, decision_context, started_at: datetime \| None = None)` signature |
+| `episode_summarizer.py:50-77` | Prompt template includes `EPISODE_START_TIMESTAMP: {started_at.isoformat()}` block above the transcript when `started_at is not None` |
 
-Without this thread-through, the prompt's "resolve relative phrases against EPISODE_START_TIMESTAMP" instruction has no value to anchor against and dates from transcripts like "deployed yesterday" become guesses.
+Without thread-through at every hop, the prompt's "resolve relative phrases against EPISODE_START_TIMESTAMP" instruction has nothing to anchor against and dates from transcripts like "deployed yesterday" become guesses. Skipping the `_generate_summary` boundary means the value never enters scope at the inner call.
 
 **Plus** Heart.recall surface (Python P1-4): when serializing recall results, `RecallResult.metadata["event_date"]` must be populated with the iso string (or absent if None). Without this, Layer 3 is silent no-op.
 
