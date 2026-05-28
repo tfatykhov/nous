@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.6** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 6 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.7** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 7 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.7 changelog (codex re-review round 7)
+
+Codex flagged 2 stale-cross-reference P2s on v2.6. Both were leftover from rounds 5/6 fixes that didn't propagate to all mentions of the same rule. Incorporated:
+
+- **P2 — Layer 4 §Per-row UPDATE post-script still claimed unconditional `event_date_classified_at = NOW()` write by live path.** v2.6 §Layer 1a §Flag-gating added the rule that the marker is only written when the flag is on, but the matching sentence in §Layer 4 wasn't updated and still says "writes `event_date_classified_at = NOW()` whenever it stores a fact." Two sources of truth contradicting. Fixed: §Layer 4 sentence now defers to §Layer 1a §Flag-gating, restating the conditional rule.
+- **P2 — Acceptance criterion #1 still said "4 unit files".** v2.6 deferred `test_date_aware_boost.py` with Layer 3 but the acceptance count wasn't updated. Fixed: criterion #1 now says "3 unit files + 1 integration file" and lists the file names explicitly so reviewers can verify scope at a glance.
 
 ## v2.6 changelog (codex re-review round 6)
 
@@ -446,7 +453,7 @@ async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
 
 This makes the script terminate cleanly (every batch advances the eligibility cursor) and remains idempotent (re-runs only pick up rows still at `event_date_classified_at IS NULL`, which by definition haven't been tried).
 
-The live-path Layer 1 extractor also writes `event_date_classified_at = NOW()` whenever it stores a fact (whether or not it found a date), so newly-ingested facts never enter the backfill eligibility set.
+The live-path Layer 1 extractor writes `event_date_classified_at = NOW()` only when `settings.temporal_extraction_enabled = True` (i.e., when the new prompt actually ran). When the flag is `False` (dark-launch default), the marker stays NULL so those rows remain eligible for the backfill to pick up once the flag is flipped on. See §Layer 1a "Flag-gating" — same rule, restated here for the backfill reader.
 
 #### Classification LLM call (Python P2 — guaranteed JSON)
 
@@ -660,7 +667,7 @@ pytest-asyncio config in `pyproject.toml:59` is already `asyncio_mode = "auto"` 
 
 ## Acceptance criteria
 
-1. **All new tests pass.** 4 unit files + 1 integration file, ~30 tests.
+1. **All new tests pass.** 3 unit files + 1 integration file, ~25 tests (`test_temporal_extractor.py`, `test_temporal_edges.py`, `test_temporal_backfill.py`, `test_f075_end_to_end.py`). `test_date_aware_boost.py` ships with Layer 3, NOT in this PR.
 2. **Existing tests pass.** No regression in `tests/test_fact_extractor_episode_id.py`, `tests/test_heart.py`, `tests/test_graph_densifier.py`.
 3. **Migration runs cleanly on fresh DB** (`docker compose up` cold start), verified by F074 harness pattern.
 4. **LongMemEval N=20 retrieval pre-check** (cheap, ~$5): hit@10 on temporal-reasoning category questions improves by ≥+5% vs current baseline. If LME pre-check fails, do NOT proceed to BEAM.
