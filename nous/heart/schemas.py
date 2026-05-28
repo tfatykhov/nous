@@ -5,12 +5,15 @@ These models define the public contract for the Heart module.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
 
 # F075: strict YYYY-MM-DD shape gate. Python 3.12's date.fromisoformat()
 # accepts alternate ISO forms ('20240310', '2024-W10-7') — the regex
@@ -124,10 +127,14 @@ class FactInput(BaseModel):
         if isinstance(v, str):
             # Regex enforces surface shape (strictly YYYY-MM-DD).
             if not _DATE_PATTERN.fullmatch(v):
+                # F075: log dropped dates so LLM format drift is observable
+                # rather than vanishing silently (SFH final-review Medium).
+                logger.warning("F075: dropped non-YYYY-MM-DD event_date %r", v[:32])
                 return None
             try:
                 return date.fromisoformat(v)
             except ValueError:
+                logger.warning("F075: dropped invalid-calendar event_date %r", v[:32])
                 return None  # fail-soft: drop bad date, keep fact
         return None
 

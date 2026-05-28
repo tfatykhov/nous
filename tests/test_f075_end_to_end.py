@@ -195,6 +195,73 @@ async def test_pre_learn_dedup_bypass_polarity_extracted_facts():
     await run_case("2024-03-10", None, dates_should_differ=False)
 
 
+@pytest.mark.asyncio
+async def test_malformed_date_stays_backfill_eligible():
+    """SFH final-review Medium: when the LLM emits a date the validator drops
+    as malformed, _store_candidate_facts must leave event_date_classified_at
+    NULL so the row stays backfill-eligible — NOT stamp it as terminal
+    "classified, no date found" (which would permanently lock it out of
+    F075.1 backfill on exactly the rows F075 exists to capture).
+
+    Contrast: a genuinely-undated candidate SHOULD stamp (flag on) because
+    there was no date to recover.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from nous.handlers.fact_extractor import FactExtractor
+
+    async def captured_learn_input(raw_event_date):
+        heart = MagicMock()
+        heart.search_facts = AsyncMock(return_value=[])  # no dedup hit
+        captured = {}
+
+        async def _learn(fact_input):
+            captured["fi"] = fact_input
+            r = MagicMock()
+            r.id = uuid4()
+            return r
+
+        heart.learn = AsyncMock(side_effect=_learn)
+
+        settings = MagicMock()
+        settings.fact_dedup_threshold = 0.92
+        settings.candidate_facts_event_limit = 30
+        settings.temporal_extraction_enabled = True  # flag ON
+
+        fx = FactExtractor.__new__(FactExtractor)
+        fx._heart = heart
+        fx._settings = settings
+        fx._dedup_via_search = True
+
+        candidates = [{
+            "subject": "API key event",
+            "content": "User obtained the API key.",
+            "event_date": raw_event_date,
+        }]
+        await fx._store_candidate_facts(candidates, episode_id="?", transcript=None)
+        return captured["fi"]
+
+    # Malformed date (regex-rejected) → event_date None AND classified_at None
+    fi_bad = await captured_learn_input("2024-3-10")  # not zero-padded
+    assert fi_bad.event_date is None
+    assert fi_bad.event_date_classified_at is None, (
+        "malformed date must leave classified_at NULL (backfill-eligible)"
+    )
+
+    # Genuinely undated → event_date None but classified_at STAMPED (flag on)
+    fi_none = await captured_learn_input(None)
+    assert fi_none.event_date is None
+    assert fi_none.event_date_classified_at is not None, (
+        "genuinely-undated candidate should stamp classified_at when flag on"
+    )
+
+    # Valid date → both set
+    fi_ok = await captured_learn_input("2024-03-10")
+    assert fi_ok.event_date == date(2024, 3, 10)
+    assert fi_ok.event_date_classified_at is not None
+
+
 def test_factsummary_carries_event_date():
     """FactSummary accepts event_date — needed for pre-learn dedup bypass
     at fact_extractor.py:176-184 / 263-273.

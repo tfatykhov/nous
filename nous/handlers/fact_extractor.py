@@ -320,6 +320,7 @@ class FactExtractor:
                 content = item
                 subject = None
                 category = None
+                raw_event_date = None
                 candidate_event_date = None
 
             if not content or not str(content).strip():
@@ -344,14 +345,18 @@ class FactExtractor:
 
             # F075: producer-path classification marker — gated on flag.
             # The summarizer's prompt DOES include event_date (Layer 1a in spec)
-            # so this path stamps unconditionally when the flag is on, mirroring
-            # the spec's "classified, no date found" terminal-state contract
-            # (NOT NULL + NULL date = "we tried, no date").
-            classified_at = (
-                datetime.now(UTC)
-                if getattr(self._settings, "temporal_extraction_enabled", False)
-                else None
-            )
+            # so the "classified, no date found" terminal-state contract applies
+            # (NOT NULL classified_at + NULL event_date = "we tried, no date").
+            #
+            # BUT: do NOT stamp when the LLM emitted a date the validator
+            # dropped as malformed (e.g. "2024-3-10", "March 10"). Stamping
+            # there would permanently lock the row out of F075.1 backfill even
+            # though a real date was present — a silent, permanent data loss
+            # on exactly the rows F075 exists to capture (SFH final-review
+            # Medium). Leave classified_at NULL so backfill can retry it.
+            flag_on = getattr(self._settings, "temporal_extraction_enabled", False)
+            date_dropped = raw_event_date is not None and candidate_event_date is None
+            classified_at = datetime.now(UTC) if (flag_on and not date_dropped) else None
             # F022 orphan-rate audit fix: tag candidate facts with their
             # source episode (same change as the LLM-fallback path above).
             fact_input = FactInput(
