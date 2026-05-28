@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.14** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 14 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.15** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 15 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,12 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.15 changelog (codex re-review round 15)
+
+Codex flagged 1 P2 on v2.14:
+
+- **P2 — Budget-exhausted early return silently rolls back already-classified rows.** When the token budget runs out mid-batch after some rows have already been classified + UPDATEd, the v2.14 `_process_batch` returned `(updated, True)` before reaching the per-batch `session.commit()` at the bottom of the function. The surrounding `async with session_factory()` then closes the uncommitted work session, rolling back the in-flight UPDATEs. Those rows stay at `event_date_classified_at IS NULL` — the LLM calls already spent on them are wasted because the next run re-classifies the same rows. Only happens when remaining budget < fetched batch size, but at small `--token-budget` values it would burn API spend silently. Fixed: added `await session.commit()` immediately before the early `return (updated, True)` to persist work-so-far.
 
 ## v2.14 changelog (codex re-review round 14)
 
@@ -591,6 +597,13 @@ async def _process_batch(
                 "F075 backfill: token budget exhausted, stopping at %d rows",
                 updated,
             )
+            # Codex round-15 P2 catch: must commit work-so-far BEFORE the
+            # early return. Otherwise the surrounding `async with
+            # session_factory()` exit rolls back the in-flight UPDATEs and
+            # those rows stay event_date_classified_at IS NULL on disk —
+            # the LLM calls already spent against them are wasted because
+            # the next run re-processes the same rows.
+            await session.commit()
             return (updated, True)  # signal _run_batches to halt
 
         classified = await _classify_event_date(row)  # returns date | None
