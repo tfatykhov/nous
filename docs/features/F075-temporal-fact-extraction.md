@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.2** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 2 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.3** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 3 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.3 changelog (codex re-review round 3)
+
+After v2.2 push, codex flagged 2 more P2s. All incorporated:
+
+- **P2 — Wrong `GraphDensifier.run_backfill_cycle` call shape.** v2.2's edge-build trigger wrote `densifier.run_backfill_cycle(agent_id=...)` but `run_backfill_cycle()` at `graph_densifier.py:1045` takes no args — `agent_id` is captured in the constructor (`graph_densifier.py:108-119`). Calling with `agent_id=` would `TypeError`. Fixed: §Edge-build trigger now shows the correct per-agent instantiation pattern, mirroring `sleep_handler.py:1354`.
+- **P2 — ORM `CheckConstraint` not updated alongside SQL migration.** The SQLAlchemy `GraphEdge` class at `models.py:239-244` declares its own `ck_edges_relation` that fresh-schema paths (`Base.metadata.create_all` in tests, Alembic autogenerate) honor. v2.2's spec only updated the migration SQL. Pre-existing drift: the ORM constraint was never updated for F070's `part_of`/`summarized_by` either. Fixed: §Schema migration now requires updating the ORM `CheckConstraint` to include all three missing relations (`part_of`, `summarized_by`, `happened_before`).
 
 ## v2.2 changelog (codex re-review round 2)
 
@@ -422,7 +429,19 @@ uv run python scripts/backfill_temporal_facts.py \
 
 #### Edge-build trigger
 
-At end-of-script (post Layer 1 column populated), call `GraphDensifier.run_backfill_cycle(agent_id=...)` synchronously to build `happened_before` edges. Cleaner end-state than deferring to next sleep.
+At end-of-script (post Layer 1 column populated), build `happened_before` edges synchronously. `GraphDensifier` captures `agent_id` in its constructor (`graph_densifier.py:108-119`) and `run_backfill_cycle()` itself takes no args (`graph_densifier.py:1045`) — the call shape mirrors `sleep_handler.py:1354`:
+
+```python
+# In the backfill script, after all rows have been classified for the agent:
+from nous.brain.graph_densifier import GraphDensifier
+from nous.brain.graph_linker import GraphLinker
+
+graph_linker = GraphLinker(db, embedder, settings, agent_id)
+densifier = GraphDensifier(db, graph_linker, embedder, settings, agent_id)
+result = await densifier.run_backfill_cycle()
+```
+
+The densifier instance is agent-scoped; running it post-classification ensures any `happened_before` edges between newly-dated facts are written before the script exits.
 
 ---
 
@@ -476,6 +495,21 @@ Partial indexes:
 - `idx_facts_event_date_unclassified_agent` accelerates backfill's eligibility query (`WHERE event_date_classified_at IS NULL ORDER BY learned_at DESC LIMIT N`).
 
 The relation CHECK extension is required by Layer 2's INSERT — without it the edge build raises a constraint violation. The pattern matches F070's migration 051 verbatim.
+
+**ORM CheckConstraint must also be updated** (`nous/storage/models.py:239-244`). The SQLAlchemy `GraphEdge.__table_args__` declares its own `ck_edges_relation` constraint that is currently **stale** — it still lists only the init.sql-era relations and was not updated when F070's migration 051 added `part_of` and `summarized_by`. Any fresh-schema path (tests using `Base.metadata.create_all`, future Alembic autogenerate) would reject all three relations.
+
+F075 brings the ORM fully current:
+
+```python
+# nous/storage/models.py — GraphEdge.__table_args__
+CheckConstraint(
+    "relation IN ('supports', 'contradicts', 'supersedes', 'related_to', 'caused_by', "
+    "'informed_by', 'evidence_for', 'discussed_in', 'extracted_from', "
+    "'part_of', 'summarized_by', "             # F070 catch-up
+    "'happened_before')",                       # F075 addition
+    name="ck_edges_relation",
+),
+```
 
 Style matches `052_f069_document_source_kind.sql:22,34`.
 
