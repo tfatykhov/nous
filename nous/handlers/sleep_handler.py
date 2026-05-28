@@ -1354,8 +1354,15 @@ class SleepHandler:
             result = await self._graph_densifier.run_backfill_cycle()
             # F043: pop CE stats BEFORE sum so they don't inflate edge totals.
             ce_stats = result.pop("_ce_stats", {"survived": 0, "pruned": 0})
+            # F075: pop temporal-chain count too — `_happened_before` is a
+            # sleep-cycle metric, not a per-entity orphan-backfill edge.
+            # Codex PR #461 round 3 fix: the leading-underscore convention
+            # in graph_densifier's return dict must be honored by the caller
+            # aggregation, not just by graph_densifier's internal logging.
+            happened_before = result.pop("_happened_before", 0)
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
+            sleep_stats["temporal_chain_edges"] = happened_before
             sleep_stats["ce_backfill_survived"] = ce_stats.get("survived", 0)
             sleep_stats["ce_backfill_pruned"] = ce_stats.get("pruned", 0)
 
