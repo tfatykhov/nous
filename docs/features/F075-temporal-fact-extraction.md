@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.9** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 9 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.10** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 10 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,14 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.10 changelog (codex re-review round 10)
+
+Codex flagged 1 P1 (material) + 2 P2s on v2.9:
+
+- **P1 — Multi-chunk merge truncates dated facts before FactExtractor sees them.** For transcripts exceeding `transcript_max_chars` (16K default), `EpisodeSummarizer._merge_summaries` at `episode_summarizer.py:445-468` summarizes chunks separately and returns `merged_candidate_facts[:5]` in chunk order. Dated events from later chunks are dropped — exactly the BEAM-100K case F075 targets. Fixed: wire path row 13 added — `_merge_summaries` stable-partitions the merged list so `event_date IS not None` candidates sort first BEFORE the [:5] truncation. Python's stable sort with `key=lambda c: c.get("event_date") is None` (False < True) puts dated facts at the front in their original chunk order; truncation then drops stable-fact tail, never dated-fact tail.
+- **P2 — Token budget exhaustion checked only between batches.** v2.9's `_process_batch` had no per-row budget gate, so a small `--token-budget` would be exceeded by up to a full batch (or unbounded if the outer loop kept invoking). F047 mirrors this exact pattern via `classifier._budget_check` at `actionability_backfill.py:57-65`. Fixed: `_process_batch` now takes a `BudgetTracker`, calls `budget.ok()` before every `_classify_event_date(row)`, and returns `(updated, stop_requested)` so the outer loop can halt cleanly.
+- **P2 — Subject-ILIKE chunk lookup too brittle for LLM-generated subjects.** v2.9's `WHERE content ILIKE '%' || subject || '%'` fails when the subject is a descriptor not a verbatim transcript substring — `OpenWeather API key acquisition` doesn't appear in "I got my OpenWeather API key on March 10" because `acquisition` is absent. Fixed: switched to pgvector cosine distance against `fact.embedding` (already SELECTed in the batch query). Matches the rest of the codebase's fact↔chunk semantic-similarity pattern. Falls back gracefully when fact has no embedding (legacy rows).
 
 ## v2.9 changelog (codex re-review round 9)
 
@@ -257,6 +265,7 @@ Per Arch P1-1's enumeration:
 | 10 | `nous/heart/facts.py` `_to_recall_result` path | `RecallResult.metadata["event_date"] = fact.event_date.isoformat() if fact.event_date else None` so Layer 3 boost has the field to read |
 | 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")` AND `event_date_classified_at=datetime.now(UTC)` (gated on `settings.temporal_extraction_enabled`). This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
 | 12 | `nous/api/retrieval_pipeline.py:659-669` (`_heart_results_to_pipeline`) | Copy `event_date` from `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Today the conversion drops metadata entirely. Layer 3's `r.metadata.get("event_date")` reads from `PipelineResult`, so the field must survive the conversion. |
+| 13 | `nous/handlers/episode_summarizer.py:445-468` (`_merge_summaries`) | **P1 — multi-chunk merge truncation.** For transcripts exceeding `transcript_max_chars` (16K default), the summarizer summarizes chunks separately and `_merge_summaries` returns `merged_candidate_facts[:5]` in chunk order — dated events from later chunks get dropped before FactExtractor sees them. This is the exact case F075 targets (BEAM-100K conversations routinely exceed 16K). Fix: stable-partition the merged list so candidates with `event_date IS not None` sort first, THEN truncate. Pseudocode: `merged_candidate_facts.sort(key=lambda c: c.get("event_date") is None)` (Python sort is stable — False < True, so dated facts stay in their original chunk order at the front). Truncation then drops stable-fact tail, not dated-fact tail. |
 
 **Plus — marker write site (Codex round-9 fix):** `event_date_classified_at` must be populated by **F075 producers only**, NOT by a generic write inside `FactManager._learn`. Multiple unrelated paths call `Heart.learn(FactInput(...))` directly — `nous/api/tools.py:516` (`learn_fact` tool), `nous/api/rest.py:1722` (REST endpoint), `nous/handlers/knowledge_extractor.py:127` (pre-prune extraction) — none of which run the F075 classifier. If `_learn` blindly stamped `event_date_classified_at = NOW()` for every write when the flag is on, those rows would be falsely marked "F075-classified" and skipped by the backfill forever.
 
@@ -473,10 +482,15 @@ v1's `WHERE id = (SELECT id FROM batch)` was broken for `LIMIT > 1`. v2 copies F
 Fix: the schema adds `event_date_classified_at TIMESTAMPTZ` (see §Schema migration). The backfill writes it on every classification attempt regardless of outcome. Eligibility uses `event_date_classified_at IS NULL` (not `event_date IS NULL`).
 
 ```python
-# Pseudo-code; concrete sites verified against F047
-async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
+# Pseudo-code; concrete sites verified against F047 (actionability_backfill.py:48-65)
+async def _process_batch(
+    conn,
+    agent_id: str,
+    batch_size: int,
+    budget: BudgetTracker,  # injected by _run_batches; F047 pattern
+) -> tuple[int, bool]:    # (updated_rows, stop_requested)
     rows = await conn.fetch("""
-        SELECT id, subject, content, source_episode_id
+        SELECT id, subject, content, embedding, source_episode_id
         FROM heart.facts
         WHERE agent_id = $1
           AND event_date_classified_at IS NULL  -- eligibility = "never tried"
@@ -487,7 +501,21 @@ async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
 
     updated = 0
     for row in rows:
+        # Codex round-10 P2 catch: check budget BEFORE every LLM call, not
+        # just between batches. Mirrors F047's classifier._budget_check
+        # gate at actionability_backfill.py:57-65 — without this, a small
+        # --token-budget gets exceeded by up to a full batch worth of
+        # rows (or unbounded if the outer loop keeps invoking).
+        if not budget.ok():
+            logger.info(
+                "F075 backfill: token budget exhausted, stopping at %d rows",
+                updated,
+            )
+            return (updated, True)  # signal _run_batches to halt
+
         result = await _classify_event_date(row)  # returns date | None
+        budget.consume(_TOKENS_PER_LLM_CALL)
+
         # ALWAYS mark classified — even when no date found. This is what
         # prevents re-processing the same stable facts on subsequent batches.
         await conn.execute("""
@@ -498,8 +526,10 @@ async def _process_batch(conn, agent_id: str, batch_size: int) -> int:
             WHERE id = $2
         """, result, row["id"])  # $1 may be NULL — that's correct
         updated += 1
-    return updated
+    return (updated, False)
 ```
+
+`BudgetTracker` is a tiny class mirroring F047's bookkeeping (`actionability_backfill.py:48-65, 162-167`): initialized with `token_budget // _TOKENS_PER_LLM_CALL = max_calls`; `ok()` returns `remaining_calls > 0`; `consume(tokens)` decrements. The outer `_run_batches` loop exits cleanly when `_process_batch` returns `stop_requested=True`.
 
 This makes the script terminate cleanly (every batch advances the eligibility cursor) and remains idempotent (re-runs only pick up rows still at `event_date_classified_at IS NULL`, which by definition haven't been tried).
 
@@ -511,19 +541,20 @@ Use `call_background_llm_structured` from `nous/handlers/__init__.py:86` (or whe
 
 #### Context source (Arch P2-1 / Python P2 — chunk context, not summary)
 
-v1 fed `episode.summary[:500]` to the classifier. That suffers the same lossy-prose problem as Layer 1. v2 fetches the most-relevant `heart.episode_chunks` row for the fact (best chunk by content similarity OR by simply selecting the chunk whose content contains the candidate entity/action):
+v1 fed `episode.summary[:500]` to the classifier. That suffers the same lossy-prose problem as Layer 1. v2 fetches the most-relevant `heart.episode_chunks` row for the fact. Codex round-10 catch: an ILIKE-on-`fact.subject` lookup is too brittle because LLM-generated subjects are descriptors, not verbatim transcript substrings — the spec's own example subject `OpenWeather API key acquisition` would not match the chunk text "I got my OpenWeather API key on March 10" because `acquisition` is absent. v2 uses **cosine similarity against the fact's existing embedding**, which is the matching strategy the rest of the codebase already uses for fact↔chunk relation:
 
 ```sql
--- Per-row: find chunks containing the fact's subject keywords
+-- Per-row: nearest chunk in the source episode by embedding cosine distance.
+-- pgvector <=> operator returns cosine distance (smaller = closer);
+-- fact.embedding is already SELECTed in the batch query above and passed as $3.
 SELECT content
 FROM heart.episode_chunks
 WHERE agent_id = $1 AND episode_id = $2
-  AND content ILIKE '%' || $3 || '%'  -- subject as keyword
-ORDER BY chunk_index
+ORDER BY embedding <=> $3::vector
 LIMIT 1;
 ```
 
-Feeds raw chunk text (up to ~600 chars) to the classifier instead of the lossy 500-char summary slice.
+Feeds raw chunk text (up to ~600 chars) to the classifier instead of the lossy 500-char summary slice. Works even when the subject is a paraphrase of the underlying transcript event — the embedding already captures semantic similarity. Falls back to no chunk only when the fact has no embedding (legacy rows pre-text-embedding-3-large rollout) or the episode has zero chunks; in either case the classifier still gets `fact.content` as primary signal.
 
 #### CLI shape
 
