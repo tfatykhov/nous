@@ -666,6 +666,15 @@ def _heart_results_to_pipeline(
             description=r.summary,
             score=r.score,
             source="heart",
+            # F075: surface event_date from RecallResult.metadata into
+            # PipelineResult.metadata so Layer 3 boost (when shipped) +
+            # downstream consumers can read it. Excludes the key entirely
+            # when unset (no None placeholder) so dict-presence checks work.
+            metadata=(
+                {"event_date": r.metadata["event_date"]}
+                if (r.metadata and r.metadata.get("event_date") is not None)
+                else {}
+            ),
         )
         for r in heart_results
     ]

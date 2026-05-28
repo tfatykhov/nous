@@ -1065,6 +1065,49 @@ class Settings(BaseSettings):
         default=0.15,
         description="P2: max boost as a fraction of original score (default 0.15 = +15% for the most-connected candidate).",
     )
+    # F075 — Temporal fact extraction
+    # All flags default OFF for dark-launch consistency (F042/F047/F067/F071 pattern).
+    temporal_extraction_enabled: bool = Field(
+        default=False,
+        description=(
+            "F075: include date-anchored event extraction in summarizer + "
+            "fact-extractor prompts. When True, the summarizer's candidate_facts "
+            "schema accepts an optional event_date field and producer paths "
+            "stamp event_date_classified_at on FactInput. Flip after measurement "
+            "confirms no regression on existing test suite or LME baseline."
+        ),
+    )
+    candidate_facts_event_limit: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "F075: per-episode cap on date-anchored candidate facts merged "
+            "across chunks (before FactExtractor). Stable facts stay capped "
+            "at 5. Default 30 covers BEAM-100K-shaped multi-day projects "
+            "with daily check-ins."
+        ),
+    )
+    temporal_backfill_default_token_budget: int = Field(
+        default=50000,
+        description="F075: default Haiku token cap for backfill script when --token-budget is not supplied.",
+    )
+    # Layer 3 (deferred — settings declared so plumbing is in place for F075.x)
+    date_aware_boost_enabled: bool = Field(
+        default=False,
+        description=(
+            "F075 Layer 3 (deferred): multiplicative boost on facts with event_date "
+            "in query's inferred date window. Ships disabled until measurement "
+            "shows Layer 1+2+4 alone falls short of acceptance criterion #5."
+        ),
+    )
+    date_aware_boost_factor: float = Field(
+        default=1.20, ge=1.0, le=2.0,
+        description="F075 Layer 3: multiplier applied to in-window facts. 1.0 = no boost.",
+    )
+    date_aware_boost_window_pad_days: int = Field(
+        default=30,
+        description="F075 Layer 3: pad days around the inferred query date window.",
+    )
     heart_graph_all_types_enabled: bool = Field(
         default=False,
         description=(

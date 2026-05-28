@@ -1095,7 +1095,70 @@ class GraphDensifier:
         # (chunk_consolidation_enabled) so it can ship independently of the
         # main F040 backfill master switch.
         results["chunks"] = await self.backfill_orphan_chunks()
+        if self._interrupted:
+            return _log_and_return(aborted=True)
+
+        # F075 (2026-05-28): chain temporal events within episode boundaries.
+        # Builds `happened_before` edges from each dated fact to its
+        # next-distinct-date successor in the same episode. Inert unless
+        # NOUS_GRAPH_ADJACENCY_BOOST_ENABLED=true (consumer at
+        # retrieval_pipeline.py:243-247) — spec line 443 documents that
+        # operators must flip the boost flag for Layer 2 to take effect.
+        results["happened_before"] = await self._build_happened_before_edges()
         return _log_and_return(aborted=False)
+
+    async def _build_happened_before_edges(self) -> int:
+        """F075 Layer 2: chain temporally-adjacent dated facts within episodes.
+
+        Each dated, active fact gets at most ONE outgoing ``happened_before``
+        edge pointing to the next-distinct-date active fact in the same
+        episode. LATERAL with ``LIMIT 1`` prevents quadratic explosion when
+        multiple facts share the same ``event_date``. Same-date facts
+        deliberately do not link to each other (we don't claim ordering on
+        concurrent events).
+
+        Returns the number of edges newly inserted (excluding ON CONFLICT
+        DO NOTHING hits — those are no-ops on re-run).
+        """
+        async with self.db.session() as session:
+            result = await session.execute(
+                text(
+                    """
+                    INSERT INTO brain.graph_edges
+                        (source_id, source_type, target_id, target_type,
+                         agent_id, relation, weight, auto_linked,
+                         extraction_method)
+                    SELECT a.id, 'fact', b.id, 'fact',
+                           a.agent_id, 'happened_before', 1.0, TRUE,
+                           'deterministic'
+                    FROM heart.facts a
+                    JOIN LATERAL (
+                        SELECT b.id
+                        FROM heart.facts b
+                        WHERE b.agent_id = a.agent_id
+                          AND b.source_episode_id = a.source_episode_id
+                          AND b.event_date IS NOT NULL
+                          AND b.event_date > a.event_date
+                          AND b.active = TRUE
+                        ORDER BY b.event_date ASC, b.id ASC
+                        LIMIT 1
+                    ) b ON TRUE
+                    WHERE a.agent_id = :agent_id
+                      AND a.event_date IS NOT NULL
+                      AND a.active = TRUE
+                    ON CONFLICT (source_id, target_id, relation) DO NOTHING
+                    """
+                ),
+                {"agent_id": self._agent_id},
+            )
+            await session.commit()
+            count = result.rowcount or 0
+            if count:
+                logger.info(
+                    "F075: built %d happened_before edges for agent_id=%s",
+                    count, self._agent_id,
+                )
+            return count
 
     async def discover_clusters(self, max_bridges: int = 20) -> int:
         """Discover disconnected graph components and create bridge edges.

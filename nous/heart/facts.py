@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -377,8 +377,20 @@ class FactManager:
         if embedding is not None:
             dupe = await self._find_duplicate(embedding, exclude_ids, session)
             if dupe is not None:
-                # Confirm existing fact instead of creating new
-                return await self._confirm(dupe.id, session)
+                # F075 dedup bypass: distinct event_dates = distinct events.
+                # Same entity, same content shape, but on different dates is
+                # not a duplicate — it's a separate event temporal_reasoning
+                # needs preserved (e.g., API key obtained March 10 vs rotated
+                # March 12). Fall through to session.add(fact) below.
+                if (
+                    input.event_date is not None
+                    and dupe.event_date is not None
+                    and input.event_date != dupe.event_date
+                ):
+                    pass  # do NOT return; treat as new event
+                else:
+                    # Confirm existing fact instead of creating new
+                    return await self._confirm(dupe.id, session)
 
         # F023: Admission gate — score candidate before storage
         admission_result: AdmissionResult | None = None
@@ -446,15 +458,25 @@ class FactManager:
             ),
             actionable=actionable_verdict,
             actionable_confidence=actionable_conf,
+            # F075: pure-sink semantics. _learn never injects values into
+            # these fields — producers (Layer 1a/1b/Layer 4 backfill) decide.
+            # Non-F075 callers (tools.py learn_fact, REST endpoint,
+            # knowledge_extractor) leave both at None → backfill-eligible.
+            event_date=input.event_date,
+            event_date_classified_at=input.event_date_classified_at,
         )
         session.add(fact)
         await session.flush()
 
         # Subject + similarity supersession (006.2)
+        # F075: pass the new fact's event_date so supersession can bypass
+        # candidates with distinct dates — same entity on a different date
+        # is a new event, not a supersession.
         if check_contradictions and input.subject and embedding is not None:
             await self._supersede_by_subject(
                 fact.id, input.subject, embedding, session,
                 new_content=input.content,
+                new_event_date=input.event_date,
             )
 
         await self._emit_event(
@@ -655,6 +677,7 @@ class FactManager:
         embedding: list[float],
         session: AsyncSession,
         new_content: str = "",
+        new_event_date: date | None = None,
     ) -> None:
         """Supersede older facts with same subject AND similar content (006.2).
 
@@ -664,6 +687,11 @@ class FactManager:
 
         F027: For ambiguous range (0.80-0.95) with LLM available, use classifier
         to disambiguate UNRELATED/REFINEMENT/UPDATE before superseding.
+
+        F075: when ``new_event_date`` is non-NULL and a candidate's
+        ``event_date`` differs, skip supersession — same subject on different
+        dates is a separate event (e.g., "API key obtained March 10" vs
+        "API key obtained March 12"), not a supersession.
 
         This prevents "Nous version 0.2" from nuking "Nous uses PostgreSQL"
         while correctly superseding "Nous version 0.1".
@@ -677,6 +705,13 @@ class FactManager:
             )
         )
         for old in result.scalars().all():
+            # F075: skip supersession on date-disagreement.
+            if (
+                new_event_date is not None
+                and old.event_date is not None
+                and new_event_date != old.event_date
+            ):
+                continue
             if old.embedding is not None:
                 similarity = self._cosine_similarity(embedding, old.embedding)
                 if similarity > 0.80:
@@ -1054,6 +1089,7 @@ class FactManager:
                 actionable=f.actionable,
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
+                event_date=f.event_date,  # F075
             )
             for f in facts
         ]
@@ -1169,6 +1205,7 @@ class FactManager:
                 actionable=f.actionable,
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
+                event_date=f.event_date,  # F075
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -1265,6 +1302,7 @@ class FactManager:
                 actionable=f.actionable,
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
+                event_date=f.event_date,  # F075
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -1362,6 +1400,7 @@ class FactManager:
                 actionable=f.actionable,
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
+                event_date=f.event_date,  # F075
             )
             for f in facts
         ]
@@ -1478,6 +1517,7 @@ class FactManager:
             created_at=fact.created_at,
             actionable=fact.actionable,
             actionable_confidence=fact.actionable_confidence,
+            event_date=fact.event_date,  # F075
         )
 
     # ------------------------------------------------------------------
