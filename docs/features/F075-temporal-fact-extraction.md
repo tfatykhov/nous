@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.7** (2026-05-27) — incorporates arch / python-pro / devil's-advocate spec review + 7 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.8** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 8 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.8 changelog (codex re-review round 8)
+
+Codex flagged 2 more P2s on v2.7. Both stdlib/precedent-collision gotchas:
+
+- **P2 — `date.fromisoformat()` accepts alternate ISO forms in Python 3.12.** v2.7's validator claimed strictness based on `date.fromisoformat` alone, but Python 3.12's stdlib accepts `'20240310'` (no hyphens) and `'2024-W10-7'` (ISO week date) — both contradict the prompt/schema contract of `YYYY-MM-DD`. Fixed: added explicit `re.compile(r"^\d{4}-\d{2}-\d{2}$").fullmatch` gate before calling `fromisoformat`; the regex enforces surface shape, `fromisoformat` then enforces day-validity (rejects 2024-02-30).
+- **P2 — Advisory lock key collides with F047's actionability lock.** v2.7 copied F047's key derivation exactly (`SHA-256(agent_id)`). Result: F075 backfill and F047 actionability backfill compete for the SAME advisory lock per agent — if F047 runs at startup while an operator invokes F075 backfill, F075 falsely reports "another temporal backfill holds the lock" and skips, even though the competing job is unrelated. Fixed: added a `_LOCK_NAMESPACE = "f075-temporal"` prefix that's concatenated before hashing, so only same-feature backfills exclude each other on the same agent.
 
 ## v2.7 changelog (codex re-review round 7)
 
@@ -272,18 +279,30 @@ event_date: date | None = None
 
 @field_validator("event_date", mode="before")
 @classmethod
+import re
+
+_DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 def _parse_event_date(cls, v):
     if v is None or isinstance(v, date):
         return v
     if isinstance(v, str):
+        # Codex round-8 catch: Python 3.12 date.fromisoformat() accepts
+        # alternate ISO forms like '20240310' (no hyphens) and '2024-W10-7'
+        # (ISO week date). The spec/prompt contract is strictly
+        # 'YYYY-MM-DD' — anything else must be dropped. Two-step check:
+        # (1) regex enforces the surface shape, (2) fromisoformat enforces
+        # day-validity (rejects 2024-02-30, etc).
+        if not _DATE_PATTERN.fullmatch(v):
+            return None
         try:
-            return date.fromisoformat(v)  # strict — rejects "2024-02-30" etc
+            return date.fromisoformat(v)
         except ValueError:
             return None  # fail-soft: drop bad date, keep fact
     return None
 ```
 
-`date.fromisoformat` is strict enough that we don't need a separate regex check; Python 3.12's stdlib rejects out-of-range days, malformed strings, etc.
+The regex gate is the contract enforcement: anything that didn't come out of the prompt's stated `YYYY-MM-DD` slot is rejected before `fromisoformat` gets a chance to parse it as a different ISO variant. `date.fromisoformat` is then used purely for day-validity checking on the regex-passing inputs.
 
 ### Layer 2 — `happened_before` edges (reranking reinforcer)
 
@@ -387,11 +406,21 @@ async def _apply_date_boost(
 ```python
 import hashlib
 
+_LOCK_NAMESPACE = "f075-temporal"  # Codex round-8 catch: salt by feature so
+                                    # F075 backfill doesn't collide with F047
+                                    # actionability backfill on the same agent.
+
 def _advisory_lock_key(agent_id: str) -> int:
-    """Stable signed bigint key derived from agent_id SHA-256.
-    Mirrors actionability_backfill.py:108-115.
+    """Stable signed bigint key derived from a feature-salted agent_id SHA-256.
+
+    Mirrors actionability_backfill.py:108-115 shape but adds a feature
+    namespace prefix so two unrelated backfills on the same agent do not
+    block each other. F047 hashes only the bare agent_id, so without
+    this salt a startup actionability sweep would falsely prevent an
+    operator-invoked temporal backfill from running on the same agent.
     """
-    digest = hashlib.sha256(agent_id.encode("utf-8")).digest()[:8]
+    salted = f"{_LOCK_NAMESPACE}:{agent_id}".encode("utf-8")
+    digest = hashlib.sha256(salted).digest()[:8]
     return int.from_bytes(digest, byteorder="big", signed=True)
 ```
 
