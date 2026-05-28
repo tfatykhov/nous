@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.15** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 15 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.16** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 16 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,14 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.16 changelog (codex re-review round 16)
+
+Codex flagged 3 P2s on v2.15. Validated each finding against the actual code (`nous/heart/schemas.py`, `nous/brain/graph_linker.py:179`, the v2.15 `_process_batch` loop body) before patching:
+
+- **P2 — `FactInput` schema row missed `event_date_classified_at`.** Wire-path row 3 declared only `event_date` on FactInput, but row 4 says `_learn` copies BOTH `event_date` and `event_date_classified_at` and row 5 declares both on the ORM. Producers (Layer 1a/1b/Layer 4) trying to pass `event_date_classified_at=...` would either fail Pydantic strict mode or have the kwarg silently dropped. Fixed: row 3 now mandates both fields on FactInput.
+- **P2 — `_fetch_chunk_context` defined but never called.** The whole point of fetching chunk context was to give the classifier better signal than `fact.content` paraphrase. v2.15's `_process_batch` body invoked `_classify_event_date(row)` directly — never hitting the helper. Dead code. Fixed: `_process_batch` now calls `_fetch_chunk_context(session, agent_id, row["source_episode_id"], row["embedding"])` BEFORE the classifier call and passes the chunk text as `chunk_context=` kwarg.
+- **P2 — Embedding parameter not serialized for pgvector cast.** v2.15 passed `row["embedding"]` raw into `CAST(:embedding AS vector)`. The repo convention at `nous/brain/graph_linker.py:179, 266` is to serialize to the pgvector text literal `"[" + ",".join(str(float(v)) for v in embedding) + "]"` before binding. Without this, the bind/cast can fail before any chunk is retrieved. Fixed: `_fetch_chunk_context` now builds `embedding_str` first, then binds.
 
 ## v2.15 changelog (codex re-review round 15)
 
@@ -291,7 +299,7 @@ Per Arch P1-1's enumeration:
 |---|---|---|
 | 1 | `episode_summarizer.py:50-77` | Add `event_date` to candidate_facts schema + prompt |
 | 2 | `fact_extractor.py:251-256` | `_store_candidate_facts` reads `event_date = item.get("event_date")` from dict |
-| 3 | `nous/heart/schemas.py:85-98` | `FactInput` adds `event_date: date \| None = None` |
+| 3 | `nous/heart/schemas.py:85-98` | `FactInput` adds BOTH `event_date: date \| None = None` AND `event_date_classified_at: datetime \| None = None`. Both fields must be declared so F075 producer paths (Layer 1a/1b/Layer 4) can pass them as kwargs without Pydantic dropping the value silently. Row 4's `_learn` copy and row 5's ORM column rely on this declaration. |
 | 4 | `nous/heart/facts.py:428-449` | `FactManager._learn` passes `event_date` AND `event_date_classified_at` from `FactInput` to `Fact()` ORM constructor verbatim. NO policy here — `_learn` is a pure sink. Marker policy lives in the F075 producer paths only (Layer 1a, 1b, Layer 4). |
 | 5 | `nous/storage/models.py:469-511` | `Fact` ORM adds `event_date: Mapped[date \| None] = mapped_column(Date, nullable=True)` AND `event_date_classified_at: Mapped[datetime \| None] = mapped_column(DateTime(timezone=True), nullable=True)` |
 | 6 | `sql/migrations/053_temporal_fact_extraction.sql` | `ALTER TABLE heart.facts ADD COLUMN event_date DATE + event_date_classified_at TIMESTAMPTZ` + partial indexes + extend `brain.graph_edges` relation CHECK to add `'happened_before'` |
@@ -606,7 +614,17 @@ async def _process_batch(
             await session.commit()
             return (updated, True)  # signal _run_batches to halt
 
-        classified = await _classify_event_date(row)  # returns date | None
+        # Codex round-16 P2 catch: actually use _fetch_chunk_context
+        # defined below. Without this, the classifier sees only
+        # fact.content (lossy paraphrase) — defeating the whole point
+        # of Layer 4 using chunks instead of episode.summary[:500].
+        chunk_ctx = await _fetch_chunk_context(
+            session,
+            agent_id,
+            row["source_episode_id"],
+            row["embedding"],
+        )
+        classified = await _classify_event_date(row, chunk_context=chunk_ctx)  # date | None
         budget.consume(_TOKENS_PER_LLM_CALL)
 
         # ALWAYS mark classified — even when no date found. This is what
@@ -657,7 +675,7 @@ async def _fetch_chunk_context(
     session: AsyncSession,
     agent_id: str,
     episode_id: UUID | None,
-    embedding,            # fact.embedding from the batch row; may be None
+    embedding,            # fact.embedding from the batch row; may be None or pgvector type
 ) -> str | None:
     """Nearest chunk in the source episode by cosine to fact.embedding.
 
@@ -667,6 +685,12 @@ async def _fetch_chunk_context(
     """
     if episode_id is None or embedding is None:
         return None
+    # Codex round-16 P2 catch: the embedding from SELECT comes back as a
+    # pgvector type (numpy array / list of floats), not a string. Passing
+    # it raw into CAST(:embedding AS vector) can fail binding. The repo
+    # convention at nous/brain/graph_linker.py:179, 266 is to serialize
+    # to the pgvector text literal "[v1,v2,...]" first, then bind as str.
+    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
     result = await session.execute(
         text("""
             SELECT content
@@ -685,7 +709,7 @@ async def _fetch_chunk_context(
         {
             "agent_id": agent_id,
             "episode_id": episode_id,
-            "embedding": embedding,
+            "embedding": embedding_str,
         },
     )
     row = result.first()
