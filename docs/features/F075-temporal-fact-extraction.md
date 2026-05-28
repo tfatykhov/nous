@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.8** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 8 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.9** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 9 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.9 changelog (codex re-review round 9)
+
+Codex flagged 2 P2s on v2.8:
+
+- **P2 — Validator snippet was non-runnable.** Round-8's regex addition placed `import re` and `_DATE_PATTERN = re.compile(...)` between the `@classmethod` decorator and the `def _parse_event_date` method — invalid Python (you can't `import` mid-class-body) AND the bare `_DATE_PATTERN` reference inside the method would look up a missing module global. Fixed: snippet now explicitly shows module-scope layout (`import re`, `_DATE_PATTERN` ABOVE `class FactInput`), with a callout that the method's bare reference works because it's a module global.
+- **P2 — `event_date_classified_at` marker site was structurally wrong.** v2.8 had `FactManager._learn` stamp the marker whenever the flag is on. But `Heart.learn(FactInput(...))` is called from many non-F075 paths (`tools.py:516`, `rest.py:1722`, `knowledge_extractor.py:127`). Those facts never ran through the F075 classifier but would have been falsely marked, then skipped by backfill forever. Fixed: marker is now a `FactInput` field populated by the F075-aware producer paths only (Layer 1a `_store_candidate_facts`, Layer 1b direct `FactInput(...)`, Layer 4 backfill UPDATE). `FactManager._learn` becomes a pure sink — persists whatever's in `FactInput`, no policy. Other learn callers leave the field at its `None` default → those rows stay backfill-eligible.
 
 ## v2.8 changelog (codex re-review round 8)
 
@@ -241,17 +248,26 @@ Per Arch P1-1's enumeration:
 | 1 | `episode_summarizer.py:50-77` | Add `event_date` to candidate_facts schema + prompt |
 | 2 | `fact_extractor.py:251-256` | `_store_candidate_facts` reads `event_date = item.get("event_date")` from dict |
 | 3 | `nous/heart/schemas.py:85-98` | `FactInput` adds `event_date: date \| None = None` |
-| 4 | `nous/heart/facts.py:428-449` | `FactManager._learn` passes `event_date` to `Fact()` ORM constructor |
+| 4 | `nous/heart/facts.py:428-449` | `FactManager._learn` passes `event_date` AND `event_date_classified_at` from `FactInput` to `Fact()` ORM constructor verbatim. NO policy here — `_learn` is a pure sink. Marker policy lives in the F075 producer paths only (Layer 1a, 1b, Layer 4). |
 | 5 | `nous/storage/models.py:469-511` | `Fact` ORM adds `event_date: Mapped[date \| None] = mapped_column(Date, nullable=True)` AND `event_date_classified_at: Mapped[datetime \| None] = mapped_column(DateTime(timezone=True), nullable=True)` |
 | 6 | `sql/migrations/053_temporal_fact_extraction.sql` | `ALTER TABLE heart.facts ADD COLUMN event_date DATE + event_date_classified_at TIMESTAMPTZ` + partial indexes + extend `brain.graph_edges` relation CHECK to add `'happened_before'` |
 | 7 | `nous/heart/schemas.py:114-165` | `FactDetail` and `FactSummary` add `event_date: date \| None = None` |
 | 8 | `nous/heart/facts.py:1046, 1160, 1256, 1355` | Each `FactSummary(...)` constructor passes `event_date=fact.event_date` (4 sites). Optional field defaults to None silently otherwise → recall surface returns None even when DB column populated |
 | 9 | `nous/heart/facts.py:1459` (`_to_detail`) | Pass `event_date=fact.event_date` to `FactDetail` construction |
 | 10 | `nous/heart/facts.py` `_to_recall_result` path | `RecallResult.metadata["event_date"] = fact.event_date.isoformat() if fact.event_date else None` so Layer 3 boost has the field to read |
-| 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")`. This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
+| 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")` AND `event_date_classified_at=datetime.now(UTC)` (gated on `settings.temporal_extraction_enabled`). This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
 | 12 | `nous/api/retrieval_pipeline.py:659-669` (`_heart_results_to_pipeline`) | Copy `event_date` from `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Today the conversion drops metadata entirely. Layer 3's `r.metadata.get("event_date")` reads from `PipelineResult`, so the field must survive the conversion. |
 
-**Plus**: when `settings.temporal_extraction_enabled = True`, `FactManager._learn` sets `event_date_classified_at = datetime.now(UTC)` on every fact write (the new codepath always marks the row classified, even when `event_date` ends up `None`). When the flag is `False`, `event_date_classified_at` stays `NULL` — the row was NOT actually classified (legacy prompt was used) so it must remain eligible for the Layer 4 backfill when the flag is later flipped on. Without this gating, dark-launched ingests would stamp the marker on rows that never saw the new extractor, then a post-launch backfill would skip them forever via the `event_date_classified_at IS NULL` predicate.
+**Plus — marker write site (Codex round-9 fix):** `event_date_classified_at` must be populated by **F075 producers only**, NOT by a generic write inside `FactManager._learn`. Multiple unrelated paths call `Heart.learn(FactInput(...))` directly — `nous/api/tools.py:516` (`learn_fact` tool), `nous/api/rest.py:1722` (REST endpoint), `nous/handlers/knowledge_extractor.py:127` (pre-prune extraction) — none of which run the F075 classifier. If `_learn` blindly stamped `event_date_classified_at = NOW()` for every write when the flag is on, those rows would be falsely marked "F075-classified" and skipped by the backfill forever.
+
+The correct design: `FactInput` carries the field optionally (default `None`), and **only the F075-aware code paths populate it**:
+
+- **Layer 1a (summarizer path):** `_store_candidate_facts` at `fact_extractor.py:251-256` sets `event_date_classified_at=datetime.now(UTC)` on the `FactInput` it constructs, gated on `settings.temporal_extraction_enabled`.
+- **Layer 1b (direct extractor path):** the `FactInput(...)` construction at `fact_extractor.py:189-196` sets the same value, gated on the same flag.
+- **Layer 4 (backfill):** the per-row `UPDATE` writes both `event_date` (date or NULL) and `event_date_classified_at = NOW()` simultaneously.
+- **All other paths** (`tools.py:516`, `rest.py:1722`, `knowledge_extractor.py:127`, any future `Heart.learn` caller) leave the field at its `None` default — those rows stay eligible for the backfill to catch up.
+
+`FactManager._learn` simply persists whatever's in `FactInput.event_date_classified_at` to the DB column — no flag check, no `now()` injection, no policy. The producer decides.
 
 **Plus (Codex v2.1 review):** the summarizer's LLM call must receive `Episode.started_at` so it can resolve relative dates ("yesterday", "last Tuesday") deterministically. Current chain `summarize_episode → _generate_summary(transcript, decision_context) → _summarize_single(transcript, decision_context)` (lines 135, 361, 394) carries neither the episode object nor `started_at`. Wire path additions for relative-date resolution — every hop must be touched, including the intermediate `_generate_summary` boundary that codex flagged in round 4:
 
@@ -269,40 +285,45 @@ Without thread-through at every hop, the prompt's "resolve relative phrases agai
 
 #### Pydantic v2 validator
 
-In `FactInput`:
+In `nous/heart/schemas.py`. Module-scope imports/constants, then the field + validator inside `FactInput`:
 
 ```python
+# nous/heart/schemas.py — module scope
+import re
 from datetime import date
 from pydantic import field_validator
 
-event_date: date | None = None
-
-@field_validator("event_date", mode="before")
-@classmethod
-import re
-
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-def _parse_event_date(cls, v):
-    if v is None or isinstance(v, date):
-        return v
-    if isinstance(v, str):
-        # Codex round-8 catch: Python 3.12 date.fromisoformat() accepts
-        # alternate ISO forms like '20240310' (no hyphens) and '2024-W10-7'
-        # (ISO week date). The spec/prompt contract is strictly
-        # 'YYYY-MM-DD' — anything else must be dropped. Two-step check:
-        # (1) regex enforces the surface shape, (2) fromisoformat enforces
-        # day-validity (rejects 2024-02-30, etc).
-        if not _DATE_PATTERN.fullmatch(v):
-            return None
-        try:
-            return date.fromisoformat(v)
-        except ValueError:
-            return None  # fail-soft: drop bad date, keep fact
-    return None
+
+class FactInput(BaseModel):
+    # ... existing fields ...
+    event_date: date | None = None
+    event_date_classified_at: datetime | None = None  # set by F075 producers only
+
+    @field_validator("event_date", mode="before")
+    @classmethod
+    def _parse_event_date(cls, v):
+        if v is None or isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            # Codex round-8 catch: Python 3.12 date.fromisoformat() accepts
+            # alternate ISO forms like '20240310' (no hyphens) and
+            # '2024-W10-7' (ISO week date). The spec/prompt contract is
+            # strictly 'YYYY-MM-DD' — anything else must be dropped.
+            # Two-step check:
+            # (1) module-level _DATE_PATTERN regex enforces surface shape
+            # (2) fromisoformat enforces day-validity (rejects 2024-02-30)
+            if not _DATE_PATTERN.fullmatch(v):
+                return None
+            try:
+                return date.fromisoformat(v)
+            except ValueError:
+                return None  # fail-soft: drop bad date, keep fact
+        return None
 ```
 
-The regex gate is the contract enforcement: anything that didn't come out of the prompt's stated `YYYY-MM-DD` slot is rejected before `fromisoformat` gets a chance to parse it as a different ISO variant. `date.fromisoformat` is then used purely for day-validity checking on the regex-passing inputs.
+Layout matters: `import re` and `_DATE_PATTERN` are at module scope (above `class FactInput`), so the validator method can reference `_DATE_PATTERN` as a module global without `cls.` prefix. The regex gate is the contract enforcement: anything that didn't come out of the prompt's stated `YYYY-MM-DD` slot is rejected before `fromisoformat` gets a chance to parse it as a different ISO variant. `date.fromisoformat` is then used purely for day-validity checking on the regex-passing inputs.
 
 ### Layer 2 — `happened_before` edges (reranking reinforcer)
 
