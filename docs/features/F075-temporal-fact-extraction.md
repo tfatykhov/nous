@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.10** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 10 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.11** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 11 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,13 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.11 changelog (codex re-review round 11)
+
+Codex flagged 1 P1 (refinement of round-10) + 1 P2 on v2.10:
+
+- **P1 — Round-10's partition-then-`[:5]` fix is STILL insufficient.** v2.10 sorted dated facts first then truncated at `[:5]`. But if a transcript contains MORE than 5 dated events, the 6th-onward dated facts are still dropped. F075 explicitly targets long multi-day haystacks where 5 dated events is well below typical density. Fixed: split candidates into separate pools — `dated[:candidate_facts_event_limit] + stable[:5]`. Default event-limit = **30** (configurable via new `NOUS_CANDIDATE_FACTS_EVENT_LIMIT`). Stable cap stays at 5.
+- **P2 — Dedup/supersession ignores `event_date`, collapsing distinct-date events.** `Heart._learn` dedup uses embedding cosine ≥ 0.80 and supersession uses subject match — neither considers `event_date`. Two facts like *"Christina obtained API key on March 10"* vs *"Christina rotated API key on March 12"* have high embedding similarity AND collide on subject, so the second silently drops or supersedes the first. **The exact date-pair temporal_reasoning needs is destroyed.** Fixed: added rule — when both candidate and existing have `event_date IS NOT NULL` and the dates differ, dedup/supersession is bypassed. Different dates = different events. Regression test added to `test_temporal_extractor.py`.
 
 ## v2.10 changelog (codex re-review round 10)
 
@@ -265,7 +272,15 @@ Per Arch P1-1's enumeration:
 | 10 | `nous/heart/facts.py` `_to_recall_result` path | `RecallResult.metadata["event_date"] = fact.event_date.isoformat() if fact.event_date else None` so Layer 3 boost has the field to read |
 | 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")` AND `event_date_classified_at=datetime.now(UTC)` (gated on `settings.temporal_extraction_enabled`). This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
 | 12 | `nous/api/retrieval_pipeline.py:659-669` (`_heart_results_to_pipeline`) | Copy `event_date` from `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Today the conversion drops metadata entirely. Layer 3's `r.metadata.get("event_date")` reads from `PipelineResult`, so the field must survive the conversion. |
-| 13 | `nous/handlers/episode_summarizer.py:445-468` (`_merge_summaries`) | **P1 — multi-chunk merge truncation.** For transcripts exceeding `transcript_max_chars` (16K default), the summarizer summarizes chunks separately and `_merge_summaries` returns `merged_candidate_facts[:5]` in chunk order — dated events from later chunks get dropped before FactExtractor sees them. This is the exact case F075 targets (BEAM-100K conversations routinely exceed 16K). Fix: stable-partition the merged list so candidates with `event_date IS not None` sort first, THEN truncate. Pseudocode: `merged_candidate_facts.sort(key=lambda c: c.get("event_date") is None)` (Python sort is stable — False < True, so dated facts stay in their original chunk order at the front). Truncation then drops stable-fact tail, not dated-fact tail. |
+| 13 | `nous/handlers/episode_summarizer.py:445-468` (`_merge_summaries`) | **P1 — multi-chunk merge truncation.** For transcripts exceeding `transcript_max_chars` (16K default), the summarizer summarizes chunks separately and `_merge_summaries` returns `merged_candidate_facts[:5]` in chunk order — dated events from later chunks get dropped before FactExtractor sees them. This is the exact case F075 targets (BEAM-100K conversations routinely exceed 16K with many date-anchored events per episode). Fix: split dated and stable candidates into separate pools with independent caps — `dated[:settings.candidate_facts_event_limit] + stable[:5]`. Default event-limit = **30** so multi-day dev projects with daily date-anchored check-ins are preserved. Stable cap stays at 5 (general patterns where 5 covers most episodes). Both pools keep original chunk order so chronological information survives. |
+
+**Plus — dedup/supersession must respect distinct dates (Codex round-11 P2 fix):** Heart.learn currently performs (a) embedding-similarity dedup (cosine ≥ `fact_native_cosine_threshold = 0.80`) and (b) subject-based supersession (same subject → newer deactivates older). Both operate without considering `event_date`. For temporal events with the same entity but different dates — e.g. *"Christina obtained the API key on March 10"* and *"Christina rotated the API key on March 12"* — embedding similarity is high AND subjects collide, so the second fact would either be silently dropped as duplicate or supersede the first. Either outcome destroys the date pair temporal_reasoning needs.
+
+Rule: **when both candidate and existing fact have `event_date IS NOT NULL` and the dates differ, dedup/supersession is bypassed.** Different dates → different events, treated as semantically distinct regardless of embedding/subject similarity. Add the guard in:
+- `Heart._learn` dedup check (before the cosine threshold compare)
+- Whatever subject-based supersession path runs in sleep cycle / extraction (search for `superseded_by` writes)
+
+Regression test: ingest two facts with same subject, same entity, same actor — only `event_date` differs — assert both rows remain active and surface separately in retrieval. Add to `tests/test_temporal_extractor.py`.
 
 **Plus — marker write site (Codex round-9 fix):** `event_date_classified_at` must be populated by **F075 producers only**, NOT by a generic write inside `FactManager._learn`. Multiple unrelated paths call `Heart.learn(FactInput(...))` directly — `nous/api/tools.py:516` (`learn_fact` tool), `nous/api/rest.py:1722` (REST endpoint), `nous/handlers/knowledge_extractor.py:127` (pre-prune extraction) — none of which run the F075 classifier. If `_learn` blindly stamped `event_date_classified_at = NOW()` for every write when the flag is on, those rows would be falsely marked "F075-classified" and skipped by the backfill forever.
 
@@ -695,6 +710,14 @@ temporal_backfill_default_token_budget: int = Field(
     default=50000,
     description="F075: default Haiku token cap for backfill script.",
 )
+candidate_facts_event_limit: int = Field(
+    default=30,
+    ge=0,
+    description="F075: per-episode cap on date-anchored candidate facts "
+                "merged across chunks (before FactExtractor). Stable facts "
+                "stay capped at 5. Default 30 covers BEAM-100K-shaped "
+                "multi-day projects with daily check-ins.",
+)
 ```
 
 `CLAUDE.md` env-var table gets 5 new rows. Update is part of the impl PR, not separate.
@@ -709,6 +732,7 @@ temporal_backfill_default_token_budget: int = Field(
 - Malformed date string fails `date.fromisoformat` → field dropped, fact kept
 - Ambiguous date → field omitted, no false positive
 - Same event, same date → dedup catches duplicate (existing dedup path unchanged)
+- **Distinct event_date for same subject/entity → both facts persist** (Codex round-11 regression test): ingest two facts with same subject ("API key event") + same entity ("Christina") but `event_date` 2024-03-10 vs 2024-03-12, assert both active rows and both surface in retrieval. Dedup/supersession bypassed by the event-date guard.
 - `_store_candidate_facts` reads `event_date` from dict and threads into `FactInput`
 - FactExtractor fallback prompt (Layer 1b) also emits event_date
 
