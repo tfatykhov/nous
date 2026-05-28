@@ -168,7 +168,10 @@ class FactExtractor:
         stored = 0
         # F075: split dated and stable candidates with separate caps so dated
         # events from later in the LLM list aren't dropped by the [:5] truncation.
-        # Matches _merge_summaries (episode_summarizer.py) + _store_candidate_facts (below).
+        # NOTE: the _EXTRACT_PROMPT fallback path's prompt schema does NOT
+        # include event_date (only the summarizer's prompt does). Any "dated"
+        # candidates here would be the LLM hallucinating a field — possible
+        # but rare. We still partition defensively to match _store_candidate_facts.
         dated = [c for c in candidates if isinstance(c, dict) and c.get("event_date")]
         stable = [c for c in candidates if not (isinstance(c, dict) and c.get("event_date"))]
         event_limit = getattr(self._settings, "candidate_facts_event_limit", 30)
@@ -179,9 +182,16 @@ class FactExtractor:
                 logger.debug("Skipping low-confidence fact: %s", fact.get("content", "")[:50])
                 continue
 
-            # F075: extract the candidate's event_date once; reused for dedup
-            # bypass + FactInput construction below. Returned by the validator.
-            candidate_event_date = fact.get("event_date")
+            # F075: normalize candidate event_date BEFORE dedup compare so we
+            # don't trip on LLM format drift (raw "2024-3-10" vs validated
+            # date(2024,3,10) would be unequal as strings). Round-trip
+            # through FactInput's validator: get back a date | None.
+            raw_event_date = fact.get("event_date")
+            candidate_event_date = (
+                FactInput(content="_", event_date=raw_event_date).event_date
+                if raw_event_date is not None
+                else None
+            )
 
             # Dedup: check if similar fact exists (production paraphrase guard)
             content = fact.get("content", "")
@@ -189,12 +199,13 @@ class FactExtractor:
                 existing = await self._heart.search_facts(content, limit=1)
                 if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
                     # F075 dedup bypass: distinct event_dates = distinct events.
-                    # Skip-and-canonicalize ONLY when both have no event_date or dates match.
+                    # Both sides are post-validator date|None objects after the
+                    # round-trip above — type-safe equality, no string coercion.
                     existing_event_date = existing[0].event_date
                     if not (
                         candidate_event_date is not None
                         and existing_event_date is not None
-                        and str(candidate_event_date) != str(existing_event_date)
+                        and candidate_event_date != existing_event_date
                     ):
                         stored_ids.append(existing[0].id)
                         logger.debug(
@@ -204,11 +215,17 @@ class FactExtractor:
                         continue
                     # else: dates differ, fall through to store as new fact
 
-            # F075: producer-path classification marker — gated on flag so
-            # non-temporal-extraction codepaths leave the field NULL.
+            # F075 (arch P2-1): the fallback _EXTRACT_PROMPT has no event_date
+            # field, so any dated candidate here is best-effort and we should
+            # NOT stamp classified_at — those rows must remain backfill-eligible.
+            # The summarizer's _store_candidate_facts path DOES stamp because
+            # its prompt explicitly asks for the field (see Layer 1a in spec).
             classified_at = (
                 datetime.now(UTC)
-                if getattr(self._settings, "temporal_extraction_enabled", False)
+                if (
+                    getattr(self._settings, "temporal_extraction_enabled", False)
+                    and candidate_event_date is not None
+                )
                 else None
             )
             # Store — P1-8 fix: pass category from LLM response.
@@ -291,7 +308,14 @@ class FactExtractor:
                 content = item.get("content", "")
                 subject = item.get("subject")
                 category = item.get("category")
-                candidate_event_date = item.get("event_date")
+                # F075: normalize candidate event_date through the validator so
+                # the dedup compare is type-safe (date == date, not str == str).
+                raw_event_date = item.get("event_date")
+                candidate_event_date = (
+                    FactInput(content="_", event_date=raw_event_date).event_date
+                    if raw_event_date is not None
+                    else None
+                )
             else:
                 content = item
                 subject = None
@@ -306,11 +330,12 @@ class FactExtractor:
                 existing = await self._heart.search_facts(content, limit=1)
                 if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
                     # F075 dedup bypass: distinct event_dates = distinct events.
+                    # Both sides are post-validator date|None — type-safe equality.
                     existing_event_date = existing[0].event_date
                     if not (
                         candidate_event_date is not None
                         and existing_event_date is not None
-                        and str(candidate_event_date) != str(existing_event_date)
+                        and candidate_event_date != existing_event_date
                     ):
                         stored_ids.append(existing[0].id)
                         logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
@@ -318,6 +343,10 @@ class FactExtractor:
                     # else: dates differ, fall through to store
 
             # F075: producer-path classification marker — gated on flag.
+            # The summarizer's prompt DOES include event_date (Layer 1a in spec)
+            # so this path stamps unconditionally when the flag is on, mirroring
+            # the spec's "classified, no date found" terminal-state contract
+            # (NOT NULL + NULL date = "we tried, no date").
             classified_at = (
                 datetime.now(UTC)
                 if getattr(self._settings, "temporal_extraction_enabled", False)

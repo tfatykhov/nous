@@ -19,6 +19,15 @@ CREATE INDEX IF NOT EXISTS idx_facts_event_date_unclassified_agent
     ON heart.facts(agent_id, learned_at)
     WHERE event_date_classified_at IS NULL;
 
+-- Composite index for Phase 7 _build_happened_before_edges LATERAL probe.
+-- Inner WHERE filters (agent_id, source_episode_id, event_date > a.event_date)
+-- + ORDER BY event_date + LIMIT 1. Without this, the LATERAL probe scans
+-- all dated facts in the agent's corpus per outer row → O(N²) at BEAM-100K
+-- scale. (Code-review P2-2.)
+CREATE INDEX IF NOT EXISTS idx_facts_episode_event_date
+    ON heart.facts(agent_id, source_episode_id, event_date)
+    WHERE event_date IS NOT NULL AND active = TRUE;
+
 COMMENT ON COLUMN heart.facts.event_date IS
     'F075: ISO date of the event this fact describes. NULL = stable fact (not event-anchored) OR pre-F075 row pending backfill.';
 COMMENT ON COLUMN heart.facts.event_date_classified_at IS

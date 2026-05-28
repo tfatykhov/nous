@@ -112,7 +112,14 @@ class FactInput(BaseModel):
     @field_validator("event_date", mode="before")
     @classmethod
     def _parse_event_date(cls, v):
-        if v is None or isinstance(v, date):
+        if v is None:
+            return v
+        # Order matters: datetime IS-A date in Python's stdlib, so test
+        # datetime FIRST. A datetime input gets explicitly coerced to date
+        # (DB column is DATE, not DATETIME).
+        if isinstance(v, datetime):
+            return v.date()
+        if isinstance(v, date):
             return v
         if isinstance(v, str):
             # Regex enforces surface shape (strictly YYYY-MM-DD).

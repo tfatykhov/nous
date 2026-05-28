@@ -82,6 +82,9 @@ architectural decisions, API behaviors) that should persist as standalone facts.
 # to extract date-anchored events from the TRANSCRIPT text (not the prose
 # summary it's about to generate). When the episode start timestamp is
 # known, it's also injected so relative date phrases can be resolved.
+#
+# NOTE: this string is CONCATENATED (not .format()'d) to the prompt at
+# _summarize_single. Single braces (not {{ }}) — code-review round 1 P1.
 _F075_TEMPORAL_INSTRUCTION = """
 
 DATE-ANCHORED EVENTS (F075):
@@ -90,21 +93,21 @@ particularly something the user did or completed — capture it as a SEPARATE
 candidate_fact with the date attached. Extend the candidate_facts schema
 above with an optional 4th field "event_date":
 
-  {{
+  {
     "subject": "<short descriptor of the event>",
     "content": "<entity> <action verb> <object> on <full date>.",
     "category": "event",
     "event_date": "YYYY-MM-DD"
-  }}
+  }
 
 Examples:
   - User says "I got my OpenWeather API key on March 10" →
-    {{"subject": "OpenWeather API key acquisition",
-      "content": "Christina obtained the OpenWeather API key on March 10, 2024.",
-      "category": "event", "event_date": "2024-03-10"}}
+    {"subject": "OpenWeather API key acquisition",
+     "content": "Christina obtained the OpenWeather API key on March 10, 2024.",
+     "category": "event", "event_date": "2024-03-10"}
   - User says "we deployed v2.1 last Tuesday" (EPISODE_START_TIMESTAMP = 2024-04-11) →
-    {{"subject": "v2.1 deployment", "content": "Team deployed v2.1 to staging on 2024-04-09.",
-      "category": "event", "event_date": "2024-04-09"}}
+    {"subject": "v2.1 deployment", "content": "Team deployed v2.1 to staging on 2024-04-09.",
+     "category": "event", "event_date": "2024-04-09"}
 
 CRITICAL: extract dates from the TRANSCRIPT text (above), not from any summary
 you have generated. Dates mentioned in passing — inside code blocks, user

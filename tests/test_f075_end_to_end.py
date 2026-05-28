@@ -81,6 +81,115 @@ def test_event_date_classified_at_passthrough():
     assert FactInput(content="x").event_date_classified_at is None
 
 
+def test_event_date_validator_coerces_datetime_to_date():
+    """datetime is a subclass of date in Python; the validator must explicitly
+    coerce so the DATE DB column doesn't receive a datetime.
+    """
+    dt = datetime(2024, 3, 10, 14, 30, 0)
+    f = FactInput(content="x", event_date=dt)
+    # Result should be a pure date, not a datetime (datetime IS-A date so
+    # an isinstance(date) check passes for both — verify the strict type).
+    assert type(f.event_date) is date  # noqa: E721
+    assert f.event_date == date(2024, 3, 10)
+
+
+def test_merge_summaries_dated_partition_preserves_more_than_5_dated():
+    """Pure-Python test of _merge_summaries split caps (no DB needed).
+
+    Regression guard for spec v2.11 P1: stable [:5] cap was dropping dated
+    events from chunks 6+. Fix splits into dated[:event_limit] + stable[:5].
+    35 dated + 10 stable across chunks must survive as 30 + 5.
+    """
+    from nous.handlers.episode_summarizer import EpisodeSummarizer
+
+    class FakeSettings:
+        candidate_facts_event_limit = 30
+
+    class FakeSelf:
+        _settings = FakeSettings()
+
+    # 35 dated + 10 stable in a single "chunk summary"
+    summaries = [{
+        "candidate_facts": (
+            [{"subject": f"s{i}", "content": "x", "event_date": "2024-03-10"} for i in range(35)]
+            + [{"subject": f"t{i}", "content": "y"} for i in range(10)]
+        ),
+        "summary": "x", "key_points": [], "topics": [],
+    }]
+    merged = EpisodeSummarizer._merge_summaries(FakeSelf(), summaries)
+    dated = [c for c in merged["candidate_facts"] if c.get("event_date")]
+    stable = [c for c in merged["candidate_facts"] if not c.get("event_date")]
+    assert len(dated) == 30, f"expected 30 dated facts after merge, got {len(dated)}"
+    assert len(stable) == 5, f"expected 5 stable facts after merge, got {len(stable)}"
+
+
+def test_pre_learn_dedup_bypass_polarity_extracted_facts():
+    """Mock-based polarity verification for _store_extracted_facts dedup.
+
+    A polarity inversion would silently break the feature. Covers the
+    invariant: distinct event_dates with high embedding similarity must
+    NOT dedup. Same-date or one-side-NULL must still dedup.
+    """
+    # Defer import to avoid heavy module-level loading in pure-validator tests.
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from nous.handlers.fact_extractor import FactExtractor
+    from nous.heart.schemas import FactSummary
+
+    async def run_case(candidate_event_date, existing_event_date, dates_should_differ):
+        heart = MagicMock()
+        existing_id = uuid4()
+        # search_facts returns a near-duplicate above threshold
+        heart.search_facts = AsyncMock(return_value=[FactSummary(
+            id=existing_id,
+            content="existing",
+            category=None,
+            subject="API key event",
+            confidence=1.0,
+            active=True,
+            score=0.99,  # above default dedup threshold
+            event_date=existing_event_date,
+        )])
+        heart.learn = AsyncMock()  # only invoked if dedup bypassed
+
+        settings = MagicMock()
+        settings.fact_dedup_threshold = 0.92
+        settings.candidate_facts_event_limit = 30
+        settings.temporal_extraction_enabled = False  # don't stamp classified_at
+
+        fx = FactExtractor.__new__(FactExtractor)
+        fx._heart = heart
+        fx._settings = settings
+        fx._dedup_via_search = True
+
+        candidates = [{
+            "subject": "API key event",
+            "content": "API key obtained",
+            "confidence": 0.9,
+            "event_date": candidate_event_date,
+        }]
+        stored_ids = await fx._store_extracted_facts(candidates, episode_id="?", transcript=None)
+
+        if dates_should_differ:
+            # Bypass: should have called learn (new fact), NOT just appended existing
+            assert heart.learn.await_count == 1, (
+                f"distinct dates {candidate_event_date} vs {existing_event_date} must bypass dedup"
+            )
+        else:
+            # Dedup engaged: appended existing canonical id, no learn call
+            assert heart.learn.await_count == 0, (
+                f"same-or-null dates ({candidate_event_date}, {existing_event_date}) must dedup"
+            )
+            assert existing_id in stored_ids
+
+    asyncio.run(run_case("2024-03-10", date(2024, 3, 12), dates_should_differ=True))
+    asyncio.run(run_case("2024-03-10", date(2024, 3, 10), dates_should_differ=False))
+    asyncio.run(run_case(None, date(2024, 3, 10), dates_should_differ=False))
+    asyncio.run(run_case("2024-03-10", None, dates_should_differ=False))
+
+
 def test_factsummary_carries_event_date():
     """FactSummary accepts event_date — needed for pre-learn dedup bypass
     at fact_extractor.py:176-184 / 263-273.
