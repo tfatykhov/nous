@@ -1,6 +1,6 @@
 # F075 — Temporal Fact Extraction + Date-Aware Retrieval
 
-**Status:** 📝 Draft **v2.11** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 11 rounds of codex PR review fixes
+**Status:** 📝 Draft **v2.12** (2026-05-28) — incorporates arch / python-pro / devil's-advocate spec review + 12 rounds of codex PR review fixes
 **Proposed by:** Tim + investigation thread
 **Date:** 2026-05-27
 **Depends on:** F002 (Heart), F022 (Cross-type linking), F040 (Graph Densifier), F047 (Actionability backfill pattern), F051 (Eval harness for measurement)
@@ -10,6 +10,14 @@
 **Reviews:** `docs/reviews/F075-spec-arch-review.md`, `F075-spec-python-pro-review.md`, `F075-spec-devil-review.md`
 
 ---
+
+## v2.12 changelog (codex re-review round 12)
+
+Codex flagged 1 P1 (continued cap refinement) + 2 P2s on v2.11:
+
+- **P1 — Downstream cap at `_store_candidate_facts` still truncates to 5.** v2.11 fixed `_merge_summaries` to emit `dated[:30] + stable[:5]` = up to 35 candidates. But `fact_extractor.py:249` then iterates `candidates[:5]` — so only the first 5 (dated, by partition order) reach `Heart.learn`. The 6th-onward dated facts that row 13's fix preserved are dropped at the storage gate. Two-site fix required, not one. Fixed: wire-path row 14 added — `_store_candidate_facts` applies the same partition (`dated[:event_limit] + stable[:5]`).
+- **P2 — Pre-learn dedup paths bypass the round-11 `_learn` event_date guard.** Both extractor paths (`fact_extractor.py:176-179`, `263-269`) call `search_facts(content, limit=1)` and skip on `fact_dedup_threshold` BEFORE `Heart.learn` is invoked. The round-11 `_learn` guard never fires for hits caught at this pre-check — distinct-date events still collapse. Fixed: wire-path row 15 added — same `event_date != event_date → bypass` rule applied at both pre-learn dedup sites. (Requires `search_facts` to surface `event_date` on results, already mandated by row 7's FactSummary update.)
+- **P2 — Backfill pseudo-code mixed AsyncSession lock with asyncpg-style SQL.** v2.11's `_run_batches` acquired the lock via `db.session()` (SQLAlchemy AsyncSession), but `_process_batch` used `conn.fetch(...)` with asyncpg `$1` placeholders. AsyncSession has `execute()` not `fetch()` — script would `AttributeError` before classifying any row. F047 uses consistent `session.execute(text(...), {...})` throughout (`actionability_backfill.py:78-205`). Fixed: pseudo-code rewritten to use SQLAlchemy `session.execute(text("..."), {...})` + `result.mappings().all()` + per-row `session.commit()`.
 
 ## v2.11 changelog (codex re-review round 11)
 
@@ -273,6 +281,8 @@ Per Arch P1-1's enumeration:
 | 11 | `nous/handlers/fact_extractor.py:189-196` (Layer 1b direct path) | The fallback `FactInput(...)` construction must also pass `event_date=fact.get("event_date")` AND `event_date_classified_at=datetime.now(UTC)` (gated on `settings.temporal_extraction_enabled`). This path does NOT go through `_store_candidate_facts`, so step 2 alone doesn't cover it. Without this, eval / direct-ingest traffic that bypasses the summarizer silently discards extracted dates. |
 | 12 | `nous/api/retrieval_pipeline.py:659-669` (`_heart_results_to_pipeline`) | Copy `event_date` from `RecallResult.metadata` into the new `PipelineResult.metadata` dict. Today the conversion drops metadata entirely. Layer 3's `r.metadata.get("event_date")` reads from `PipelineResult`, so the field must survive the conversion. |
 | 13 | `nous/handlers/episode_summarizer.py:445-468` (`_merge_summaries`) | **P1 — multi-chunk merge truncation.** For transcripts exceeding `transcript_max_chars` (16K default), the summarizer summarizes chunks separately and `_merge_summaries` returns `merged_candidate_facts[:5]` in chunk order — dated events from later chunks get dropped before FactExtractor sees them. This is the exact case F075 targets (BEAM-100K conversations routinely exceed 16K with many date-anchored events per episode). Fix: split dated and stable candidates into separate pools with independent caps — `dated[:settings.candidate_facts_event_limit] + stable[:5]`. Default event-limit = **30** so multi-day dev projects with daily date-anchored check-ins are preserved. Stable cap stays at 5 (general patterns where 5 covers most episodes). Both pools keep original chunk order so chronological information survives. |
+| 14 | `nous/handlers/fact_extractor.py:249` (`_store_candidate_facts`) | **P1 — downstream cap re-truncates to 5.** `_store_candidate_facts` iterates `candidates[:5]` — even after `_merge_summaries` (row 13) emits 35 candidates, only the first 5 dated facts get stored, defeating row 13's fix. Apply the same partition here: `dated, stable = partition(candidates); dated[:settings.candidate_facts_event_limit] + stable[:5]`. Both caps come from the same settings to keep the merge+store pipeline self-consistent. |
+| 15 | `nous/handlers/fact_extractor.py:176-179, 263-269` (pre-learn dedup paths) | **P2 — event_date dedup-bypass needs to apply BEFORE Heart.learn.** Both extractor paths run `search_facts(content, limit=1)` and skip on `fact_dedup_threshold` BEFORE invoking `Heart.learn` — the round-11 `_learn` event_date guard never fires for these pre-learn dedup hits. Apply the same rule at both pre-learn sites: when both candidate AND `existing[0]` have `event_date IS NOT NULL` and the dates differ, do NOT skip — proceed with the learn. Requires `search_facts` results to surface `event_date` (already covered by wire row 8 if FactSummary carries it, which row 7 mandates). |
 
 **Plus — dedup/supersession must respect distinct dates (Codex round-11 P2 fix):** Heart.learn currently performs (a) embedding-similarity dedup (cosine ≥ `fact_native_cosine_threshold = 0.80`) and (b) subject-based supersession (same subject → newer deactivates older). Both operate without considering `event_date`. For temporal events with the same entity but different dates — e.g. *"Christina obtained the API key on March 10"* and *"Christina rotated the API key on March 12"* — embedding similarity is high AND subjects collide, so the second fact would either be silently dropped as duplicate or supersede the first. Either outcome destroys the date pair temporal_reasoning needs.
 
@@ -497,22 +507,30 @@ v1's `WHERE id = (SELECT id FROM batch)` was broken for `LIMIT > 1`. v2 copies F
 Fix: the schema adds `event_date_classified_at TIMESTAMPTZ` (see §Schema migration). The backfill writes it on every classification attempt regardless of outcome. Eligibility uses `event_date_classified_at IS NULL` (not `event_date IS NULL`).
 
 ```python
-# Pseudo-code; concrete sites verified against F047 (actionability_backfill.py:48-65)
+# Pseudo-code; uses SQLAlchemy AsyncSession to match the locked session
+# context from _run_batches above. F047's actionability_backfill.py:78-205
+# uses the same idiom — session.execute(text(...), {...}).
+from sqlalchemy import text
+
 async def _process_batch(
-    conn,
+    session: AsyncSession,        # the same locked session from _run_batches
     agent_id: str,
     batch_size: int,
-    budget: BudgetTracker,  # injected by _run_batches; F047 pattern
-) -> tuple[int, bool]:    # (updated_rows, stop_requested)
-    rows = await conn.fetch("""
-        SELECT id, subject, content, embedding, source_episode_id
-        FROM heart.facts
-        WHERE agent_id = $1
-          AND event_date_classified_at IS NULL  -- eligibility = "never tried"
-          AND active = TRUE
-        ORDER BY learned_at DESC
-        LIMIT $2
-    """, agent_id, batch_size)
+    budget: BudgetTracker,        # injected by _run_batches; F047 pattern
+) -> tuple[int, bool]:            # (updated_rows, stop_requested)
+    result = await session.execute(
+        text("""
+            SELECT id, subject, content, embedding, source_episode_id
+            FROM heart.facts
+            WHERE agent_id = :agent_id
+              AND event_date_classified_at IS NULL  -- eligibility = "never tried"
+              AND active = TRUE
+            ORDER BY learned_at DESC
+            LIMIT :batch_size
+        """),
+        {"agent_id": agent_id, "batch_size": batch_size},
+    )
+    rows = result.mappings().all()
 
     updated = 0
     for row in rows:
@@ -528,21 +546,27 @@ async def _process_batch(
             )
             return (updated, True)  # signal _run_batches to halt
 
-        result = await _classify_event_date(row)  # returns date | None
+        classified = await _classify_event_date(row)  # returns date | None
         budget.consume(_TOKENS_PER_LLM_CALL)
 
         # ALWAYS mark classified — even when no date found. This is what
         # prevents re-processing the same stable facts on subsequent batches.
-        await conn.execute("""
-            UPDATE heart.facts
-            SET event_date = $1,
-                event_date_classified_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $2
-        """, result, row["id"])  # $1 may be NULL — that's correct
+        await session.execute(
+            text("""
+                UPDATE heart.facts
+                SET event_date = :event_date,
+                    event_date_classified_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :id
+            """),
+            {"event_date": classified, "id": row["id"]},  # event_date may be NULL
+        )
+        await session.commit()  # per-row commit so a crash mid-loop preserves progress
         updated += 1
     return (updated, False)
 ```
+
+Single SQLAlchemy session is used for the lock acquisition (`_run_batches`), the batch SELECT, the per-row UPDATE, and the lock release — consistent API throughout. F047 follows the exact same pattern at `actionability_backfill.py:78-205`.
 
 `BudgetTracker` is a tiny class mirroring F047's bookkeeping (`actionability_backfill.py:48-65, 162-167`): initialized with `token_budget // _TOKENS_PER_LLM_CALL = max_calls`; `ok()` returns `remaining_calls > 0`; `consume(tokens)` decrements. The outer `_run_batches` loop exits cleanly when `_process_batch` returns `stop_requested=True`.
 
