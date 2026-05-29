@@ -109,37 +109,46 @@ async def test_resolve_dedup_checks_lower_hits_when_top_is_distinct():
     heart.facts.is_distinct_fact = AsyncMock(side_effect=[True, False])
     ext = _extractor(heart, tiebreaker=True)
 
-    result = await ext._resolve_dedup("MRR dropped five percent", None)
-    assert result == para.id
+    canonical, exclude_ids = await ext._resolve_dedup("MRR dropped five percent", None)
+    assert canonical == para.id
+    # the DISTINCT-judged opposite is recorded for native-dedup exclusion
+    assert opp.id in exclude_ids
 
 
 @pytest.mark.asyncio
 async def test_resolve_dedup_stores_when_all_hits_distinct():
-    """All above-threshold hits judged DISTINCT -> None (store as new)."""
+    """All above-threshold hits judged DISTINCT -> store as new, and every hit
+    id is returned for native-dedup exclusion (codex P2)."""
+    a, b = _hit("x up", 0.97), _hit("y down", 0.95)
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[_hit("x up", 0.97), _hit("y down", 0.95)])
+    heart.search_facts = AsyncMock(return_value=[a, b])
     heart.facts.is_distinct_fact = AsyncMock(return_value=True)
     ext = _extractor(heart, tiebreaker=True)
-    assert await ext._resolve_dedup("z", None) is None
+    canonical, exclude_ids = await ext._resolve_dedup("z", None)
+    assert canonical is None
+    assert set(exclude_ids) == {a.id, b.id}
 
 
 @pytest.mark.asyncio
 async def test_resolve_dedup_flag_off_dedups_top_hit_without_llm():
-    """Flag off -> legacy single-top-hit dedup; the tiebreaker is never called."""
+    """Flag off -> legacy single-top-hit dedup; tiebreaker never called and no
+    exclusion ids (native dedup behaves exactly as pre-F377)."""
     top = _hit("anchor", 0.97)
     heart = MagicMock()
     heart.search_facts = AsyncMock(return_value=[top])
     heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=False)
 
-    assert await ext._resolve_dedup("paraphrase", None) == top.id
+    canonical, exclude_ids = await ext._resolve_dedup("paraphrase", None)
+    assert canonical == top.id
+    assert exclude_ids == []
     heart.facts.is_distinct_fact.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_resolve_dedup_skips_distinct_event_date():
     """F075 bypass: an above-threshold hit with a different event_date is not a
-    duplicate, so it is skipped even before the tiebreaker."""
+    duplicate, so it is skipped even before the tiebreaker (and not excluded)."""
     from datetime import date
     hit = _hit("same text", 0.97, event_date=date(2024, 1, 1))
     heart = MagicMock()
@@ -147,5 +156,7 @@ async def test_resolve_dedup_skips_distinct_event_date():
     heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=True)
 
-    assert await ext._resolve_dedup("same text", date(2024, 6, 1)) is None
+    canonical, exclude_ids = await ext._resolve_dedup("same text", date(2024, 6, 1))
+    assert canonical is None
+    assert exclude_ids == []
     heart.facts.is_distinct_fact.assert_not_called()

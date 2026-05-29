@@ -138,17 +138,27 @@ class FactExtractor:
 
     async def _resolve_dedup(
         self, content: str, candidate_event_date: "date | None"
-    ) -> UUID | None:
-        """Return the canonical fact UUID to dedup against, or None to store new.
+    ) -> "tuple[UUID | None, list[UUID]]":
+        """Resolve the RRF dedup decision for a candidate.
+
+        Returns ``(canonical_id, exclude_ids)``:
+        - ``canonical_id`` is the existing fact to dedup against, or ``None`` to
+          store the candidate as new.
+        - ``exclude_ids`` are above-threshold hits the tiebreaker judged DISTINCT;
+          the caller must pass them to ``Heart.learn(exclude_ids=...)`` so the
+          native-cosine (Leg-2) dedup cannot silently re-merge them and undo the
+          DISTINCT verdict (codex P2).
 
         Examines every above-threshold RRF hit (not just the top one) when the
         tiebreaker is enabled, so a high-overlap opposite ranked first cannot
         hide a real duplicate ranked lower (codex P2). With the flag off, only
-        the top hit is examined — byte-identical to the pre-F377 path. Hits whose
-        ``event_date`` differs from the candidate are skipped (F075: distinct
-        dates = distinct events). Shared by both producer paths (cf. #354)."""
+        the top hit is examined and ``exclude_ids`` is empty — byte-identical to
+        the pre-F377 path. Hits whose ``event_date`` differs from the candidate
+        are skipped (F075: distinct dates = distinct events). Shared by both
+        producer paths (cf. #354)."""
+        distinct_ids: list[UUID] = []
         if not self._dedup_via_search:
-            return None
+            return None, distinct_ids
         # `is True` so a truthy Mock/duck-typed setting can't widen the search
         # or trip the await-a-mock path (codex P2 / MagicMock footgun).
         tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
@@ -168,8 +178,11 @@ class FactExtractor:
             ):
                 continue
             if await self._confirm_dedup(cand.content, content):
-                return cand.id
-        return None
+                return cand.id, distinct_ids
+            # Tiebreaker judged DISTINCT: keep examining lower hits, and exclude
+            # this id from the downstream native dedup so it isn't re-merged.
+            distinct_ids.append(cand.id)
+        return None, distinct_ids
 
     async def extract_and_store(
         self,
@@ -256,7 +269,7 @@ class FactExtractor:
             # _resolve_dedup examines all above-threshold RRF hits (F377) and
             # applies the F075 distinct-event_date bypass; None = store as new.
             content = fact.get("content", "")
-            canonical = await self._resolve_dedup(content, candidate_event_date)
+            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date)
             if canonical is not None:
                 stored_ids.append(canonical)
                 logger.debug(
@@ -293,7 +306,12 @@ class FactExtractor:
                 event_date=candidate_event_date,
                 event_date_classified_at=classified_at,
             )
-            result = await self._heart.learn(fact_input)
+            # F377: exclude tiebreaker-DISTINCT hits from native (Leg-2) dedup so
+            # learn can't re-merge what the tiebreaker already cleared.
+            if exclude_ids:
+                result = await self._heart.learn(fact_input, exclude_ids=exclude_ids)
+            else:
+                result = await self._heart.learn(fact_input)
             if isinstance(result, FactRejected):
                 logger.debug("Admission rejected extracted fact: %s", content[:50])
                 continue
@@ -379,7 +397,7 @@ class FactExtractor:
             # Dedup: check if similar fact exists. _resolve_dedup examines all
             # above-threshold RRF hits (F377) + the F075 distinct-date bypass;
             # None = store as new.
-            canonical = await self._resolve_dedup(content, candidate_event_date)
+            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date)
             if canonical is not None:
                 stored_ids.append(canonical)
                 logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", canonical, content[:50])
@@ -412,7 +430,11 @@ class FactExtractor:
                 event_date=candidate_event_date,
                 event_date_classified_at=classified_at,
             )
-            result = await self._heart.learn(fact_input)
+            # F377: exclude tiebreaker-DISTINCT hits from native (Leg-2) dedup.
+            if exclude_ids:
+                result = await self._heart.learn(fact_input, exclude_ids=exclude_ids)
+            else:
+                result = await self._heart.learn(fact_input)
             if isinstance(result, FactRejected):
                 logger.debug("Admission rejected candidate fact: %s", content[:50])
                 continue
