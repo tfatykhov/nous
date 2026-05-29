@@ -1053,9 +1053,19 @@ class AgentRunner:
             # loop — recall_deep can be dispatched inside the for-turn
             # iteration. Reset lives in the existing `finally:` below so
             # we don't add new nesting (single source of cleanup).
-            _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
-                _build_exclude_ids(self._settings, turn_context)
-            )
+            #
+            # stream_chat is an async GENERATOR. rest.py pumps it via
+            # asyncio.ensure_future(gen.__anext__()) once per SSE chunk (the
+            # keepalive race), so each resume runs in a FRESH copied context.
+            # A Token from set() in one __anext__ cannot be reset() in a later
+            # one — CPython raises "Token was created in a different Context".
+            # So: only engage the contextvar when the feature is actually on
+            # (None = flag off, the prod default → no churn, no crash), and
+            # restore by value (set) rather than by token (reset) so the
+            # finally can never raise across the generator's context boundaries.
+            _f071_exclude = _build_exclude_ids(self._settings, turn_context)
+            if _f071_exclude is not None:
+                CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
             try:
                 for turn in range(self._settings.max_turns):
                     # Unified block accumulator: keyed by block_index, preserves
@@ -1343,9 +1353,12 @@ class AgentRunner:
                 # F026: Post-response claim verification (streaming: warn+inject only)
                 self._verify_claims(session_id, response_text, all_tool_results, ledger)
             finally:
-                # F071: reset the per-turn exclusion set first — restoring the
-                # contextvar must not depend on post_turn's success.
-                CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
+                # F071: clear the per-turn exclusion set first — restoring the
+                # contextvar must not depend on post_turn's success. Value-based
+                # (set(None), not reset(token)) so it can't raise across the
+                # async-generator's per-chunk context boundaries (see set above).
+                if _f071_exclude is not None:
+                    CURRENT_TURN_EXCLUDE_IDS.set(None)
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
