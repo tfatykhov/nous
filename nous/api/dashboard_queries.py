@@ -809,15 +809,23 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                 GROUP BY CAST(created_at AS date)
             ),
             daily_new_connected AS (
-                SELECT day, COUNT(DISTINCT node_id) AS cnt
+                -- #381: count each node ONCE, on the date its FIRST edge appeared.
+                -- The prior form counted a node on every day it had any edge, so a
+                -- node edged on multiple days inflated the running connected sum past
+                -- the running total and GREATEST(...,0) clamped orphan_count to 0.
+                SELECT first_connected_day AS day, COUNT(*) AS cnt
                 FROM (
-                    SELECT CAST(created_at AS date) AS day, source_id AS node_id
-                    FROM brain.graph_edges WHERE agent_id = :agent_id
-                    UNION
-                    SELECT CAST(created_at AS date) AS day, target_id AS node_id
-                    FROM brain.graph_edges WHERE agent_id = :agent_id
+                    SELECT node_id, CAST(MIN(created_at) AS date) AS first_connected_day
+                    FROM (
+                        SELECT source_id AS node_id, created_at
+                        FROM brain.graph_edges WHERE agent_id = :agent_id
+                        UNION ALL
+                        SELECT target_id AS node_id, created_at
+                        FROM brain.graph_edges WHERE agent_id = :agent_id
+                    ) all_endpoints
+                    GROUP BY node_id
                 ) first_seen
-                GROUP BY day
+                GROUP BY first_connected_day
             ),
             pre_period AS (
                 SELECT
