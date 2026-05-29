@@ -77,18 +77,23 @@ async def _fetch_chunk_context(
     session: AsyncSession,
     agent_id: str,
     episode_id: UUID | None,
-    embedding,  # fact.embedding from the batch row; None or pgvector type
+    fact_id: UUID,
+    has_embedding: bool,
 ) -> str | None:
     """Nearest source-episode chunk by cosine to the fact's embedding.
 
     Returns None for legacy rows (no source episode / no embedding) or when
     no embedded chunk matches — caller falls back to fact.content.
+
+    The cosine is computed entirely in SQL via a correlated subquery on the
+    fact's embedding — never round-tripping the vector through Python. A raw
+    ``text()`` SELECT returns pgvector as a text literal (``"[...]"``), so the
+    old serialize-in-Python path raised ValueError on '[' for every embedded
+    fact; the repo's chunk↔fact cosine (graph_densifier) likewise keeps the
+    vector in SQL (``c.embedding <=> f.embedding``).
     """
-    if episode_id is None or embedding is None:
+    if episode_id is None or not has_embedding:
         return None
-    # The embedding comes back as a pgvector type; serialize to the text
-    # literal before binding (repo convention, graph_linker.py:179).
-    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
     result = await session.execute(
         text(
             """
@@ -97,11 +102,13 @@ async def _fetch_chunk_context(
             WHERE agent_id = :agent_id
               AND episode_id = :episode_id
               AND embedding IS NOT NULL
-            ORDER BY embedding <=> CAST(:embedding AS vector)
+            ORDER BY embedding <=> (
+                SELECT embedding FROM heart.facts WHERE id = :fact_id
+            )
             LIMIT 1
             """
         ),
-        {"agent_id": agent_id, "episode_id": episode_id, "embedding": embedding_str},
+        {"agent_id": agent_id, "episode_id": episode_id, "fact_id": fact_id},
     )
     row = result.first()
     return row[0] if row else None
@@ -196,7 +203,9 @@ async def _process_batch(
     result = await session.execute(
         text(
             f"""
-            SELECT id, subject, content, embedding, source_episode_id, learned_at
+            SELECT id, subject, content,
+                   (embedding IS NOT NULL) AS has_embedding,
+                   source_episode_id, learned_at
             FROM heart.facts
             WHERE agent_id = :agent_id
               AND event_date_classified_at IS NULL
@@ -219,7 +228,7 @@ async def _process_batch(
             return (updated, True, new_cursor, len(rows))
 
         chunk_ctx = await _fetch_chunk_context(
-            session, agent_id, row["source_episode_id"], row["embedding"]
+            session, agent_id, row["source_episode_id"], row["id"], row["has_embedding"]
         )
         classified, should_stamp = await _classify_event_date(client, model, row, chunk_ctx)
         budget.consume()
