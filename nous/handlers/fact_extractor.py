@@ -122,7 +122,9 @@ class FactExtractor:
         and should be stored. Fails open to dedup (flag off, or None verdict) so a
         tiebreaker outage never changes legacy behaviour. Shared by both dedup
         sites so they cannot drift (cf. #354)."""
-        if not self._settings.fact_dedup_tiebreaker_enabled:
+        # getattr default-off: duck-typed / stub settings without the attr must
+        # not accidentally enable the tiebreaker (codex P2).
+        if not getattr(self._settings, "fact_dedup_tiebreaker_enabled", False):
             return True
         if await self._heart.facts.is_distinct_fact(existing_content, candidate_content) is True:
             logger.debug(
@@ -131,6 +133,39 @@ class FactExtractor:
             )
             return False
         return True
+
+    async def _resolve_dedup(
+        self, content: str, candidate_event_date: "date | None"
+    ) -> UUID | None:
+        """Return the canonical fact UUID to dedup against, or None to store new.
+
+        Examines every above-threshold RRF hit (not just the top one) when the
+        tiebreaker is enabled, so a high-overlap opposite ranked first cannot
+        hide a real duplicate ranked lower (codex P2). With the flag off, only
+        the top hit is examined — byte-identical to the pre-F377 path. Hits whose
+        ``event_date`` differs from the candidate are skipped (F075: distinct
+        dates = distinct events). Shared by both producer paths (cf. #354)."""
+        if not self._dedup_via_search:
+            return None
+        tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False)
+        # Only widen the search when the tiebreaker can re-judge lower hits;
+        # flag-off keeps the historical single-top-hit behaviour exactly.
+        limit = 5 if tiebreaker else 1
+        existing = await self._heart.search_facts(content, limit=limit)
+        for cand in existing:
+            # search_facts is score-desc; stop at the first sub-threshold hit.
+            if cand.score is None or cand.score <= self._settings.fact_dedup_threshold:
+                break
+            # F075: distinct event_dates = distinct events, never a duplicate.
+            if (
+                candidate_event_date is not None
+                and cand.event_date is not None
+                and candidate_event_date != cand.event_date
+            ):
+                continue
+            if await self._confirm_dedup(cand.content, content):
+                return cand.id
+        return None
 
     async def extract_and_store(
         self,
@@ -213,29 +248,18 @@ class FactExtractor:
                 else None
             )
 
-            # Dedup: check if similar fact exists (production paraphrase guard)
+            # Dedup: check if similar fact exists (production paraphrase guard).
+            # _resolve_dedup examines all above-threshold RRF hits (F377) and
+            # applies the F075 distinct-event_date bypass; None = store as new.
             content = fact.get("content", "")
-            if self._dedup_via_search:
-                existing = await self._heart.search_facts(content, limit=1)
-                if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
-                    # F075 dedup bypass: distinct event_dates = distinct events.
-                    # Both sides are post-validator date|None objects after the
-                    # round-trip above — type-safe equality, no string coercion.
-                    existing_event_date = existing[0].event_date
-                    if not (
-                        candidate_event_date is not None
-                        and existing_event_date is not None
-                        and candidate_event_date != existing_event_date
-                    ):
-                        # F377: confirm the RRF dup before skipping the write.
-                        if await self._confirm_dedup(existing[0].content, content):
-                            stored_ids.append(existing[0].id)
-                            logger.debug(
-                                "Dedup skip — adding canonical UUID %s for content: %s",
-                                existing[0].id, content[:50],
-                            )
-                            continue
-                    # else: dates differ (or tiebreaker says distinct) — fall through to store
+            canonical = await self._resolve_dedup(content, candidate_event_date)
+            if canonical is not None:
+                stored_ids.append(canonical)
+                logger.debug(
+                    "Dedup skip — adding canonical UUID %s for content: %s",
+                    canonical, content[:50],
+                )
+                continue
 
             # F075 (arch P2-1): the fallback _EXTRACT_PROMPT has no event_date
             # field, so any dated candidate here is best-effort and we should
@@ -348,24 +372,14 @@ class FactExtractor:
             if not content or not str(content).strip():
                 continue
 
-            # Dedup: check if similar fact exists
-            if self._dedup_via_search:
-                existing = await self._heart.search_facts(content, limit=1)
-                if existing and existing[0].score is not None and existing[0].score > self._settings.fact_dedup_threshold:
-                    # F075 dedup bypass: distinct event_dates = distinct events.
-                    # Both sides are post-validator date|None — type-safe equality.
-                    existing_event_date = existing[0].event_date
-                    if not (
-                        candidate_event_date is not None
-                        and existing_event_date is not None
-                        and candidate_event_date != existing_event_date
-                    ):
-                        # F377: confirm the RRF dup before skipping the write.
-                        if await self._confirm_dedup(existing[0].content, content):
-                            stored_ids.append(existing[0].id)
-                            logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
-                            continue
-                    # else: dates differ (or tiebreaker says distinct) — fall through to store
+            # Dedup: check if similar fact exists. _resolve_dedup examines all
+            # above-threshold RRF hits (F377) + the F075 distinct-date bypass;
+            # None = store as new.
+            canonical = await self._resolve_dedup(content, candidate_event_date)
+            if canonical is not None:
+                stored_ids.append(canonical)
+                logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", canonical, content[:50])
+                continue
 
             # F075: producer-path classification marker — gated on flag.
             # The summarizer's prompt DOES include event_date (Layer 1a in spec)
