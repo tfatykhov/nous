@@ -114,12 +114,23 @@ _CLASSIFY_SYSTEM = (
 )
 
 
-async def _classify_event_date(client, model: str, row, chunk_context: str | None) -> date | None:
-    """LLM-extract the event date for one fact. Returns a validated date | None.
+async def _classify_event_date(
+    client, model: str, row, chunk_context: str | None
+) -> tuple[date | None, bool]:
+    """LLM-extract the event date for one fact.
+
+    Returns ``(event_date, should_stamp)``:
+      - valid date string        -> (date,  True)   record + terminal
+      - explicit null            -> (None,  True)   "no date", terminal
+      - malformed non-null date  -> (None,  False)  leave NULL, retry next run
+      - no structured result     -> (None,  False)  transient failure, retry
 
     Normalizes the raw LLM string through FactInput's validator so malformed
     shapes ('2024-3-10', ISO week, bad calendar dates) are dropped exactly as
-    on the live path — type-safe, no parse-repair here.
+    on the live path. A non-null raw the validator drops is malformed and is
+    NOT stamped terminal — otherwise one bad model response would permanently
+    lose a recoverable date on a legacy fact (mirrors the F075 live-path
+    "malformed stays eligible" rule). The row is simply revisited next run.
     """
     content = row["content"]
     context = (chunk_context or content)[:1500]
@@ -149,8 +160,12 @@ async def _classify_event_date(client, model: str, row, chunk_context: str | Non
         max_tokens=100,
     )
     if not result:
-        return None
-    return FactInput(content="_", event_date=result.get("event_date")).event_date
+        # Transient LLM failure — don't stamp, retry on the next run.
+        return (None, False)
+    raw = result.get("event_date")
+    validated = FactInput(content="_", event_date=raw).event_date
+    malformed = raw is not None and validated is None
+    return (validated, not malformed)
 
 
 async def _process_batch(
@@ -161,39 +176,63 @@ async def _process_batch(
     *,
     client,
     model: str,
-) -> tuple[int, bool]:
-    """Classify one batch of never-classified facts. Returns (updated, stop)."""
+    cursor: tuple | None,
+) -> tuple[int, bool, tuple | None, int]:
+    """Classify one keyset-paginated batch of never-classified facts.
+
+    Returns ``(updated, stop, new_cursor, fetched)``. ``cursor`` is the
+    ``(learned_at, id)`` of the last row processed in the previous batch (None
+    for the first). Keyset pagination — rather than always re-taking the top-N
+    by recency — lets us leave malformed/transient rows un-stamped without
+    re-fetching them this run (they'd otherwise reappear forever, or a full
+    page of them would stall older eligible rows behind a plain LIMIT). Still-
+    NULL rows are naturally retried on the next run.
+    """
+    params: dict = {"agent_id": agent_id, "batch_size": batch_size}
+    cursor_clause = ""
+    if cursor is not None:
+        cursor_clause = "AND (learned_at, id) < (:cur_la, :cur_id)"
+        params["cur_la"], params["cur_id"] = cursor
     result = await session.execute(
         text(
-            """
-            SELECT id, subject, content, embedding, source_episode_id
+            f"""
+            SELECT id, subject, content, embedding, source_episode_id, learned_at
             FROM heart.facts
             WHERE agent_id = :agent_id
               AND event_date_classified_at IS NULL
               AND active = TRUE
-            ORDER BY learned_at DESC
+              {cursor_clause}
+            ORDER BY learned_at DESC, id DESC
             LIMIT :batch_size
             """
         ),
-        {"agent_id": agent_id, "batch_size": batch_size},
+        params,
     )
     rows = result.mappings().all()
 
     updated = 0
+    new_cursor = cursor
     for row in rows:
         if not budget.ok():
             logger.info("F075 backfill: token budget exhausted, stopping at %d rows", updated)
             await session.commit()  # persist work-so-far before the early return
-            return (updated, True)
+            return (updated, True, new_cursor, len(rows))
 
         chunk_ctx = await _fetch_chunk_context(
             session, agent_id, row["source_episode_id"], row["embedding"]
         )
-        classified = await _classify_event_date(client, model, row, chunk_ctx)
+        classified, should_stamp = await _classify_event_date(client, model, row, chunk_ctx)
         budget.consume()
+        # Advance the cursor for every consumed row, stamped or not, so a
+        # skipped (malformed/transient) row isn't re-fetched within this run.
+        new_cursor = (row["learned_at"], row["id"])
 
-        # ALWAYS stamp classified_at — even when no date found — so the row
-        # is never re-processed (eligibility is classified_at IS NULL).
+        if not should_stamp:
+            # Malformed or transient — leave classified_at NULL; retry next run.
+            continue
+
+        # Stamp classified_at (even when event_date is NULL = "no date") so a
+        # cleanly-answered row is never re-processed.
         await session.execute(
             text(
                 """
@@ -209,7 +248,7 @@ async def _process_batch(
         updated += 1
 
     await session.commit()
-    return (updated, False)
+    return (updated, False, new_cursor, len(rows))
 
 
 async def run_temporal_backfill(
@@ -231,16 +270,22 @@ async def run_temporal_backfill(
             logger.info("F075 backfill: another process holds the lock for %s, exiting", agent_id)
             return {"agent_id": agent_id, "classified": 0, "skipped": "lock_held"}
         try:
-            budget = BudgetTracker(max(1, token_budget // _TOKENS_PER_LLM_CALL))
+            # Hard call cap. No max(1, ...): --token-budget 0 (or below one
+            # call's cost) must perform zero LLM calls, matching the dry-run
+            # estimate and honoring the operator's cost guard.
+            budget = BudgetTracker(max(0, token_budget // _TOKENS_PER_LLM_CALL))
+            cursor: tuple | None = None
             while True:
                 async with db.session_factory() as work_session:
-                    updated, stop = await _process_batch(
+                    updated, stop, cursor, fetched = await _process_batch(
                         work_session, agent_id, batch_size, budget,
                         client=client, model=settings.background_model,
+                        cursor=cursor,
                     )
                 total += updated
                 logger.info("F075 backfill: %d facts classified so far", total)
-                if stop or updated == 0:
+                # A short page means we've walked every eligible row once.
+                if stop or fetched < batch_size:
                     break
         finally:
             await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
@@ -285,7 +330,7 @@ async def _main(args) -> None:
     try:
         eligible = await _count_eligible(db, args.agent_id)
         if args.dry_run:
-            calls = min(eligible, args.token_budget // _TOKENS_PER_LLM_CALL)
+            calls = min(eligible, max(0, args.token_budget // _TOKENS_PER_LLM_CALL))
             est_tokens = calls * _TOKENS_PER_LLM_CALL
             print(
                 f"[dry-run] agent={args.agent_id}: {eligible} facts eligible "
