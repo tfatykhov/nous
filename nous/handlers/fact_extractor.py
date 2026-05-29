@@ -164,16 +164,25 @@ class FactExtractor:
         tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
         threshold = self._settings.fact_dedup_threshold
 
-        # Phase 1 — decide the TOP hit at limit=1. RRF penalises single-channel
-        # hits by `limit + 1` (search.py), so limit=1 yields each hit's HIGHEST
-        # possible normalised score. Resolving the top hit here means widening
-        # the search later can never drop the rank-1 hit below threshold and
-        # miss a duplicate the legacy (limit=1) path would have caught (#469).
+        # The `search_facts` score is coupled to the call's `limit` in two ways,
+        # so a single fixed-limit search can't be trusted for the threshold gate:
+        #   (1) RRF penalises single-channel hits by `limit + 1` (search.py), so a
+        #       hit's score *drops* as limit grows (#469/P2-5);
+        #   (2) apply_supersession_filter runs AFTER truncation, so a superseded
+        #       rank-1 fact is soft-penalised ×0.3 at limit=1 (its superseder is
+        #       absent) but dropped entirely at limit=5 where the superseder is
+        #       present, surfacing the current fact instead (#470/P2-6).
+        # Handle both: decide an above-threshold TOP hit at limit=1 (its highest
+        # possible score — closes P2-5), then run the widened limit=5 pass when
+        # the tiebreaker is on AND there's something a single limit=1 view could
+        # have hidden (a real top candidate, or a superseded top whose ×0.3 may
+        # mask its superseder at rank 2-5 — closes P2-6).
         top_hits = await self._heart.search_facts(content, limit=1)
-        if not top_hits or top_hits[0].score is None or top_hits[0].score <= threshold:
-            return None, distinct_ids  # no above-threshold candidate → store
-        top = top_hits[0]
-        if not self._event_date_differs(top, candidate_event_date):
+        top = top_hits[0] if top_hits else None
+        top_is_candidate = (
+            top is not None and top.score is not None and top.score > threshold
+        )
+        if top_is_candidate and not self._event_date_differs(top, candidate_event_date):
             if await self._confirm_dedup(top.content, content):
                 return top.id, distinct_ids
             distinct_ids.append(top.id)  # tiebreaker judged the top DISTINCT
@@ -182,13 +191,18 @@ class FactExtractor:
         if not tiebreaker:
             return None, distinct_ids
 
-        # Phase 2 (flag-on only) — the top hit was DISTINCT or a different event,
-        # so look for a lower-ranked true duplicate it outranked. Lower hits have
-        # no limit=1 baseline, so any RRF penalty here only loses *added* coverage,
-        # never regresses legacy dedup.
+        # Skip the widened pass only for a genuine non-dup: a below-threshold,
+        # non-superseded top. (A below-threshold *superseded* top may be a ×0.3
+        # artifact hiding its superseder — P2-6 — so it still needs phase 2.)
+        if not top_is_candidate and (top is None or top.superseded_by is None):
+            return None, distinct_ids
+
+        # Phase 2 (flag-on) — widen to find a duplicate a single limit=1 view
+        # hid: a lower-ranked true dup the top outranked, or the superseder of a
+        # soft-penalised superseded top (dropped here, so its superseder surfaces).
         for cand in await self._heart.search_facts(content, limit=5):
-            if cand.id == top.id:
-                continue
+            if top is not None and cand.id == top.id:
+                continue  # already decided at limit=1 scoring
             if cand.score is None or cand.score <= threshold:
                 continue
             if self._event_date_differs(cand, candidate_event_date):

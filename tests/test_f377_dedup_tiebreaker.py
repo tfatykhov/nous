@@ -84,8 +84,11 @@ from uuid import uuid4  # noqa: E402
 from nous.handlers.fact_extractor import FactExtractor  # noqa: E402
 
 
-def _hit(content: str, score: float, *, id=None, event_date=None) -> SimpleNamespace:
-    return SimpleNamespace(id=id or uuid4(), content=content, score=score, event_date=event_date)
+def _hit(content: str, score: float, *, id=None, event_date=None, superseded_by=None) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id or uuid4(), content=content, score=score,
+        event_date=event_date, superseded_by=superseded_by,
+    )
 
 
 def _extractor(heart, *, tiebreaker: bool) -> FactExtractor:
@@ -166,6 +169,47 @@ async def test_resolve_dedup_decides_top_hit_at_limit_1_scoring():
     canonical, exclude_ids = await ext._resolve_dedup("near duplicate", None)
     assert canonical == dup_id  # deduped via the limit=1 decision, not missed
     assert exclude_ids == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_finds_superseder_when_top_is_soft_penalized():
+    """#470/P2-6: apply_supersession_filter runs after truncation, so at limit=1
+    a superseded rank-1 fact is soft-penalized ×0.3 below threshold (superseder
+    absent). The widened pass must still run (top.superseded_by is set) and dedup
+    against the superseder that surfaces at limit=5."""
+    old_id, superseder_id = uuid4(), uuid4()
+
+    async def fake_search(content, limit):
+        if limit == 1:
+            # superseded old fact, ×0.3 soft-penalized below threshold
+            return [_hit("old value", 0.30, id=old_id, superseded_by=superseder_id)]
+        # limit=5: old fact dropped by the supersession filter; superseder surfaces
+        return [_hit("current value", 0.95, id=superseder_id)]
+
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(side_effect=fake_search)
+    heart.facts.is_distinct_fact = AsyncMock(return_value=False)  # superseder is a real dup
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("the value", None)
+    assert canonical == superseder_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_below_threshold_nonsuperseded_skips_phase2():
+    """A genuine non-dup (below-threshold, non-superseded top) stores without the
+    extra limit=5 search — no perf regression on the common clean-learn path."""
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(return_value=[_hit("unrelated", 0.40)])
+    heart.facts.is_distinct_fact = AsyncMock()
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("brand new fact", None)
+    assert canonical is None
+    assert exclude_ids == []
+    heart.facts.is_distinct_fact.assert_not_called()
+    # only the limit=1 phase-1 search ran
+    assert heart.search_facts.await_count == 1
 
 
 @pytest.mark.asyncio
