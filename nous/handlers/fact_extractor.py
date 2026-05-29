@@ -162,27 +162,66 @@ class FactExtractor:
         # `is True` so a truthy Mock/duck-typed setting can't widen the search
         # or trip the await-a-mock path (codex P2 / MagicMock footgun).
         tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
-        # Only widen the search when the tiebreaker can re-judge lower hits;
-        # flag-off keeps the historical single-top-hit behaviour exactly.
-        limit = 5 if tiebreaker else 1
-        existing = await self._heart.search_facts(content, limit=limit)
-        for cand in existing:
-            # search_facts is score-desc; stop at the first sub-threshold hit.
-            if cand.score is None or cand.score <= self._settings.fact_dedup_threshold:
-                break
-            # F075: distinct event_dates = distinct events, never a duplicate.
-            if (
-                candidate_event_date is not None
-                and cand.event_date is not None
-                and candidate_event_date != cand.event_date
-            ):
+        threshold = self._settings.fact_dedup_threshold
+
+        # `search_facts` returns the RECALL score, not a clean dedup signal:
+        # `apply_supersession_filter` (facts.py:338) penalises superseded (×0.3)
+        # and low-confidence (×conf) hits AND RE-SORTS after truncation, and RRF
+        # penalises single-channel hits by `limit + 1` (search.py). So the score
+        # at a given limit depends on the limit and the result-set composition.
+        # Two consequences, handled together rather than per-symptom:
+        #   • a single-channel rank-1 dup scores highest at limit=1 (#469/P2-5);
+        #   • a penalised rank-1 hit at limit=1 can sit below threshold while the
+        #     real winner (superseder / high-confidence dup) only rises to the top
+        #     after the filter re-sort at limit=5 (#470/P2-6, P2-7).
+        # So: decide an above-threshold TOP at limit=1 (closes P2-5), then — when
+        # the tiebreaker is on — ALWAYS run the limit=5 pass unless limit=1 found
+        # nothing at all. Gating on "any hit returned" (not on a symptom like
+        # superseded/low-conf) covers every current and future filter mutator.
+        top_hits = await self._heart.search_facts(content, limit=1)
+        top = top_hits[0] if top_hits else None
+        top_is_candidate = (
+            top is not None and top.score is not None and top.score > threshold
+        )
+        if top_is_candidate and not self._event_date_differs(top, candidate_event_date):
+            if await self._confirm_dedup(top.content, content):
+                return top.id, distinct_ids
+            distinct_ids.append(top.id)  # tiebreaker judged the top DISTINCT
+
+        # Legacy (flag off) examines only the top hit — byte-identical behaviour.
+        if not tiebreaker:
+            return None, distinct_ids
+
+        # No hit at all → genuinely nothing to dedup against → store. Any returned
+        # hit means the penalised/re-sorted limit=1 score can't be trusted to mean
+        # "no duplicate", so always widen (restores merged #468's limit=5 coverage).
+        if top is None:
+            return None, distinct_ids
+
+        # Phase 2 (flag-on) — the limit=5 filter re-sort surfaces the real winner
+        # (superseder / high-confidence dup) that a single limit=1 view hid, plus
+        # any lower-ranked true dup the top outranked.
+        for cand in await self._heart.search_facts(content, limit=5):
+            if cand.id == top.id:
+                continue  # already decided at limit=1 scoring
+            if cand.score is None or cand.score <= threshold:
+                continue
+            if self._event_date_differs(cand, candidate_event_date):
                 continue
             if await self._confirm_dedup(cand.content, content):
                 return cand.id, distinct_ids
-            # Tiebreaker judged DISTINCT: keep examining lower hits, and exclude
-            # this id from the downstream native dedup so it isn't re-merged.
             distinct_ids.append(cand.id)
         return None, distinct_ids
+
+    @staticmethod
+    def _event_date_differs(hit: "FactSummary", candidate_event_date: "date | None") -> bool:
+        """F075: True when both sides carry a distinct event_date (= distinct
+        events, never a duplicate). Missing dates on either side → not distinct."""
+        return (
+            candidate_event_date is not None
+            and hit.event_date is not None
+            and candidate_event_date != hit.event_date
+        )
 
     async def extract_and_store(
         self,

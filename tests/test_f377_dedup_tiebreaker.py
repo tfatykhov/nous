@@ -84,8 +84,11 @@ from uuid import uuid4  # noqa: E402
 from nous.handlers.fact_extractor import FactExtractor  # noqa: E402
 
 
-def _hit(content: str, score: float, *, id=None, event_date=None) -> SimpleNamespace:
-    return SimpleNamespace(id=id or uuid4(), content=content, score=score, event_date=event_date)
+def _hit(content: str, score: float, *, id=None, event_date=None, superseded_by=None) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=id or uuid4(), content=content, score=score,
+        event_date=event_date, superseded_by=superseded_by,
+    )
 
 
 def _extractor(heart, *, tiebreaker: bool) -> FactExtractor:
@@ -143,6 +146,91 @@ async def test_resolve_dedup_flag_off_dedups_top_hit_without_llm():
     assert canonical == top.id
     assert exclude_ids == []
     heart.facts.is_distinct_fact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_decides_top_hit_at_limit_1_scoring():
+    """#469/P2-5: widening the dedup search must not drop the rank-1 hit below
+    threshold. A single-channel duplicate scores above threshold at limit=1 but
+    below at limit=5 (RRF penalty_rank = limit + 1); phase 1 resolves the top hit
+    at limit=1, so it is still deduped instead of wrongly stored."""
+    dup_id = uuid4()
+
+    async def fake_search(content, limit):
+        # same fact, limit-dependent RRF score (single-channel penalty grows)
+        score = 0.94 if limit == 1 else 0.83
+        return [_hit("near-dup", score, id=dup_id)]
+
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(side_effect=fake_search)
+    heart.facts.is_distinct_fact = AsyncMock(return_value=False)  # genuine duplicate
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("near duplicate", None)
+    assert canonical == dup_id  # deduped via the limit=1 decision, not missed
+    assert exclude_ids == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_finds_superseder_when_top_is_soft_penalized():
+    """#470/P2-6: apply_supersession_filter runs after truncation, so at limit=1
+    a superseded rank-1 fact is soft-penalized ×0.3 below threshold (superseder
+    absent). The widened pass must still run (top.superseded_by is set) and dedup
+    against the superseder that surfaces at limit=5."""
+    old_id, superseder_id = uuid4(), uuid4()
+
+    async def fake_search(content, limit):
+        if limit == 1:
+            # superseded old fact, ×0.3 soft-penalized below threshold
+            return [_hit("old value", 0.30, id=old_id, superseded_by=superseder_id)]
+        # limit=5: old fact dropped by the supersession filter; superseder surfaces
+        return [_hit("current value", 0.95, id=superseder_id)]
+
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(side_effect=fake_search)
+    heart.facts.is_distinct_fact = AsyncMock(return_value=False)  # superseder is a real dup
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("the value", None)
+    assert canonical == superseder_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_low_confidence_top_finds_dup():
+    """#470/P2-7: apply_supersession_filter also ×confidence-penalizes low-conf
+    hits and re-sorts. A low-confidence rank-1 hit pushed below threshold at
+    limit=1 must not short-circuit — the widened pass surfaces the high-confidence
+    duplicate the filter re-sort brings to the top at limit=5."""
+    lowconf_id, dup_id = uuid4(), uuid4()
+
+    async def fake_search(content, limit):
+        if limit == 1:
+            return [_hit("low-conf note", 0.40, id=lowconf_id)]  # not superseded
+        return [_hit("the real duplicate", 0.95, id=dup_id)]
+
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(side_effect=fake_search)
+    heart.facts.is_distinct_fact = AsyncMock(return_value=False)
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("the value", None)
+    assert canonical == dup_id  # generic gate widens despite a non-superseded top
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_empty_search_stores_without_widening():
+    """The only short-circuit left: limit=1 returns nothing → genuinely no fact to
+    dedup against → store, no widened search."""
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(return_value=[])
+    heart.facts.is_distinct_fact = AsyncMock()
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("brand new fact", None)
+    assert canonical is None
+    assert exclude_ids == []
+    heart.facts.is_distinct_fact.assert_not_called()
+    assert heart.search_facts.await_count == 1  # no phase-2 widening
 
 
 @pytest.mark.asyncio
