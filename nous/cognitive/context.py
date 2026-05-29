@@ -32,6 +32,7 @@ TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
     "Context Safety": "static",
+    "Epistemic Routing": "dynamic",  # §2
     "User Profile": "semi_stable",
     "Active Censors": "semi_stable",
     "Current Frame": "semi_stable",
@@ -112,6 +113,7 @@ class ContextEngine:
         identity_override: str | None = None,
         temporal_boost: bool = False,  # 008.6
         critic_skills: list[str] | None = None,
+        epistemic_class: str | None = None,  # §2
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -226,6 +228,23 @@ class ContextEngine:
                     tier=SECTION_TIERS.get("Context Safety", "dynamic"),
                 )
             )
+
+        # §2: Epistemic routing instruction (sibling to the anti-hallucination
+        # block). Orthogonal: the block above is about cleared tool-results +
+        # fabricated IDs; this is about memory-vs-base-knowledge routing. Flag
+        # OFF => no section appended => byte-identical to today.
+        if self._settings.epistemic_gate_enabled:
+            epistemic_text = self._epistemic_instruction(epistemic_class)
+            if epistemic_text:
+                sections.append(
+                    ContextSection(
+                        priority=2,
+                        label="Epistemic Routing",
+                        content=epistemic_text,
+                        token_estimate=self._estimate_tokens(epistemic_text),
+                        tier=SECTION_TIERS.get("Epistemic Routing", "dynamic"),
+                    )
+                )
 
         # F020: Cache availability hints
         if session_id and session:
@@ -867,6 +886,48 @@ class ContextEngine:
         elif window >= 200_000:
             return int(base_budget * 1.5)
         return base_budget
+
+    def _epistemic_instruction(self, cls: str | None) -> str:
+        """§2: map an epistemic class to its routing prose.
+
+        ``None`` (fail-open) and any unknown value return the SOFTENED abstain
+        prose — fail-open errs toward ANSWERING general questions while still
+        restricting personal/time-sensitive asks to retrieved memory. It MUST
+        NOT broadly forbid base-model knowledge.
+        """
+        if cls == "grounded":
+            return (
+                "This turn relates to the user's own memory, decisions, or this "
+                "project. Answer using your retrieved memory below and cite which "
+                "fact/decision/episode you used. If the specific answer is not in "
+                "your retrieved memory, say so plainly rather than guessing."
+            )
+        if cls == "world_knowledge":
+            return (
+                "This is a general, non-personal question (e.g. coding, how-to, a "
+                "definition, general utility). Answer it directly from your own "
+                "broad knowledge. You MAY note that this is general knowledge "
+                "rather than something from the user's personal memory. Do NOT "
+                "refuse just because it is not in the retrieved memory."
+            )
+        if cls == "abstain":
+            return (
+                "This turn depends on personal, specific, or time-sensitive "
+                "information that only the user's memory could hold. Answer ONLY "
+                "from the retrieved memory below. If the specific answer is not "
+                "present, clearly say you don't have that information rather than "
+                "guessing or inferring."
+            )
+        # None (fail-open) or any unknown value => SOFTENED abstain prose.
+        return (
+            "Prefer the user's retrieved memory below for anything personal, "
+            "specific to this project, or time-sensitive, and say so plainly if "
+            "a personal/time-sensitive answer is not present. For general, "
+            "non-personal questions — coding, how-to, definitions, general "
+            "utility — you MAY answer from your own broad knowledge. Do NOT "
+            "refuse a general question merely because it is not in the retrieved "
+            "memory."
+        )
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count: len(text) / CHARS_PER_TOKEN."""

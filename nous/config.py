@@ -967,6 +967,62 @@ class Settings(BaseSettings):
         description="F050 — cache row retention; sweep handler ships in F050.2.",
     )
 
+    # §2: Haiku-layered three-way epistemic gate (grounded / world_knowledge /
+    # abstain). All default OFF (dark-launch); fail-open to softened prose.
+    epistemic_gate_enabled: bool = Field(
+        default=False,
+        description=(
+            "§2 master switch — Haiku three-way epistemic routing "
+            "(grounded / world_knowledge / abstain). When true, an "
+            "EpistemicClassifier tags each turn and ContextEngine injects an "
+            "Epistemic Routing instruction sibling to the anti-hallucination "
+            "block. Fail-open: timeout/error/budget => softened abstain prose "
+            "that PERMITS base-model knowledge. Default OFF."
+        ),
+    )
+    epistemic_gate_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="§2 — Haiku model id for epistemic classification.",
+    )
+    epistemic_gate_timeout_seconds: float = Field(
+        default=2.0,
+        description=(
+            "§2 — per-call Haiku timeout. Blown timeout fails open to "
+            "softened prose."
+        ),
+    )
+    epistemic_gate_max_per_hour: int = Field(
+        default=500,
+        description=(
+            "§2 — in-process sliding-window budget cap on Haiku calls. "
+            "Breach => fail open + WARN-once."
+        ),
+    )
+
+    # §1: event_date-only recency conflict resolver. Default OFF; inert until
+    # NOUS_TEMPORAL_EXTRACTION_ENABLED populates event_date.
+    recency_resolver_enabled: bool = Field(
+        default=False,
+        description=(
+            "§1: event_date-only recency conflict resolver. After retrieval, "
+            "same-subject facts that conflict on a value AND both carry a "
+            "non-null, DIFFERING event_date are resolved: newer => "
+            "[current YYYY-MM], older => [superseded YYYY-MM] + down-ranked "
+            "*0.3 (never deleted). Inert until NOUS_TEMPORAL_EXTRACTION_ENABLED "
+            "populates event_date. Default OFF."
+        ),
+    )
+    recency_resolver_similarity_floor: float = Field(
+        default=0.55, ge=0.0, le=1.0,
+        description=(
+            "§1: difflib SequenceMatcher ratio above which two same-subject "
+            "facts are treated as the SAME attribute restated/changed (so a "
+            "differing event_date = supersession). Below this => different "
+            "attributes => no trigger. Tuned to avoid 'Alice's role' vs "
+            "'Alice's city' false conflicts."
+        ),
+    )
+
     # F067: Episode chunks (raw transcript chunks alongside lossy fact extraction)
     # and parent episode injection in recall_deep. Both default OFF — opt-in.
     # Validated on LongMemEval per-question isolation methodology (+13pp chunks,

@@ -235,6 +235,15 @@ def _format_pipeline_text(
     search_all = "all" in search_types
     results_text: list[str] = []
 
+    def _recency_tag(r: "Any") -> str:
+        # §1: inline [current|superseded YYYY-MM] tag. Empty string when no
+        # recency_status (flag OFF, or non-conflicting fact) => byte-identical.
+        status = r.metadata.get("recency_status")
+        if not status:
+            return ""
+        month = r.metadata.get("recency_date", "")
+        return f"[{status} {month}]".rstrip()  # no leading space
+
     # ------------------------------------------------------------------
     # Heart Memory section
     # ------------------------------------------------------------------
@@ -277,7 +286,7 @@ def _format_pipeline_text(
                     results_text.append(f"-- Session {sess_id[:8]} --")
                     for result in items:
                         results_text.append(
-                            f"{i}. [{result.type}] {result.description} "
+                            f"{i}. [{result.type}] {result.description}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f})"
                         )
                         i += 1
@@ -286,7 +295,7 @@ def _format_pipeline_text(
                         results_text.append("-- Other --")
                     for result in no_session:
                         results_text.append(
-                            f"{i}. [{result.type}] {result.description} "
+                            f"{i}. [{result.type}] {result.description}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f})"
                         )
                         i += 1
@@ -294,7 +303,7 @@ def _format_pipeline_text(
                 # Legacy flat output (byte-identical to pre-P1.1)
                 for i, result in enumerate(heart_results, 1):
                     results_text.append(
-                        f"{i}. [{result.type}] {result.description} "
+                        f"{i}. [{result.type}] {result.description}{_recency_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f})"
                     )
         else:
