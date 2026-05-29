@@ -162,27 +162,51 @@ class FactExtractor:
         # `is True` so a truthy Mock/duck-typed setting can't widen the search
         # or trip the await-a-mock path (codex P2 / MagicMock footgun).
         tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
-        # Only widen the search when the tiebreaker can re-judge lower hits;
-        # flag-off keeps the historical single-top-hit behaviour exactly.
-        limit = 5 if tiebreaker else 1
-        existing = await self._heart.search_facts(content, limit=limit)
-        for cand in existing:
-            # search_facts is score-desc; stop at the first sub-threshold hit.
-            if cand.score is None or cand.score <= self._settings.fact_dedup_threshold:
-                break
-            # F075: distinct event_dates = distinct events, never a duplicate.
-            if (
-                candidate_event_date is not None
-                and cand.event_date is not None
-                and candidate_event_date != cand.event_date
-            ):
+        threshold = self._settings.fact_dedup_threshold
+
+        # Phase 1 — decide the TOP hit at limit=1. RRF penalises single-channel
+        # hits by `limit + 1` (search.py), so limit=1 yields each hit's HIGHEST
+        # possible normalised score. Resolving the top hit here means widening
+        # the search later can never drop the rank-1 hit below threshold and
+        # miss a duplicate the legacy (limit=1) path would have caught (#469).
+        top_hits = await self._heart.search_facts(content, limit=1)
+        if not top_hits or top_hits[0].score is None or top_hits[0].score <= threshold:
+            return None, distinct_ids  # no above-threshold candidate → store
+        top = top_hits[0]
+        if not self._event_date_differs(top, candidate_event_date):
+            if await self._confirm_dedup(top.content, content):
+                return top.id, distinct_ids
+            distinct_ids.append(top.id)  # tiebreaker judged the top DISTINCT
+
+        # Legacy (flag off) examines only the top hit — byte-identical behaviour.
+        if not tiebreaker:
+            return None, distinct_ids
+
+        # Phase 2 (flag-on only) — the top hit was DISTINCT or a different event,
+        # so look for a lower-ranked true duplicate it outranked. Lower hits have
+        # no limit=1 baseline, so any RRF penalty here only loses *added* coverage,
+        # never regresses legacy dedup.
+        for cand in await self._heart.search_facts(content, limit=5):
+            if cand.id == top.id:
+                continue
+            if cand.score is None or cand.score <= threshold:
+                continue
+            if self._event_date_differs(cand, candidate_event_date):
                 continue
             if await self._confirm_dedup(cand.content, content):
                 return cand.id, distinct_ids
-            # Tiebreaker judged DISTINCT: keep examining lower hits, and exclude
-            # this id from the downstream native dedup so it isn't re-merged.
             distinct_ids.append(cand.id)
         return None, distinct_ids
+
+    @staticmethod
+    def _event_date_differs(hit: "FactSummary", candidate_event_date: "date | None") -> bool:
+        """F075: True when both sides carry a distinct event_date (= distinct
+        events, never a duplicate). Missing dates on either side → not distinct."""
+        return (
+            candidate_event_date is not None
+            and hit.event_date is not None
+            and candidate_event_date != hit.event_date
+        )
 
     async def extract_and_store(
         self,

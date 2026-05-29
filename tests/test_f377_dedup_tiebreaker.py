@@ -146,6 +146,29 @@ async def test_resolve_dedup_flag_off_dedups_top_hit_without_llm():
 
 
 @pytest.mark.asyncio
+async def test_resolve_dedup_decides_top_hit_at_limit_1_scoring():
+    """#469/P2-5: widening the dedup search must not drop the rank-1 hit below
+    threshold. A single-channel duplicate scores above threshold at limit=1 but
+    below at limit=5 (RRF penalty_rank = limit + 1); phase 1 resolves the top hit
+    at limit=1, so it is still deduped instead of wrongly stored."""
+    dup_id = uuid4()
+
+    async def fake_search(content, limit):
+        # same fact, limit-dependent RRF score (single-channel penalty grows)
+        score = 0.94 if limit == 1 else 0.83
+        return [_hit("near-dup", score, id=dup_id)]
+
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(side_effect=fake_search)
+    heart.facts.is_distinct_fact = AsyncMock(return_value=False)  # genuine duplicate
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("near duplicate", None)
+    assert canonical == dup_id  # deduped via the limit=1 decision, not missed
+    assert exclude_ids == []
+
+
+@pytest.mark.asyncio
 async def test_resolve_dedup_skips_distinct_event_date():
     """F075 bypass: an above-threshold hit with a different event_date is not a
     duplicate, so it is skipped even before the tiebreaker (and not excluded)."""
