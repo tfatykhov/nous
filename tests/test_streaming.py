@@ -453,7 +453,13 @@ class TestStreamChat:
     ):
         """F071 regression with the feature ON: the contextvar is engaged, but
         value-based restore (set(None), not reset(token)) must still not raise
-        when the generator is pumped across contexts."""
+        when the generator is pumped across contexts.
+
+        Scope: this asserts no crash + post_turn runs. It does NOT assert that
+        exclusions are *applied* mid-stream — they aren't on the SSE path (the
+        set() is invisible after the first yield; documented limitation in
+        stream_chat). This is a crash regression, not a feature-correctness test.
+        """
         cognitive, _ = mock_cognitive
         settings = _make_mock_settings()
         settings.recall_exclude_context_ids = True  # F071 ON

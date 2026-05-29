@@ -1063,6 +1063,17 @@ class AgentRunner:
             # (None = flag off, the prod default → no churn, no crash), and
             # restore by value (set) rather than by token (reset) so the
             # finally can never raise across the generator's context boundaries.
+            #
+            # KNOWN LIMITATION (deferred): for the same fresh-context-per-chunk
+            # reason, a value set here is only visible within THIS __anext__.
+            # Once stream_chat yields, the next __anext__ runs in the parent
+            # context, so a recall_deep dispatched after the first yielded event
+            # reads None — i.e. F071 exclusions do NOT apply on the streaming
+            # path. recall_exclude_context_ids is off-by-default/dark and was
+            # only ever validated on the non-streaming run_turn path; making it
+            # work under SSE needs the contextvar set in rest.py's parent
+            # context (or exclude-ids threaded explicitly), tracked separately.
+            # This block's job is solely to not CRASH the streaming turn.
             _f071_exclude = _build_exclude_ids(self._settings, turn_context)
             if _f071_exclude is not None:
                 CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
