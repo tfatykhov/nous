@@ -100,6 +100,35 @@ _SUPERSESSION_CLASSIFIER_SCHEMA: dict[str, Any] = {
 }
 
 
+# F377: Leg-1 dedup tiebreaker prompt. Purpose-built binary same-vs-distinct
+# classifier (the supersession classifier above has no SAME/DUPLICATE label, so
+# paraphrases map ambiguously). Used only when the RRF pre-check flagged a dup.
+_DEDUP_TIEBREAKER_PROMPT_TEMPLATE = (
+    "Two short facts were flagged as possible duplicates by keyword search. "
+    "Decide whether they state the SAME fact or DIFFERENT facts.\n\n"
+    "EXISTING fact: {existing}\n\n"
+    "CANDIDATE fact: {candidate}\n\n"
+    "Return DUPLICATE only if the candidate is a restatement or paraphrase of "
+    "the existing fact with no materially different claim. Return DISTINCT if "
+    "they differ in any value, sign, polarity, quantity, direction, entity, or "
+    "time, or if one negates or contradicts the other — even when the wording "
+    "is very similar (e.g. 'metric down 5%' vs 'metric up 5%' are DISTINCT)."
+)
+
+_DEDUP_TIEBREAKER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["DUPLICATE", "DISTINCT"],
+            "description": "DUPLICATE if the candidate restates the existing fact; "
+            "DISTINCT if it makes any materially different or contradictory claim.",
+        },
+    },
+    "required": ["verdict"],
+}
+
+
 class FactManager:
     """Manages semantic memory — what we know."""
 
@@ -260,6 +289,46 @@ class FactManager:
             output_schema=_SUPERSESSION_CLASSIFIER_SCHEMA,
             max_tokens=300,
         )
+
+    async def is_distinct_fact(
+        self, existing_content: str, candidate_content: str
+    ) -> bool | None:
+        """F377 dedup tiebreaker for the Leg-1 (RRF pre-check) path.
+
+        Returns ``True`` if the candidate is a DISTINCT fact (store it, do not
+        dedup), ``False`` if it is a DUPLICATE/paraphrase (dedup), or ``None``
+        if the LLM is unavailable or the call fails. Callers MUST fail open on
+        ``None`` — i.e. preserve the pre-tiebreaker behaviour (dedup) so the
+        learn path is never blocked by a tiebreaker outage.
+        """
+        if self._llm is None:
+            return None
+
+        from nous.handlers import call_background_llm_structured
+
+        prompt = _DEDUP_TIEBREAKER_PROMPT_TEMPLATE.format(
+            existing=existing_content[:500],
+            candidate=candidate_content[:500],
+        )
+        try:
+            result = await call_background_llm_structured(
+                client=self._llm,
+                model=self._llm_model,
+                system_prompt="You are a memory deduplication classifier. "
+                "Decide whether two facts are the same or distinct.",
+                user_message=prompt,
+                tool_name="classify_dedup",
+                tool_description="Decide whether two facts are duplicates or distinct.",
+                output_schema=_DEDUP_TIEBREAKER_SCHEMA,
+                max_tokens=100,
+            )
+        except Exception:
+            logger.debug("F377 dedup tiebreaker call failed; failing open", exc_info=True)
+            return None
+
+        if not result or "verdict" not in result:
+            return None
+        return result["verdict"] == "DISTINCT"
 
     # ------------------------------------------------------------------
     # F027: Retrieval soft suppression

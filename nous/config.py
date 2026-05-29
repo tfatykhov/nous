@@ -238,6 +238,15 @@ class Settings(BaseSettings):
     # Default kept 0.95 for backwards-compat.
     fact_native_cosine_threshold: float = 0.95
 
+    # F377: Leg-1 dedup tiebreaker. When a fact's hybrid-search (RRF) pre-check
+    # flags it as a duplicate, a same-vs-distinct Haiku classifier confirms the
+    # verdict before skipping the write. Fixes RRF over-dedup on high-lexical-
+    # overlap semantic opposites ("MRR -5%" vs "MRR +5%") that threshold tuning
+    # cannot separate (sweep 0.92/0.95/0.97 = byte-identical). Fires only on the
+    # RRF-dup path, fails open (None/error -> dedup as before). Reuses
+    # contradiction_model. Default OFF (land dark; flip after the dedup eval).
+    fact_dedup_tiebreaker_enabled: bool = False
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000
