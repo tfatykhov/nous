@@ -63,6 +63,7 @@ asyncio_default_test_loop_scope = "session"
 markers = [
     "integration: requires live PostgreSQL (run with --integration)",
     "eval: F051 retrieval-eval-harness unit tests (no DB required)",
+    "postgres_only: requires real PostgreSQL (skipped unless NOUS_TEST_DB=postgres)",
 ]
 
 [tool.ruff]

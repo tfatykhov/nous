@@ -101,3 +101,59 @@ async def test_get_density_data_with_data(db):
     # Backfill progress should have today's entry
     assert len(data["backfill_progress"]) >= 1
     assert data["backfill_progress"][0]["edges"] == 1
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_orphan_trend_counts_each_node_once_across_multiple_days(db):
+    """Regression for #381: orphan_trend must not undercount when a node gains
+    edges on multiple days. The old daily_new_connected CTE counted a node once
+    per day it had ANY edge, inflating cumulative connected past cumulative total
+    so GREATEST(...,0) clamped the orphan count to 0. The final-day orphan_trend
+    value must equal the ground-truth total_orphans."""
+    from nous.api.dashboard_queries import get_health_data
+
+    agent_id = f"test-orphan-trend-{uuid.uuid4().hex[:8]}"
+    fact_a = uuid.uuid4()
+    fact_b = uuid.uuid4()  # stays orphan
+    dec_id = uuid.uuid4()
+
+    async with db.session() as session:
+        await session.execute(
+            text("""
+                INSERT INTO heart.facts (id, agent_id, content, category, active, created_at)
+                VALUES (:a, :aid, 'fact a', 'general', true, now() - interval '6 days'),
+                       (:b, :aid, 'fact b', 'general', true, now() - interval '6 days')
+            """),
+            {"a": fact_a, "b": fact_b, "aid": agent_id},
+        )
+        await session.execute(
+            text("""
+                INSERT INTO brain.decisions (id, agent_id, description, confidence, stakes, category, created_at)
+                VALUES (:id, :aid, 'decision d', 0.8, 'low', 'tooling', now() - interval '6 days')
+            """),
+            {"id": dec_id, "aid": agent_id},
+        )
+        # fact_a <-> decision connected by TWO edges created on different days.
+        # The buggy CTE counts {fact_a, decision} on each day => 4 connected,
+        # exceeding the 3 total nodes => clamp to 0 orphans.
+        await session.execute(
+            text("""
+                INSERT INTO brain.graph_edges
+                    (id, agent_id, source_id, source_type, target_id, target_type, relation, auto_linked, created_at)
+                VALUES (:e1, :aid, :src, 'fact', :tgt, 'decision', 'evidence_for', true, now() - interval '5 days'),
+                       (:e2, :aid, :src, 'fact', :tgt, 'decision', 'related_to',  true, now() - interval '3 days')
+            """),
+            {"e1": uuid.uuid4(), "e2": uuid.uuid4(), "aid": agent_id, "src": fact_a, "tgt": dec_id},
+        )
+        await session.commit()
+
+    async with db.session() as session:
+        data = await get_health_data(session, agent_id)
+
+    # Ground truth: only fact_b is an orphan.
+    assert data["total_orphans"] == 1
+    # The final-day orphan trend must match the ground-truth count, not the
+    # clamped-to-0 value the multi-day double-count used to produce.
+    assert data["orphan_trend"][-1]["count"] == data["total_orphans"]
+    assert data["orphan_trend"][-1]["count"] == 1
