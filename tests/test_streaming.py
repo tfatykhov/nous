@@ -8,6 +8,7 @@ Tests cover:
 - Telegram StreamingMessage progressive editing with debounce
 """
 
+import asyncio
 import json
 import time
 from typing import Any, AsyncGenerator
@@ -408,6 +409,72 @@ class TestStreamChat:
         assert text_events[0].text == "Hello "
         assert text_events[1].text == "world"
         assert len(done_events) >= 1
+
+    @staticmethod
+    async def _drain_via_tasks(agen):
+        """Pump an async generator the way rest.py's SSE keepalive race does:
+        each __anext__ wrapped in its own asyncio Task, so every resume runs
+        in a FRESH copied context. This is what fragments contextvar context
+        and exposed the F071 'Token was created in a different Context' crash.
+        """
+        events = []
+        while True:
+            try:
+                events.append(await asyncio.ensure_future(agen.__anext__()))
+            except StopAsyncIteration:
+                break
+        return events
+
+    @pytest.mark.asyncio
+    async def test_streaming_contextvar_survives_cross_context_pump_flag_off(
+        self, runner, mock_cognitive
+    ):
+        """F071 regression (prod default, flag OFF): pumping stream_chat across
+        per-chunk contexts must NOT raise the contextvar Token error, and the
+        finally's post_turn must still run. Pre-fix, reset(token) raised in the
+        finally (token born in a different __anext__ context) and skipped
+        post_turn on every Telegram turn."""
+        cognitive, _ = mock_cognitive
+
+        async def fake_stream(*args, **kwargs):
+            yield StreamEvent(type="text_delta", text="hi")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        events = await self._drain_via_tasks(runner.stream_chat("s-ctx-off", "Hi"))
+
+        assert any(e.type == "done" for e in events)  # clean completion, finally didn't raise
+        cognitive.post_turn.assert_awaited()  # finally ran to completion
+
+    @pytest.mark.asyncio
+    async def test_streaming_contextvar_survives_cross_context_pump_flag_on(
+        self, mock_cognitive
+    ):
+        """F071 regression with the feature ON: the contextvar is engaged, but
+        value-based restore (set(None), not reset(token)) must still not raise
+        when the generator is pumped across contexts.
+
+        Scope: this asserts no crash + post_turn runs. It does NOT assert that
+        exclusions are *applied* mid-stream — they aren't on the SSE path (the
+        set() is invisible after the first yield; documented limitation in
+        stream_chat). This is a crash regression, not a feature-correctness test.
+        """
+        cognitive, _ = mock_cognitive
+        settings = _make_mock_settings()
+        settings.recall_exclude_context_ids = True  # F071 ON
+        runner = _make_runner(cognitive, settings)
+
+        async def fake_stream(*args, **kwargs):
+            yield StreamEvent(type="text_delta", text="hi")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+        runner._call_api_stream = MagicMock(side_effect=fake_stream)
+
+        events = await self._drain_via_tasks(runner.stream_chat("s-ctx-on", "Hi"))
+
+        assert any(e.type == "done" for e in events)
+        cognitive.post_turn.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_tool_call_mid_stream(self, runner, mock_cognitive):
