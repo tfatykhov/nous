@@ -37,6 +37,7 @@ from nous.storage.models import Agent
 
 if TYPE_CHECKING:
     from nous.cognitive.critic import CriticAgent
+    from nous.cognitive.epistemic import EpistemicClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,8 @@ class CognitiveLayer:
 
         # F024: Critic Agent
         self._critic = critic
+        # §2: Haiku epistemic classifier (wired from main.py when flag on).
+        self._epistemic_classifier: "EpistemicClassifier | None" = None
         self._session_tool_history: dict[str, list[dict]] = {}
         self._censor_executor = CensorActionExecutor(heart)
         self._pending_nudges: dict[str, str] = {}
@@ -260,6 +263,10 @@ class CognitiveLayer:
         # 005.5: Session metadata for significance filtering
         # P1-8: Known memory leak on abandoned sessions (same as _active_episodes)
         self._session_metadata: dict[str, SessionMetadata] = {}  # session_id -> metadata
+
+    def set_epistemic_classifier(self, classifier: "EpistemicClassifier | None") -> None:
+        """Wire the §2 Haiku epistemic classifier (called from main.py when flag on)."""
+        self._epistemic_classifier = classifier
 
     async def list_frames(self, agent_id: str, session: AsyncSession | None = None) -> list:
         """Public delegation to FrameEngine.list_frames()."""
@@ -581,6 +588,13 @@ class CognitiveLayer:
         sections_by_tier: dict[str, str] = {}
         build_result = None
         context_token_estimate = 0
+        # §2: epistemic routing class (Haiku, fail-open to None => softened prose).
+        # Computed only on non-initiation turns (initiation uses its own prompt).
+        # classify() short-circuits when the flag is OFF, so the hot path stays
+        # free when the feature is off.
+        epistemic_class: str | None = None
+        if not _is_initiation and self._epistemic_classifier is not None:
+            epistemic_class = await self._epistemic_classifier.classify(user_input)
         if not _is_initiation:
             # 008: Load identity from DB for normal turns (review fix P1-3)
             _identity_override = None
@@ -608,6 +622,7 @@ class CognitiveLayer:
                     identity_override=_identity_override,
                     temporal_boost=_temporal_boost,  # 008.6
                     critic_skills=_critic_skills,  # Issue #229
+                    epistemic_class=epistemic_class,  # §2
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)

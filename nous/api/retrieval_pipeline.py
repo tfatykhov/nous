@@ -22,9 +22,10 @@ Byte-identical text output is a hard invariant of the refactor; see
 
 from __future__ import annotations
 
+import difflib
 import logging
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
@@ -250,6 +251,12 @@ async def run_recall_pipeline(
     # Attach contradiction links to matching results
     if acc.contradictions:
         _attach_contradictions(results, acc.contradictions)
+
+    # §1: event_date-only recency conflict resolution (same-subject conflicting
+    # facts). Runs on the full cross-leg candidate set with contradiction links
+    # present, BEFORE the rerank_by_score sort below.
+    if getattr(settings, "recency_resolver_enabled", False):
+        results = _resolve_recency_conflicts(results, settings)
 
     # F065 follow-up (2026-05-23): optional score-based merge.
     #
@@ -708,7 +715,6 @@ async def _apply_graph_adjacency_boost(
 
     Fails open: any DB error returns the original list unchanged.
     """
-    from dataclasses import replace
     from sqlalchemy import text as sa_text
 
     if not results or len(results) < 2:
@@ -766,7 +772,6 @@ async def _attach_fact_source_episodes(
     Episodes use their own id as the session. Procedures/decisions don't
     belong to a session — left untouched.
     """
-    from dataclasses import replace
     from sqlalchemy import text as sa_text
     fact_ids = [str(r.id) for r in results if r.type == "fact"]
     if not fact_ids:
@@ -993,6 +998,128 @@ def _graph_expanded_to_pipeline(
         )
         for n in graph_expanded
     ]
+
+
+def _recency_key(meta: dict) -> tuple[date | None, str]:
+    """Return ``(comparable_date_or_None, "YYYY-MM" label)``. EVENT_DATE ONLY.
+
+    ``event_date`` reaches metadata as a date-only ``"YYYY-MM-DD"`` string
+    (``heart.py`` calls ``.isoformat()`` on a ``date``). Parse with
+    ``date.fromisoformat`` wrapped in try/except so a malformed/None/non-str
+    value FAILS OPEN to ``(None, "")`` — a no-op for that fact, NOT a crash.
+    Without this, one bad event_date would take down every recall_deep call
+    while the flag is on.
+
+    Returns ``(None, "")`` when event_date is absent/None/unparseable. The
+    caller treats a None date as unresolvable => no-op: a pair conflicts ONLY
+    when BOTH keys are non-None AND differ. Label is month-granular for
+    display. NO created_at, NO list-index fallback.
+    """
+    raw = meta.get("event_date")
+    try:
+        parsed = date.fromisoformat(raw)  # type: ignore[arg-type]
+    except (ValueError, TypeError, AttributeError):
+        return (None, "")
+    return (parsed, parsed.strftime("%Y-%m"))
+
+
+def _resolve_recency_conflicts(
+    results: list[PipelineResult],
+    settings: "Settings",
+    *,
+    stale_penalty: float = 0.3,  # mirrors apply_supersession_filter penalty
+) -> list[PipelineResult]:
+    """Annotate + down-rank same-subject conflicting facts by event_date.
+
+    Scope: ``type == "fact"`` only (chunks/episodes/decisions have no
+    subject+event_date). EVENT_DATE ONLY — ordering AND the
+    ``[current]``/``[superseded]`` tag use event_date. A pair contributes to
+    the status map ONLY when BOTH facts have a non-None, DIFFERING event_date;
+    else no-op. Frozen ``PipelineResult`` => rebuild via ``dataclasses.replace``.
+    Sets ``metadata["recency_status"] = "current"|"superseded"`` and
+    ``metadata["recency_date"] = "YYYY-MM"``. Down-ranks superseded by
+    ``*stale_penalty`` (NOT deleted). The inline annotation is the only live
+    ORDERING signal in default prod + BEAM (the down-rank re-sorts only when
+    ``rerank_by_score=True``, which is False in recall_deep's default config
+    AND in BEAM). The deflated score IS still printed by the formatter
+    (cosmetic; nothing downstream re-reads it).
+    """
+    floor = float(getattr(settings, "recency_resolver_similarity_floor", 0.55))
+
+    # Group facts by normalized non-empty subject. subject is a real
+    # ``str | None`` (heart.py forwards None verbatim), so ``(x or "")`` is
+    # REQUIRED — ``meta.get("subject", "")`` returns the present None and
+    # None.strip() raises. Skip empty-subject facts before grouping.
+    groups: dict[str, list[PipelineResult]] = {}
+    for r in results:
+        if r.type != "fact":
+            continue
+        subj = (r.metadata.get("subject") or "").strip().lower()
+        if not subj:
+            continue
+        groups.setdefault(subj, []).append(r)
+
+    # status_map: id -> (status, "YYYY-MM"). "superseded" wins on conflict.
+    status_map: dict[UUID, tuple[str, str]] = {}
+
+    def _mark(rid: UUID, status: str, month: str) -> None:
+        if status_map.get(rid, ("",))[0] == "superseded":
+            return  # already superseded by some newer value — sticky
+        status_map[rid] = (status, month)
+
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                # Gate 2: not identical (never trigger on restatement).
+                if a.description.strip() == b.description.strip():
+                    continue
+                # Gate 3: conflict signal — strong (contradicts edge) OR
+                # cheap difflib overlap fallback.
+                strong = (b.id in a.contradicts) or (a.id in b.contradicts)
+                if not strong:
+                    ratio = difflib.SequenceMatcher(
+                        None, a.description, b.description
+                    ).ratio()
+                    if ratio < floor:
+                        continue
+                # Gate 4: both event_dates present AND differing.
+                ka, _ = _recency_key(a.metadata)
+                kb, _ = _recency_key(b.metadata)
+                if ka is None or kb is None or ka == kb:
+                    continue
+                # Resolve: later date => current, earlier => superseded.
+                if ka > kb:
+                    newer, older = a, b
+                else:
+                    newer, older = b, a
+                _mark(newer.id, "current", newer.metadata.get("recency_date", ""))
+                _mark(older.id, "superseded", "")
+
+    if not status_map:
+        return results
+
+    # Recompute the YYYY-MM label per id from its own event_date (the _mark
+    # above stored "" for the month; fill it here from the fact's own date so
+    # the label always matches the fact it annotates).
+    rebuilt: list[PipelineResult] = []
+    for r in results:
+        entry = status_map.get(r.id)
+        if entry is None:
+            rebuilt.append(r)
+            continue
+        status, _ = entry
+        _, month = _recency_key(r.metadata)
+        new_meta = {**r.metadata, "recency_status": status, "recency_date": month}
+        if status == "superseded":
+            rebuilt.append(
+                replace(r, metadata=new_meta, score=(r.score or 0.0) * stale_penalty)
+            )
+        else:
+            rebuilt.append(replace(r, metadata=new_meta))
+    return rebuilt
 
 
 def _attach_contradictions(

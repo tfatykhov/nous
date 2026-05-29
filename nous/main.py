@@ -181,6 +181,24 @@ async def create_components(settings: Settings) -> dict:
         critic=critic,
     )
 
+    # §2: wire EpistemicClassifier into the cognitive layer (flag-gated).
+    # Reuses the OAT-capable shared api_client (single auth path — same
+    # rationale as F050's QueryExpander wiring above).
+    if settings.epistemic_gate_enabled:
+        from nous.cognitive.epistemic import EpistemicClassifier
+        epistemic_classifier = EpistemicClassifier(
+            llm=api_client,
+            settings=settings,
+            model=settings.epistemic_gate_model,
+        )
+        cognitive.set_epistemic_classifier(epistemic_classifier)
+        logger.info(
+            "§2: EpistemicClassifier wired (model=%s, timeout=%.1fs, budget=%d/hr)",
+            settings.epistemic_gate_model,
+            settings.epistemic_gate_timeout_seconds,
+            settings.epistemic_gate_max_per_hour,
+        )
+
     # F023: Wire admission LLM client using shared api_client
     if heart.facts._admission_controller is not None:
         from nous.heart.admission import AdmissionLLMClient

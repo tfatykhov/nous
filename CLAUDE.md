@@ -516,6 +516,12 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_DATE_AWARE_BOOST_ENABLED` | `false` | F075 Layer 3 (deferred to F075.x): multiplicative boost on facts with `event_date` in query's inferred date window. Ships disabled until Layer 1+2 measurement shows it's needed. |
 | `NOUS_DATE_AWARE_BOOST_FACTOR` | `1.20` | F075 Layer 3: multiplier applied to in-window facts. 1.0 = no boost. |
 | `NOUS_DATE_AWARE_BOOST_WINDOW_PAD_DAYS` | `30` | F075 Layer 3: pad days around the inferred query date window. |
+| `NOUS_EPISTEMIC_GATE_ENABLED` | `false` | §2 master switch — Haiku three-way epistemic routing (grounded / world_knowledge / abstain). When true, an `EpistemicClassifier` tags each turn in `pre_turn` and `ContextEngine.build` injects an Epistemic Routing instruction sibling to the anti-hallucination block. Fail-open: timeout/error/budget => softened abstain prose that PERMITS base-model knowledge. Default OFF (dark-launch). NOT BEAM-measurable (BEAM bypasses intent/layer/context). |
+| `NOUS_EPISTEMIC_GATE_MODEL` | `claude-haiku-4-5-20251001` | §2 — Haiku model id for epistemic classification. |
+| `NOUS_EPISTEMIC_GATE_TIMEOUT_SECONDS` | `2.0` | §2 — per-call Haiku timeout (`asyncio.wait_for`). Blown timeout fails open to softened prose. |
+| `NOUS_EPISTEMIC_GATE_MAX_PER_HOUR` | `500` | §2 — in-process sliding-window budget cap on Haiku calls (asyncio.Lock-serialized counter, mirrors F050). Breach => fail open + WARN-once. |
+| `NOUS_RECENCY_RESOLVER_ENABLED` | `false` | §1 — event_date-only recency conflict resolver. After retrieval (in `run_recall_pipeline`, after `_attach_contradictions`), same-subject facts that conflict on a value AND both carry a non-null, DIFFERING `event_date` are resolved: newer => `[current YYYY-MM]`, older => `[superseded YYYY-MM]` + down-ranked `*0.3` (never deleted). Inert until `NOUS_TEMPORAL_EXTRACTION_ENABLED` populates `event_date`. Default OFF. |
+| `NOUS_RECENCY_RESOLVER_SIMILARITY_FLOOR` | `0.55` | §1 — `difflib.SequenceMatcher` ratio above which two same-subject facts are treated as the SAME attribute restated/changed (so a differing `event_date` = supersession). Below this => different attributes => no trigger. |
 
 ### REST Endpoints
 
