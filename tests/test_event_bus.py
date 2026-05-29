@@ -1455,6 +1455,64 @@ class TestSessionTimeoutMonitor:
         assert monitor._sleep_emitted is False
 
     @pytest.mark.asyncio
+    async def test_background_turn_does_not_reset_activity(self):
+        """#462: a background turn must not refresh the global idle timer."""
+        monitor, bus, cognitive = self._make_monitor()
+        idle_marker = time.monotonic() - 500
+        monitor._global_last_activity = idle_marker
+        monitor._sleep_emitted = True
+
+        await monitor.on_activity(
+            _make_event(
+                "turn_completed",
+                session_id="bg-sess",
+                data={"is_background": True},
+            )
+        )
+
+        # Global timer untouched and sleep flag NOT cleared by the background turn.
+        assert monitor._global_last_activity == idle_marker
+        assert monitor._sleep_emitted is True
+        # Per-session tracking also skipped — the background session is invisible.
+        assert "bg-sess" not in monitor._last_activity
+
+    @pytest.mark.asyncio
+    async def test_sleep_fires_despite_repeated_background_turns(self):
+        """#462: background turns spaced over > sleep_timeout still let sleep fire."""
+        monitor, bus, cognitive = self._make_monitor(
+            settings=_mock_settings(
+                session_idle_timeout=9999, sleep_timeout=0, sleep_check_interval=1
+            )
+        )
+        monitor._global_last_activity = time.monotonic() - 10
+        monitor._last_activity.clear()
+
+        received: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            received.append(event)
+
+        bus.on("sleep_started", capture)
+        await bus.start()
+        try:
+            # 5 consecutive background turns — each would reset the idle timer
+            # under the old behavior and starve sleep forever.
+            for _ in range(5):
+                await monitor.on_activity(
+                    _make_event(
+                        "turn_completed",
+                        session_id="bg-sess",
+                        data={"is_background": True},
+                    )
+                )
+            await monitor._check_timeouts()
+            await asyncio.sleep(0.1)
+            assert len(received) == 1
+            assert received[0].type == "sleep_started"
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
     async def test_expired_sessions_cleaned_from_tracking(self):
         """33. Expired sessions cleaned from tracking dict."""
         monitor, bus, cognitive = self._make_monitor(

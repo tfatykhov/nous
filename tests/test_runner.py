@@ -49,7 +49,7 @@ class MockCognitiveLayer:
         self.pre_turn_calls.append((agent_id, session_id, user_input))
         return self.preset_context
 
-    async def post_turn(self, agent_id, session_id, turn_result, turn_context, session=None):
+    async def post_turn(self, agent_id, session_id, turn_result, turn_context, session=None, is_background=False):
         self.post_turn_calls.append((agent_id, session_id, turn_result, turn_context))
         from nous.cognitive.schemas import Assessment
 

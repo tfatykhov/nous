@@ -354,7 +354,12 @@ class AgentRunner:
         # otherwise be closed mid-stream by a monitor tick. The bus is
         # async-queued so emitting message_received here would leave a
         # residual race; the synchronous touch eliminates it.
-        if self._session_monitor is not None:
+        #
+        # #462: skip the refresh for background turns (heartbeat/subtask).
+        # touch() resets _global_last_activity + _sleep_emitted; a background
+        # turn firing inside the sleep_timeout window would otherwise defer
+        # the sleep cycle forever. Foreground turns still close the race.
+        if self._session_monitor is not None and not is_background:
             try:
                 self._session_monitor.touch(session_id, _agent_id)
             except Exception:
@@ -394,7 +399,10 @@ class AgentRunner:
                 response_text = turn_context.censor_block_reason or "I can't process that request."
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
-                await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                await self._cognitive.post_turn(
+                    _agent_id, session_id, turn_result, turn_context,
+                    is_background=is_background,
+                )
                 return response_text, turn_context, usage
 
             # F026: Get/create execution ledger and set turn
@@ -525,7 +533,10 @@ class AgentRunner:
                 error=error,
                 thinking_blocks=thinking_blocks,
             )
-            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+            await self._cognitive.post_turn(
+                _agent_id, session_id, turn_result, turn_context,
+                is_background=is_background,
+            )
 
             # 8. Safety net: warn if decision frame but record_decision not called
             self._check_safety_net(turn_context, tool_results)

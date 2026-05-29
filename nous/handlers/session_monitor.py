@@ -82,7 +82,17 @@ class SessionTimeoutMonitor:
         bus.on("session_ended", self._on_session_ended)  # P1-4 fix: cleanup
 
     async def on_activity(self, event: Event) -> None:
-        """Track session activity."""
+        """Track session activity.
+
+        #462: background turns (heartbeat/subtask) carry ``is_background=True``
+        in the ``turn_completed`` event. They must NOT reset
+        ``_global_last_activity`` or clear ``_sleep_emitted`` — a background
+        turn firing within the sleep_timeout window would otherwise starve the
+        sleep cycle indefinitely. This is the bus-side guard; runner.py also
+        skips the synchronous ``touch()`` for background turns.
+        """
+        if event.data and event.data.get("is_background") is True:
+            return
         now = time.monotonic()
         if event.session_id:
             self._last_activity[event.session_id] = now
