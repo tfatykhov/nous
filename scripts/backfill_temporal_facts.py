@@ -325,17 +325,26 @@ async def _count_eligible(db: Database, agent_id: str) -> int:
 async def _main(args) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     settings = Settings()
+    # --token-budget falls back to NOUS_TEMPORAL_BACKFILL_DEFAULT_TOKEN_BUDGET
+    # (Settings) when omitted, so an operator who lowers that env default — or
+    # sets it to 0 to block spend unless explicitly overridden — is honored by
+    # the documented flagless command.
+    token_budget = (
+        args.token_budget
+        if args.token_budget is not None
+        else settings.temporal_backfill_default_token_budget
+    )
     db = Database(settings)
     await db.connect()
     try:
         eligible = await _count_eligible(db, args.agent_id)
         if args.dry_run:
-            calls = min(eligible, max(0, args.token_budget // _TOKENS_PER_LLM_CALL))
+            calls = min(eligible, max(0, token_budget // _TOKENS_PER_LLM_CALL))
             est_tokens = calls * _TOKENS_PER_LLM_CALL
             print(
                 f"[dry-run] agent={args.agent_id}: {eligible} facts eligible "
-                f"(event_date_classified_at IS NULL). With --token-budget "
-                f"{args.token_budget}, would classify ~{calls} this run "
+                f"(event_date_classified_at IS NULL). With token budget "
+                f"{token_budget}, would classify ~{calls} this run "
                 f"(~{est_tokens} tokens, no LLM calls made)."
             )
             return
@@ -350,7 +359,7 @@ async def _main(args) -> None:
                 db, client, settings,
                 agent_id=args.agent_id,
                 batch_size=args.batch_size,
-                token_budget=args.token_budget,
+                token_budget=token_budget,
             )
         finally:
             await client.close()
@@ -363,7 +372,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="F075.1 one-time temporal-fact backfill")
     parser.add_argument("--agent-id", required=True, help="Agent whose facts to backfill")
     parser.add_argument("--batch-size", type=int, default=100)
-    parser.add_argument("--token-budget", type=int, default=50000)
+    parser.add_argument(
+        "--token-budget",
+        type=int,
+        default=None,
+        help="Hard Haiku call cap (tokens). Omit to use "
+        "NOUS_TEMPORAL_BACKFILL_DEFAULT_TOKEN_BUDGET.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Estimate only; no LLM calls")
     asyncio.run(_main(parser.parse_args()))
 
