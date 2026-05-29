@@ -390,6 +390,26 @@ async def _build_heart_for_eval(
                 exc_info=True,
             )
 
+    # F377: wire the dedup-tiebreaker LLM client onto heart.facts when enabled.
+    # Mirrors nous/main.py:192. Without this the fact_dedup_tiebreaker_enabled
+    # flag is a no-op in the harness (is_distinct_fact returns None -> fail-open
+    # dedup) and the dedup eval can't measure the tiebreaker. Reuse the F050
+    # api_client if one was already created.
+    if getattr(settings, "fact_dedup_tiebreaker_enabled", False):
+        try:
+            if api_client is None:
+                from nous.api.anthropic_client import create_client
+                api_client = create_client(settings)
+                await api_client.start()
+            heart.facts.set_llm_client(api_client, model=settings.contradiction_model)
+            logger.info("F377: harness dedup tiebreaker LLM client wired for eval")
+        except Exception:
+            logger.warning(
+                "F377: harness dedup tiebreaker wiring failed; tiebreaker collapses "
+                "to fail-open dedup",
+                exc_info=True,
+            )
+
     try:
         async with heart:
             yield heart

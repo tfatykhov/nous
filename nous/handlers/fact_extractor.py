@@ -112,6 +112,26 @@ class FactExtractor:
         if bus is not None:
             bus.on("episode_summarized", self.handle)
 
+    async def _confirm_dedup(self, existing_content: str, candidate_content: str) -> bool:
+        """F377: confirm an RRF-flagged duplicate before skipping the write.
+
+        The hybrid-search (RRF) pre-check over-dedups high-lexical-overlap
+        semantic opposites ("MRR -5%" vs "+5%"). When the tiebreaker flag is on,
+        a same-vs-distinct Haiku classifier confirms the verdict. Returns True if
+        the candidate should be deduped (skipped), False if it was judged DISTINCT
+        and should be stored. Fails open to dedup (flag off, or None verdict) so a
+        tiebreaker outage never changes legacy behaviour. Shared by both dedup
+        sites so they cannot drift (cf. #354)."""
+        if not self._settings.fact_dedup_tiebreaker_enabled:
+            return True
+        if await self._heart.facts.is_distinct_fact(existing_content, candidate_content) is True:
+            logger.debug(
+                "F377 tiebreaker: DISTINCT — storing despite RRF dup: %s",
+                candidate_content[:50],
+            )
+            return False
+        return True
+
     async def extract_and_store(
         self,
         summary: dict,
@@ -207,13 +227,15 @@ class FactExtractor:
                         and existing_event_date is not None
                         and candidate_event_date != existing_event_date
                     ):
-                        stored_ids.append(existing[0].id)
-                        logger.debug(
-                            "Dedup skip — adding canonical UUID %s for content: %s",
-                            existing[0].id, content[:50],
-                        )
-                        continue
-                    # else: dates differ, fall through to store as new fact
+                        # F377: confirm the RRF dup before skipping the write.
+                        if await self._confirm_dedup(existing[0].content, content):
+                            stored_ids.append(existing[0].id)
+                            logger.debug(
+                                "Dedup skip — adding canonical UUID %s for content: %s",
+                                existing[0].id, content[:50],
+                            )
+                            continue
+                    # else: dates differ (or tiebreaker says distinct) — fall through to store
 
             # F075 (arch P2-1): the fallback _EXTRACT_PROMPT has no event_date
             # field, so any dated candidate here is best-effort and we should
@@ -338,10 +360,12 @@ class FactExtractor:
                         and existing_event_date is not None
                         and candidate_event_date != existing_event_date
                     ):
-                        stored_ids.append(existing[0].id)
-                        logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
-                        continue
-                    # else: dates differ, fall through to store
+                        # F377: confirm the RRF dup before skipping the write.
+                        if await self._confirm_dedup(existing[0].content, content):
+                            stored_ids.append(existing[0].id)
+                            logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", existing[0].id, content[:50])
+                            continue
+                    # else: dates differ (or tiebreaker says distinct) — fall through to store
 
             # F075: producer-path classification marker — gated on flag.
             # The summarizer's prompt DOES include event_date (Layer 1a in spec)
