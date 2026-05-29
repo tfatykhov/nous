@@ -196,11 +196,33 @@ async def test_resolve_dedup_finds_superseder_when_top_is_soft_penalized():
 
 
 @pytest.mark.asyncio
-async def test_resolve_dedup_below_threshold_nonsuperseded_skips_phase2():
-    """A genuine non-dup (below-threshold, non-superseded top) stores without the
-    extra limit=5 search — no perf regression on the common clean-learn path."""
+async def test_resolve_dedup_low_confidence_top_finds_dup():
+    """#470/P2-7: apply_supersession_filter also ×confidence-penalizes low-conf
+    hits and re-sorts. A low-confidence rank-1 hit pushed below threshold at
+    limit=1 must not short-circuit — the widened pass surfaces the high-confidence
+    duplicate the filter re-sort brings to the top at limit=5."""
+    lowconf_id, dup_id = uuid4(), uuid4()
+
+    async def fake_search(content, limit):
+        if limit == 1:
+            return [_hit("low-conf note", 0.40, id=lowconf_id)]  # not superseded
+        return [_hit("the real duplicate", 0.95, id=dup_id)]
+
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[_hit("unrelated", 0.40)])
+    heart.search_facts = AsyncMock(side_effect=fake_search)
+    heart.facts.is_distinct_fact = AsyncMock(return_value=False)
+    ext = _extractor(heart, tiebreaker=True)
+
+    canonical, exclude_ids = await ext._resolve_dedup("the value", None)
+    assert canonical == dup_id  # generic gate widens despite a non-superseded top
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_empty_search_stores_without_widening():
+    """The only short-circuit left: limit=1 returns nothing → genuinely no fact to
+    dedup against → store, no widened search."""
+    heart = MagicMock()
+    heart.search_facts = AsyncMock(return_value=[])
     heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=True)
 
@@ -208,8 +230,7 @@ async def test_resolve_dedup_below_threshold_nonsuperseded_skips_phase2():
     assert canonical is None
     assert exclude_ids == []
     heart.facts.is_distinct_fact.assert_not_called()
-    # only the limit=1 phase-1 search ran
-    assert heart.search_facts.await_count == 1
+    assert heart.search_facts.await_count == 1  # no phase-2 widening
 
 
 @pytest.mark.asyncio

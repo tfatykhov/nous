@@ -164,19 +164,20 @@ class FactExtractor:
         tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
         threshold = self._settings.fact_dedup_threshold
 
-        # The `search_facts` score is coupled to the call's `limit` in two ways,
-        # so a single fixed-limit search can't be trusted for the threshold gate:
-        #   (1) RRF penalises single-channel hits by `limit + 1` (search.py), so a
-        #       hit's score *drops* as limit grows (#469/P2-5);
-        #   (2) apply_supersession_filter runs AFTER truncation, so a superseded
-        #       rank-1 fact is soft-penalised ×0.3 at limit=1 (its superseder is
-        #       absent) but dropped entirely at limit=5 where the superseder is
-        #       present, surfacing the current fact instead (#470/P2-6).
-        # Handle both: decide an above-threshold TOP hit at limit=1 (its highest
-        # possible score — closes P2-5), then run the widened limit=5 pass when
-        # the tiebreaker is on AND there's something a single limit=1 view could
-        # have hidden (a real top candidate, or a superseded top whose ×0.3 may
-        # mask its superseder at rank 2-5 — closes P2-6).
+        # `search_facts` returns the RECALL score, not a clean dedup signal:
+        # `apply_supersession_filter` (facts.py:338) penalises superseded (×0.3)
+        # and low-confidence (×conf) hits AND RE-SORTS after truncation, and RRF
+        # penalises single-channel hits by `limit + 1` (search.py). So the score
+        # at a given limit depends on the limit and the result-set composition.
+        # Two consequences, handled together rather than per-symptom:
+        #   • a single-channel rank-1 dup scores highest at limit=1 (#469/P2-5);
+        #   • a penalised rank-1 hit at limit=1 can sit below threshold while the
+        #     real winner (superseder / high-confidence dup) only rises to the top
+        #     after the filter re-sort at limit=5 (#470/P2-6, P2-7).
+        # So: decide an above-threshold TOP at limit=1 (closes P2-5), then — when
+        # the tiebreaker is on — ALWAYS run the limit=5 pass unless limit=1 found
+        # nothing at all. Gating on "any hit returned" (not on a symptom like
+        # superseded/low-conf) covers every current and future filter mutator.
         top_hits = await self._heart.search_facts(content, limit=1)
         top = top_hits[0] if top_hits else None
         top_is_candidate = (
@@ -191,17 +192,17 @@ class FactExtractor:
         if not tiebreaker:
             return None, distinct_ids
 
-        # Skip the widened pass only for a genuine non-dup: a below-threshold,
-        # non-superseded top. (A below-threshold *superseded* top may be a ×0.3
-        # artifact hiding its superseder — P2-6 — so it still needs phase 2.)
-        if not top_is_candidate and (top is None or top.superseded_by is None):
+        # No hit at all → genuinely nothing to dedup against → store. Any returned
+        # hit means the penalised/re-sorted limit=1 score can't be trusted to mean
+        # "no duplicate", so always widen (restores merged #468's limit=5 coverage).
+        if top is None:
             return None, distinct_ids
 
-        # Phase 2 (flag-on) — widen to find a duplicate a single limit=1 view
-        # hid: a lower-ranked true dup the top outranked, or the superseder of a
-        # soft-penalised superseded top (dropped here, so its superseder surfaces).
+        # Phase 2 (flag-on) — the limit=5 filter re-sort surfaces the real winner
+        # (superseder / high-confidence dup) that a single limit=1 view hid, plus
+        # any lower-ranked true dup the top outranked.
         for cand in await self._heart.search_facts(content, limit=5):
-            if top is not None and cand.id == top.id:
+            if cand.id == top.id:
                 continue  # already decided at limit=1 scoring
             if cand.score is None or cand.score <= threshold:
                 continue
