@@ -1,0 +1,327 @@
+"""F075.1 — one-time retrofit: classify event_date on existing heart.facts.
+
+Standalone operational script (NOT a startup handler — runs once, manually,
+per agent). For each fact with event_date_classified_at IS NULL, asks a
+background LLM to extract the calendar date the fact's event happened on
+(using the source episode chunk as context, not the lossy summary), writes
+event_date (date | NULL) + stamps event_date_classified_at, then triggers
+GraphDensifier to build happened_before edges over the freshly-dated facts.
+
+Correctness patterns copied verbatim from the F075 spec §Layer 4 (hardened
+across 17 codex rounds):
+  - session-scoped pg_try_advisory_lock on a DEDICATED checked-out
+    connection (never commits / never pool-released) so the lock survives
+    every per-batch commit; namespaced "f075-temporal:" so it doesn't
+    collide with F047's actionability lock.
+  - per-batch work on fresh sessions; commit-before-early-return on budget
+    exhaustion so spent LLM calls aren't rolled back.
+  - eligibility = event_date_classified_at IS NULL (NOT event_date IS NULL):
+    a stable fact correctly classified as "no date" stays classified and
+    is never re-processed.
+  - chunk context via cosine to fact.embedding (serialized pgvector literal,
+    NULL-guarded both sides).
+
+Usage:
+    uv run python scripts/backfill_temporal_facts.py --agent-id nous-default
+    uv run python scripts/backfill_temporal_facts.py --agent-id nous-default --dry-run
+    uv run python scripts/backfill_temporal_facts.py --agent-id X --batch-size 100 --token-budget 50000
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import hashlib
+import logging
+from datetime import date
+from uuid import UUID
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from nous.api.runner import create_client
+from nous.config import Settings
+from nous.handlers import call_background_llm_structured
+from nous.heart.schemas import FactInput
+from nous.storage.database import Database
+
+logger = logging.getLogger(__name__)
+
+# Salt by feature so F075's lock never collides with F047's actionability
+# lock on the same agent (both would otherwise hash the bare agent_id).
+_LOCK_NAMESPACE = "f075-temporal"
+# Rough Haiku call cost; converts --token-budget into a hard call cap.
+_TOKENS_PER_LLM_CALL = 250
+
+
+def _advisory_lock_key(agent_id: str) -> int:
+    """Stable signed bigint advisory-lock key, namespaced to F075."""
+    salted = f"{_LOCK_NAMESPACE}:{agent_id}".encode("utf-8")
+    digest = hashlib.sha256(salted).digest()[:8]
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+class BudgetTracker:
+    """Call-count budget. consume() decrements by 1; ok() gates the next call."""
+
+    def __init__(self, max_calls: int) -> None:
+        self.remaining_calls = max_calls
+
+    def ok(self) -> bool:
+        return self.remaining_calls > 0
+
+    def consume(self) -> None:
+        self.remaining_calls -= 1
+
+
+async def _fetch_chunk_context(
+    session: AsyncSession,
+    agent_id: str,
+    episode_id: UUID | None,
+    embedding,  # fact.embedding from the batch row; None or pgvector type
+) -> str | None:
+    """Nearest source-episode chunk by cosine to the fact's embedding.
+
+    Returns None for legacy rows (no source episode / no embedding) or when
+    no embedded chunk matches — caller falls back to fact.content.
+    """
+    if episode_id is None or embedding is None:
+        return None
+    # The embedding comes back as a pgvector type; serialize to the text
+    # literal before binding (repo convention, graph_linker.py:179).
+    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+    result = await session.execute(
+        text(
+            """
+            SELECT content
+            FROM heart.episode_chunks
+            WHERE agent_id = :agent_id
+              AND episode_id = :episode_id
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT 1
+            """
+        ),
+        {"agent_id": agent_id, "episode_id": episode_id, "embedding": embedding_str},
+    )
+    row = result.first()
+    return row[0] if row else None
+
+
+_CLASSIFY_SYSTEM = (
+    "You extract the single calendar date an event happened on, from a memory "
+    "fact and its source context. Only use a date explicitly present in the "
+    "text — never guess. If there is no clear single event date, return null."
+)
+
+
+async def _classify_event_date(client, model: str, row, chunk_context: str | None) -> date | None:
+    """LLM-extract the event date for one fact. Returns a validated date | None.
+
+    Normalizes the raw LLM string through FactInput's validator so malformed
+    shapes ('2024-3-10', ISO week, bad calendar dates) are dropped exactly as
+    on the live path — type-safe, no parse-repair here.
+    """
+    content = row["content"]
+    context = (chunk_context or content)[:1500]
+    user_message = (
+        f"Fact: {content}\n\n"
+        f"Source context:\n{context}\n\n"
+        "Return the YYYY-MM-DD date this fact's event happened on, or null if "
+        "no clear single date is present."
+    )
+    result = await call_background_llm_structured(
+        client,
+        model=model,
+        system_prompt=_CLASSIFY_SYSTEM,
+        user_message=user_message,
+        tool_name="record_event_date",
+        tool_description="Record the ISO date the fact's event occurred on, or null.",
+        output_schema={
+            "type": "object",
+            "properties": {
+                "event_date": {
+                    "type": ["string", "null"],
+                    "description": "YYYY-MM-DD or null",
+                }
+            },
+            "required": ["event_date"],
+        },
+        max_tokens=100,
+    )
+    if not result:
+        return None
+    return FactInput(content="_", event_date=result.get("event_date")).event_date
+
+
+async def _process_batch(
+    session: AsyncSession,
+    agent_id: str,
+    batch_size: int,
+    budget: BudgetTracker,
+    *,
+    client,
+    model: str,
+) -> tuple[int, bool]:
+    """Classify one batch of never-classified facts. Returns (updated, stop)."""
+    result = await session.execute(
+        text(
+            """
+            SELECT id, subject, content, embedding, source_episode_id
+            FROM heart.facts
+            WHERE agent_id = :agent_id
+              AND event_date_classified_at IS NULL
+              AND active = TRUE
+            ORDER BY learned_at DESC
+            LIMIT :batch_size
+            """
+        ),
+        {"agent_id": agent_id, "batch_size": batch_size},
+    )
+    rows = result.mappings().all()
+
+    updated = 0
+    for row in rows:
+        if not budget.ok():
+            logger.info("F075 backfill: token budget exhausted, stopping at %d rows", updated)
+            await session.commit()  # persist work-so-far before the early return
+            return (updated, True)
+
+        chunk_ctx = await _fetch_chunk_context(
+            session, agent_id, row["source_episode_id"], row["embedding"]
+        )
+        classified = await _classify_event_date(client, model, row, chunk_ctx)
+        budget.consume()
+
+        # ALWAYS stamp classified_at — even when no date found — so the row
+        # is never re-processed (eligibility is classified_at IS NULL).
+        await session.execute(
+            text(
+                """
+                UPDATE heart.facts
+                SET event_date = :event_date,
+                    event_date_classified_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :id
+                """
+            ),
+            {"event_date": classified, "id": row["id"]},
+        )
+        updated += 1
+
+    await session.commit()
+    return (updated, False)
+
+
+async def run_temporal_backfill(
+    db: Database,
+    client,
+    settings: Settings,
+    agent_id: str,
+    batch_size: int,
+    token_budget: int,
+) -> dict:
+    """Lock-protected batch loop + happened_before edge build. Returns stats."""
+    key = _advisory_lock_key(agent_id)
+    total = 0
+    # Dedicated lock-holding connection: never commits, never pool-released,
+    # so the session-scoped advisory lock survives every per-batch commit.
+    async with db.engine.connect() as lock_conn:
+        locked = await lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+        if not locked.scalar():
+            logger.info("F075 backfill: another process holds the lock for %s, exiting", agent_id)
+            return {"agent_id": agent_id, "classified": 0, "skipped": "lock_held"}
+        try:
+            budget = BudgetTracker(max(1, token_budget // _TOKENS_PER_LLM_CALL))
+            while True:
+                async with db.session_factory() as work_session:
+                    updated, stop = await _process_batch(
+                        work_session, agent_id, batch_size, budget,
+                        client=client, model=settings.background_model,
+                    )
+                total += updated
+                logger.info("F075 backfill: %d facts classified so far", total)
+                if stop or updated == 0:
+                    break
+        finally:
+            await lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+
+    # Build happened_before edges over the freshly-dated facts.
+    from nous.brain.graph_densifier import GraphDensifier
+    from nous.brain.graph_linker import GraphLinker
+    from nous.brain.embeddings import EmbeddingProvider
+
+    embedder = EmbeddingProvider(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+    )
+    linker = GraphLinker(db, embedder, settings, agent_id)
+    densifier = GraphDensifier(db, linker, embedder, settings, agent_id)
+    edges = await densifier._build_happened_before_edges()
+
+    return {"agent_id": agent_id, "classified": total, "happened_before_edges": edges}
+
+
+async def _count_eligible(db: Database, agent_id: str) -> int:
+    async with db.session_factory() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT COUNT(*) FROM heart.facts
+                WHERE agent_id = :agent_id
+                  AND event_date_classified_at IS NULL
+                  AND active = TRUE
+                """
+            ),
+            {"agent_id": agent_id},
+        )
+        return result.scalar() or 0
+
+
+async def _main(args) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    settings = Settings()
+    db = Database(settings)
+    await db.connect()
+    try:
+        eligible = await _count_eligible(db, args.agent_id)
+        if args.dry_run:
+            calls = min(eligible, args.token_budget // _TOKENS_PER_LLM_CALL)
+            est_tokens = calls * _TOKENS_PER_LLM_CALL
+            print(
+                f"[dry-run] agent={args.agent_id}: {eligible} facts eligible "
+                f"(event_date_classified_at IS NULL). With --token-budget "
+                f"{args.token_budget}, would classify ~{calls} this run "
+                f"(~{est_tokens} tokens, no LLM calls made)."
+            )
+            return
+        if eligible == 0:
+            print(f"agent={args.agent_id}: 0 eligible facts — nothing to backfill.")
+            return
+
+        client = create_client(settings)
+        await client.start()
+        try:
+            stats = await run_temporal_backfill(
+                db, client, settings,
+                agent_id=args.agent_id,
+                batch_size=args.batch_size,
+                token_budget=args.token_budget,
+            )
+        finally:
+            await client.close()
+        print(f"F075 backfill complete: {stats}")
+    finally:
+        await db.disconnect()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="F075.1 one-time temporal-fact backfill")
+    parser.add_argument("--agent-id", required=True, help="Agent whose facts to backfill")
+    parser.add_argument("--batch-size", type=int, default=100)
+    parser.add_argument("--token-budget", type=int, default=50000)
+    parser.add_argument("--dry-run", action="store_true", help="Estimate only; no LLM calls")
+    asyncio.run(_main(parser.parse_args()))
+
+
+if __name__ == "__main__":
+    main()
