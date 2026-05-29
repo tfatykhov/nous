@@ -47,7 +47,7 @@ class _MockCognitive:
     async def pre_turn(self, agent_id, session_id, user_input, session=None, **_):
         return self.preset
 
-    async def post_turn(self, agent_id, session_id, turn_result, turn_context, session=None):
+    async def post_turn(self, agent_id, session_id, turn_result, turn_context, session=None, is_background=False):
         from nous.cognitive.schemas import Assessment
         return Assessment(actual=turn_result.response_text[:200])
 

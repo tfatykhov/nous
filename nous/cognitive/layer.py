@@ -888,6 +888,7 @@ class CognitiveLayer:
         turn_result: TurnResult,
         turn_context: TurnContext,
         session: AsyncSession | None = None,
+        is_background: bool = False,
     ) -> Assessment:
         """ACT (done) -> MONITOR -> LEARN — process LLM output.
 
@@ -1128,6 +1129,9 @@ class CognitiveLayer:
             "surprise_level": assessment.surprise_level,
             "decision_id": decision_id,
             "has_errors": turn_result.error is not None,
+            # #462: background turns (heartbeat/subtask) must not reset the
+            # session monitor's idle timer, or the sleep cycle never fires.
+            "is_background": is_background,
         }
         try:
             if self._bus:

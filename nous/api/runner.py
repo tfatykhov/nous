@@ -354,9 +354,16 @@ class AgentRunner:
         # otherwise be closed mid-stream by a monitor tick. The bus is
         # async-queued so emitting message_received here would leave a
         # residual race; the synchronous touch eliminates it.
+        #
+        # #462: a background turn (heartbeat/subtask) still touches its own
+        # session entry — so the monitor won't close it mid-turn and will
+        # later reclaim its runner state — but touch(is_background=True) does
+        # not reset the global sleep timer and flags the session for exclusion
+        # from the sleep gate. Foreground turns still close the race and re-arm
+        # the timer.
         if self._session_monitor is not None:
             try:
-                self._session_monitor.touch(session_id, _agent_id)
+                self._session_monitor.touch(session_id, _agent_id, is_background=is_background)
             except Exception:
                 logger.debug("session_monitor.touch failed (suppressed)", exc_info=True)
 
@@ -394,7 +401,10 @@ class AgentRunner:
                 response_text = turn_context.censor_block_reason or "I can't process that request."
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
-                await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+                await self._cognitive.post_turn(
+                    _agent_id, session_id, turn_result, turn_context,
+                    is_background=is_background,
+                )
                 return response_text, turn_context, usage
 
             # F026: Get/create execution ledger and set turn
@@ -525,7 +535,10 @@ class AgentRunner:
                 error=error,
                 thinking_blocks=thinking_blocks,
             )
-            await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
+            await self._cognitive.post_turn(
+                _agent_id, session_id, turn_result, turn_context,
+                is_background=is_background,
+            )
 
             # 8. Safety net: warn if decision frame but record_decision not called
             self._check_safety_net(turn_context, tool_results)
