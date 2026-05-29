@@ -355,13 +355,15 @@ class AgentRunner:
         # async-queued so emitting message_received here would leave a
         # residual race; the synchronous touch eliminates it.
         #
-        # #462: skip the refresh for background turns (heartbeat/subtask).
-        # touch() resets _global_last_activity + _sleep_emitted; a background
-        # turn firing inside the sleep_timeout window would otherwise defer
-        # the sleep cycle forever. Foreground turns still close the race.
-        if self._session_monitor is not None and not is_background:
+        # #462: a background turn (heartbeat/subtask) still touches its own
+        # session entry — so the monitor won't close it mid-turn and will
+        # later reclaim its runner state — but touch(is_background=True) does
+        # not reset the global sleep timer and flags the session for exclusion
+        # from the sleep gate. Foreground turns still close the race and re-arm
+        # the timer.
+        if self._session_monitor is not None:
             try:
-                self._session_monitor.touch(session_id, _agent_id)
+                self._session_monitor.touch(session_id, _agent_id, is_background=is_background)
             except Exception:
                 logger.debug("session_monitor.touch failed (suppressed)", exc_info=True)
 

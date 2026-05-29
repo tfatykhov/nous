@@ -72,6 +72,13 @@ class SessionTimeoutMonitor:
         self._runner = runner
         self._last_activity: dict[str, float] = {}  # session_id -> monotonic time
         self._last_agent: dict[str, str] = {}  # session_id -> agent_id
+        # #462: sessions whose activity came from a background turn
+        # (heartbeat/subtask). They are still tracked in _last_activity so the
+        # idle-close path can clean them up (their runner state would otherwise
+        # leak — inline await_result subtasks don't call end_conversation), but
+        # they are excluded from the global sleep-timer gate so they cannot
+        # starve the sleep cycle.
+        self._background_sessions: set[str] = set()
         self._global_last_activity: float = time.monotonic()
         self._sleep_emitted: bool = False
         self._last_wm_sweep: float = 0.0  # F049: monotonic time of last WM sweep
@@ -85,23 +92,27 @@ class SessionTimeoutMonitor:
         """Track session activity.
 
         #462: background turns (heartbeat/subtask) carry ``is_background=True``
-        in the ``turn_completed`` event. They must NOT reset
-        ``_global_last_activity`` or clear ``_sleep_emitted`` — a background
-        turn firing within the sleep_timeout window would otherwise starve the
-        sleep cycle indefinitely. This is the bus-side guard; runner.py also
-        skips the synchronous ``touch()`` for background turns.
+        in the ``turn_completed`` event. Their session is still tracked in
+        ``_last_activity`` (so the idle-close path eventually reclaims its
+        runner state), but they must NOT reset ``_global_last_activity`` or
+        clear ``_sleep_emitted`` and must be excluded from the sleep gate — a
+        background turn firing within the sleep_timeout window would otherwise
+        starve the sleep cycle indefinitely.
         """
-        if event.data and event.data.get("is_background") is True:
-            return
+        is_background = bool(event.data and event.data.get("is_background") is True)
         now = time.monotonic()
         if event.session_id:
             self._last_activity[event.session_id] = now
             if event.agent_id:
                 self._last_agent[event.session_id] = event.agent_id
+            if is_background:
+                self._background_sessions.add(event.session_id)
+        if is_background:
+            return  # don't reset the global timer / sleep flag
         self._global_last_activity = now
-        self._sleep_emitted = False  # Reset sleep flag on any activity
+        self._sleep_emitted = False  # Reset sleep flag on any foreground activity
 
-    def touch(self, session_id: str, agent_id: str) -> None:
+    def touch(self, session_id: str, agent_id: str, is_background: bool = False) -> None:
         """Synchronously refresh activity for a session.
 
         Called by AgentRunner at the START of run_turn so a long in-flight
@@ -111,10 +122,17 @@ class SessionTimeoutMonitor:
         wide race window where the monitor would close a session whose
         request was received but whose turn hadn't completed. This direct
         call closes the window.
+
+        #462: a background turn still refreshes its own session entry (so the
+        monitor won't close it mid-turn), but does not reset the global sleep
+        timer and marks the session background so it's excluded from the gate.
         """
         now = time.monotonic()
         self._last_activity[session_id] = now
         self._last_agent[session_id] = agent_id
+        if is_background:
+            self._background_sessions.add(session_id)
+            return
         self._global_last_activity = now
         self._sleep_emitted = False
 
@@ -123,6 +141,7 @@ class SessionTimeoutMonitor:
         if event.session_id:
             self._last_activity.pop(event.session_id, None)
             self._last_agent.pop(event.session_id, None)
+            self._background_sessions.discard(event.session_id)
 
     async def start(self) -> None:
         """Start the periodic timeout checker."""
@@ -287,6 +306,7 @@ class SessionTimeoutMonitor:
         for sid in closed:
             self._last_activity.pop(sid, None)
             self._last_agent.pop(sid, None)
+            self._background_sessions.discard(sid)
 
         # 2. Check global inactivity -> sleep_started
         #
@@ -302,11 +322,20 @@ class SessionTimeoutMonitor:
         # sleep_timeout, rather than requiring the dict to be empty. This
         # handles both the normal case (dict already empty after session
         # timeouts) and the edge case where sleep_timeout <= session_idle_timeout.
+        # #462: exclude background sessions (heartbeat/subtask) from the gate —
+        # they're tracked for idle cleanup but a recurring background session
+        # would otherwise keep at least one entry perpetually "recent" and
+        # block sleep forever, the same starvation in a second guise.
         global_idle = now - self._global_last_activity
+        foreground_activity = [
+            last
+            for sid, last in self._last_activity.items()
+            if sid not in self._background_sessions
+        ]
         all_sessions_sleeping = all(
             (now - last) > self._settings.sleep_timeout
-            for last in self._last_activity.values()
-        ) if self._last_activity else True
+            for last in foreground_activity
+        ) if foreground_activity else True
         if (
             global_idle > self._settings.sleep_timeout
             and not self._sleep_emitted

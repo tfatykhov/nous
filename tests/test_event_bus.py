@@ -1455,8 +1455,10 @@ class TestSessionTimeoutMonitor:
         assert monitor._sleep_emitted is False
 
     @pytest.mark.asyncio
-    async def test_background_turn_does_not_reset_activity(self):
-        """#462: a background turn must not refresh the global idle timer."""
+    async def test_background_turn_does_not_reset_global_timer(self):
+        """#462: a background turn must not reset the global idle timer or sleep
+        flag, but its session IS still tracked (so idle-close can reclaim it)
+        and is flagged background (so it's excluded from the sleep gate)."""
         monitor, bus, cognitive = self._make_monitor()
         idle_marker = time.monotonic() - 500
         monitor._global_last_activity = idle_marker
@@ -1473,12 +1475,15 @@ class TestSessionTimeoutMonitor:
         # Global timer untouched and sleep flag NOT cleared by the background turn.
         assert monitor._global_last_activity == idle_marker
         assert monitor._sleep_emitted is True
-        # Per-session tracking also skipped — the background session is invisible.
-        assert "bg-sess" not in monitor._last_activity
+        # But the session IS tracked + flagged background (cleanup preserved,
+        # excluded from the sleep gate).
+        assert "bg-sess" in monitor._last_activity
+        assert "bg-sess" in monitor._background_sessions
 
     @pytest.mark.asyncio
     async def test_sleep_fires_despite_repeated_background_turns(self):
-        """#462: background turns spaced over > sleep_timeout still let sleep fire."""
+        """#462: a recurring background session, even refreshed right now, must
+        not block sleep — it's excluded from the all-sessions-sleeping gate."""
         monitor, bus, cognitive = self._make_monitor(
             settings=_mock_settings(
                 session_idle_timeout=9999, sleep_timeout=0, sleep_check_interval=1
@@ -1495,8 +1500,9 @@ class TestSessionTimeoutMonitor:
         bus.on("sleep_started", capture)
         await bus.start()
         try:
-            # 5 consecutive background turns — each would reset the idle timer
-            # under the old behavior and starve sleep forever.
+            # 5 consecutive background turns — each would reset the global timer
+            # under the old behavior, and each leaves a "recent" entry in
+            # _last_activity that would block the gate without the exclusion.
             for _ in range(5):
                 await monitor.on_activity(
                     _make_event(
@@ -1505,10 +1511,39 @@ class TestSessionTimeoutMonitor:
                         data={"is_background": True},
                     )
                 )
+            # Background session is tracked and freshly active...
+            assert "bg-sess" in monitor._last_activity
             await monitor._check_timeouts()
             await asyncio.sleep(0.1)
+            # ...yet sleep still fires because it's excluded from the gate.
             assert len(received) == 1
             assert received[0].type == "sleep_started"
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_foreground_session_still_blocks_sleep(self):
+        """#462 guard: a recent FOREGROUND session must still block sleep — the
+        background exclusion must not leak to normal sessions."""
+        monitor, bus, cognitive = self._make_monitor(
+            settings=_mock_settings(
+                session_idle_timeout=9999, sleep_timeout=9999, sleep_check_interval=1
+            )
+        )
+        monitor._global_last_activity = time.monotonic() - 100000
+        monitor._last_activity["fg-sess"] = time.monotonic()  # recent, foreground
+
+        received: list[Event] = []
+
+        async def capture(event: Event) -> None:
+            received.append(event)
+
+        bus.on("sleep_started", capture)
+        await bus.start()
+        try:
+            await monitor._check_timeouts()
+            await asyncio.sleep(0.1)
+            assert len(received) == 0
         finally:
             await bus.stop()
 

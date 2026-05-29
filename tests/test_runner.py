@@ -443,7 +443,9 @@ async def test_run_turn_touches_session_monitor(runner, mock_cognitive):
     session_id = f"test-{uuid.uuid4().hex[:8]}"
     await runner.run_turn(session_id, "Hello!")
 
-    monitor.touch.assert_called_once_with(session_id, runner._settings.agent_id)
+    monitor.touch.assert_called_once_with(
+        session_id, runner._settings.agent_id, is_background=False
+    )
 
 
 async def test_run_turn_touch_failure_does_not_break_turn(runner, mock_cognitive):
