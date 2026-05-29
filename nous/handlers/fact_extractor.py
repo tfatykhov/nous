@@ -122,9 +122,11 @@ class FactExtractor:
         and should be stored. Fails open to dedup (flag off, or None verdict) so a
         tiebreaker outage never changes legacy behaviour. Shared by both dedup
         sites so they cannot drift (cf. #354)."""
-        # getattr default-off: duck-typed / stub settings without the attr must
-        # not accidentally enable the tiebreaker (codex P2).
-        if not getattr(self._settings, "fact_dedup_tiebreaker_enabled", False):
+        # `is True` (not truthiness): real Settings stores a bool, so this only
+        # activates on an explicit True and stays off for duck-typed/Mock
+        # settings whose auto-attr is truthy but not the literal True (codex P2;
+        # bare-MagicMock truthiness is a known test footgun).
+        if getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is not True:
             return True
         if await self._heart.facts.is_distinct_fact(existing_content, candidate_content) is True:
             logger.debug(
@@ -147,7 +149,9 @@ class FactExtractor:
         dates = distinct events). Shared by both producer paths (cf. #354)."""
         if not self._dedup_via_search:
             return None
-        tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False)
+        # `is True` so a truthy Mock/duck-typed setting can't widen the search
+        # or trip the await-a-mock path (codex P2 / MagicMock footgun).
+        tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
         # Only widen the search when the tiebreaker can re-judge lower hits;
         # flag-off keeps the historical single-top-hit behaviour exactly.
         limit = 5 if tiebreaker else 1
