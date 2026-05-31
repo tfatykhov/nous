@@ -1202,7 +1202,11 @@ class AgentRunner:
                             if thinking_text:
                                 all_thinking_blocks.append(thinking_text)
 
-                    if stop_reason == "end_turn" or not tool_calls:
+                    # Dispatch whenever there are tool calls, even with stop_reason='end_turn'
+                    # (opus-4.8 interleaved thinking can end the message with a thinking block
+                    # after the tool_use, flipping the stop_reason). Terminal only when there
+                    # are no tool calls to dispatch.
+                    if not tool_calls:
                         response_text = "".join(text_parts)
                         break
 
@@ -1591,9 +1595,20 @@ class AgentRunner:
                     if thinking_text:
                         all_thinking_blocks.append(thinking_text)
 
-            # If not a tool use, we're done
-            if api_response.stop_reason != "tool_use":
+            # Terminate only when there are genuinely no tool_use blocks to dispatch.
+            # opus-4.8 with adaptive/interleaved thinking can return tool_use blocks while
+            # reporting stop_reason='end_turn' (the message ends with a thinking block AFTER
+            # the tool_use). Gating on stop_reason=='tool_use' silently dropped those tool
+            # calls -> turns=0, empty answer. Dispatch whenever tool_use blocks are present.
+            has_tool_use = any(b.get("type") == "tool_use" for b in api_response.content)
+            if not has_tool_use:
                 response_text = self._extract_text(api_response.content)
+                logger.debug(
+                    "tool-loop terminal: stop=%s blocks=%s text_len=%d thinking=%d turns=%d toolcalls=%d",
+                    api_response.stop_reason,
+                    [b.get("type") for b in api_response.content],
+                    len(response_text), len(all_thinking_blocks), turns, total_tool_calls,
+                )
                 return response_text, all_tool_results, total_usage, all_thinking_blocks
 
             # P0-3: Append FULL assistant response (all content blocks)
@@ -1809,7 +1824,14 @@ class AgentRunner:
             if final_response.usage:
                 total_usage["input_tokens"] += final_response.usage.get("input_tokens", 0)
                 total_usage["output_tokens"] += final_response.usage.get("output_tokens", 0)
-            return self._extract_text(final_response.content), all_tool_results, total_usage, all_thinking_blocks
+            _rt = self._extract_text(final_response.content)
+            logger.debug(
+                "tool-loop max_turns: stop=%s blocks=%s text_len=%d thinking=%d",
+                final_response.stop_reason,
+                [b.get("type") for b in final_response.content],
+                len(_rt), len(all_thinking_blocks),
+            )
+            return _rt, all_tool_results, total_usage, all_thinking_blocks
         except Exception:
             return "I reached the maximum number of tool iterations. Please try again.", all_tool_results, total_usage, all_thinking_blocks
 

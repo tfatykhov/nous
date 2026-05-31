@@ -197,6 +197,29 @@ class TestToolLoop:
         assert loop_runner._call_api.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_tool_use_dispatched_despite_end_turn_stop_reason(self, loop_runner):
+        """opus-4.8 with adaptive/interleaved thinking returns tool_use blocks while
+        reporting stop_reason='end_turn' (the message ends with a thinking block AFTER the
+        tool_use). The loop MUST dispatch those tools, not terminate on the stop_reason —
+        gating on stop_reason=='tool_use' silently dropped them, producing empty answers.
+        Regression for the opus-4.8 non-streaming dropped-tool bug."""
+        tool_response = _make_api_response(
+            stop_reason="end_turn",   # the bug trigger: end_turn WITH a tool_use block
+            tool_uses=[{"name": "echo", "input": {"message": "bridge"}, "id": "toolu_et"}],
+        )
+        final_response = _make_api_response(text="Answered after the tool", stop_reason="end_turn")
+        loop_runner._call_api = AsyncMock(side_effect=[tool_response, final_response])
+
+        conv = _make_conversation([("user", "needs a tool")])
+        response_text, tool_results, _usage, _ = await loop_runner._tool_loop(
+            system_prompt="Test prompt", conversation=conv, frame_id="task",
+        )
+        assert len(tool_results) == 1, "tool_use must dispatch even when stop_reason='end_turn'"
+        assert tool_results[0].tool_name == "echo"
+        assert response_text == "Answered after the tool"
+        assert loop_runner._call_api.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_tool_loop_max_turns(self, loop_runner):
         """API always returns tool_use -> stops at max_turns (3) and makes final call."""
         # Always return tool_use (will hit max_turns=3)
