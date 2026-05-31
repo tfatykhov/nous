@@ -334,6 +334,29 @@ def _format_pipeline_text(
             )
 
     # ------------------------------------------------------------------
+    # Graph-Connected Memories section (Path A: fact/episode/chunk/procedure
+    # neighbours expanded from Heart seeds — F022 cross-type + F040/F070).
+    # Tagged ``metadata["stage_origin"] == "heart_graph_memory"`` by
+    # ``_heart_graph_memory_to_pipeline``. Without this section these neighbours
+    # are computed and ranked but never rendered, so the agent cannot see an
+    # associatively-linked memory (e.g. a co-experienced fact surfaced via a
+    # co-occurrence edge). Only non-empty when ``heart_graph_all_types_enabled``
+    # is on (default off), so the default recall_deep output is byte-identical.
+    # ------------------------------------------------------------------
+    heart_graph_memory: list = [
+        r for r in results
+        if r.source == "graph_expanded"
+        and r.metadata.get("stage_origin") == "heart_graph_memory"
+    ]
+    if heart_graph_memory:
+        results_text.append("\n=== Graph-Connected Memories ===")
+        for i, n in enumerate(heart_graph_memory, 1):
+            results_text.append(
+                f"{i}. [{n.type}] [via {n.edge_relation}] {n.description} "
+                f"(id: {n.id}, score: {n.score:.3f})"
+            )
+
+    # ------------------------------------------------------------------
     # Brain Decisions section
     # ------------------------------------------------------------------
     if search_all or "decision" in search_types:
