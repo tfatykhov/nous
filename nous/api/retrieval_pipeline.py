@@ -449,7 +449,7 @@ async def _run_stages(
         # ------------------------------------------------------------------
         if settings.heart_graph_all_types_enabled:
             mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
-            seen_mem_ids: set[UUID] = set()
+            seen_mem: dict[UUID, "NeighborResult"] = {}
             heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
             # acc.chunk_results carries (id, content, score, episode_id) per
             # _search_episode_chunks at line 825. Use star-unpack so future
@@ -510,7 +510,19 @@ async def _run_stages(
                         # keep the guard for defense against future filter drift.
                         if n.node_type == "decision":
                             continue
-                        if n.id in seen_mem_ids:
+                        if n.id in seen_mem:
+                            # Reached from multiple seeds: keep the STRONGEST seed
+                            # score. First-seed-wins (the old behaviour) could
+                            # permanently under-score a neighbor that a later,
+                            # higher-scored seed also reaches — pushing it below the
+                            # top-k cutline the seed-score fix exists to clear. A
+                            # non-null score wins over None (adopt the seed-score path)
+                            # and the larger of two non-null scores wins.
+                            prev = seen_mem[n.id]
+                            if seed_score is not None and (
+                                prev.seed_score is None or seed_score > prev.seed_score
+                            ):
+                                prev.seed_score = seed_score
                             continue
                         # Skip duplicates against existing candidate pool. Track
                         # duplicates as a separate counter so eval can distinguish
@@ -523,13 +535,10 @@ async def _run_stages(
                                 ) + 1
                             )
                             continue
-                        # Carry the seed's retrieval score for the seed-score
-                        # scoring fix. First-seed-wins (heart seeds precede chunk
-                        # seeds, and within heart seeds order is by recall rank,
-                        # so the first to reach a neighbor is the strongest).
+                        # Carry the seed's retrieval score for the seed-score fix.
                         n.seed_score = seed_score
                         acc.heart_graph_memory_neighbors.append(n)
-                        seen_mem_ids.add(n.id)
+                        seen_mem[n.id] = n
 
     # ------------------------------------------------------------------
     # Stage 3+4: Brain decisions + graph expansion

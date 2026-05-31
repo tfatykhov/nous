@@ -111,6 +111,13 @@ async def spreading_activation_search(
                 ON (e.source_id = a.id OR e.target_id = a.id)
             WHERE a.depth < :max_depth
                 AND e.relation != 'contradicts'
+                -- F076: co_mention edges are NOT a spreading-activation consumer.
+                -- Spreading is decision-seeded and auto-enabled by non-co_mention
+                -- density; without this filter, once spreading is on for an agent the
+                -- default-on co_mention builder would change decision retrieval before
+                -- any documented co_mention consumer flag (Path A / adjacency / seed-
+                -- score) is rolled out. IS DISTINCT FROM keeps NULL/legacy rows.
+                AND e.extraction_method IS DISTINCT FROM 'co_mention'
                 AND e.agent_id = :agent_id
         )
         SELECT id, node_type, SUM(activation) AS total_activation

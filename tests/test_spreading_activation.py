@@ -162,3 +162,41 @@ async def test_spreading_activation_returns_seeds(brain, session):
     assert len(results) >= 1
     ids = [r[0] for r in results]
     assert d1.id in ids
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_spreading_excludes_comention_edges(brain, session):
+    """F076 (codex P2-G): spreading activation must NOT traverse co_mention edges.
+    They are a Path-A consumer, not a spreading one; otherwise the default-on
+    co_mention builder changes decision retrieval the moment spreading is enabled."""
+    from sqlalchemy import text
+
+    from nous.brain.schemas import RecordInput
+
+    def _inp(d):
+        return RecordInput(description=d, confidence=0.8, category="architecture",
+                           stakes="low", reasons=_reasons())
+
+    a = await brain.record(_inp("Spreading seed decision alpha node here"), session=session)
+    b = await brain.record(_inp("Decision beta reached by a normal related edge"), session=session)
+    c = await brain.record(_inp("Decision gamma reached only by a co_mention edge"), session=session)
+
+    async def _edge(s_id, t_id, method):
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+            "agent_id,relation,weight,auto_linked,extraction_method) "
+            "VALUES (:s,:t,'decision','decision',:a,'related_to',1.0,true,:m)"),
+            {"s": str(s_id), "t": str(t_id), "a": brain.agent_id, "m": method})
+
+    await _edge(a.id, b.id, "deterministic")  # non-co_mention -> traversed
+    await _edge(a.id, c.id, "co_mention")     # co_mention -> must be skipped
+    await session.flush()
+
+    settings = Settings()  # default spreading_activation_max_depth=2
+    activated = await spreading_activation_search(
+        session, brain.agent_id, [(a.id, "decision", 1.0)], settings,
+    )
+    ids = {r[0] for r in activated}
+    assert b.id in ids, "a normal edge must be traversed by spreading activation"
+    assert c.id not in ids, "a co_mention edge must NOT be traversed by spreading activation"
