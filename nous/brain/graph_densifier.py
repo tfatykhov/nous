@@ -1191,8 +1191,13 @@ class GraphDensifier:
                 )
             return count
 
-    async def build_comention_edges(self) -> int:
+    async def build_comention_edges(self, *, dry_run: bool = False) -> int:
         """F076: link facts that NAME the same entity, independent of cosine.
+
+        dry_run=True computes the candidate pairs (same caps, hub/fan-out limits,
+        and prior-edge skip) and returns how many edges WOULD be inserted, without
+        writing — used by the one-time prod backfill (scripts/backfill_comention_edges.py)
+        to preview yield before committing.
 
         The associative edge the cosine-only graph misses: two facts that both
         mention "Steve Hillage" but embed below the 0.82 fact-fact threshold stay
@@ -1289,6 +1294,9 @@ class GraphDensifier:
 
         if not to_insert:
             return 0
+
+        if dry_run:
+            return len(to_insert)
 
         insert_sql = text(
             "INSERT INTO brain.graph_edges "

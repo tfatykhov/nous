@@ -361,6 +361,33 @@ async def test_comention_links_clean_shared_entity_pair(db, settings, mock_embed
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_build_comention_dry_run_previews_without_writing(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """F076 backfill: dry_run returns the would-build count and writes nothing; a real
+    run then inserts exactly that many."""
+    agent_id = f"test-cm-dry-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={"comention_linking_enabled": True})
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("x")
+        await _insert_fact(session, agent_id, "Dara Velen leads Project Helios.", emb)
+        await _insert_fact(session, agent_id, "Dara Velen studied at the Halvorsen Institute.", emb)
+        await session.commit()
+
+    would = await densifier.build_comention_edges(dry_run=True)
+    async with db.session() as session:
+        after_dry = (await session.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention'"
+        ), {"a": agent_id})).scalar()
+    assert would == 1 and after_dry == 0  # previewed, nothing written
+
+    built = await densifier.build_comention_edges()
+    assert built == would
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_find_orphans_episode_with_only_plain_summary_is_returned(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):
