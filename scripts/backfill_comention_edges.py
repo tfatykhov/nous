@@ -1,11 +1,11 @@
 """One-time full-corpus co-mention edge backfill (F076).
 
 The sleep-cycle builder (`GraphDensifier.build_comention_edges`) only scans the
-NEWEST `comention_max_facts_per_cycle` (default 5000) facts, so on a corpus larger
-than that the older facts never get co-mention edges. This script runs the SAME
-shipping builder over the WHOLE corpus in a single pass (co-mention MUST see all
-facts at once — paginating the entity match would miss cross-batch shared-entity
-pairs), per agent.
+NEWEST `comention_max_facts_per_cycle` (default 5000) facts AND chunks, so on a
+corpus larger than that the older nodes never get co-mention edges. This script runs
+the SAME shipping builder over the WHOLE corpus in a single pass (co-mention MUST see
+all nodes at once — paginating the entity match would miss cross-batch shared-entity
+pairs), per agent. Links fact<->fact and chunk<->chunk (same-type only).
 
 Deterministic + idempotent: regex entity extraction + INSERT ... ON CONFLICT DO
 NOTHING, with the hub degree-cap, per-fact fan-out cap, and the prior-edge skip

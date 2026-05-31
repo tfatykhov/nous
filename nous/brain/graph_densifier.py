@@ -1192,28 +1192,29 @@ class GraphDensifier:
             return count
 
     async def build_comention_edges(self, *, dry_run: bool = False) -> int:
-        """F076: link facts that NAME the same entity, independent of cosine.
+        """F076: link facts AND chunks that NAME the same entity, independent of cosine.
 
-        dry_run=True computes the candidate pairs (same caps, hub/fan-out limits,
-        and prior-edge skip) and returns how many edges WOULD be inserted, without
-        writing — used by the one-time prod backfill (scripts/backfill_comention_edges.py)
-        to preview yield before committing.
+        Same-type only — fact<->fact and chunk<->chunk (never fact<->chunk). Chunks use
+        the raw transcript text, which carries entities the lossy fact extractor drops,
+        so a shared entity that appears only in transcript still forms a bridge that the
+        chunk-seed Path A expansion can traverse.
 
-        The associative edge the cosine-only graph misses: two facts that both
-        mention "Steve Hillage" but embed below the 0.82 fact-fact threshold stay
-        orphans. Here we extract entities from each active fact's content and link
-        facts that share one — no cosine gate. Edges are relation='related_to',
-        extraction_method='co_mention' (own provenance tier, escapes the F065
-        inferred penalty; weight written directly via raw INSERT so the
-        graph_linker related_to multiplier does not discount it).
+        dry_run=True computes the candidate pairs (same caps, hub/fan-out limits, and
+        prior-edge skip) and returns how many edges WOULD be inserted across both types,
+        without writing — used by scripts/backfill_comention_edges.py to preview yield.
 
-        Conservative for a default-on builder: hub-entity degree cap, per-fact
-        fan-out cap, rarer-entity-first fill (rarer = stronger signal), and a
-        reverse-direction / pre-existing-edge guard so we never create a duplicate
-        undirected link. Idempotent across sleep cycles (skips pairs already
-        connected by any related_to edge, incl. prior co_mention edges).
+        The associative edge the cosine-only graph misses: two nodes that both mention
+        "Steve Hillage" but embed below the same-type threshold stay orphans. We extract
+        entities from each node's content and link nodes that share one — no cosine gate.
+        Edges are relation='related_to', extraction_method='co_mention' (own provenance
+        tier, escapes the F065 inferred penalty; weight written directly via raw INSERT).
 
-        Returns the number of new co-mention edges inserted.
+        Conservative for a default-on builder: hub-entity degree cap, per-node fan-out
+        cap, rarer-entity-first fill (rarer = stronger signal), and a pre-existing-edge
+        guard (any relation, incl. contradicts) so we never duplicate a link or join a
+        contradicting pair. Idempotent across sleep cycles.
+
+        Returns the total number of new co-mention edges inserted (facts + chunks).
         """
         from itertools import combinations
 
@@ -1226,106 +1227,124 @@ class GraphDensifier:
         max_per_node = int(s.comention_max_edges_per_node)
         weight = float(s.comention_weight)
         min_chars = int(s.comention_min_entity_chars)
-        max_facts = int(s.comention_max_facts_per_cycle)
-
-        async with self.db.session() as session:
-            rows = (await session.execute(
-                text(
-                    "SELECT id, content FROM heart.facts "
-                    "WHERE agent_id = :a AND active = TRUE "
-                    "ORDER BY learned_at DESC, id LIMIT :lim"
-                ),
-                {"a": self._agent_id, "lim": max_facts},
-            )).all()
-        if not rows:
-            return 0
-
-        # entity -> ordered unique fact ids (deterministic).
-        ent_to_facts: dict[str, list[str]] = {}
-        for fid, content in rows:
-            for ent in extract_entities(content or "", min_chars=min_chars):
-                bucket = ent_to_facts.setdefault(ent, [])
-                fid_s = str(fid)
-                if fid_s not in bucket:
-                    bucket.append(fid_s)
-
-        # Pre-existing fact-fact edges of ANY relation (either direction) — skip to
-        # avoid (a) duplicate undirected related_to links + churn AND (b) adding a
-        # related_to edge OVER a contradicts/supersedes pair. The latter matters
-        # because adjacency-boost and spreading-activation filter only
-        # `relation != 'contradicts'`, so a co_mention related_to edge would let
-        # mutually-inconsistent facts reinforce/retrieve each other. Loading every
-        # relation (not just related_to) makes any prior edge a hard skip.
-        async with self.db.session() as session:
-            existing_rows = (await session.execute(
-                text(
-                    "SELECT source_id, target_id FROM brain.graph_edges "
-                    "WHERE agent_id = :a "
-                    "AND source_type = 'fact' AND target_type = 'fact'"
-                ),
-                {"a": self._agent_id},
-            )).all()
-        existing: set[tuple[str, str]] = set()
-        for src, tgt in existing_rows:
-            a, b = str(src), str(tgt)
-            existing.add((a, b) if a < b else (b, a))
-
-        # Build candidate pairs: rarer entities first (stronger signal), skip hubs,
-        # cap per-node fan-out, canonical (a < b), interrupt-aware.
-        deg: dict[str, int] = {}
-        to_insert: list[tuple[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for ent in sorted(ent_to_facts, key=lambda k: (len(ent_to_facts[k]), k)):
-            fids = ent_to_facts[ent]
-            if not (2 <= len(fids) <= max_degree):
-                continue
-            for a, b in combinations(sorted(fids), 2):
-                if deg.get(a, 0) >= max_per_node or deg.get(b, 0) >= max_per_node:
-                    continue
-                key = (a, b)
-                if key in seen or key in existing:
-                    continue
-                seen.add(key)
-                deg[a] = deg.get(a, 0) + 1
-                deg[b] = deg.get(b, 0) + 1
-                to_insert.append(key)
-            if self._interrupted:
-                break
-
-        if not to_insert:
-            return 0
-
-        if dry_run:
-            return len(to_insert)
+        scan_cap = int(s.comention_max_facts_per_cycle)
 
         insert_sql = text(
             "INSERT INTO brain.graph_edges "
             "(source_id, target_id, source_type, target_type, agent_id, "
             " relation, weight, auto_linked, extraction_method) "
-            "VALUES (:s, :t, 'fact', 'fact', :a, 'related_to', :w, TRUE, 'co_mention') "
+            "VALUES (:s, :t, :nt, :nt, :a, 'related_to', :w, TRUE, 'co_mention') "
             "ON CONFLICT (source_id, target_id, relation) DO NOTHING"
         )
-        inserted = 0
-        BATCH = 500
-        async with self.db.session() as session:
-            for i in range(0, len(to_insert), BATCH):
-                chunk = to_insert[i:i + BATCH]
-                await session.execute(
-                    insert_sql,
-                    [{"s": a, "t": b, "a": self._agent_id, "w": weight} for a, b in chunk],
-                )
-                inserted += len(chunk)
-            await session.commit()
 
-        if inserted:
-            logger.info(
-                "F076: built %d co_mention edges for agent_id=%s "
-                "(%d shared entities scanned over %d facts)",
-                inserted, self._agent_id,
-                sum(1 for v in ent_to_facts.values() if 2 <= len(v) <= max_degree),
-                len(rows),
-            )
-        return inserted
+        async def _link_one_type(node_type: str, scan_sql: str) -> int:
+            async with self.db.session() as session:
+                rows = (await session.execute(
+                    text(scan_sql), {"a": self._agent_id, "lim": scan_cap},
+                )).all()
+            if not rows:
+                return 0
+
+            # entity -> ordered unique node ids (deterministic).
+            ent_to_nodes: dict[str, list[str]] = {}
+            for nid, content in rows:
+                for ent in extract_entities(content or "", min_chars=min_chars):
+                    bucket = ent_to_nodes.setdefault(ent, [])
+                    nid_s = str(nid)
+                    if nid_s not in bucket:
+                        bucket.append(nid_s)
+
+            # Pre-existing same-type edges of ANY relation (either direction) — skip to
+            # avoid (a) duplicate undirected related_to links + churn AND (b) adding a
+            # related_to edge OVER a contradicts/supersedes pair. adjacency-boost and
+            # spreading-activation filter only `relation != 'contradicts'`, so a
+            # co_mention related_to edge would let mutually-inconsistent nodes reinforce
+            # each other. Loading every relation makes any prior edge a hard skip.
+            # P2-F: scope to the SCANNED nodes — candidate pairs only come from `rows`,
+            # so an edge can only block a pair if BOTH endpoints are in the scanned set;
+            # this bounds the lookup by the per-cycle scan, not the agent's total edges.
+            node_ids = [str(nid) for nid, _ in rows]
+            async with self.db.session() as session:
+                existing_rows = (await session.execute(
+                    text(
+                        "SELECT source_id, target_id FROM brain.graph_edges "
+                        "WHERE agent_id = :a "
+                        "AND source_type = :nt AND target_type = :nt "
+                        "AND source_id = ANY(CAST(:ids AS uuid[])) "
+                        "AND target_id = ANY(CAST(:ids AS uuid[]))"
+                    ),
+                    {"a": self._agent_id, "nt": node_type, "ids": node_ids},
+                )).all()
+            existing: set[tuple[str, str]] = set()
+            for src, tgt in existing_rows:
+                a, b = str(src), str(tgt)
+                existing.add((a, b) if a < b else (b, a))
+
+            # Candidate pairs: rarer entities first, skip hubs, cap per-node fan-out,
+            # canonical (a < b), interrupt-aware.
+            deg: dict[str, int] = {}
+            to_insert: list[tuple[str, str]] = []
+            seen: set[tuple[str, str]] = set()
+            for ent in sorted(ent_to_nodes, key=lambda k: (len(ent_to_nodes[k]), k)):
+                nids = ent_to_nodes[ent]
+                if not (2 <= len(nids) <= max_degree):
+                    continue
+                for a, b in combinations(sorted(nids), 2):
+                    if deg.get(a, 0) >= max_per_node or deg.get(b, 0) >= max_per_node:
+                        continue
+                    key = (a, b)
+                    if key in seen or key in existing:
+                        continue
+                    seen.add(key)
+                    deg[a] = deg.get(a, 0) + 1
+                    deg[b] = deg.get(b, 0) + 1
+                    to_insert.append(key)
+                if self._interrupted:
+                    break
+
+            if not to_insert:
+                return 0
+            if dry_run:
+                return len(to_insert)
+
+            inserted = 0
+            BATCH = 500
+            async with self.db.session() as session:
+                for i in range(0, len(to_insert), BATCH):
+                    batch = to_insert[i:i + BATCH]
+                    await session.execute(
+                        insert_sql,
+                        [{"s": a, "t": b, "nt": node_type, "a": self._agent_id, "w": weight}
+                         for a, b in batch],
+                    )
+                    inserted += len(batch)
+                await session.commit()
+
+            if inserted:
+                logger.info(
+                    "F076: built %d co_mention %s edges for agent_id=%s "
+                    "(%d shared entities over %d nodes)",
+                    inserted, node_type, self._agent_id,
+                    sum(1 for v in ent_to_nodes.values() if 2 <= len(v) <= max_degree),
+                    len(rows),
+                )
+            return inserted
+
+        total = await _link_one_type(
+            "fact",
+            "SELECT id, content FROM heart.facts WHERE agent_id = :a AND active = TRUE "
+            "ORDER BY learned_at DESC, id LIMIT :lim",
+        )
+        if self._interrupted:
+            return total
+        # Chunks: heart.episode_chunks has no `active`/`learned_at` columns; order by id
+        # for a deterministic scan window.
+        total += await _link_one_type(
+            "chunk",
+            "SELECT id, content FROM heart.episode_chunks WHERE agent_id = :a "
+            "ORDER BY id LIMIT :lim",
+        )
+        return total
 
     async def discover_clusters(self, max_bridges: int = 20) -> int:
         """Discover disconnected graph components and create bridge edges.

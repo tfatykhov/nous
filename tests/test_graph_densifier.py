@@ -361,6 +361,40 @@ async def test_comention_links_clean_shared_entity_pair(db, settings, mock_embed
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_comention_links_chunks_same_type_only(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """F076 (codex P2-E): chunk<->chunk co_mention edges form from a shared entity in
+    raw transcript, and linking is same-type only (no fact<->chunk edge)."""
+    agent_id = f"test-cm-chunk-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={"comention_linking_enabled": True})
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("x")
+        ep = await _insert_episode(session, agent_id, "episode summary")
+        await _insert_chunk(session, agent_id, ep, 0, "Dara Velen led the design review.", emb)
+        await _insert_chunk(session, agent_id, ep, 1, "Later that week Dara Velen joined Korrindale Systems.", emb)
+        # a lone fact also naming Dara Velen — must NOT cross-link to the chunks
+        await _insert_fact(session, agent_id, "Dara Velen lives near the river.", emb)
+        await session.commit()
+
+    n = await densifier.build_comention_edges()
+    async with db.session() as session:
+        cc = (await session.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention' "
+            "AND source_type='chunk' AND target_type='chunk'"
+        ), {"a": agent_id})).scalar()
+        cross = (await session.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention' "
+            "AND ((source_type='fact' AND target_type='chunk') OR (source_type='chunk' AND target_type='fact'))"
+        ), {"a": agent_id})).scalar()
+    assert cc == 1, "two chunks sharing an entity must form one chunk<->chunk co_mention edge"
+    assert cross == 0, "co_mention is same-type only (no fact<->chunk)"
+    assert n == 1, "only the chunk pair links (single fact has no fact-fact partner)"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_build_comention_dry_run_previews_without_writing(db, settings, mock_embeddings, _fix_stale_relation_constraint):
     """F076 backfill: dry_run returns the would-build count and writes nothing; a real
     run then inserts exactly that many."""
