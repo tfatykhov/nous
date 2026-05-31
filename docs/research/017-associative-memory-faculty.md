@@ -314,3 +314,55 @@ become plastic / goal-gated / multi-hop; we ADD the missing faculty; we REMOVE a
 - **MODIFY:** make edge weights *plastic* (P1); extend stale-scan to *edge decay* (P1); goal-gate + multi-hop + fact-seed *spreading/Path A* (P2); reframe F040 as completeness, not faculty.
 - **ADD:** co-activation edges + plastic-strength field (P1); replay-as-resampling (P1); pattern-completion recall (P3); goal-conditioned activation (P2); SNN replay (P4, earned).
 - **REMOVE:** essentially nothing — except the **hub degree-cap** (replace with IDF down-weighting, P2). Low blast radius is deliberate.
+
+## PART 7 — ROADMAP UPDATE (post-baseline, 2026-05-31)
+
+The 18-cell Capability Baseline (018) + the path-confirmation work supersede the Phase-1→4
+ordering above. The data-driven plan:
+
+### 7.1 Build mechanisms, not types
+The many real-world association *types* (causal, role, part-whole, analogy, co-occurrence,
+supersession, symbolic, cross-modal…) collapse to **four mechanisms**, of which two already work:
+
+| Mechanism | Covers | Status |
+|---|---|---|
+| Similarity (embedding) | semantic, paraphrase, abstract analogy, metaphorical proximity | ✅ works |
+| LLM reasoning over context | causal, role/skill, part-whole, multi-hop, goal, contradiction, conceptual metaphor | ✅ works (if facts present) |
+| Experiential co-activation (formation + plasticity) | episodic / contextual / experienced-together, any relation | ⬛ **Gap 1** |
+| Temporal structure (event_date + resolver) | recency, supersession, before/after | ⬛ **Gap 2** |
+
+All 18 cells fell into these four. **The program is finishing the two missing mechanisms, not
+enumerating types.** Add a fifth mechanism only when a cell proves none of the four can carry it.
+
+### 7.2 Scope: world-true vs. context-true
+Memory owns only **context-true** associations (true of *this user*, learned from experience).
+**World-true** associations (how concepts relate in general — anger↔turbulence, ring↔marriage,
+loud↔bright) are **parametric**: the LLM/embedding already have them. Synesthesia, personification,
+and conventional symbolism are world-true ⇒ already handled; do **not** rebuild them in the graph.
+
+### 7.3 The real build order (replaces 3.x Phase ordering)
+0. **Path-unification (the prerequisite — partly DONE).** The agent's machinery only helps if it
+   reaches the agent. Confirmed: pre-turn injection uses plain `search_facts` (no graph, no
+   resolver); `recall_deep` has both but its formatter dropped Path-A fact-neighbours.
+   **DONE + validated:** `recall_deep` "Graph-Connected Memories" formatter section (fact/episode/
+   chunk neighbours now reach the agent); resolver-on `recall_deep` flips c12 to the current value.
+   **Still open:** make the *pre-turn* path graph/resolver-aware for *proactive* surfacing (heavier;
+   carries false-bridge-on-hot-path risk) — only if the recall_deep route proves insufficient.
+1. **Formation (Gap 1).** Create co-activation edges from genuine co-occurrence (shared occasion),
+   plus **edge semantics** (a `co_occurred`/occasion label, not generic `related_to`, so the LLM can
+   contextualise). **Gate:** cell 11 passes *without* manual injection.
+2. **Strengthen-by-use (Gap 1 plasticity).** Wire `track_access` into edge weight; decay by disuse.
+   The weight-sweep showed a single co-occurrence needs ~0.8 to surface ⇒ strengthening, not a high
+   fixed weight, is the durable answer. **Gate:** a longitudinal cell where rank improves with
+   repeated co-recall and an unused edge decays.
+3. **Temporal resolver into the agent path (Gap 2).** The resolver is sound but lives only in
+   `recall_deep`; populate `subject`+`event_date` and loosen the trigger so it fires on natural
+   correction phrasing. **Gate:** c12 confabulation flips on the default agent path.
+
+### 7.4 tinyHippo's earned entry criterion (finally concrete)
+The attractor/replay substrate is gated on **emergent personal symbolism**: a cell where a symbol
+(object ⇄ abstract meaning) is *never stated*, present only as a *recurring co-activation pattern
+across many episodes*. Reconstructing a coherent latent association from many partial/noisy
+co-activations is what a dense-associative (Hopfield) / replay-consolidation substrate does that
+pairwise-edge counting cannot. Build it only when that cell exists and shows {similarity +
+co-activation edge + temporal structure + LLM} all fail. Not a someday-rung — a testable gate.

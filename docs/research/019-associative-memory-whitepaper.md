@@ -495,7 +495,69 @@ marked invalid rather than counted, and is noted here for completeness.
 
 ---
 
-## 8. Limitations and threats to validity
+## 8. Association types vs. mechanisms (the scope of the faculty)
+
+A fair worry on seeing the gaps arrive one at a time — co-occurrence, then supersession, then
+role/skill — is that this is whack-a-mole: the real world has *dozens* of ways things associate
+(causal, part-whole, analogy, goal-relevance, symbolic, cross-modal…), so will the backlog ever
+end? The instrument's answer is no, because **the many association *types* collapse to a few
+*mechanisms*, and most of them already work.**
+
+| Mechanism | Association types it covers | Status |
+|---|---|---|
+| **Similarity** (embedding geometry) | semantic, paraphrase, abstract/structural analogy, metaphorical proximity | ✅ works |
+| **LLM reasoning** over what's in context | causal, role/skill, part-whole, multi-hop, goal-relevance, contradiction, conceptual metaphor | ✅ works (if the facts are present) |
+| **Experiential co-activation** (edge formed from co-occurrence, strengthened by use) | episodic, contextual, "experienced-together" — *regardless of the specific relation* | ⬛ Gap 1 |
+| **Temporal structure** (event-date ordering / resolver) | recency, supersession, before/after | ⬛ Gap 2 |
+
+Every one of the 18 cells fell into these four; none escaped. We are not fixing types — we are
+building the **two missing mechanisms**. The formatter fix that surfaced graph-neighbours is itself
+type-agnostic: it renders neighbours of *any* relation, and the LLM reads the relation label and
+interprets. Two refinements sharpen the scope:
+
+### 8.1 World-true vs. context-true associations
+There are two fundamentally different kinds of association, and the memory faculty owns only one:
+- **World-true** — how concepts relate *in general* ("anger looks like turbulence"; "loud and
+  bright are both high-intensity"; "a ring conventionally signifies marriage"). These are
+  **parametric**: already carried by the LLM and the embedding from training. The faculty should
+  *not* re-derive them.
+- **Context-true** — what is true of *this user/situation* ("my grandfather's watch means
+  resilience *to me*"). These are **episodic**: they don't exist until experience creates them, so
+  they must be learned and stored. This is the faculty's job.
+
+This dissolves a whole apparent class of "hard" associations. **Synesthesia / cross-modal**
+("a loud colour"), **personification** ("the ocean is angry"), and **conventional symbolism**
+(ring → marriage, flag → nation) are largely *world-true* — the LLM does conceptual metaphor and
+structure-mapping natively, and the embedding already places metaphorically-linked terms near each
+other (Phase-0 confirmed it spans abstract structure). They feel exotic but are home turf for a
+model trained on human metaphor. For a *text* agent, cross-modal binding reduces to embedding
+proximity; genuine multimodal binding is a joint-embedding (representation) question, not a memory
+one. None of these require a new memory mechanism.
+
+### 8.2 Emergent personal symbolism — the earned entry for an attractor substrate
+The genuinely memory-relevant slice is **personal symbolism**, which splits once more:
+- **Explicit** ("this watch means resilience to me" — stated) → stored as a fact, retrieved,
+  applied. Covered by similarity + LLM.
+- **Emergent / implicit** — the user *never states* the symbol, but it is latent in a *recurring
+  pattern* (every mention of the watch coincides with talk of hard times). Inferring "the watch
+  symbolises resilience for this user" from a co-activation pattern **across many episodes** is
+  covered by *nothing we have built*.
+
+This emergent case is not a fifth mechanism — it is a *composition* of **Gap 1** (co-activation
+detection) **plus the LLM-as-cortex naming the pattern during consolidation**. But it stresses a
+capability pairwise-edge formation lacks: **discovering and naming a latent association from a
+statistical pattern over the whole history**, not from a single co-occurrence. Reconstructing a
+coherent association (watch ⇄ resilience) from many partial, noisy co-activations is exactly what an
+attractor / dense-associative (Hopfield-style) network or replay-consolidation does that edge
+counting cannot. **This is the concrete, discriminating need that would justify the heavy substrate
+(the "tinyHippo" rung)** — and it comes with its own test: a cell where the symbol is *never stated*,
+only emergent. Until such a need is demonstrated, the substrate stays deferred.
+
+**Net principle: build mechanisms, not types.** Count mechanisms (four, two working); add a new one
+only when a cell proves that none of the four can carry an association — and gate the substrate on
+the emergent-symbolism test, not on a someday-rung.
+
+## 9. Limitations and threats to validity
 
 We hold our own conclusions to the same scrutiny as the system:
 
@@ -528,7 +590,7 @@ We hold our own conclusions to the same scrutiny as the system:
 
 ---
 
-## 9. Conclusion
+## 10. Conclusion
 
 We set out to learn whether an LLM agent's memory behaves like an associative faculty or a similarity
 index with graph dressing, and — before building anything new — to locate the real gap. The instrument
