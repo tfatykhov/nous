@@ -33,6 +33,25 @@ try:
 except Exception:
     pass
 
+
+def _load(path: Path) -> None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        os.environ[k] = v
+
+
+_load(REPO / ".env.prod-snapshot")
+os.environ.update({
+    "DB_HOST": "127.0.0.1", "DB_PORT": "5433", "DB_NAME": "nous_eval_live",
+    "DB_USER": "nous", "DB_PASSWORD": "nous_eval", "NOUS_AGENT_ID": "nous-baseline-eval",
+})
+
 from scripts.diag.faculty.baseline_corpus import NO_HANDLE_PAIRS  # noqa: E402
 
 AGENT = "nous-baseline-eval"
@@ -67,29 +86,29 @@ def setup() -> None:
 
 
 def formation() -> None:
-    """The mechanism: facts sharing a source episode get a co-activation edge. No hand-injection."""
-    print("=== FORMATION: create co-activation edges from shared episodes ===")
+    """Run the REAL feature: GraphDensifier.build_cooccurrence_edges (co_occurred edges)."""
+    import asyncio
+    asyncio.run(_formation_async())
+
+
+async def _formation_async() -> None:
+    from nous.brain.embeddings import EmbeddingProvider
+    from nous.brain.graph_densifier import GraphDensifier
+    from nous.brain.graph_linker import GraphLinker
+    from nous.config import Settings
+    from nous.storage.database import Database
+
+    print("=== FORMATION: real GraphDensifier.build_cooccurrence_edges (relation='co_occurred') ===")
+    # clear prior MVP/heuristic edges so the pre-existing-edge guard doesn't block the pairs
     psql(f"DELETE FROM brain.graph_edges WHERE agent_id='{AGENT}' AND extraction_method IN ('heuristic','co_occurrence')")
-    rows = psql(
-        "SELECT source_episode_id, string_agg(id::text, ',') FROM heart.facts "
-        f"WHERE agent_id='{AGENT}' AND source_episode_id IS NOT NULL AND active "
-        "GROUP BY source_episode_id HAVING count(*) >= 2"
-    )
-    created = 0
-    for line in rows.splitlines():
-        if "|" not in line:
-            continue
-        _epid, ids_csv = line.split("|", 1)
-        ids = [x for x in ids_csv.split(",") if x]
-        if len(ids) > MAX_EPISODE_FACTS:
-            print(f"  skip episode with {len(ids)} facts (noise gate)"); continue
-        for i in range(len(ids)):
-            for j in range(i + 1, len(ids)):
-                psql("INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
-                     "agent_id,relation,weight,auto_linked,extraction_method) VALUES "
-                     f"('{ids[i]}','{ids[j]}','fact','fact','{AGENT}','related_to',{COOCCUR_WEIGHT},true,'heuristic')")
-                created += 1
-    print(f"  formed {created} co-activation edges (weight {COOCCUR_WEIGHT}, from shared episodes)")
+    s = Settings().model_copy(update={"cooccurrence_linking_enabled": True})
+    db = Database(s); await db.connect()
+    emb = EmbeddingProvider(api_key=s.openai_api_key, model="text-embedding-3-large", dimensions=1536)
+    gd = GraphDensifier(db, GraphLinker(db, emb, s, AGENT), emb, s, AGENT)
+    n = await gd.build_cooccurrence_edges()
+    await db.disconnect()
+    n_co = psql(f"SELECT count(*) FROM brain.graph_edges WHERE agent_id='{AGENT}' AND relation='co_occurred'")
+    print(f"  build_cooccurrence_edges returned {n}; co_occurred edges in DB: {n_co}")
 
 
 def ask(query: str) -> tuple[str, int]:

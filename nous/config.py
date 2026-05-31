@@ -1255,6 +1255,45 @@ class Settings(BaseSettings):
         description="F076: max active facts scanned per sleep cycle (most-recent first); safety bound on the O(corpus) pass.",
     )
     # =========================================================================
+    # Gap-1 Formation — experiential co-occurrence linking (migration 055)
+    # =========================================================================
+    cooccurrence_linking_enabled: bool = Field(
+        default=False,
+        description=(
+            "Gap-1 formation: during sleep, link facts learned from the SAME source "
+            "episode (mentioned together in one occasion) with a co-activation edge — "
+            "the associative link the cosine-only graph misses when two co-experienced "
+            "facts share no words and aren't semantically near (no-handle case). Edges are "
+            "relation='co_occurred' (carries the semantics so the agent can contextualise, "
+            "unlike generic related_to), extraction_method='co_occurrence'. Default OFF "
+            "(new, opt-in; flip after eval). Retrieval effect needs the consumers "
+            "(heart_graph_all_types_enabled / graph_neighbor_seed_score / adjacency_boost) "
+            "AND the recall_deep Graph-Connected Memories formatter section."
+        ),
+    )
+    cooccurrence_weight: float = Field(
+        default=0.90, ge=0.0, le=1.0,
+        description=(
+            "Stored weight of a co_occurred edge (raw INSERT). Default 0.90 mirrors "
+            "comention_weight — the weight-sweep showed a single co-occurrence needs ~0.8+ "
+            "to clear the top-10 cutline via Path-A seed-score composition; lower weights "
+            "rank the neighbour too low for the agent to use. Strengthen-by-use (later) "
+            "replaces this fixed weight with a learned one."
+        ),
+    )
+    cooccurrence_max_episode_facts: int = Field(
+        default=6, ge=2,
+        description=(
+            "Noise gate: skip episodes that produced more than N facts. A focused "
+            "conversation co-mentions a few related things; a rambling one touches many "
+            "unrelated topics — linking all pairs there is noise, not association."
+        ),
+    )
+    cooccurrence_max_episodes_per_cycle: int = Field(
+        default=2000, ge=1,
+        description="Safety bound: max episodes scanned per sleep cycle (most-recent first).",
+    )
+    # =========================================================================
     # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
     # =========================================================================
     chunk_consolidation_enabled: bool = Field(
