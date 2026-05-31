@@ -157,6 +157,13 @@ class GraphDensifier:
               AND NOT EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :agent_id
+                    -- F076: a co_mention edge must NOT make a fact look non-orphan.
+                    -- It only links fact<->fact on a shared entity; it does NOT give
+                    -- the cross-type (fact->decision/episode) connectivity the F040
+                    -- backfill provides. Counting it here would permanently skip such
+                    -- facts from later backfill cycles (find_orphans consumes the
+                    -- orphan signal). IS DISTINCT FROM keeps NULL/legacy rows counting.
+                    AND e.extraction_method IS DISTINCT FROM 'co_mention'
                     AND (
                         (e.source_id = t.id AND e.source_type = :type_name)
                         OR (e.target_id = t.id AND e.target_type = :type_name)
@@ -1237,13 +1244,18 @@ class GraphDensifier:
                 if fid_s not in bucket:
                     bucket.append(fid_s)
 
-        # Pre-existing related_to fact-fact pairs (either direction, incl. prior
-        # co_mention edges) — skip to avoid duplicate undirected links + churn.
+        # Pre-existing fact-fact edges of ANY relation (either direction) — skip to
+        # avoid (a) duplicate undirected related_to links + churn AND (b) adding a
+        # related_to edge OVER a contradicts/supersedes pair. The latter matters
+        # because adjacency-boost and spreading-activation filter only
+        # `relation != 'contradicts'`, so a co_mention related_to edge would let
+        # mutually-inconsistent facts reinforce/retrieve each other. Loading every
+        # relation (not just related_to) makes any prior edge a hard skip.
         async with self.db.session() as session:
             existing_rows = (await session.execute(
                 text(
                     "SELECT source_id, target_id FROM brain.graph_edges "
-                    "WHERE agent_id = :a AND relation = 'related_to' "
+                    "WHERE agent_id = :a "
                     "AND source_type = 'fact' AND target_type = 'fact'"
                 ),
                 {"a": self._agent_id},
