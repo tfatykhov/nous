@@ -273,6 +273,121 @@ async def test_find_orphans_excludes_linked(db, settings, mock_embeddings, _fix_
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_find_orphans_ignores_comention_edges(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """F076 (codex P2-C): a fact whose ONLY edge is co_mention must still be an orphan.
+
+    co_mention links fact<->fact on a shared entity but gives no cross-type
+    (fact->decision/episode) connectivity; counting it would permanently skip the
+    fact from later F040 backfill cycles. A NON-co_mention edge still masks (control)."""
+    agent_id = f"test-orphan-cm-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("cm")
+        cm_a = await _insert_fact(session, agent_id, "co_mention only fact A", emb)
+        cm_b = await _insert_fact(session, agent_id, "co_mention only fact B", emb)
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (agent_id, source_id, target_id, source_type, "
+            "target_type, relation, weight, auto_linked, extraction_method) "
+            "VALUES (:a, :s, :t, 'fact', 'fact', 'related_to', 0.9, true, 'co_mention')"
+        ), {"a": agent_id, "s": cm_a, "t": cm_b})
+        # control: a fact linked by a non-co_mention (NULL extraction_method) edge
+        cos_a = await _insert_fact(session, agent_id, "cosine-linked fact A", emb)
+        cos_b = await _insert_fact(session, agent_id, "cosine-linked fact B", emb)
+        await _insert_edge(session, agent_id, cos_a, cos_b, "fact", "fact")
+        await session.commit()
+
+    async with db.session() as session:
+        orphan_ids = [oid for oid, _ in await densifier.find_orphans("fact", 100, session)]
+    assert cm_a in orphan_ids and cm_b in orphan_ids   # co_mention does NOT mask
+    assert cos_a not in orphan_ids and cos_b not in orphan_ids  # control still masks
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_comention_skips_pair_with_contradicts_edge(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """F076 (codex P2-D): build_comention_edges must NOT add a related_to edge over a
+    pair that already has a contradicts edge — adjacency-boost/spreading filter only
+    `relation != 'contradicts'`, so that would let contradictory facts reinforce."""
+    agent_id = f"test-cm-contra-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={"comention_linking_enabled": True})
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("x")
+        a = await _insert_fact(session, agent_id, "Dara Velen leads Project Helios.", emb)
+        b = await _insert_fact(session, agent_id, "Dara Velen never touched Project Helios.", emb)
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (agent_id, source_id, target_id, source_type, "
+            "target_type, relation, weight, auto_linked) "
+            "VALUES (:a, :s, :t, 'fact', 'fact', 'contradicts', 1.0, true)"
+        ), {"a": agent_id, "s": a, "t": b})
+        await session.commit()
+
+    n = await densifier.build_comention_edges()
+
+    async with db.session() as session:
+        cm = (await session.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention'"
+        ), {"a": agent_id})).scalar()
+    assert n == 0 and cm == 0, "co_mention must skip a pair already joined by contradicts"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_comention_links_clean_shared_entity_pair(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """Positive control: the P2-D 'skip any prior fact-fact edge' change must NOT break
+    the happy path — a shared-entity pair with no prior edge still gets exactly 1 edge."""
+    agent_id = f"test-cm-clean-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={"comention_linking_enabled": True})
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("x")
+        await _insert_fact(session, agent_id, "Dara Velen leads Project Helios.", emb)
+        await _insert_fact(session, agent_id, "Dara Velen studied at the Halvorsen Institute.", emb)
+        await session.commit()
+
+    n = await densifier.build_comention_edges()
+    async with db.session() as session:
+        cm = (await session.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention'"
+        ), {"a": agent_id})).scalar()
+    assert n == 1 and cm == 1
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_build_comention_dry_run_previews_without_writing(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """F076 backfill: dry_run returns the would-build count and writes nothing; a real
+    run then inserts exactly that many."""
+    agent_id = f"test-cm-dry-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={"comention_linking_enabled": True})
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("x")
+        await _insert_fact(session, agent_id, "Dara Velen leads Project Helios.", emb)
+        await _insert_fact(session, agent_id, "Dara Velen studied at the Halvorsen Institute.", emb)
+        await session.commit()
+
+    would = await densifier.build_comention_edges(dry_run=True)
+    async with db.session() as session:
+        after_dry = (await session.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id=:a AND extraction_method='co_mention'"
+        ), {"a": agent_id})).scalar()
+    assert would == 1 and after_dry == 0  # previewed, nothing written
+
+    built = await densifier.build_comention_edges()
+    assert built == would
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_find_orphans_episode_with_only_plain_summary_is_returned(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):

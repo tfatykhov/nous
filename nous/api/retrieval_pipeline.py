@@ -400,7 +400,12 @@ async def _run_stages(
     # ------------------------------------------------------------------
     if (
         heart_types
-        and acc.heart_results
+        # Fire when EITHER fact/episode results OR chunk results are present.
+        # Previously required acc.heart_results, which silently blocked Path A
+        # (Stage 2b) chunk-seed expansion on chunk-only retrieval (no fact/episode
+        # hit) — the line-403 gap. Stage 2's decision loop no-ops on empty
+        # heart_results; Stage 2b stays gated on heart_graph_all_types_enabled.
+        and (acc.heart_results or acc.chunk_results)
         and settings.graph_recall_enabled
         and settings.cross_type_linking_enabled
     ):
@@ -444,28 +449,37 @@ async def _run_stages(
         # ------------------------------------------------------------------
         if settings.heart_graph_all_types_enabled:
             mem_limit = max(1, int(settings.heart_graph_neighbors_per_seed))
-            seen_mem_ids: set[UUID] = set()
+            seen_mem: dict[UUID, "NeighborResult"] = {}
             heart_ids: set[UUID] = {hr.id for hr in acc.heart_results}
             # acc.chunk_results carries (id, content, score, episode_id) per
             # _search_episode_chunks at line 825. Use star-unpack so future
             # tuple shape changes don't crash this hot loop.
             chunk_ids: set[UUID] = {item[0] for item in acc.chunk_results}
             # Heart seeds: top-K fact/episode results.
-            mem_seeds: list[tuple[UUID, str]] = [
-                (hr.id, hr.type) for hr in acc.heart_results[:3]
+            # (id, node_type, seed_score) — seed_score threads the seed's own
+            # retrieval score to its neighbors for the seed-score scoring fix.
+            # Keep it NULLABLE: a None score must stay None so the consumer's
+            # `seed_score is not None` guard routes it to the legacy fallback
+            # (NOT coerce to 0.0, which would pass the guard and score the
+            # neighbor 0.0 — silently sinking it).
+            mem_seeds: list[tuple[UUID, str, float | None]] = [
+                (hr.id, hr.type, hr.score) for hr in acc.heart_results[:3]
                 if hr.type in ("fact", "episode")
             ]
             # Chunk seeds: top-K F067 chunk-recall results (when present).
             # Chunks have rich same-episode neighborhoods via F070.
+            # chunk_results items are (id, content, score, episode_id).
             mem_seeds.extend(
-                (item[0], "chunk") for item in acc.chunk_results[:3]
+                (item[0], "chunk",
+                 float(item[2]) if len(item) > 2 and item[2] is not None else None)
+                for item in acc.chunk_results[:3]
             )
             # Per-type fan-out — one ``LIMIT`` window per neighbor type so
             # chunks don't crowd facts/episodes (or vice versa) out of a
             # single small union limit. Order is irrelevant; the global
             # rerank handles final ordering.
             mem_neighbor_types = ("fact", "episode", "chunk", "procedure")
-            for seed_id, seed_type in mem_seeds:
+            for seed_id, seed_type, seed_score in mem_seeds:
                 for nbr_type in mem_neighbor_types:
                     try:
                         mem_neighbors = await brain.neighbors(
@@ -496,7 +510,24 @@ async def _run_stages(
                         # keep the guard for defense against future filter drift.
                         if n.node_type == "decision":
                             continue
-                        if n.id in seen_mem_ids:
+                        if n.id in seen_mem:
+                            # Reached from multiple seeds: keep the PATH (seed + edge)
+                            # with the highest COMPOSED score, not just the strongest
+                            # seed. First-seed-wins could permanently under-score a
+                            # neighbor a later, higher-scored seed also reaches. But
+                            # updating seed_score alone while keeping the first path's
+                            # edge_weight/extraction_method would score a path that
+                            # does not exist (a later strong seed through a weak edge
+                            # combined with the first path's strong edge). Compare the
+                            # full composed score and replace the stored neighbor's
+                            # path metadata when the later path genuinely wins.
+                            prev = seen_mem[n.id]
+                            n.seed_score = seed_score
+                            if _score_memory_neighbor(n, settings) > _score_memory_neighbor(prev, settings):
+                                prev.seed_score = n.seed_score
+                                prev.edge_weight = n.edge_weight
+                                prev.edge_relation = n.edge_relation
+                                prev.extraction_method = n.extraction_method
                             continue
                         # Skip duplicates against existing candidate pool. Track
                         # duplicates as a separate counter so eval can distinguish
@@ -509,8 +540,10 @@ async def _run_stages(
                                 ) + 1
                             )
                             continue
+                        # Carry the seed's retrieval score for the seed-score fix.
+                        n.seed_score = seed_score
                         acc.heart_graph_memory_neighbors.append(n)
-                        seen_mem_ids.add(n.id)
+                        seen_mem[n.id] = n
 
     # ------------------------------------------------------------------
     # Stage 3+4: Brain decisions + graph expansion
@@ -922,6 +955,26 @@ def _heart_graph_to_pipeline(
     ]
 
 
+def _score_memory_neighbor(n: "NeighborResult", settings: "Settings") -> float:
+    """Composed Path-A neighbor score.
+
+    Shared by Stage 2b's duplicate path-selection and the final scoring below, so the
+    two never diverge. Seed-score fix (eval-gated): a neighbor inherits its seed's
+    retrieval score discounted by edge confidence, putting it on the candidate's scale
+    so a strong-seed+strong-edge neighbor can clear the top-k cutline that
+    edge_weight*decay (ceiling ~0.70) structurally cannot. Falls back to the legacy
+    formula when the flag is off or the seed_score wasn't threaded.
+    """
+    if getattr(settings, "graph_neighbor_seed_score_enabled", False) and n.seed_score is not None:
+        penalty = (
+            settings.graph_inferred_edge_penalty
+            if (n.extraction_method or "heuristic") == "inferred"
+            else 1.0
+        )
+        return n.seed_score * n.edge_weight * penalty
+    return _f065_provenance_penalty(n, n.edge_weight, settings.graph_recall_decay, settings)
+
+
 def _heart_graph_memory_to_pipeline(
     memory_neighbors: list["NeighborResult"], settings: "Settings"
 ) -> list[PipelineResult]:
@@ -932,13 +985,12 @@ def _heart_graph_memory_to_pipeline(
     memory candidate. Scoring uses the same decay + F065 provenance penalty
     pattern as the decision-neighbor path.
     """
-    decay = settings.graph_recall_decay
     return [
         PipelineResult(
             id=n.id,
             type=n.node_type,
             description=n.description,
-            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
+            score=_score_memory_neighbor(n, settings),
             source="graph_expanded",
             edge_relation=n.edge_relation,
             metadata={"stage_origin": "heart_graph_memory"},

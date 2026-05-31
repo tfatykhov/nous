@@ -157,6 +157,13 @@ class GraphDensifier:
               AND NOT EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :agent_id
+                    -- F076: a co_mention edge must NOT make a fact look non-orphan.
+                    -- It only links fact<->fact on a shared entity; it does NOT give
+                    -- the cross-type (fact->decision/episode) connectivity the F040
+                    -- backfill provides. Counting it here would permanently skip such
+                    -- facts from later backfill cycles (find_orphans consumes the
+                    -- orphan signal). IS DISTINCT FROM keeps NULL/legacy rows counting.
+                    AND e.extraction_method IS DISTINCT FROM 'co_mention'
                     AND (
                         (e.source_id = t.id AND e.source_type = :type_name)
                         OR (e.target_id = t.id AND e.target_type = :type_name)
@@ -1110,7 +1117,26 @@ class GraphDensifier:
         # sleep_handler._phase_graph_densification (same convention as
         # `_ce_stats`). Codex PR #461 P2 fix.
         results["_happened_before"] = await self._build_happened_before_edges()
-        return _log_and_return(aborted=False)
+        if self._interrupted:
+            return _log_and_return(aborted=True)
+
+        # F076 (2026-05-30): co-mention / shared-entity associative edges.
+        # Leading underscore keeps the count out of the orphan-backfill sum in
+        # sleep_handler._phase_graph_densification (same convention as
+        # `_ce_stats` / `_happened_before`). Default ON (comention_linking_enabled).
+        # Wrapped: this default-ON, last-in-cycle pass must not mask sibling
+        # backfill stats or skip downstream phases if it throws (its own edges
+        # commit independently; siblings already committed). Silent-failure review.
+        try:
+            results["_co_mention"] = await self.build_comention_edges()
+        except Exception:
+            logger.warning(
+                "F076: build_comention_edges failed for agent_id=%s "
+                "(non-fatal; sibling backfill edges already committed)",
+                self._agent_id, exc_info=True,
+            )
+            results["_co_mention"] = 0
+        return _log_and_return(aborted=self._interrupted)
 
     async def _build_happened_before_edges(self) -> int:
         """F075 Layer 2: chain temporally-adjacent dated facts within episodes.
@@ -1164,6 +1190,150 @@ class GraphDensifier:
                     count, self._agent_id,
                 )
             return count
+
+    async def build_comention_edges(self, *, dry_run: bool = False) -> int:
+        """F076: link facts that NAME the same entity, independent of cosine.
+
+        FACT-only by design. chunk<->chunk co-mention was considered and dropped: it
+        builds a noisy, redundant edge web over overlapping raw transcript slices with
+        little marginal retrieval value. The right associative node for a document is a
+        distilled connector FACT (see the document-consolidation feature, F077), which
+        joins THIS fact graph — not a tangle of chunk edges. Chunks stay for verbatim
+        recall; consolidation gives documents a semantic identity in the fact graph.
+
+        dry_run=True computes the candidate pairs (same caps, hub/fan-out limits, and
+        prior-edge skip) and returns how many edges WOULD be inserted, without writing —
+        used by scripts/backfill_comention_edges.py to preview yield.
+
+        The associative edge the cosine-only graph misses: two facts that both mention
+        "Steve Hillage" but embed below the 0.82 fact-fact threshold stay orphans. We
+        extract entities from each active fact's content and link facts that share one —
+        no cosine gate. Edges are relation='related_to', extraction_method='co_mention'
+        (own provenance tier, escapes the F065 inferred penalty; weight written directly
+        via raw INSERT).
+
+        Conservative for a default-on builder: hub-entity degree cap, per-fact fan-out
+        cap, rarer-entity-first fill (rarer = stronger signal), and a pre-existing-edge
+        guard (any relation, incl. contradicts) so we never duplicate a link or join a
+        contradicting pair. Idempotent across sleep cycles.
+
+        Returns the number of new co-mention edges inserted.
+        """
+        from itertools import combinations
+
+        from nous.brain.entity_extraction import extract_entities
+
+        s = self._settings
+        if not getattr(s, "comention_linking_enabled", False):
+            return 0
+        max_degree = int(s.comention_max_degree)
+        max_per_node = int(s.comention_max_edges_per_node)
+        weight = float(s.comention_weight)
+        min_chars = int(s.comention_min_entity_chars)
+        max_facts = int(s.comention_max_facts_per_cycle)
+
+        async with self.db.session() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT id, content FROM heart.facts "
+                    "WHERE agent_id = :a AND active = TRUE "
+                    "ORDER BY learned_at DESC, id LIMIT :lim"
+                ),
+                {"a": self._agent_id, "lim": max_facts},
+            )).all()
+        if not rows:
+            return 0
+
+        # entity -> ordered unique fact ids (deterministic).
+        ent_to_facts: dict[str, list[str]] = {}
+        for fid, content in rows:
+            for ent in extract_entities(content or "", min_chars=min_chars):
+                bucket = ent_to_facts.setdefault(ent, [])
+                fid_s = str(fid)
+                if fid_s not in bucket:
+                    bucket.append(fid_s)
+
+        # Pre-existing fact-fact edges of ANY relation (either direction) — skip to
+        # avoid (a) duplicate undirected related_to links + churn AND (b) adding a
+        # related_to edge OVER a contradicts/supersedes pair. adjacency-boost and
+        # spreading-activation filter only `relation != 'contradicts'`, so a co_mention
+        # related_to edge would let mutually-inconsistent facts reinforce each other.
+        # Loading every relation makes any prior edge a hard skip.
+        # P2-F: scope to the SCANNED facts — candidate pairs only come from `rows`, so an
+        # edge can only block a pair if BOTH endpoints are in the scanned set; this bounds
+        # the lookup by the per-cycle scan, not the agent's total historical edge count.
+        fact_ids = [str(fid) for fid, _ in rows]
+        async with self.db.session() as session:
+            existing_rows = (await session.execute(
+                text(
+                    "SELECT source_id, target_id FROM brain.graph_edges "
+                    "WHERE agent_id = :a "
+                    "AND source_type = 'fact' AND target_type = 'fact' "
+                    "AND source_id = ANY(CAST(:ids AS uuid[])) "
+                    "AND target_id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": self._agent_id, "ids": fact_ids},
+            )).all()
+        existing: set[tuple[str, str]] = set()
+        for src, tgt in existing_rows:
+            a, b = str(src), str(tgt)
+            existing.add((a, b) if a < b else (b, a))
+
+        # Candidate pairs: rarer entities first, skip hubs, cap per-node fan-out,
+        # canonical (a < b), interrupt-aware.
+        deg: dict[str, int] = {}
+        to_insert: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for ent in sorted(ent_to_facts, key=lambda k: (len(ent_to_facts[k]), k)):
+            fids = ent_to_facts[ent]
+            if not (2 <= len(fids) <= max_degree):
+                continue
+            for a, b in combinations(sorted(fids), 2):
+                if deg.get(a, 0) >= max_per_node or deg.get(b, 0) >= max_per_node:
+                    continue
+                key = (a, b)
+                if key in seen or key in existing:
+                    continue
+                seen.add(key)
+                deg[a] = deg.get(a, 0) + 1
+                deg[b] = deg.get(b, 0) + 1
+                to_insert.append(key)
+            if self._interrupted:
+                break
+
+        if not to_insert:
+            return 0
+        if dry_run:
+            return len(to_insert)
+
+        insert_sql = text(
+            "INSERT INTO brain.graph_edges "
+            "(source_id, target_id, source_type, target_type, agent_id, "
+            " relation, weight, auto_linked, extraction_method) "
+            "VALUES (:s, :t, 'fact', 'fact', :a, 'related_to', :w, TRUE, 'co_mention') "
+            "ON CONFLICT (source_id, target_id, relation) DO NOTHING"
+        )
+        inserted = 0
+        BATCH = 500
+        async with self.db.session() as session:
+            for i in range(0, len(to_insert), BATCH):
+                batch = to_insert[i:i + BATCH]
+                await session.execute(
+                    insert_sql,
+                    [{"s": a, "t": b, "a": self._agent_id, "w": weight} for a, b in batch],
+                )
+                inserted += len(batch)
+            await session.commit()
+
+        if inserted:
+            logger.info(
+                "F076: built %d co_mention edges for agent_id=%s "
+                "(%d shared entities over %d facts)",
+                inserted, self._agent_id,
+                sum(1 for v in ent_to_facts.values() if 2 <= len(v) <= max_degree),
+                len(rows),
+            )
+        return inserted
 
     async def discover_clusters(self, max_bridges: int = 20) -> int:
         """Discover disconnected graph components and create bridge edges.
