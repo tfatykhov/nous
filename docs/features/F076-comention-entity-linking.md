@@ -27,9 +27,12 @@ This feature builds that edge as a real, default-on **sleep** step.
 
 ### 2. Densifier co-mention pass — `nous/brain/graph_densifier.py`
 - New `build_comention_edges(agent_id)` invoked from `run_backfill_cycle` (runs in **sleep**).
-- For active **facts** and **chunks** (same-type within each): extract entities from content,
-  index entity→{node_ids}, drop hub entities mentioned in > `max_degree` nodes, link node
+- For active **facts** (fact↔fact only): extract entities from content, index
+  entity→{fact_ids}, drop hub entities mentioned in > `max_degree` facts, link fact
   pairs sharing an entity with per-node fan-out cap `max_edges_per_node`.
+  (chunk↔chunk co-mention was dropped — a noisy redundant web over overlapping raw
+  slices; documents get a distilled connector FACT via the document-consolidation
+  feature **F077** instead, which joins this same fact graph.)
 - Insert `graph_edges(relation='related_to', extraction_method='co_mention', weight=settings
   value, auto_linked=true)`, `ON CONFLICT (source_id,target_id,relation) DO NOTHING`.
   `related_to` ⇒ traversable by Path A / spreading / adjacency; not `contradicts` so spreading
