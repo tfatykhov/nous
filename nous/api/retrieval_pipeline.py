@@ -400,7 +400,12 @@ async def _run_stages(
     # ------------------------------------------------------------------
     if (
         heart_types
-        and acc.heart_results
+        # Fire when EITHER fact/episode results OR chunk results are present.
+        # Previously required acc.heart_results, which silently blocked Path A
+        # (Stage 2b) chunk-seed expansion on chunk-only retrieval (no fact/episode
+        # hit) — the line-403 gap. Stage 2's decision loop no-ops on empty
+        # heart_results; Stage 2b stays gated on heart_graph_all_types_enabled.
+        and (acc.heart_results or acc.chunk_results)
         and settings.graph_recall_enabled
         and settings.cross_type_linking_enabled
     ):
@@ -451,21 +456,30 @@ async def _run_stages(
             # tuple shape changes don't crash this hot loop.
             chunk_ids: set[UUID] = {item[0] for item in acc.chunk_results}
             # Heart seeds: top-K fact/episode results.
-            mem_seeds: list[tuple[UUID, str]] = [
-                (hr.id, hr.type) for hr in acc.heart_results[:3]
+            # (id, node_type, seed_score) — seed_score threads the seed's own
+            # retrieval score to its neighbors for the seed-score scoring fix.
+            # Keep it NULLABLE: a None score must stay None so the consumer's
+            # `seed_score is not None` guard routes it to the legacy fallback
+            # (NOT coerce to 0.0, which would pass the guard and score the
+            # neighbor 0.0 — silently sinking it).
+            mem_seeds: list[tuple[UUID, str, float | None]] = [
+                (hr.id, hr.type, hr.score) for hr in acc.heart_results[:3]
                 if hr.type in ("fact", "episode")
             ]
             # Chunk seeds: top-K F067 chunk-recall results (when present).
             # Chunks have rich same-episode neighborhoods via F070.
+            # chunk_results items are (id, content, score, episode_id).
             mem_seeds.extend(
-                (item[0], "chunk") for item in acc.chunk_results[:3]
+                (item[0], "chunk",
+                 float(item[2]) if len(item) > 2 and item[2] is not None else None)
+                for item in acc.chunk_results[:3]
             )
             # Per-type fan-out — one ``LIMIT`` window per neighbor type so
             # chunks don't crowd facts/episodes (or vice versa) out of a
             # single small union limit. Order is irrelevant; the global
             # rerank handles final ordering.
             mem_neighbor_types = ("fact", "episode", "chunk", "procedure")
-            for seed_id, seed_type in mem_seeds:
+            for seed_id, seed_type, seed_score in mem_seeds:
                 for nbr_type in mem_neighbor_types:
                     try:
                         mem_neighbors = await brain.neighbors(
@@ -509,6 +523,11 @@ async def _run_stages(
                                 ) + 1
                             )
                             continue
+                        # Carry the seed's retrieval score for the seed-score
+                        # scoring fix. First-seed-wins (heart seeds precede chunk
+                        # seeds, and within heart seeds order is by recall rank,
+                        # so the first to reach a neighbor is the strongest).
+                        n.seed_score = seed_score
                         acc.heart_graph_memory_neighbors.append(n)
                         seen_mem_ids.add(n.id)
 
@@ -933,12 +952,30 @@ def _heart_graph_memory_to_pipeline(
     pattern as the decision-neighbor path.
     """
     decay = settings.graph_recall_decay
+    use_seed = getattr(settings, "graph_neighbor_seed_score_enabled", False)
+
+    def _score(n: "NeighborResult") -> float:
+        # Seed-score fix (eval-gated): a neighbor inherits its seed's retrieval
+        # score discounted by edge confidence, putting it on the same scale as
+        # the candidate it was reached from. This lets a strong-seed+strong-edge
+        # neighbor clear the vector top-k cutline, which edge_weight*decay
+        # (ceiling ~0.70) structurally cannot. Falls back to the legacy formula
+        # when the flag is off or the seed_score wasn't threaded.
+        if use_seed and n.seed_score is not None:
+            penalty = (
+                settings.graph_inferred_edge_penalty
+                if (n.extraction_method or "heuristic") == "inferred"
+                else 1.0
+            )
+            return n.seed_score * n.edge_weight * penalty
+        return _f065_provenance_penalty(n, n.edge_weight, decay, settings)
+
     return [
         PipelineResult(
             id=n.id,
             type=n.node_type,
             description=n.description,
-            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
+            score=_score(n),
             source="graph_expanded",
             edge_relation=n.edge_relation,
             metadata={"stage_origin": "heart_graph_memory"},

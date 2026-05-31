@@ -23,12 +23,15 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-# Mirror of the migration 047 CHECK constraint. Keep in sync.
+# Mirror of the migration 047 + 054 CHECK constraint. Keep in sync.
+#   co_mention (F076): shared-mentioned-entity associative edges built by the
+#   sleep densifier — a direct string match, NOT a low-confidence inference, so
+#   it gets its own tier (and escapes the inferred-edge penalty).
 VALID_METHODS: Final[frozenset[str]] = frozenset(
-    {"deterministic", "heuristic", "inferred"}
+    {"deterministic", "heuristic", "inferred", "co_mention"}
 )
 
-ExtractionMethod = Literal["deterministic", "heuristic", "inferred"]
+ExtractionMethod = Literal["deterministic", "heuristic", "inferred", "co_mention"]
 
 
 def classify(
@@ -71,6 +74,8 @@ def classify(
         return "inferred"
     if source == "structural":
         return "deterministic"
+    if source == "co_mention":
+        return "co_mention"
     if source in ("auto_linker", "ce_backfill"):
         return "inferred"
     return "heuristic"

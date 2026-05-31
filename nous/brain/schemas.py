@@ -166,3 +166,9 @@ class NeighborResult(BaseModel):
     # constructed outside _neighbors (e.g. spreading-activation rows)
     # or for rows that somehow slip through the migration with NULL.
     extraction_method: str = "heuristic"
+    # Retrieval score of the SEED this neighbor was expanded from (Path A
+    # graph-neighbor scoring fix). Set by run_recall_pipeline Stage 2b when
+    # the neighbor is collected; consumed by _heart_graph_memory_to_pipeline
+    # when graph_neighbor_seed_score_enabled. None for neighbors built outside
+    # that path (e.g. decision expansion, spreading activation).
+    seed_score: float | None = None

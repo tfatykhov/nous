@@ -41,7 +41,14 @@ _GRAPH_EDGE_RELATIONS = [
 
 class TestClassify:
     def test_valid_methods_constant_matches_check_constraint(self) -> None:
-        assert VALID_METHODS == {"deterministic", "heuristic", "inferred"}
+        # F076 (migration 054) added the 'co_mention' tier.
+        assert VALID_METHODS == {"deterministic", "heuristic", "inferred", "co_mention"}
+
+    def test_source_co_mention_routes_to_own_tier(self) -> None:
+        # F076: shared-mentioned-entity edges get their own tier (escape the
+        # inferred penalty); structural-relation precedence still wins.
+        assert classify("related_to", source="co_mention") == "co_mention"
+        assert classify("supersedes", source="co_mention") == "deterministic"
 
     @pytest.mark.parametrize("relation", _GRAPH_EDGE_RELATIONS)
     def test_every_relation_maps_to_a_valid_tier(self, relation: str) -> None:

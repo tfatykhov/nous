@@ -1193,6 +1193,59 @@ class Settings(BaseSettings):
             "surfaced."
         ),
     )
+    graph_neighbor_seed_score_enabled: bool = Field(
+        default=False,
+        description=(
+            "Graph-neighbor SCORING fix (eval-gated). When false (default), a "
+            "Path-A graph neighbor scores edge_weight * graph_recall_decay, a "
+            "hard ceiling of ~0.70 that sits BELOW the vector top-k cutline "
+            "(~0.72-0.83), so graph-recovered items can never reach top-k and "
+            "the whole association layer is invisible to recall@k (the F065 "
+            "dead-end, measured 2026-05-30). When true, a neighbor inherits its "
+            "SEED's retrieval score discounted by edge confidence "
+            "(seed_score * edge_weight), putting it on the same scale as the "
+            "candidate it was reached from so a strong-seed+strong-edge bridge "
+            "can clear the cutline. Opt-in for eval measurement (mirrors "
+            "rerank_by_score); prod adoption is a separate regression-gated "
+            "decision."
+        ),
+    )
+    # =========================================================================
+    # F076 — Co-mention / shared-entity linking (associative graph layer)
+    # =========================================================================
+    comention_linking_enabled: bool = Field(
+        default=True,
+        description=(
+            "F076: during sleep, link facts that NAME the same entity "
+            "(shared mention) independent of embedding cosine — the associative "
+            "edge the cosine-only graph misses (the Steve Hillage orphan case). "
+            "Edges are relation='related_to', extraction_method='co_mention'. "
+            "Default ON (core capability). NOTE: retrieval effect requires the "
+            "consumers (heart_graph_all_types_enabled / graph_adjacency_boost / "
+            "graph_neighbor_seed_score) and these edges also raise global graph "
+            "density (can auto-trip spreading activation)."
+        ),
+    )
+    comention_max_degree: int = Field(
+        default=10, ge=2,
+        description="F076: skip hub entities mentioned in > N facts (noise bound).",
+    )
+    comention_max_edges_per_node: int = Field(
+        default=20, ge=1,
+        description="F076: per-fact co-mention edge fan-out cap.",
+    )
+    comention_weight: float = Field(
+        default=0.80, ge=0.0, le=1.0,
+        description="F076: stored weight of a co-mention edge (raw INSERT, no relation multiplier).",
+    )
+    comention_min_entity_chars: int = Field(
+        default=6, ge=1,
+        description="F076: minimum normalized entity-phrase length to link on.",
+    )
+    comention_max_facts_per_cycle: int = Field(
+        default=5000, ge=1,
+        description="F076: max active facts scanned per sleep cycle (most-recent first); safety bound on the O(corpus) pass.",
+    )
     # =========================================================================
     # F070 — Chunk-aware sleep consolidation (v1: edges only, no schema change)
     # =========================================================================
