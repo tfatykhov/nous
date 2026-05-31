@@ -511,18 +511,23 @@ async def _run_stages(
                         if n.node_type == "decision":
                             continue
                         if n.id in seen_mem:
-                            # Reached from multiple seeds: keep the STRONGEST seed
-                            # score. First-seed-wins (the old behaviour) could
-                            # permanently under-score a neighbor that a later,
-                            # higher-scored seed also reaches — pushing it below the
-                            # top-k cutline the seed-score fix exists to clear. A
-                            # non-null score wins over None (adopt the seed-score path)
-                            # and the larger of two non-null scores wins.
+                            # Reached from multiple seeds: keep the PATH (seed + edge)
+                            # with the highest COMPOSED score, not just the strongest
+                            # seed. First-seed-wins could permanently under-score a
+                            # neighbor a later, higher-scored seed also reaches. But
+                            # updating seed_score alone while keeping the first path's
+                            # edge_weight/extraction_method would score a path that
+                            # does not exist (a later strong seed through a weak edge
+                            # combined with the first path's strong edge). Compare the
+                            # full composed score and replace the stored neighbor's
+                            # path metadata when the later path genuinely wins.
                             prev = seen_mem[n.id]
-                            if seed_score is not None and (
-                                prev.seed_score is None or seed_score > prev.seed_score
-                            ):
-                                prev.seed_score = seed_score
+                            n.seed_score = seed_score
+                            if _score_memory_neighbor(n, settings) > _score_memory_neighbor(prev, settings):
+                                prev.seed_score = n.seed_score
+                                prev.edge_weight = n.edge_weight
+                                prev.edge_relation = n.edge_relation
+                                prev.extraction_method = n.extraction_method
                             continue
                         # Skip duplicates against existing candidate pool. Track
                         # duplicates as a separate counter so eval can distinguish
@@ -950,6 +955,26 @@ def _heart_graph_to_pipeline(
     ]
 
 
+def _score_memory_neighbor(n: "NeighborResult", settings: "Settings") -> float:
+    """Composed Path-A neighbor score.
+
+    Shared by Stage 2b's duplicate path-selection and the final scoring below, so the
+    two never diverge. Seed-score fix (eval-gated): a neighbor inherits its seed's
+    retrieval score discounted by edge confidence, putting it on the candidate's scale
+    so a strong-seed+strong-edge neighbor can clear the top-k cutline that
+    edge_weight*decay (ceiling ~0.70) structurally cannot. Falls back to the legacy
+    formula when the flag is off or the seed_score wasn't threaded.
+    """
+    if getattr(settings, "graph_neighbor_seed_score_enabled", False) and n.seed_score is not None:
+        penalty = (
+            settings.graph_inferred_edge_penalty
+            if (n.extraction_method or "heuristic") == "inferred"
+            else 1.0
+        )
+        return n.seed_score * n.edge_weight * penalty
+    return _f065_provenance_penalty(n, n.edge_weight, settings.graph_recall_decay, settings)
+
+
 def _heart_graph_memory_to_pipeline(
     memory_neighbors: list["NeighborResult"], settings: "Settings"
 ) -> list[PipelineResult]:
@@ -960,31 +985,12 @@ def _heart_graph_memory_to_pipeline(
     memory candidate. Scoring uses the same decay + F065 provenance penalty
     pattern as the decision-neighbor path.
     """
-    decay = settings.graph_recall_decay
-    use_seed = getattr(settings, "graph_neighbor_seed_score_enabled", False)
-
-    def _score(n: "NeighborResult") -> float:
-        # Seed-score fix (eval-gated): a neighbor inherits its seed's retrieval
-        # score discounted by edge confidence, putting it on the same scale as
-        # the candidate it was reached from. This lets a strong-seed+strong-edge
-        # neighbor clear the vector top-k cutline, which edge_weight*decay
-        # (ceiling ~0.70) structurally cannot. Falls back to the legacy formula
-        # when the flag is off or the seed_score wasn't threaded.
-        if use_seed and n.seed_score is not None:
-            penalty = (
-                settings.graph_inferred_edge_penalty
-                if (n.extraction_method or "heuristic") == "inferred"
-                else 1.0
-            )
-            return n.seed_score * n.edge_weight * penalty
-        return _f065_provenance_penalty(n, n.edge_weight, decay, settings)
-
     return [
         PipelineResult(
             id=n.id,
             type=n.node_type,
             description=n.description,
-            score=_score(n),
+            score=_score_memory_neighbor(n, settings),
             source="graph_expanded",
             edge_relation=n.edge_relation,
             metadata={"stage_origin": "heart_graph_memory"},

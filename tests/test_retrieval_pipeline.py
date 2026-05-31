@@ -563,6 +563,48 @@ class TestPathAStage2b:
         )
 
     @pytest.mark.asyncio
+    async def test_best_composed_path_wins_not_phantom_combination(self):
+        """P2: keep the PATH with the best composed (seed x edge) score — never combine
+        a later seed with the first path's edge (a path that does not exist)."""
+        from uuid import uuid4
+
+        low_seed = uuid4()
+        high_seed = uuid4()
+        nbr_id = uuid4()
+
+        def _nbr(weight):
+            return NeighborResult(
+                id=nbr_id, node_type="fact", description="shared neighbor",
+                edge_relation="related_to", edge_weight=weight,
+                created_at=datetime.now(UTC),
+            )
+
+        # Weak seed + STRONG edge FIRST (0.4*0.9 = 0.36) vs strong seed + WEAK edge
+        # LATER (0.9*0.3 = 0.27). The first path is genuinely better and must win —
+        # the phantom combination would be 0.9*0.9 = 0.81.
+        recall = [
+            RecallResult(type="fact", id=low_seed, summary="weak seed strong edge", score=0.4),
+            RecallResult(type="fact", id=high_seed, summary="strong seed weak edge", score=0.9),
+        ]
+        heart = _make_heart(recall_results=recall)
+        brain = _make_brain(
+            neighbors_by_node={low_seed: [_nbr(0.9)], high_seed: [_nbr(0.3)]},
+            contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(heart_graph_all_types_enabled=True)
+        settings.graph_neighbor_seed_score_enabled = True
+        settings.graph_inferred_edge_penalty = 0.5
+
+        results, _ = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain, settings=settings, limit=20,
+        )
+        nbr_result = next(r for r in results if r.id == nbr_id)
+        # best REAL path = 0.4 x 0.9 = 0.36; NOT phantom 0.81 and NOT 0.27
+        assert abs(nbr_result.score - 0.36) < 1e-6, (
+            f"expected best composed path 0.36, got {nbr_result.score}"
+        )
+
+    @pytest.mark.asyncio
     async def test_skips_decisions_and_dedups_against_pool(self):
         """Stage 2b must (1) skip neighbors of type='decision' (already
         handled by Stage 2), (2) skip duplicates already in heart_results,
