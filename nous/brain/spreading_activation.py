@@ -18,17 +18,27 @@ logger = logging.getLogger(__name__)
 
 
 async def compute_graph_density(session: AsyncSession, agent_id: str) -> float:
-    """Compute average edges per unique node for the given agent."""
+    """Compute average edges per unique node for the given agent.
+
+    F076: co-mention edges (``extraction_method='co_mention'``) are EXCLUDED from
+    the density count. The co-mention builder is default-on but its retrieval
+    consumers (Path A / adjacency / seed-score) default off, so its edges must not
+    silently push an agent over ``spreading_activation_density_threshold`` and flip
+    decision retrieval into spreading activation before that rollout is intentional.
+    ``IS DISTINCT FROM`` keeps NULL/legacy ``extraction_method`` rows counted.
+    """
     sql = text("""
         WITH node_counts AS (
             SELECT COUNT(*) AS edge_count,
                    (SELECT COUNT(DISTINCT node_id) FROM (
-                       SELECT source_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                       SELECT source_id AS node_id FROM brain.graph_edges
+                       WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
                        UNION
-                       SELECT target_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+                       SELECT target_id AS node_id FROM brain.graph_edges
+                       WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
                    ) nodes) AS unique_nodes
             FROM brain.graph_edges
-            WHERE agent_id = :agent_id
+            WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
         )
         SELECT CASE WHEN unique_nodes = 0 THEN 0.0
                     ELSE edge_count::float / unique_nodes
