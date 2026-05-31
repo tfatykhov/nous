@@ -46,7 +46,7 @@ This feature builds that edge as a real, default-on **sleep** step.
 - `comention_linking_enabled: bool = True`  (NOUS_COMENTION_LINKING_ENABLED) — **default ON**
 - `comention_max_degree: int = 10`          — skip hub entities (> N nodes) to bound noise
 - `comention_max_edges_per_node: int = 20`  — fan-out cap
-- `comention_weight: float = 0.80`          — edge weight
+- `comention_weight: float = 0.90`          — edge weight (was 0.80; the private-fact value harness showed 0.80 lands a fully-vector-missed disjoint bridge at rank 11, 0.90 clears the cutline at rank 7 with zero displacement — Path-A score = seed_score × comention_weight)
 - `comention_min_entity_chars: int = 6`     — entity length floor
 
 ### 5. Retrieval consumption (already built — no new work, but note for the A/B)

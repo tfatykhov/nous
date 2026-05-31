@@ -1235,8 +1235,16 @@ class Settings(BaseSettings):
         description="F076: per-fact co-mention edge fan-out cap.",
     )
     comention_weight: float = Field(
-        default=0.80, ge=0.0, le=1.0,
-        description="F076: stored weight of a co-mention edge (raw INSERT, no relation multiplier).",
+        default=0.90, ge=0.0, le=1.0,
+        description=(
+            "F076: stored weight of a co-mention edge (raw INSERT, no relation multiplier). "
+            "Default 0.90 (was 0.80): Path-A's seed-score composition scores a recovered "
+            "neighbor at seed_score x comention_weight, and the private-fact value harness "
+            "(scripts/diag/hippo/privfact/) showed 0.80 lands a fully-vector-missed disjoint "
+            "bridge at rank 11 (one short of top-10) while 0.90 clears the cutline (rank 7) "
+            "with zero control displacement. Only affects retrieval once the consumer flags "
+            "(heart_graph_all_types_enabled, graph_neighbor_seed_score_enabled) are on."
+        ),
     )
     comention_min_entity_chars: int = Field(
         default=6, ge=1,
