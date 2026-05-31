@@ -386,10 +386,14 @@ class HttpxAnthropicClient:
                 "API calls will fail"
             )
 
+        # interleaved-thinking-2025-05-14 and fine-grained-tool-streaming-2025-05-14
+        # were REMOVED — Anthropic's Claude 4 migration guide marks both obsolete.
+        # Adaptive thinking (Opus 4.6+/Sonnet 4.6+) enables interleaved thinking
+        # natively, and sending the legacy interleaved header alongside it broke
+        # opus-4.8 streaming tool round-trips ("tool_use ids without tool_result").
+        # Nous targets Claude 4.6+ only, so they are dropped unconditionally.
         beta_features: list[str] = [
             "claude-code-20250219",
-            "fine-grained-tool-streaming-2025-05-14",
-            "interleaved-thinking-2025-05-14",
         ]
         if is_oat:
             beta_features.append("oauth-2025-04-20")
@@ -816,10 +820,14 @@ class SdkAnthropicClient:
             kwargs["api_key"] = "missing"
 
         # Beta headers + OAT browser access header
+        # interleaved-thinking-2025-05-14 and fine-grained-tool-streaming-2025-05-14
+        # were REMOVED — Anthropic's Claude 4 migration guide marks both obsolete.
+        # Adaptive thinking (Opus 4.6+/Sonnet 4.6+) enables interleaved thinking
+        # natively, and sending the legacy interleaved header alongside it broke
+        # opus-4.8 streaming tool round-trips ("tool_use ids without tool_result").
+        # Nous targets Claude 4.6+ only, so they are dropped unconditionally.
         beta_features: list[str] = [
             "claude-code-20250219",
-            "fine-grained-tool-streaming-2025-05-14",
-            "interleaved-thinking-2025-05-14",
         ]
         if is_oat:
             beta_features.append("oauth-2025-04-20")
