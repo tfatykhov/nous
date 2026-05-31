@@ -254,8 +254,10 @@ class GraphEdge(Base):
             name="ck_edges_target_type",
         ),
         # F065: provenance tier — see edge_provenance.classify().
+        # 'co_mention' added by F076 (migration 054); keep in sync so schemas
+        # built from this metadata (test fixtures) accept co-mention edges.
         CheckConstraint(
-            "extraction_method IN ('deterministic', 'heuristic', 'inferred')",
+            "extraction_method IN ('deterministic', 'heuristic', 'inferred', 'co_mention')",
             name="ck_edges_extraction_method",
         ),
         {"schema": "brain"},
