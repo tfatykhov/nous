@@ -251,7 +251,24 @@ def _format_pipeline_text(
     # The pre-refactor closure used a local `heart_types` list; we replicate
     # that gate by checking whether any heart-eligible type was in search_types
     # (or 'all' was passed) AND the pipeline produced or attempted Heart results.
-    heart_results = [r for r in results if r.source == "heart"]
+    def _via_tag(r) -> str:
+        # Mark a Path-A graph-memory neighbour (now interleaved into the ranked Heart
+        # Memory list by score) so its associative provenance stays visible to the agent.
+        if r.metadata.get("stage_origin") == "heart_graph_memory" and getattr(r, "edge_relation", None):
+            return f"[via {r.edge_relation}] "
+        return ""
+
+    # Prominence fix: graph-memory neighbours (Path A — fact/episode/chunk surfaced via
+    # an edge) are INTERLEAVED into the ranked Heart Memory list (``results`` is
+    # score-sorted when rerank_by_score=True) rather than buried in a trailing section,
+    # so an associatively-linked memory (e.g. a co-occurrence neighbour) sits at its true
+    # rank where the agent actually reads. Empty when heart_graph_all_types is off
+    # (default) => the default recall_deep output stays byte-identical.
+    heart_results = [
+        r for r in results
+        if r.source == "heart"
+        or r.metadata.get("stage_origin") == "heart_graph_memory"
+    ]
     heart_section_eligible = search_all or any(
         t in search_types for t in ["episode", "fact", "procedure", "censor"]
     )
@@ -286,7 +303,7 @@ def _format_pipeline_text(
                     results_text.append(f"-- Session {sess_id[:8]} --")
                     for result in items:
                         results_text.append(
-                            f"{i}. [{result.type}] {result.description}{_recency_tag(result)} "
+                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f})"
                         )
                         i += 1
@@ -295,15 +312,16 @@ def _format_pipeline_text(
                         results_text.append("-- Other --")
                     for result in no_session:
                         results_text.append(
-                            f"{i}. [{result.type}] {result.description}{_recency_tag(result)} "
+                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f})"
                         )
                         i += 1
             else:
-                # Legacy flat output (byte-identical to pre-P1.1)
+                # Flat output (byte-identical to pre-P1.1 when no graph-memory neighbours
+                # are present, i.e. heart_graph_all_types off — _via_tag returns "").
                 for i, result in enumerate(heart_results, 1):
                     results_text.append(
-                        f"{i}. [{result.type}] {result.description}{_recency_tag(result)} "
+                        f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f})"
                     )
         else:
@@ -333,28 +351,10 @@ def _format_pipeline_text(
                 f"(id: {n.id}, score: {n.score:.3f})"
             )
 
-    # ------------------------------------------------------------------
-    # Graph-Connected Memories section (Path A: fact/episode/chunk/procedure
-    # neighbours expanded from Heart seeds — F022 cross-type + F040/F070).
-    # Tagged ``metadata["stage_origin"] == "heart_graph_memory"`` by
-    # ``_heart_graph_memory_to_pipeline``. Without this section these neighbours
-    # are computed and ranked but never rendered, so the agent cannot see an
-    # associatively-linked memory (e.g. a co-experienced fact surfaced via a
-    # co-occurrence edge). Only non-empty when ``heart_graph_all_types_enabled``
-    # is on (default off), so the default recall_deep output is byte-identical.
-    # ------------------------------------------------------------------
-    heart_graph_memory: list = [
-        r for r in results
-        if r.source == "graph_expanded"
-        and r.metadata.get("stage_origin") == "heart_graph_memory"
-    ]
-    if heart_graph_memory:
-        results_text.append("\n=== Graph-Connected Memories ===")
-        for i, n in enumerate(heart_graph_memory, 1):
-            results_text.append(
-                f"{i}. [{n.type}] [via {n.edge_relation}] {n.description} "
-                f"(id: {n.id}, score: {n.score:.3f})"
-            )
+    # NOTE: Path-A graph-memory neighbours (stage_origin == "heart_graph_memory") are no
+    # longer a trailing section — they are interleaved into the ranked Heart Memory list
+    # above (prominence fix) with a "[via <relation>]" marker, so an associatively-linked
+    # memory sits at its true score-rank where the agent reads it.
 
     # ------------------------------------------------------------------
     # Brain Decisions section
