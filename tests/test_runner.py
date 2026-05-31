@@ -987,35 +987,41 @@ def test_parse_signature_delta():
 
 
 async def test_start_thinking_beta_header(mock_cognitive):
-    """start() adds interleaved-thinking beta header when thinking enabled."""
+    """start() pins the claude-code beta and drops obsolete Claude-4 betas."""
     s = Settings(ANTHROPIC_API_KEY="test-api-key", thinking_mode="adaptive", api_backend="httpx")
     r = AgentRunner(mock_cognitive, MockBrain(), MockHeart(), s)
     await r.start()
     try:
         http = r._api._http
         assert "anthropic-beta" in http.headers
-        assert "interleaved-thinking-2025-05-14" in http.headers["anthropic-beta"]
+        beta = http.headers["anthropic-beta"]
+        assert "claude-code-20250219" in beta
+        # Removed for Claude 4.6+: adaptive thinking enables interleaved thinking
+        # natively, and the legacy header broke opus-4.8 streaming tool round-trips.
+        assert "interleaved-thinking-2025-05-14" not in beta
+        assert "fine-grained-tool-streaming-2025-05-14" not in beta
     finally:
         await r.close()
 
 
 async def test_start_no_thinking_no_beta(mock_cognitive):
-    """start() still has beta headers (claude-code, fine-grained-tool-streaming, etc.)."""
+    """start() always pins the claude-code beta; legacy Claude-4 betas are absent."""
     s = Settings(ANTHROPIC_API_KEY="test-api-key", thinking_mode="off", api_backend="httpx")
     r = AgentRunner(mock_cognitive, MockBrain(), MockHeart(), s)
     await r.start()
     try:
         http = r._api._http
-        # Beta headers are always present (claude-code, fine-grained-tool-streaming, etc.)
         assert "anthropic-beta" in http.headers
-        # But interleaved-thinking is always included for forward compat
-        assert "interleaved-thinking-2025-05-14" in http.headers["anthropic-beta"]
+        beta = http.headers["anthropic-beta"]
+        assert "claude-code-20250219" in beta
+        assert "interleaved-thinking-2025-05-14" not in beta
+        assert "fine-grained-tool-streaming-2025-05-14" not in beta
     finally:
         await r.close()
 
 
 async def test_start_oat_plus_thinking_headers(mock_cognitive):
-    """start() combines OAT + thinking beta headers."""
+    """start() combines the OAT beta with the pinned claude-code beta."""
     s = Settings(
         ANTHROPIC_API_KEY="sk-ant-oat-test-token",
         thinking_mode="manual",
@@ -1028,7 +1034,8 @@ async def test_start_oat_plus_thinking_headers(mock_cognitive):
     try:
         beta = r._api._http.headers["anthropic-beta"]
         assert "oauth-2025-04-20" in beta
-        assert "interleaved-thinking-2025-05-14" in beta
+        assert "claude-code-20250219" in beta
+        assert "interleaved-thinking-2025-05-14" not in beta
     finally:
         await r.close()
 
