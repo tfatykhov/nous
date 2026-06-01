@@ -366,3 +366,25 @@ across many episodes*. Reconstructing a coherent latent association from many pa
 co-activations is what a dense-associative (Hopfield) / replay-consolidation substrate does that
 pairwise-edge counting cannot. Build it only when that cell exists and shows {similarity +
 co-activation edge + temporal structure + LLM} all fail. Not a someday-rung — a testable gate.
+
+## PART 8 — POST-DEPLOY STATE + NORTH-STAR NEXT STEPS (2026-06-01)
+
+### 8.1 Shipped & deployed
+The Part-7 build order shipped as **PR #475** (merged to main `169f85c`, deployed to prod `nous-default`):
+- **recall_deep prominence interleave** — graph-memory neighbours interleaved into the ranked Heart Memory list by score with `[via <relation>]` markers (was a buried trailing section).
+- **Gap-1 FORMATION** — `build_cooccurrence_edges` (`co_occurred` edges from shared `source_episode_id`; migration 055; flag `cooccurrence_linking_enabled` default OFF) + `scripts/backfill_cooccurrence_edges.py`.
+- **Gap-2 RESOLUTION** — `ContextEngine._resolve_recency` in the **pre-turn** path (sticky-superseded; demote+tag).
+
+Validated: 18-cell live-instance baseline (c11 0/3→3/3, c12 FAIL→PASS, strengths hold, no regression), real-Postgres tests green. **Prod backfill run: 212 `co_occurred` edges on `nous-default`.** Prod activation is **PARTIAL**: `recency_resolver` + `temporal` + `heart_graph_all_types` + `adjacency_boost` ON → **Gap-2 fully live**; `graph_neighbor_seed_score` + `cooccurrence_linking` OFF → Gap-1 edges present but surface less prominently + no new formation in sleep. Full Gap-1 needs those two flags (eval-gate first; seed_score historically off in prod).
+
+### 8.2 The substrate question, resolved to ONE experiment (supersedes the Phase 3/4 rung framing)
+Part 3 assumed symbolic-Hebbian → Hopfield → SNN. The evidence **reframes the axis**: the question is NOT "which substrate" but **"does ANY formed-association layer beat *retrieve-well-+-LLM* on prod-shaped data?"** Four investigations all say the formed layer is **decorative on task-shaped data** (Phase-0 multi-hop, F076 co-mention, co-occurrence formation, BEAM step-0). On BEAM (independent prod-shaped data) the shipped mechanisms are **structurally inert as-built**: one-episode-per-topical-batch (7–9 facts > the 6-fact gate → 0 edges); contradictions are diffuse/implicit and the LLM synthesis already resolves them. ⇒ The mechanisms are **tuned to clean discrete data**; for task-shaped data the heavy substrate (tinyHippo, even rung-2 Hopfield) is **UNJUSTIFIED, not merely gated**. The single class retrieval+LLM provably **cannot** do = **EMERGENT PERSONAL SYMBOLISM** (a symbol never stated, present only as a recurring co-activation pattern across episodes → nothing to retrieve, no text for the LLM, requires pattern-completion over history). BEAM cannot test it.
+
+### 8.3 North-star next steps (prioritised, eval-gated)
+1. **THE DECISIVE EXPERIMENT — emergent-symbolism discriminating eval.** Three arms (retrieval+LLM baseline vs formed-structure vs learned), private invented **never-stated** symbols emergent from recurring co-activation, full agent cycle, authoring-bias guard (don't build an item only the formed edge can solve). **Outcome A:** retrieval+LLM handles it / the class doesn't occur → tinyHippo **permanently deferred** and the faculty program is **complete at the cheap-wins level**. **Outcome B:** retrieval+LLM provably fails + a formed/learned structure succeeds → start **rung-2 (dense-associative / modern-Hopfield)**; the SNN stays the far horizon. This is the single move that closes (or opens) the north star. Advisor-gate first.
+2. **Generalise the shipped mechanisms to prod-shape** (only if the symbolic path continues): formation needs **finer (turn / sub-topic) segmentation + a salience gate** instead of a hard 6-fact cutoff — the "which co-occurrence is worth a link?" sub-question, now empirically forced by BEAM; resolver needs **diffuse/implicit-contradiction handling** + `event_date` population.
+3. **Edge-weight plasticity (strengthen-by-use / decay)** — the audit's "single highest-leverage gap," still **UNSHIPPED** — but the 4-investigation pattern (LLM is the workhorse, graph decorative) now questions whether it is the lever at all. **Gate it on the same emergent-symbolism eval** (does strengthening help where retrieval+LLM can't?); don't build on the audit's hunch.
+4. **Prod flag activation decision** — flip `graph_neighbor_seed_score` + `cooccurrence_linking` for full Gap-1, eval-gated.
+
+### 8.4 The north star, reframed (honest)
+Original north star: associative faculty → tinyHippo SNN. The evidence reframes it: the faculty's *demonstrated* value is the **cheap, generalizable wins** (retrieval prominence, recall-time resolution) — already shipped + deployed. The heavy substrate is now gated on **one unproven need** (emergent symbolism). So the north star is reached **either** by completing at the cheap-wins level (if the emergent-symbolism eval shows no substrate need) **or** by earning the substrate through that single decisive gate. *Principle-before-substrate held — we did not build the SNN on hope.*
