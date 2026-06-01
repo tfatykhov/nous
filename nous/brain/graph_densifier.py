@@ -1136,6 +1136,17 @@ class GraphDensifier:
                 self._agent_id, exc_info=True,
             )
             results["_co_mention"] = 0
+        # Gap-1 formation: experiential co-occurrence edges (default OFF; same wrapping
+        # discipline — own edges commit independently, must not mask siblings on throw).
+        try:
+            results["_co_occurrence"] = await self.build_cooccurrence_edges()
+        except Exception:
+            logger.warning(
+                "Gap-1: build_cooccurrence_edges failed for agent_id=%s "
+                "(non-fatal; sibling backfill edges already committed)",
+                self._agent_id, exc_info=True,
+            )
+            results["_co_occurrence"] = 0
         return _log_and_return(aborted=self._interrupted)
 
     async def _build_happened_before_edges(self) -> int:
@@ -1190,6 +1201,96 @@ class GraphDensifier:
                     count, self._agent_id,
                 )
             return count
+
+    async def build_cooccurrence_edges(self, *, dry_run: bool = False) -> int:
+        """Gap-1 formation: link facts learned from the SAME source episode.
+
+        Two facts mentioned together in one conversation/occasion co-occurred — an
+        experiential association the cosine-only graph misses when they share no words and
+        aren't semantically near (the no-handle case). Distinct from F076 co-mention
+        (shared entity): the signal is shared ``source_episode_id``, not a shared entity.
+        Edges are relation='co_occurred' (carries the occasion semantics so the agent can
+        contextualise, unlike generic related_to) + extraction_method='co_occurrence'.
+
+        Noise gate: skip episodes that produced more than ``cooccurrence_max_episode_facts``
+        facts — a focused chat co-mentions a few related things; a rambling one touches many
+        unrelated topics, where linking all pairs is noise, not association. Pre-existing-edge
+        guard (any relation, either direction) keeps it idempotent and never links a
+        contradicting pair. dry_run returns the count that WOULD be inserted.
+        """
+        from itertools import combinations
+
+        s = self._settings
+        if not getattr(s, "cooccurrence_linking_enabled", False):
+            return 0
+        max_facts = int(s.cooccurrence_max_episode_facts)
+        max_eps = int(s.cooccurrence_max_episodes_per_cycle)
+        weight = float(s.cooccurrence_weight)
+
+        # episode -> its active facts; focused episodes only (2..max_facts), recent first.
+        async with self.db.session() as session:
+            rows = (await session.execute(
+                text(
+                    "SELECT array_agg(id::text) AS fids FROM heart.facts "
+                    "WHERE agent_id = :a AND active = TRUE AND source_episode_id IS NOT NULL "
+                    "GROUP BY source_episode_id "
+                    "HAVING count(*) BETWEEN 2 AND :maxf "
+                    "ORDER BY max(learned_at) DESC LIMIT :lim"
+                ),
+                {"a": self._agent_id, "maxf": max_facts, "lim": max_eps},
+            )).all()
+        if not rows:
+            return 0
+
+        candidates: set[tuple[str, str]] = set()
+        for (fids,) in rows:
+            for a, b in combinations(sorted(fids), 2):
+                candidates.add((a, b))
+        if not candidates:
+            return 0
+
+        # pre-existing fact-fact edges (any relation, either direction) among the candidate
+        # facts -> hard skip (no dup; never overlay a contradicts/supersedes pair, which the
+        # adjacency/spreading consumers would let reinforce each other).
+        all_ids = sorted({x for pair in candidates for x in pair})
+        async with self.db.session() as session:
+            ex = (await session.execute(
+                text(
+                    "SELECT source_id, target_id FROM brain.graph_edges "
+                    "WHERE agent_id = :a AND source_type='fact' AND target_type='fact' "
+                    "AND source_id = ANY(CAST(:ids AS uuid[])) "
+                    "AND target_id = ANY(CAST(:ids AS uuid[]))"
+                ),
+                {"a": self._agent_id, "ids": all_ids},
+            )).all()
+        existing: set[tuple[str, str]] = set()
+        for src, tgt in ex:
+            x, y = str(src), str(tgt)
+            existing.add((x, y) if x < y else (y, x))
+
+        to_insert = [p for p in candidates if p not in existing]
+        if dry_run or not to_insert:
+            return len(to_insert)
+
+        inserted = 0
+        async with self.db.session() as session:
+            for a, b in to_insert:
+                if self._interrupted:
+                    break
+                await session.execute(
+                    text(
+                        "INSERT INTO brain.graph_edges "
+                        "(source_id, target_id, source_type, target_type, agent_id, "
+                        " relation, weight, auto_linked, extraction_method) "
+                        "VALUES (CAST(:s AS uuid), CAST(:t AS uuid), 'fact', 'fact', :a, "
+                        " 'co_occurred', :w, TRUE, 'co_occurrence') "
+                        "ON CONFLICT DO NOTHING"
+                    ),
+                    {"s": a, "t": b, "a": self._agent_id, "w": weight},
+                )
+                inserted += 1
+            await session.commit()
+        return inserted
 
     async def build_comention_edges(self, *, dry_run: bool = False) -> int:
         """F076: link facts that NAME the same entity, independent of cosine.

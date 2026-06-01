@@ -118,6 +118,13 @@ def create_app(
                     "related_facts": len(turn_context.recalled_fact_ids),
                     "related_episodes": len(turn_context.recalled_episode_ids),
                     "context_tokens": turn_context.context_token_estimate,
+                    # Actual IDs injected into context this turn — lets an eval attribute
+                    # mechanism (pre_turn context-injection vs agentic tool retrieval), which
+                    # usage.tool_calls cannot see.
+                    "recalled_fact_ids": list(turn_context.recalled_fact_ids),
+                    "recalled_decision_ids": list(turn_context.recalled_decision_ids),
+                    "recalled_episode_ids": list(turn_context.recalled_episode_ids),
+                    "recalled_procedure_ids": list(turn_context.recalled_procedure_ids),
                 }
             return JSONResponse(result)
         except Exception as e:

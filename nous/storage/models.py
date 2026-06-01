@@ -242,7 +242,8 @@ class GraphEdge(Base):
             "relation IN ('supports', 'contradicts', 'supersedes', 'related_to', 'caused_by', "
             "'informed_by', 'evidence_for', 'discussed_in', 'extracted_from', "
             "'part_of', 'summarized_by', "             # F070 catch-up (migration 051)
-            "'happened_before')",                       # F075 (migration 053)
+            "'happened_before', "                       # F075 (migration 053)
+            "'co_occurred')",                           # Gap-1 formation (migration 055)
             name="ck_edges_relation",
         ),
         CheckConstraint(
@@ -254,10 +255,10 @@ class GraphEdge(Base):
             name="ck_edges_target_type",
         ),
         # F065: provenance tier — see edge_provenance.classify().
-        # 'co_mention' added by F076 (migration 054); keep in sync so schemas
-        # built from this metadata (test fixtures) accept co-mention edges.
+        # 'co_mention' added by F076 (migration 054); 'co_occurrence' by Gap-1 formation
+        # (migration 055); keep in sync so schemas built from this metadata accept them.
         CheckConstraint(
-            "extraction_method IN ('deterministic', 'heuristic', 'inferred', 'co_mention')",
+            "extraction_method IN ('deterministic', 'heuristic', 'inferred', 'co_mention', 'co_occurrence')",
             name="ck_edges_extraction_method",
         ),
         {"schema": "brain"},

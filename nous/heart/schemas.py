@@ -210,6 +210,11 @@ class FactSummary(BaseModel):
     # F075: Propagated from ORM for the dedup-bypass rule + Layer 3 boost.
     # Distinct event_dates between candidate and existing => distinct events.
     event_date: date | None = None
+    # Gap-2: transient pre-turn recency-resolution tags set by
+    # ContextEngine._resolve_recency (current/superseded + YYYY-MM). NOT persisted;
+    # default None keeps every other consumer byte-identical.
+    recency_status: str | None = None
+    recency_date: str | None = None
 
 
 # --- Procedures ---

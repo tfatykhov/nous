@@ -423,6 +423,10 @@ class ContextEngine:
                     [round(getattr(f, "score", 0) or 0, 3) for f in (facts or [])[:5]],
                     [(getattr(f, "subject", "") or "")[:30] for f in (facts or [])[:5]])
                 if facts:
+                    # Gap-2: resolve same-subject current-vs-stale conflicts (demote +
+                    # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
+                    # value drops out of the injected set and the agent sees the current one.
+                    facts = self._resolve_recency(facts)
                     # F017: Staleness penalty (before boosts)
                     facts = self._apply_staleness_penalty(facts)
                     # F10: apply_frame_boost (preserved from existing pipeline)
@@ -954,6 +958,53 @@ class ContextEngine:
             lines.append(f"- [{outcome}] {desc} (confidence: {conf:.2f})")
         return "\n".join(lines)
 
+    def _resolve_recency(self, facts: list) -> list:
+        """Gap-2: demote + tag same-subject facts that conflict by event_date.
+
+        Mirrors the recall_deep resolver (api/retrieval_pipeline._resolve_recency_conflicts)
+        but for the PRE-TURN injection path, which uses plain search_facts and otherwise never
+        resolves a current-vs-stale value — so the agent can answer from a superseded fact
+        (the c12 contradiction failure). Gated by ``recency_resolver_enabled``. A pair resolves
+        only when BOTH facts carry a non-None, DIFFERING event_date AND either share a
+        superseded_by link or are content-similar (difflib >= floor). The older is down-ranked
+        (*0.3) and tagged 'superseded'; the newer tagged 'current'. Transient tags only.
+        """
+        import difflib
+
+        s = self._settings
+        if not getattr(s, "recency_resolver_enabled", False) or not facts:
+            return facts
+        floor = float(getattr(s, "recency_resolver_similarity_floor", 0.55))
+        groups: dict[str, list] = {}
+        for f in facts:
+            subj = (getattr(f, "subject", None) or "").strip().lower()
+            if subj:
+                groups.setdefault(subj, []).append(f)
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            for i in range(len(members)):
+                for j in range(i + 1, len(members)):
+                    a, b = members[i], members[j]
+                    da, db = getattr(a, "event_date", None), getattr(b, "event_date", None)
+                    if da is None or db is None or da == db:
+                        continue
+                    if (a.content or "").strip() == (b.content or "").strip():
+                        continue
+                    linked = (a.superseded_by == b.id) or (b.superseded_by == a.id)
+                    if not linked and difflib.SequenceMatcher(
+                        None, a.content or "", b.content or ""
+                    ).ratio() < floor:
+                        continue
+                    newer, older = (a, b) if da > db else (b, a)
+                    newer.recency_status = "current"
+                    newer.recency_date = newer.event_date.strftime("%Y-%m")
+                    if older.recency_status != "current":
+                        older.recency_status = "superseded"
+                        older.recency_date = older.event_date.strftime("%Y-%m")
+                        older.score = (getattr(older, "score", None) or 0.0) * 0.3
+        return facts
+
     def _format_facts(self, facts: list) -> str:
         """Format facts for context.
 
@@ -972,10 +1023,14 @@ class ContextEngine:
                 truncated = content[:max_len].rsplit(" ", 1)[0]
                 content = truncated + "..."
 
+            # Gap-2: recency tag (current/superseded) when the pre-turn resolver ran.
+            status = getattr(f, "recency_status", None)
+            rtag = f" [{status} {getattr(f, 'recency_date', '') or ''}]".rstrip() if status else ""
+
             if subject:
-                lines.append(f"- [{subject}] {content} [confidence: {conf:.2f}]")
+                lines.append(f"- [{subject}] {content}{rtag} [confidence: {conf:.2f}]")
             else:
-                lines.append(f"- {content} [confidence: {conf:.2f}]")
+                lines.append(f"- {content}{rtag} [confidence: {conf:.2f}]")
         return "\n".join(lines)
 
     def _format_procedures(self, procedures: list) -> str:
