@@ -997,9 +997,14 @@ class ContextEngine:
                     ).ratio() < floor:
                         continue
                     newer, older = (a, b) if da > db else (b, a)
-                    newer.recency_status = "current"
-                    newer.recency_date = newer.event_date.strftime("%Y-%m")
-                    if older.recency_status != "current":
+                    # 'superseded' is STICKY (mirrors the recall_deep resolver): once a fact
+                    # is superseded by ANY newer same-subject value it stays superseded — so an
+                    # intermediate version among 3+ dated facts (2024/2025/2026) can't be
+                    # re-tagged 'current' and re-injected at full score.
+                    if newer.recency_status != "superseded":
+                        newer.recency_status = "current"
+                        newer.recency_date = newer.event_date.strftime("%Y-%m")
+                    if older.recency_status != "superseded":
                         older.recency_status = "superseded"
                         older.recency_date = older.event_date.strftime("%Y-%m")
                         older.score = (getattr(older, "score", None) or 0.0) * 0.3

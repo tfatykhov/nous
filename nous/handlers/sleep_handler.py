@@ -1363,10 +1363,14 @@ class SleepHandler:
             # F076: pop co-mention count too — it's a sleep-cycle associative-edge
             # metric, not a per-entity orphan-backfill edge (same convention).
             comention = result.pop("_co_mention", 0)
+            # Gap-1: pop co-occurrence count too — sleep-cycle associative-edge metric,
+            # not a per-entity orphan-backfill edge (same leading-underscore convention).
+            cooccurrence = result.pop("_co_occurrence", 0)
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
             sleep_stats["temporal_chain_edges"] = happened_before
             sleep_stats["comention_edges"] = comention
+            sleep_stats["cooccurrence_edges"] = cooccurrence
             sleep_stats["ce_backfill_survived"] = ce_stats.get("survived", 0)
             sleep_stats["ce_backfill_pruned"] = ce_stats.get("pruned", 0)
 
