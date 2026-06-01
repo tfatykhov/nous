@@ -174,3 +174,16 @@ injection path the agent used (tc=0) — so live agent only benefits if it calls
 Everything else (surfacing + selection) is already carried by similarity + LLM — NOT by the
 graph. Confirms the 017 thesis across 18 real-world scenarios: the lever is FORMATION +
 RESOLUTION (write-path / injection-path), not denser cosine edges or multi-hop graph traversal.
+
+### Follow-on (2026-06-01) — built, deployed, and what the instrument can't see
+Both ranked gaps were built and shipped (PR #475, deployed to prod): FORMATION via co-occurrence
+edge-formation (c11 0/3→3/3); RESOLUTION via a pre-turn recency resolver (c12 FAIL→PASS). On an
+**independent** externally-authored benchmark (BEAM) both mechanisms are structurally **inert
+as-built** — whole-episode co-occurrence is too coarse for long multi-topic sessions (trips the
+noise gate → 0 edges) and real contradictions are diffuse, not crisp dated value-swaps. So this
+instrument validated the mechanisms on its own clean cells but **could not** test generalization;
+that required the independent dataset. The two open work-items this surfaces — finer (turn/sub-topic)
+co-occurrence segmentation + a salience gate, and diffuse-contradiction handling — are now in the
+017 PART-8 north-star backlog, themselves gated on the single decisive emergent-symbolism eval that
+decides whether any formed-structure layer earns its keep over retrieval+LLM. See 017 §8 and the
+019 whitepaper §11.

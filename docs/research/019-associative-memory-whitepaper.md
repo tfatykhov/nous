@@ -607,6 +607,51 @@ cells move.
 
 ---
 
+## 11. Postscript — what we built, what an independent dataset revealed, and the one test that remains (2026-06-01)
+
+The two fixes were built, validated on the instrument, and deployed.
+
+**Formation (the experiential gap).** A consolidation pass now forms an explicit associative link
+between facts that were *learned in the same episode* — co-experience, not similarity. The link is
+weighted, deduplicated, and idempotent; it is consumed at recall time by interleaving the linked memory
+into the ranked result list with an explicit "[via …]" marker rather than burying it in a trailing
+section. On the instrument, the dedicated experiential cell moved from 0/3 to 3/3 with no regression on
+the strength cells. The links were also backfilled onto the live deployment (212 links over its real
+history).
+
+**Resolution (the selection gap).** When similarity surfaces two facts that state different values for
+the same attribute and each carries a different *event date*, a recall-time resolver now marks the newer
+one "current" and the older one "superseded" (demoting, never deleting it) and renders that verdict
+inline. The previously failing supersession cell now passes.
+
+**What an independent dataset revealed.** Validating both mechanisms on a separate, externally authored
+long-conversation benchmark — deliberately, to escape the bias of testing on data we wrote — showed that
+*as built, both mechanisms are tuned to clean, discrete inputs and do not yet generalize to messy,
+prod-shaped sessions.* Co-experience linking keyed on a whole episode is too coarse when a single session
+spans many sub-topics with many facts (it trips the noise gate and forms nothing); and real
+contradictions are usually diffuse and implicit rather than two crisply opposed dated statements, which
+the single-shot synthesizer already reconciles on its own. This is the central honest result of the
+follow-on: **the formed-association layer demonstrably helps on clean data and is, so far, decorative on
+messy task-shaped data — exactly where a competent retriever plus a strong language model is already the
+workhorse.**
+
+**The one test that remains.** Across four separate investigations, every formed-structure layer we
+added was either load-bearing only on clean synthetic data or fully substitutable by retrieval-plus-LLM.
+That leaves a single class of problem a similarity index and a language model provably *cannot* serve: an
+association that is **never stated and exists only as a recurring co-activation pattern across many
+episodes** — a private, emergent symbol with no text to retrieve and no parametric knowledge to draw on.
+Reconstructing such a latent association from many partial, noisy co-activations is precisely what a
+dense pattern-completion substrate does that pairwise-edge counting cannot. Whether that class occurs
+often enough to justify the substrate is an empirical question, and it is the next — and decisive — test:
+a three-arm experiment (retrieve-plus-LLM vs. a formed structure vs. a learned one) over invented,
+never-stated symbols, with an explicit guard against authoring an item that only the structure can solve.
+If retrieval-plus-LLM handles it, the heavy substrate is permanently deferred and this line of work is
+*complete at the cheap-wins level it has already reached*. If it provably fails where a formed structure
+succeeds, that is the first earned reason to build the substrate — and only then. We did not build it on
+hope; we will not build it without that result.
+
+---
+
 ### Appendix A — How to read the four mechanism signals
 
 | If the answer is… | …and the signals show | then it was carried by |
