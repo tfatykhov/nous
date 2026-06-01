@@ -427,9 +427,9 @@ Five meta-themes emerged:
 | Societies of Memories (too aggressive linking) | Ch. 8 | F040 admission control + density-gated spreading activation |
 | Co-activation / edge FORMATION from experience `(shipped, default OFF)` | Ch. 11 | PR #475 `build_cooccurrence_edges` (`cooccurrence_linking_enabled=False`) + F076 co-mention; formation only |
 | Exception Principle / Contextual Censor Exceptions | Ch. 12/27 | F031 `unblock_pattern` + `trigger_action` payloads |
-| Query Reformulation / Multiple Descriptions | Ch. 14 | F050 multi-query expansion |
-| Memory Rearrangement (merge/compress/relink) | Ch. 15 | Sleep Phases 4-5 + recency resolver + co-occurrence relink |
-| Distributed Memory (fragment activation) | Ch. 20 | Spreading activation across heterogeneous types + F067 chunks |
+| Query Reformulation / Multiple Descriptions `(shipped, default OFF)` | Ch. 14 | F050 multi-query expansion (`query_expansion_enabled=False`) |
+| Memory Rearrangement (merge/relink) | Ch. 15 | F031 contradiction consolidation + recency resolver are real; co-occurrence relink `(default OFF)`; episode compress is a `(stub)` |
+| Distributed Memory (fragment activation, partial) | Ch. 20 | Cross-type distribution real; spreading activation is density-gated (often dormant) + F067 chunks `(shipped, default OFF)` |
 | Listener Modeling (partial) | Ch. 22 | Episode recall + context assembly + dedup |
 | Frame Default Assumptions (partial) | Ch. 24 | Frame `default_*` / `questions_to_ask` surfaced in `FrameSelection` |
 | Mental Bugs (partial) | Ch. 30 | F012 error→recovery procedure learning |
