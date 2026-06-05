@@ -498,6 +498,13 @@ async def create_components(settings: Settings) -> dict:
         register_telegram_tools(dispatcher, settings, web_http)
         logger.info("Telegram file delivery tool registered (send_file)")
 
+    # F078.1: Register guarded send_email tool (gated on SMTP login user).
+    # Additive — the agent-authored bash+smtplib path stays available (BC).
+    if settings.email_user:
+        from nous.api.email_tools import register_email_tools
+        register_email_tools(dispatcher, settings)
+        logger.info("Guarded email tool registered (send_email)")
+
     # F020: Register cache_retrieve tool
     from nous.api.tools import register_cache_retrieve_tool
     register_cache_retrieve_tool(dispatcher, database.session_factory)
