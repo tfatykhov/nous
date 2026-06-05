@@ -996,6 +996,16 @@ class AgentRunner:
                 else:
                     system_prompt = system_prompt_prefix + "\n\n" + system_prompt
             tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
+            # F078 (codex P1): a refuse-tier censor must strip state-modifying tools on the
+            # STREAMING path too — the non-streaming _tool_loop already does this, but the SSE
+            # path (used by Telegram) built tools directly and would otherwise leak write/
+            # external/irreversible/bash to a refused turn. refuse_active already accounts for
+            # refuse_keep_tools (set in cognitive/layer.py).
+            if turn_context.refuse_active and tools:
+                _refuse_denylist = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
+                _before = len(tools)
+                tools = [t for t in tools if t["name"] not in _refuse_denylist]
+                logger.info("F078 refuse: stripped %d state-modifying tool(s) (streaming)", _before - len(tools))
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
