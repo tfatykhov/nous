@@ -22,8 +22,16 @@ from nous.storage.models import Censor, Event
 
 logger = logging.getLogger(__name__)
 
-# Escalation path: warn -> block -> absolute. No downgrade.
-_ESCALATION_ORDER = {"warn": "block", "block": "absolute", "absolute": "absolute"}
+# F078: manual escalation path: steer -> refuse -> abort. No downgrade.
+# Used ONLY by escalate() (a deliberate operator action). Auto-escalation removed.
+_ESCALATION_ORDER = {"steer": "refuse", "refuse": "abort", "abort": "abort"}
+
+# F078: provenance -> max tier a censor may be created/updated at.
+# auto (monitor/F039) can never reach a halting tier; agent (create_censor tool)
+# caps at refuse; human (operator/migration) may reach abort.
+_TIER_RANK = {"steer": 0, "refuse": 1, "abort": 2}
+_PROVENANCE_MAX_TIER = {"auto": "steer", "agent": "refuse", "human": "abort"}
+_VALID_ACTIONS = ("steer", "refuse", "abort")
 
 # Maximum length of text input to evaluate against regex patterns (ReDoS guard)
 _MAX_REGEX_INPUT_LEN = 10_000
@@ -82,6 +90,38 @@ class CensorManager:
         return await self._add(input, session)
 
     async def _add(self, input: CensorInput, session: AsyncSession) -> CensorDetail:
+        # F078: validate trigger_pattern compiles (reject at the boundary, not
+        # silently dead at check time). Same for unblock_pattern if present.
+        try:
+            re.compile(input.trigger_pattern)
+        except re.error as exc:
+            raise ValueError(f"Invalid trigger_pattern regex: {exc}") from exc
+        if input.unblock_pattern is not None:
+            try:
+                re.compile(input.unblock_pattern)
+            except re.error as exc:
+                raise ValueError(f"Invalid unblock_pattern regex: {exc}") from exc
+
+        # F078: validate trigger_action.tool against the read-only allowlist.
+        # Local import avoids a circular import (censor_actions imports Heart).
+        if input.trigger_action is not None:
+            from nous.heart.censor_actions import ALLOWED_TOOLS
+
+            tool = input.trigger_action.get("tool") if isinstance(input.trigger_action, dict) else None
+            if tool is not None and tool not in ALLOWED_TOOLS:
+                raise ValueError(f"Censor trigger_action.tool not allowed: {tool}")
+
+        # F078: provenance -> max-tier cap. Clamp DOWN to the cap (do not raise)
+        # so an over-eager auto/agent caller can never create a turn-killer.
+        action = input.action
+        cap = _PROVENANCE_MAX_TIER.get(input.provenance, "steer")
+        if _TIER_RANK.get(action, 0) > _TIER_RANK[cap]:
+            logger.warning(
+                "Censor provenance=%s caps tier at %s; clamping requested action %s down",
+                input.provenance, cap, action,
+            )
+            action = cap
+
         # Generate embedding from trigger_pattern + reason
         embedding = None
         if self.embeddings:
@@ -94,7 +134,7 @@ class CensorManager:
         censor = Censor(
             agent_id=self.agent_id,
             trigger_pattern=input.trigger_pattern,
-            action=input.action,
+            action=action,
             reason=input.reason,
             domain=input.domain,
             learned_from_decision=input.learned_from_decision,
@@ -102,6 +142,8 @@ class CensorManager:
             trigger_action=input.trigger_action,
             action_instruction=input.action_instruction,
             unblock_pattern=input.unblock_pattern,
+            provenance=input.provenance,
+            refuse_keep_tools=input.refuse_keep_tools,
             created_by="manual",
             embedding=embedding,
         )
@@ -114,7 +156,8 @@ class CensorManager:
             {
                 "censor_id": str(censor.id),
                 "trigger": input.trigger_pattern,
-                "action": input.action,
+                "action": action,
+                "provenance": input.provenance,
             },
         )
 
@@ -132,8 +175,9 @@ class CensorManager:
     ) -> list[CensorMatch]:
         """Check text against all active censors (with side effects).
 
-        Increments activation_count, updates last_activated, and
-        auto-escalates when threshold is reached.
+        Increments activation_count and updates last_activated. F078 removed
+        the silent auto-escalation — promotion to a harder tier is now a
+        deliberate operator action only (see escalate()).
         """
         if session is None:
             async with self.db.session() as session:
@@ -174,23 +218,10 @@ class CensorManager:
 
         for censor, _similarity in matches:
             # Increment activation_count (P2-9: NULL-safe)
+            # F078: auto-escalation removed — a loose auto-created rule can no
+            # longer promote itself into a turn-killer. Promotion is human-only.
             censor.activation_count = (censor.activation_count or 0) + 1
             censor.last_activated = now
-
-            # Auto-escalation check
-            threshold = censor.escalation_threshold or 3
-            if censor.activation_count >= threshold and censor.action == "warn":
-                old_action = censor.action
-                censor.action = "block"
-                await self._emit_event(
-                    session,
-                    "censor_escalated",
-                    {
-                        "censor_id": str(censor.id),
-                        "old_action": old_action,
-                        "new_action": "block",
-                    },
-                )
 
             await self._emit_event(
                 session,
@@ -211,6 +242,7 @@ class CensorManager:
                     trigger_action=censor.trigger_action,
                     action_instruction=censor.action_instruction,
                     unblock_pattern=censor.unblock_pattern,
+                    refuse_keep_tools=bool(censor.refuse_keep_tools),
                 )
             )
 
@@ -393,6 +425,7 @@ class CensorManager:
                 trigger_action=c.trigger_action,
                 action_instruction=c.action_instruction,
                 unblock_pattern=c.unblock_pattern,
+                refuse_keep_tools=bool(c.refuse_keep_tools),
             )
             for cid in ids
             if (c := censors.get(cid)) is not None
@@ -438,6 +471,7 @@ class CensorManager:
                             trigger_action=censor.trigger_action,
                             action_instruction=censor.action_instruction,
                             unblock_pattern=censor.unblock_pattern,
+                            refuse_keep_tools=bool(censor.refuse_keep_tools),
                         )
                     )
             except re.error:
@@ -489,7 +523,10 @@ class CensorManager:
     # ------------------------------------------------------------------
 
     async def escalate(self, censor_id: UUID, session: AsyncSession | None = None) -> CensorDetail:
-        """Manually escalate censor severity. warn -> block -> absolute. No downgrade."""
+        """Manually escalate censor severity. steer -> refuse -> abort. No downgrade.
+
+        F078: deliberate operator action only — there is no automatic caller.
+        """
         if session is None:
             async with self.db.session() as session:
                 result = await self._escalate(censor_id, session)
@@ -619,12 +656,18 @@ class CensorManager:
         unblock_pattern: str | None | object = _SENTINEL,
         reason: str | None | object = _SENTINEL,
         domain: str | None | object = _SENTINEL,
+        action: str | object = _SENTINEL,
+        active: bool | object = _SENTINEL,
         session: AsyncSession | None = None,
     ) -> CensorDetail:
         """Update specific fields on an existing censor.
 
         Only fields explicitly passed are updated. Pass None to clear a field.
         Fields not passed are left unchanged.
+
+        F078: ``action`` and ``active`` are the UI severity-control path. The
+        operator is provenance=human, so ANY valid tier (incl. abort) is allowed
+        on update — no cap. ``action`` must be one of steer/refuse/abort.
         """
         if session is None:
             async with self.db.session() as session:
@@ -632,7 +675,8 @@ class CensorManager:
                     censor_id, trigger_action=trigger_action,
                     action_instruction=action_instruction,
                     unblock_pattern=unblock_pattern,
-                    reason=reason, domain=domain, session=session,
+                    reason=reason, domain=domain,
+                    action=action, active=active, session=session,
                 )
                 await session.commit()
                 return result
@@ -640,7 +684,8 @@ class CensorManager:
             censor_id, trigger_action=trigger_action,
             action_instruction=action_instruction,
             unblock_pattern=unblock_pattern,
-            reason=reason, domain=domain, session=session,
+            reason=reason, domain=domain,
+            action=action, active=active, session=session,
         )
 
     async def _update(
@@ -652,6 +697,8 @@ class CensorManager:
         unblock_pattern,
         reason,
         domain,
+        action=_SENTINEL,
+        active=_SENTINEL,
         session: AsyncSession,
     ) -> CensorDetail:
         censor = await self._get_censor_orm(censor_id, session)
@@ -669,6 +716,28 @@ class CensorManager:
             censor.reason = reason
         if domain is not SENTINEL:
             censor.domain = domain
+
+        # F078: UI severity-control path. Operator may set any valid tier.
+        if action is not SENTINEL and action is not None:
+            if action not in _VALID_ACTIONS:
+                raise ValueError(f"Invalid censor action: {action!r}")
+            old_action = censor.action
+            if action != old_action:
+                censor.action = action
+                await self._emit_event(
+                    session,
+                    "censor_updated",
+                    {
+                        "censor_id": str(censor_id),
+                        "old_action": old_action,
+                        "new_action": action,
+                    },
+                )
+
+        if active is not SENTINEL and active is not None:
+            if not isinstance(active, bool):
+                raise ValueError(f"Invalid censor active flag: {active!r}")
+            censor.active = active
 
         censor.updated_at = datetime.now(UTC)
         await session.flush()
@@ -706,4 +775,6 @@ class CensorManager:
             trigger_action=censor.trigger_action,
             action_instruction=censor.action_instruction,
             unblock_pattern=censor.unblock_pattern,
+            provenance=censor.provenance or "human",
+            refuse_keep_tools=bool(censor.refuse_keep_tools),
         )

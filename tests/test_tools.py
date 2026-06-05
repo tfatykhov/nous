@@ -351,7 +351,7 @@ class TestCreateCensor:
         result = await tools["create_censor"](
             trigger_pattern="rm -rf /",
             reason="Dangerous command that could delete everything",
-            action="block",
+            action="refuse",
             domain="debugging",
         )
 
@@ -359,7 +359,8 @@ class TestCreateCensor:
         text = result["content"][0]["text"]
         assert "Censor created successfully" in text
         assert "ID:" in text
-        assert "Action: block" in text
+        # F078: agent provenance caps at refuse (would clamp abort -> refuse).
+        assert "Action: refuse" in text
         assert "Domain: debugging" in text
         assert "Pattern: rm -rf /" in text
 

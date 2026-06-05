@@ -128,10 +128,12 @@ class CorrectionExtractor:
 
                 # Optionally create censor for "never do" patterns
                 if extraction.get("is_censor") and extraction.get("censor_pattern"):
+                    # F078: auto-learned (F039) censors are provenance="auto" -> capped to steer.
                     censor_input = CensorInput(
                         trigger_pattern=extraction["censor_pattern"],
                         reason=f"F039: Learned from correction — {principle[:100]}",
-                        action="warn",
+                        action="steer",
+                        provenance="auto",
                     )
                     await self._heart.add_censor(censor_input)
                     logger.info("F039: Created censor for correction: %s", extraction["censor_pattern"])

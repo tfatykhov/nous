@@ -30,7 +30,12 @@ from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 —
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
-from nous.cognitive.execution_ledger import ExecutionLedger
+from nous.cognitive.execution_ledger import (
+    EXTERNAL_TOOLS,
+    IRREVERSIBLE_TOOLS,
+    WRITE_TOOLS,
+    ExecutionLedger,
+)
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
@@ -510,6 +515,7 @@ class AgentRunner:
                         extra_tools=extra_tools,
                         force_tool_on_penultimate=force_tool_on_penultimate,
                         dag_node_id=dag_node_id,
+                        refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
                     )
                 finally:
                     CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
@@ -990,6 +996,16 @@ class AgentRunner:
                 else:
                     system_prompt = system_prompt_prefix + "\n\n" + system_prompt
             tools = self._dispatcher.available_tools(turn_context.frame.frame_id)
+            # F078 (codex P1): a refuse-tier censor must strip state-modifying tools on the
+            # STREAMING path too — the non-streaming _tool_loop already does this, but the SSE
+            # path (used by Telegram) built tools directly and would otherwise leak write/
+            # external/irreversible/bash to a refused turn. refuse_active already accounts for
+            # refuse_keep_tools (set in cognitive/layer.py).
+            if getattr(turn_context, "refuse_active", False) and tools:
+                _refuse_denylist = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
+                _before = len(tools)
+                tools = [t for t in tools if t["name"] not in _refuse_denylist]
+                logger.info("F078 refuse: stripped %d state-modifying tool(s) (streaming)", _before - len(tools))
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
@@ -1425,6 +1441,7 @@ class AgentRunner:
         extra_tools: dict[str, tuple[dict, Any]] | None = None,
         force_tool_on_penultimate: str | None = None,
         dag_node_id: UUID | None = None,  # F064.1: activity-ping target
+        refuse_active: bool = False,  # F078: strip state-modifying tools for the turn
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -1456,6 +1473,20 @@ class AgentRunner:
         # F034.5: Dynamic check tool restriction
         if tool_filter is not None:
             base_tools = [t for t in base_tools if t["name"] in tool_filter]
+
+        # F078 (R6): a `refuse`-tier censor matched. The LLM still runs, but its
+        # state-modifying tools are stripped for the turn so it can only decline
+        # gracefully (or answer read-only). This is a DENYLIST removal, distinct
+        # from the whitelist `tool_filter` above. Denylist sourced from
+        # execution_ledger (NOT ActionGate, which is disabled in prod).
+        if refuse_active:
+            _refuse_denylist = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
+            before = len(base_tools)
+            base_tools = [t for t in base_tools if t["name"] not in _refuse_denylist]
+            logger.warning(
+                "F078 refuse: stripped %d state-modifying tools for the turn",
+                before - len(base_tools),
+            )
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages

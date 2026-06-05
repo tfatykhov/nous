@@ -106,7 +106,7 @@ async def _seed_data(brain, heart, session):
         CensorInput(
             trigger_pattern="seed censor trigger",
             reason="Seed censor reason",
-            action="warn",
+            action="steer",
         ),
         session=session,
     )
@@ -124,6 +124,51 @@ async def test_pre_turn_selects_frame(cognitive, session):
 
     assert isinstance(ctx, TurnContext)
     assert ctx.frame.frame_id == "decision"
+
+
+async def test_pre_turn_steer_directive_reaches_sections_by_tier(cognitive, heart, settings, session, monkeypatch):
+    """F078 R1: a directive-only steer match (no trigger_action) must land in
+    TurnContext.sections_by_tier['dynamic'] so it survives the F036 cache-split
+    in runner._build_system_prompt. This is the half that was the prod no-op:
+    the layer used to append only to the flat system_prompt, which the runner
+    ignores under cache_split_system_prompt=True (default).
+    """
+    from uuid import uuid4
+    from nous.heart.schemas import CensorMatch
+
+    # Ensure the cache-split path is the one under test.
+    settings.cache_split_system_prompt = True
+
+    directive = "VERIFY-RECIPIENT-BEFORE-SENDING-EMAIL-marker"
+
+    async def _fake_check_censors(text, domain=None, session=None):
+        return [
+            CensorMatch(
+                id=uuid4(),
+                trigger_pattern="send.*email",
+                action="steer",
+                reason="fallback reason should be ignored when instruction present",
+                domain=None,
+                trigger_action=None,  # directive-only — the prod-shape steer case
+                action_instruction=directive,
+            )
+        ]
+
+    monkeypatch.setattr(heart, "check_censors", _fake_check_censors)
+
+    sid = f"test-steer-tier-{uuid.uuid4().hex[:8]}"
+    ctx = await cognitive.pre_turn(
+        "nous-default", sid, "please send an email to the team", session=session,
+    )
+
+    # The directive must reach the dynamic tier (the cache-split read path),
+    # NOT only the flat system_prompt. Reverting the layer's sections_by_tier
+    # write turns this assertion red.
+    assert ctx.sections_by_tier, "build should have populated sections_by_tier"
+    assert directive in ctx.sections_by_tier.get("dynamic", "")
+    # And it should NOT have set a blocking flag (steer never blocks).
+    assert ctx.censor_blocked is False
+    assert ctx.refuse_active is False
 
 
 async def test_pre_turn_builds_context(cognitive, brain, heart, session):

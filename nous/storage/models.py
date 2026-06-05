@@ -669,10 +669,21 @@ class OutcomeSignal(Base):
 class Censor(Base):
     __tablename__ = "censors"
     __table_args__ = (
+        # F078: steer | refuse | abort (was warn | block | absolute). Migration 056
+        # remaps existing rows; this CHECK is also enforced in SQLite test mode, so it
+        # must move in lockstep with the migration.
         CheckConstraint(
-            "action IN ('warn', 'block', 'absolute')",
+            "action IN ('steer', 'refuse', 'abort')",
             name="ck_censors_action",
         ),
+        # F078: provenance drives the max-tier creation cap (auto<=steer, agent<=refuse,
+        # human<=abort). Distinct from the legacy created_by audit field below.
+        CheckConstraint(
+            "provenance IN ('auto', 'agent', 'human')",
+            name="ck_censors_provenance",
+        ),
+        # Legacy audit field (kept for history). 'auto_escalation' is no longer written
+        # once F078 removes auto-escalation, but the value stays valid.
         CheckConstraint(
             "created_by IN ('manual', 'auto_failure', 'auto_escalation')",
             name="ck_censors_created_by",
@@ -683,8 +694,12 @@ class Censor(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
     trigger_pattern: Mapped[str] = mapped_column(Text, nullable=False)
-    action: Mapped[str] = mapped_column(String(20), nullable=False, server_default="warn")
+    action: Mapped[str] = mapped_column(String(20), nullable=False, server_default="steer")
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # F078: creation provenance — caps the max tier a censor may reach.
+    provenance: Mapped[str] = mapped_column(String(20), nullable=False, server_default="human")
+    # F078: when true, a refuse-tier censor does not strip tools for the turn.
+    refuse_keep_tools: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     domain: Mapped[str | None] = mapped_column(String(100))
     learned_from_decision: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("brain.decisions.id")

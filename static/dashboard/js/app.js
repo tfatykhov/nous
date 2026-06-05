@@ -159,6 +159,25 @@ const Dashboard = {
     },
 
     /**
+     * Send a JSON body to the API (PUT by default). F078: used by the censor
+     * severity-control UI to call PUT /censors/{id}.
+     */
+    async apiSend(path, body, method) {
+        var res = await fetch(path, {
+            method: method || 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        var data = null;
+        try { data = await res.json(); } catch (e) { /* no body */ }
+        if (!res.ok) {
+            var msg = (data && data.error) ? data.error : (res.status + ' ' + res.statusText);
+            throw new Error(msg);
+        }
+        return data;
+    },
+
+    /**
      * Show loading skeleton in a container.
      */
     showLoading(container) {

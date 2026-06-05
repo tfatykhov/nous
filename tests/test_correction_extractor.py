@@ -226,7 +226,9 @@ class TestCorrectionExtractor:
             heart.add_censor.assert_called_once()
             censor_input = heart.add_censor.call_args[0][0]
             assert censor_input.trigger_pattern == "assume user preference"
-            assert censor_input.action == "warn"
+            # F078: auto-learned censors are steer + provenance=auto.
+            assert censor_input.action == "steer"
+            assert censor_input.provenance == "auto"
 
     @pytest.mark.asyncio
     async def test_skip_short_principle(self):

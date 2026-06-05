@@ -65,7 +65,7 @@ def _censor_input(**overrides) -> CensorInput:
     defaults = dict(
         trigger_pattern="integration test censor trigger",
         reason="integration test censor reason",
-        action="warn",
+        action="steer",
     )
     defaults.update(overrides)
     return CensorInput(**defaults)
@@ -246,7 +246,7 @@ async def test_procedure_lifecycle(heart, session):
 
 
 async def test_censor_lifecycle(heart, session):
-    """add -> check triggers -> escalate after threshold."""
+    """add -> check triggers (F078: no auto-escalation — stays steer)."""
     censor = await heart.add_censor(
         _censor_input(
             trigger_pattern="lifecycle censor test trigger",
@@ -254,18 +254,18 @@ async def test_censor_lifecycle(heart, session):
         ),
         session=session,
     )
-    assert censor.action == "warn"
+    assert censor.action == "steer"
 
-    # Trigger 3 times (threshold) with identical text
+    # Trigger 3 times with identical text
     for _ in range(3):
         matches = await heart.check_censors(
             "lifecycle censor test trigger lifecycle censor test reason",
             session=session,
         )
 
-    # After threshold, should have auto-escalated to block
+    # F078: auto-escalation removed — the censor stays steer no matter the count.
     assert len(matches) >= 1
-    assert matches[0].action == "block"
+    assert matches[0].action == "steer"
 
 
 # ---------------------------------------------------------------------------

@@ -172,8 +172,11 @@ class TurnContext(BaseModel):
     frame: FrameSelection
     decision_id: str | None = None  # Set if frame is 'decision' or 'task'
     active_censors: list[str] = Field(default_factory=list)
-    censor_blocked: bool = False  # Set if a block censor matched user input
-    censor_block_reason: str | None = None  # Reason for the block
+    censor_blocked: bool = False  # F078: set if an `abort` censor matched user input (hard cut)
+    censor_block_reason: str | None = None  # Reason for the abort
+    # F078: set when a `refuse`-tier censor matched. The LLM still runs, but
+    # runner strips the state-modifying tool denylist for the turn (R6).
+    refuse_active: bool = False
     context_token_estimate: int = 0
     recalled_decision_ids: list[str] = Field(default_factory=list)
     recalled_fact_ids: list[str] = Field(default_factory=list)

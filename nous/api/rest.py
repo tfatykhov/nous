@@ -584,7 +584,11 @@ def create_app(
             return JSONResponse({"error": str(e)}, status_code=500)
 
     async def update_censor(request: Request) -> JSONResponse:
-        """PUT /censors/{id} - Update censor fields (F031)."""
+        """PUT /censors/{id} - Update censor fields (F031).
+
+        F078: ``action`` (steer|refuse|abort) and ``active`` (bool) are the UI
+        severity-control path — operator=human, so any valid tier is allowed.
+        """
         censor_id = request.path_params["id"]
         try:
             body = await request.json()
@@ -592,12 +596,25 @@ def create_app(
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         update_fields = {}
-        for field in ("trigger_action", "action_instruction", "unblock_pattern", "reason", "domain"):
+        for field in (
+            "trigger_action", "action_instruction", "unblock_pattern",
+            "reason", "domain", "action", "active",
+        ):
             if field in body:
                 update_fields[field] = body[field]
 
         if not update_fields:
             return JSONResponse({"error": "No fields to update"}, status_code=400)
+
+        # F078: validate action vocabulary (UI severity control).
+        if "action" in update_fields and update_fields["action"] not in ("steer", "refuse", "abort"):
+            return JSONResponse(
+                {"error": "action must be one of: steer, refuse, abort"},
+                status_code=400,
+            )
+        # F078: validate active is a bool.
+        if "active" in update_fields and not isinstance(update_fields["active"], bool):
+            return JSONResponse({"error": "active must be a boolean"}, status_code=400)
 
         # F031: Validate trigger_action structure if provided
         ta = update_fields.get("trigger_action")
