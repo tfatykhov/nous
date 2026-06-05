@@ -1316,7 +1316,7 @@ class TestSubtaskConfigDefaults:
             call_kwargs = heart.subtasks.create.call_args.kwargs
             assert call_kwargs.get("model") == "claude-haiku-4-5-20251001"
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
     def test_spawn_task_uses_settings_inline_timeout(self):
         """spawn_task uses settings.inline_subtask_timeout for await_result default."""
@@ -1345,7 +1345,7 @@ class TestSubtaskConfigDefaults:
             # timeout should be min(45, 600) = 45
             assert call_kwargs.get("timeout") == 45
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
 
 
 class TestRunTurnErrorPropagation:

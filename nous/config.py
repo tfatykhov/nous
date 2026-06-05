@@ -725,6 +725,12 @@ class Settings(BaseSettings):
     email: str = ""  # Nous agent email address
     email_user: str = ""  # IMAP login user
     email_password: str = ""  # IMAP login password
+    # F078.1: Guarded send_email tool (recipient allowlist + secret scan + rate limit)
+    email_allowlist: str = ""  # CSV of allowed recipients (case-insensitive exact). Empty = reject all.
+    email_tool_enabled: bool = True  # Master switch for the guarded send_email tool
+    email_max_per_hour: int = 5  # In-process sliding-window rate limit
+    email_smtp_host: str = "smtp.gmail.com"  # SMTP host for the send_email tool
+    email_smtp_port: int = 587  # SMTP STARTTLS port
     tim_chat_id: str = ""  # Tim's Telegram chat ID
     emerson_hook_url: str = ""  # Emerson presence hook URL
     emerson_hook_token: str = ""  # Emerson presence hook token
