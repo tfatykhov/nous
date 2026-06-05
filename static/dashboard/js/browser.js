@@ -76,7 +76,7 @@ Dashboard.registerView('browser', async function(container) {
             html += buildSelect('filter-stakes', 'Stakes', ['', 'low', 'medium', 'high'], state.filters.stakes);
             html += buildSelect('filter-outcome', 'Outcome', ['', 'success', 'partial', 'failure', 'pending'], state.filters.outcome);
         } else if (tab === 'censors') {
-            html += buildSelect('filter-action', 'Action', ['', 'warn', 'block', 'absolute'], state.filters.action);
+            html += buildSelect('filter-action', 'Action', ['', 'steer', 'refuse', 'abort'], state.filters.action);
         }
 
         html += '<button class="btn" id="tab-search-btn">Search</button>';
@@ -186,6 +186,9 @@ Dashboard.registerView('browser', async function(container) {
             });
         });
 
+        // F078: wire censor severity controls (tier dropdown + active toggle + save).
+        if (tab === 'censors') wireCensorControls(tableArea);
+
         // Pagination
         var totalPages = Math.ceil(state.total / state.limit);
         var currentPage = Math.floor(state.offset / state.limit) + 1;
@@ -283,7 +286,8 @@ Dashboard.registerView('browser', async function(container) {
             return '<span class="badge ' + cls + '">' + escapeHtml(val) + '</span>';
         }
         if (col.format === 'action') {
-            var actionCls = val === 'block' || val === 'absolute' ? 'badge-censor' : 'badge-partial';
+            // F078: abort/refuse are halting/blocking tiers; steer is advisory.
+            var actionCls = (val === 'abort' || val === 'refuse') ? 'badge-censor' : 'badge-partial';
             return '<span class="badge ' + actionCls + '">' + escapeHtml(val) + '</span>';
         }
         if (col.badge) return '<span class="badge ' + col.badge + '">' + escapeHtml(String(val)) + '</span>';
@@ -341,11 +345,14 @@ Dashboard.registerView('browser', async function(container) {
             case 'censors':
                 html += detailRow('Trigger', item.trigger_pattern);
                 html += detailRow('Action', item.action);
+                html += detailRow('Provenance', item.provenance);
                 html += detailRow('Reason', item.reason);
                 html += detailRow('Domain', item.domain);
                 html += detailRow('Activations', item.activation_count);
                 html += detailRow('False Positives', item.false_positive_count);
                 html += detailRow('ID', null, '<span class="mono">' + escapeHtml(item.id || '') + '</span>');
+                // F078: per-censor severity control — tier dropdown + active toggle + save.
+                html += detailRow('Severity (tier)', null, buildCensorTierControl(item));
                 break;
             case 'chunks':
                 html += detailRow('Content', item.content);
@@ -358,6 +365,50 @@ Dashboard.registerView('browser', async function(container) {
 
         html += '</div>';
         return html;
+    }
+
+    // F078: per-censor tier dropdown + active toggle + save button.
+    // Calls PUT /censors/{id} with {action} / {active}.
+    function buildCensorTierControl(item) {
+        var id = escapeHtml(item.id || '');
+        var tiers = ['steer', 'refuse', 'abort'];
+        var sel = '<select class="filter-select censor-tier-select" data-censor-id="' + id + '">';
+        tiers.forEach(function(t) {
+            sel += '<option value="' + t + '"' + (item.action === t ? ' selected' : '') + '>' + t + '</option>';
+        });
+        sel += '</select>';
+        var activeChecked = item.active === false ? '' : ' checked';
+        var toggle = '<label class="censor-active-toggle" style="margin-left:8px">' +
+            '<input type="checkbox" class="censor-active-check" data-censor-id="' + id + '"' + activeChecked + '> Active</label>';
+        var btn = '<button class="btn censor-save-btn" data-censor-id="' + id + '" style="margin-left:8px">Save</button>';
+        var status = '<span class="censor-save-status" data-censor-id="' + id + '" style="margin-left:8px"></span>';
+        return sel + toggle + btn + status;
+    }
+
+    function wireCensorControls(tableArea) {
+        // Stop row collapse when interacting with the controls.
+        tableArea.querySelectorAll('.censor-tier-select, .censor-active-check, .censor-save-btn').forEach(function(el) {
+            el.addEventListener('click', function(e) { e.stopPropagation(); });
+        });
+        tableArea.querySelectorAll('.censor-save-btn').forEach(function(btn) {
+            btn.addEventListener('click', async function(e) {
+                e.stopPropagation();
+                var id = btn.dataset.censorId;
+                var sel = tableArea.querySelector('.censor-tier-select[data-censor-id="' + id + '"]');
+                var chk = tableArea.querySelector('.censor-active-check[data-censor-id="' + id + '"]');
+                var status = tableArea.querySelector('.censor-save-status[data-censor-id="' + id + '"]');
+                var body = {};
+                if (sel) body.action = sel.value;
+                if (chk) body.active = chk.checked;
+                if (status) status.textContent = 'Saving...';
+                try {
+                    await Dashboard.apiSend('/censors/' + id, body, 'PUT');
+                    if (status) { status.textContent = 'Saved'; status.className = 'censor-save-status text-green'; }
+                } catch (err) {
+                    if (status) { status.textContent = 'Error: ' + err.message; status.className = 'censor-save-status text-muted'; }
+                }
+            });
+        });
     }
 
     function detailRow(label, value, rawHtml) {

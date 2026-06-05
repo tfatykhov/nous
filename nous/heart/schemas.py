@@ -22,7 +22,8 @@ _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Type aliases using Literal for compile-time validation (P3-2)
 MemoryType = Literal["fact", "procedure", "decision", "censor", "episode", "chunk"]
-CensorAction = Literal["warn", "block", "absolute"]
+CensorAction = Literal["steer", "refuse", "abort"]  # F078 (was warn|block|absolute)
+CensorProvenance = Literal["auto", "agent", "human"]  # F078: caps max tier at create
 EpisodeOutcome = Literal["success", "partial", "failure", "ongoing", "abandoned"]
 ProcedureOutcome = Literal["success", "failure", "neutral"]
 
@@ -297,13 +298,17 @@ class CensorInput(BaseModel):
 
     trigger_pattern: str
     reason: str
-    action: CensorAction = "warn"  # P3-2: Literal type
+    action: CensorAction = "steer"  # F078: steer | refuse | abort (was warn)
     domain: str | None = None
     learned_from_decision: UUID | None = None
     learned_from_episode: UUID | None = None
     trigger_action: dict | None = None  # F031: e.g. {"tool": "recall", "args": {...}}
     action_instruction: str | None = None  # F031: human-readable instruction
-    unblock_pattern: str | None = None  # F031: regex — if action results match, downgrade block→warn
+    unblock_pattern: str | None = None  # F031: regex — if action results match, downgrade refuse→steer
+    # F078: creation provenance — caps the max tier (auto<=steer, agent<=refuse, human<=abort).
+    provenance: CensorProvenance = "human"
+    # F078: when true, a refuse-tier censor does NOT strip tools for the turn.
+    refuse_keep_tools: bool = False
 
 
 class CensorDetail(BaseModel):
@@ -327,6 +332,9 @@ class CensorDetail(BaseModel):
     trigger_action: dict | None = None  # F031
     action_instruction: str | None = None  # F031
     unblock_pattern: str | None = None  # F031
+    # F078: creation provenance + refuse opt-out.
+    provenance: CensorProvenance = "human"
+    refuse_keep_tools: bool = False
 
 
 class CensorMatch(BaseModel):
@@ -341,6 +349,8 @@ class CensorMatch(BaseModel):
     trigger_action: dict | None = None  # F031
     action_instruction: str | None = None  # F031
     unblock_pattern: str | None = None  # F031
+    # F078: surfaced so the turn-enforcer can honor the refuse tool-strip opt-out.
+    refuse_keep_tools: bool = False
 
 
 # --- Working Memory ---

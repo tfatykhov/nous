@@ -186,7 +186,7 @@ async def test_censors_with_pagination(client, heart, db):
     """GET /censors returns total and supports limit/offset."""
     async with db.session() as session:
         await heart.add_censor(
-            CensorInput(trigger_pattern="test pattern", reason="Test", action="warn"),
+            CensorInput(trigger_pattern="test pattern", reason="Test", action="steer"),
             session=session,
         )
         await session.commit()

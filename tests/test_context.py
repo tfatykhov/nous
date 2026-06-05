@@ -130,7 +130,7 @@ async def _seed_censor(heart, session):
         CensorInput(
             trigger_pattern="dangerous operation",
             reason="Avoid risky operations without review",
-            action="warn",
+            action="steer",
         ),
         session=session,
     )

@@ -127,7 +127,7 @@ class ContextEngine:
 
         Assembly order (by priority):
         1. Identity prompt (always included, static)
-        2. Active censors (always, action=block first)
+        2. Active censors (always, action=abort first)
         3. Frame description + questions_to_ask
         4. Working memory (current task + open threads)
         5. Similar decisions from Brain.query()
@@ -1066,24 +1066,25 @@ class ContextEngine:
     def _format_censors(self, censors: list) -> str:
         """Format active censors.
 
-        P1-4: Use action (not severity).
+        F078: Use the steer | refuse | abort vocabulary (was warn | block | absolute).
         Format: - **{ACTION}:** {trigger_pattern} -- {reason}
-        F031: Append action_instruction for warn censors if present.
+        Append action_instruction for steer/refuse censors (the directive-bearing tiers).
         """
-        action_order = {"absolute": 0, "block": 1, "warn": 2}
+        # Hardest tier first so the LLM sees blocking rules at the top.
+        action_order = {"abort": 0, "refuse": 1, "steer": 2}
         sorted_censors = sorted(
             censors,
-            key=lambda c: action_order.get(getattr(c, "action", "warn"), 3),
+            key=lambda c: action_order.get(getattr(c, "action", "steer"), 3),
         )
         lines = []
         for c in sorted_censors:
-            action = getattr(c, "action", "warn").upper()
+            action = getattr(c, "action", "steer").upper()
             pattern = getattr(c, "trigger_pattern", "")
             reason = getattr(c, "reason", "")
             line = f"- **{action}:** {pattern} -- {reason}"
-            # F031: Append action_instruction for warn censors
+            # F078: surface the directive for the advisory/refusal tiers.
             instruction = getattr(c, "action_instruction", None)
-            if instruction and action == "WARN":
+            if instruction and action in ("STEER", "REFUSE"):
                 line += f"\n  *Instruction:* {instruction}"
             lines.append(line)
         return "\n".join(lines)

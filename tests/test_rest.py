@@ -152,7 +152,7 @@ async def _seed_censor(heart, session):
         CensorInput(
             trigger_pattern="test censor pattern",
             reason="Test censor reason",
-            action="warn",
+            action="steer",
         ),
         session=session,
     )

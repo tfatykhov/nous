@@ -761,19 +761,39 @@ class CognitiveLayer:
         # Programmatic censor check on user input (#160 follow-up).
         # Subtasks skip censor checks here — they are checked at creation
         # time in spawn_task instead (non-interactive, no user to see blocks).
-        censor_injected: dict[str, str] = {}
+        # F078: censor enforcement on user input. Tier implies side:
+        #   abort  -> hard cut before the LLM (input-gate; reserved for destructive).
+        #   refuse -> LLM runs, refusal directive injected, write tools stripped (runner).
+        #   steer  -> directive (action_instruction|reason) + any trigger_action results
+        #             injected as Active Guidance. NEVER blocks.
+        # The injected guidance is the directive itself for EVERY steer/refuse match,
+        # not only the F031 trigger_action results.
+        censor_injected: dict[str, str] = {}  # censor_id -> guidance text
         censor_blocked = False
         censor_block_reason: str | None = None
+        refuse_active = False
         if not is_subtask:
           try:
             matches = await self._heart.check_censors(user_input, session=session)
             for match in matches:
-                if match.action == "block":
-                    # F031: Conditional unblock — if trigger_action + unblock_pattern,
-                    # execute action and check if results match unblock_pattern.
-                    # Match → downgrade to warn (skip block). No match → block as normal.
-                    unblocked = False
+                if match.action == "abort":
+                    # Hard cut before the LLM (was the old block-halt behavior).
+                    censor_blocked = True
+                    censor_block_reason = (
+                        f"Blocked by censor: {match.reason or match.trigger_pattern}"
+                    )
+                    logger.warning(
+                        "Censor ABORT on user input (session=%s, censor=%s): %s",
+                        session_id, match.id, match.trigger_pattern,
+                    )
+                    if match.action_instruction:
+                        censor_block_reason += f"\n\n{match.action_instruction}"
+                    break  # One abort is enough
+                elif match.action == "refuse":
+                    # F031: Conditional unblock — if trigger_action + unblock_pattern
+                    # match, downgrade refuse -> steer (run normally, no tool strip).
                     action_result: str | None = None
+                    downgraded = False
                     if match.trigger_action:
                         try:
                             action_result = await self._censor_executor.execute(
@@ -781,58 +801,62 @@ class CognitiveLayer:
                             )
                         except Exception:
                             logger.warning(
-                                "Censor block action failed (session=%s, censor=%s)",
+                                "Censor refuse action failed (session=%s, censor=%s)",
                                 session_id, match.id, exc_info=True,
                             )
-
-                        # Check unblock condition
                         if action_result and match.unblock_pattern:
                             try:
                                 if re.search(match.unblock_pattern, action_result, re.IGNORECASE):
-                                    unblocked = True
+                                    downgraded = True
                                     logger.info(
-                                        "Censor UNBLOCK: pattern matched (session=%s, censor=%s)",
+                                        "Censor REFUSE→STEER downgrade (session=%s, censor=%s)",
                                         session_id, match.id,
                                     )
                             except re.error:
                                 logger.warning("Invalid unblock_pattern regex: %s", match.unblock_pattern)
 
-                    if unblocked:
-                        # Downgrade to warn — inject context like a warn censor
-                        logger.info(
-                            "Censor BLOCK→WARN downgrade (session=%s, censor=%s): %s",
-                            session_id, match.id, match.trigger_pattern,
-                        )
+                    directive = match.action_instruction or match.reason
+                    if downgraded:
+                        # Treat as steer: guidance only, no tool strip.
+                        guidance = directive
                         if action_result:
-                            censor_injected[str(match.id)] = action_result
+                            guidance = f"{guidance}\n\n{action_result}" if guidance else action_result
+                        if guidance:
+                            censor_injected[str(match.id)] = guidance
                     else:
-                        # Block as normal
-                        censor_blocked = True
-                        censor_block_reason = (
-                            f"Blocked by censor: {match.reason or match.trigger_pattern}"
-                        )
+                        # F078 R6: strip write tools unless the censor opted out
+                        # via refuse_keep_tools. The refusal directive is still
+                        # injected either way.
+                        if not match.refuse_keep_tools:
+                            refuse_active = True
                         logger.warning(
-                            "Censor BLOCK on user input (session=%s, censor=%s): %s",
-                            session_id, match.id, match.trigger_pattern,
+                            "Censor REFUSE on user input (session=%s, censor=%s, keep_tools=%s): %s",
+                            session_id, match.id, match.refuse_keep_tools, match.trigger_pattern,
+                        )
+                        guidance = (
+                            "You must DECLINE this request. "
+                            f"{directive}" if directive else "You must DECLINE this request."
                         )
                         if action_result:
-                            censor_block_reason += f"\n\nRelated context:\n{action_result}"
-                        if match.action_instruction:
-                            censor_block_reason += f"\n\n{match.action_instruction}"
-                        break  # One block is enough
-                elif match.action == "warn":
+                            guidance += f"\n\n{action_result}"
+                        censor_injected[str(match.id)] = guidance
+                elif match.action == "steer":
                     logger.info(
-                        "Censor WARN on user input (session=%s, censor=%s): %s",
+                        "Censor STEER on user input (session=%s, censor=%s): %s",
                         session_id, match.id, match.trigger_pattern,
                     )
-                    # F031: Execute trigger_action if present
+                    directive = match.action_instruction or match.reason
+                    guidance = directive or ""
+                    # F031: Execute trigger_action if present and append its results.
                     if match.trigger_action:
                         try:
                             action_result = await self._censor_executor.execute(
                                 match.trigger_action, session=session,
                             )
                             if action_result:
-                                censor_injected[str(match.id)] = action_result
+                                guidance = (
+                                    f"{guidance}\n\n{action_result}" if guidance else action_result
+                                )
                                 logger.info(
                                     "Censor action executed (session=%s, censor=%s, tool=%s)",
                                     session_id, match.id, match.trigger_action.get("tool"),
@@ -842,16 +866,35 @@ class CognitiveLayer:
                                 "Censor action failed (session=%s, censor=%s)",
                                 session_id, match.id, exc_info=True,
                             )
+                    if guidance:
+                        censor_injected[str(match.id)] = guidance
           except Exception:
             logger.debug("Censor check failed during pre_turn")
 
-        # F031: Append censor-injected context to system prompt
+        # F078 R1: route censor-injected guidance into BOTH the flat system_prompt
+        # (legacy path) AND sections_by_tier["dynamic"] (F036 cache-split path,
+        # default). runner._build_system_prompt ignores the flat string when
+        # cache_split_system_prompt is true, so steer/refuse would be a silent
+        # no-op unless we also write the dynamic tier here.
         if censor_injected:
-            injected_section = "\n\n## Censor-Injected Context\n"
-            injected_section += "The following information was automatically retrieved by active censors. Use it to inform your response:\n\n"
-            for censor_id, result_text in censor_injected.items():
-                injected_section += f"{result_text}\n\n"
-            system_prompt += injected_section
+            injected_section = "## Active Guidance\n"
+            injected_section += (
+                "Active censors flagged this turn. Follow the directives below:\n\n"
+            )
+            for _censor_id, result_text in censor_injected.items():
+                injected_section += f"- {result_text}\n\n"
+            system_prompt += "\n\n" + injected_section
+            # Only touch sections_by_tier when it's already populated (build
+            # succeeded). If build failed it stays {} and runner uses the flat
+            # path — writing a lone "dynamic" key would wrongly trigger the
+            # split path and drop the identity prompt.
+            if sections_by_tier:
+                existing_dynamic = sections_by_tier.get("dynamic", "")
+                sections_by_tier["dynamic"] = (
+                    existing_dynamic + "\n\n" + injected_section
+                    if existing_dynamic
+                    else injected_section
+                )
 
         # F065 Phase 2: Hub-shift autosurface (gated dormant by default).
         # Synchronous by design — the manager swallows DB errors internally
@@ -884,6 +927,7 @@ class CognitiveLayer:
             active_censors=active_censors,
             censor_blocked=censor_blocked,
             censor_block_reason=censor_block_reason,
+            refuse_active=refuse_active,
             context_token_estimate=context_token_estimate,
             recalled_decision_ids=recalled_decision_ids,
             recalled_fact_ids=recalled_fact_ids,
@@ -1071,23 +1115,17 @@ class CognitiveLayer:
 
         # Post-turn censor check on model output (#160 follow-up).
         # Catches credential leaks, blocked content in model responses.
-        # Only logs — doesn't block (response already sent in streaming).
-        # Increments activation_count for monitoring/escalation.
+        # F078: READ-ONLY — uses search() (no side effects): no activation_count
+        # increment, no escalation. Log-only (response already sent in streaming).
         try:
-            output_matches = await self._heart.check_censors(
+            output_matches = await self._heart.censors.search(
                 turn_result.response_text, session=session,
             )
             for match in output_matches:
-                if match.action == "block":
-                    logger.warning(
-                        "Censor BLOCK on model output (session=%s, censor=%s): %s",
-                        session_id, match.id, match.trigger_pattern,
-                    )
-                elif match.action == "warn":
-                    logger.info(
-                        "Censor WARN on model output (session=%s, censor=%s): %s",
-                        session_id, match.id, match.trigger_pattern,
-                    )
+                logger.info(
+                    "Censor match on model output (session=%s, censor=%s, action=%s): %s",
+                    session_id, match.id, match.action, match.trigger_pattern,
+                )
         except Exception:
             logger.debug("Censor check failed during post_turn")
 

@@ -798,7 +798,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
     async def create_censor(
         trigger_pattern: str,
         reason: str,
-        action: str = "warn",
+        action: str = "steer",
         domain: str | None = None,
         learned_from_decision: str | None = None,
         learned_from_episode: str | None = None,
@@ -808,7 +808,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         Args:
             trigger_pattern: Pattern to match (substring or regex)
             reason: Why this censor exists
-            action: warn, block, or absolute
+            action: steer (advisory, default), refuse, or abort. Agent-created
+                censors are capped at refuse (provenance="agent").
             domain: Domain this censor applies to (architecture, debugging, etc.)
             learned_from_decision: Decision UUID that triggered this censor
             learned_from_episode: Episode UUID that triggered this censor
@@ -817,6 +818,20 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             MCP-compliant response with censor ID or error message
         """
         try:
+            # F078: validate action vocabulary before constructing the input.
+            if action not in ("steer", "refuse", "abort"):
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"Invalid action {action!r}; must be one of "
+                                "steer, refuse, abort."
+                            ),
+                        }
+                    ]
+                }
+
             # Parse UUIDs if provided
             decision_uuid = UUID(learned_from_decision) if learned_from_decision else None
             episode_uuid = UUID(learned_from_episode) if learned_from_episode else None
@@ -828,6 +843,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 domain=domain,
                 learned_from_decision=decision_uuid,
                 learned_from_episode=episode_uuid,
+                # F078: agent provenance -> _add caps tier at refuse.
+                provenance="agent",
             )
 
             # Create censor
@@ -1423,9 +1440,13 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
         "reason": {"type": "string", "description": "Why this censor exists"},
         "action": {
             "type": "string",
-            "description": "Censor action",
-            "enum": ["warn", "block", "absolute"],
-            "default": "warn",
+            "description": (
+                "Censor tier: steer (advisory directive, non-blocking), "
+                "refuse (LLM declines + write tools stripped), or abort (hard cut). "
+                "Agent-created censors are capped at refuse."
+            ),
+            "enum": ["steer", "refuse", "abort"],
+            "default": "steer",
         },
         "domain": {"type": "string", "description": "Domain this censor applies to"},
         "learned_from_decision": {"type": "string", "description": "Decision UUID"},
@@ -1913,15 +1934,20 @@ def create_subtask_tools(
                     settings.subtask_max_timeout,
                 )
 
-            # F031: Check censors on subtask task text at creation time.
+            # F078 (R3): Check censors on subtask task text at creation time.
             # Subtasks are non-interactive so censor checks are skipped during
-            # execution (pre_turn). We check here instead for immediate feedback.
+            # execution (pre_turn) — the spawn gate is the ONLY censor enforcement
+            # the background path gets, so it must honor the new tiers:
+            #   abort / refuse -> REJECT the subtask (the autonomous-exfil path).
+            #   steer          -> do NOT reject; inject the directive into the task.
+            # Email censors are `steer`, so daily email subtasks pass unaffected.
             try:
                 from nous.heart.censor_actions import CensorActionExecutor
+                _steer_directives: list[str] = []
                 matches = await heart.check_censors(task)
                 for match in matches:
-                    if match.action == "block":
-                        # F031: Check unblock condition before rejecting
+                    if match.action in ("abort", "refuse"):
+                        # F031: refuse may downgrade to steer via unblock_pattern.
                         unblocked = False
                         if match.trigger_action and match.unblock_pattern:
                             executor = CensorActionExecutor(heart)
@@ -1939,10 +1965,24 @@ def create_subtask_tools(
                             if match.action_instruction:
                                 msg += f"\n{match.action_instruction}"
                             return {"content": [{"type": "text", "text": msg}]}
-                    elif match.action == "warn":
-                        logger.info("Censor WARN on subtask creation: %s", match.trigger_pattern)
+                        # downgraded refuse -> treat as steer directive below
+                        directive = match.action_instruction or match.reason
+                        if directive:
+                            _steer_directives.append(directive)
+                    elif match.action == "steer":
+                        logger.info("Censor STEER on subtask creation: %s", match.trigger_pattern)
+                        directive = match.action_instruction or match.reason
+                        if directive:
+                            _steer_directives.append(directive)
+                # Inject steer directives into the task text so the subtask honors them.
+                if _steer_directives:
+                    task = task + "\n\n## Active Guidance\n" + "\n".join(
+                        f"- {d}" for d in _steer_directives
+                    )
             except Exception:
-                logger.debug("Censor check failed during spawn_task, proceeding")
+                # The spawn gate is the ONLY censor enforcement a subtask gets (the exfil
+                # path) — a swallowed failure here is a silent enforcement gap, so WARN.
+                logger.warning("Censor check failed during spawn_task, proceeding", exc_info=True)
 
             # F062: persist payload_schema only when BOTH flags are on
             # (Codex round-9 P2). Without F061 hardening the legacy executor

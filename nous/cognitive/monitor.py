@@ -168,11 +168,12 @@ class MonitorEngine:
 
                 try:
                     # P1-5: Construct CensorInput pydantic model
-                    # P1-4: Use action, not severity
+                    # F078: auto-learned censors are provenance="auto" -> capped to steer.
                     censor_input = CensorInput(
                         trigger_pattern=candidate_text,
                         reason="Auto-created from tool error",
-                        action="warn",
+                        action="steer",
+                        provenance="auto",
                     )
                     await self._heart.add_censor(censor_input, session=session)
                     existing_patterns.add(candidate_text)
@@ -375,10 +376,12 @@ class MonitorEngine:
 
             # Optionally create censor
             if extraction.get("is_censor") and extraction.get("censor_pattern"):
+                # F078: auto-learned (F039) censors are provenance="auto" -> capped to steer.
                 censor_input = CensorInput(
                     trigger_pattern=extraction["censor_pattern"],
                     reason=f"F039: Inline correction — {principle[:100]}",
-                    action="warn",
+                    action="steer",
+                    provenance="auto",
                 )
                 await self._heart.add_censor(censor_input, session=session)
 
