@@ -515,7 +515,7 @@ class AgentRunner:
                         extra_tools=extra_tools,
                         force_tool_on_penultimate=force_tool_on_penultimate,
                         dag_node_id=dag_node_id,
-                        refuse_active=turn_context.refuse_active,  # F078 R6
+                        refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
                     )
                 finally:
                     CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
@@ -1001,7 +1001,7 @@ class AgentRunner:
             # path (used by Telegram) built tools directly and would otherwise leak write/
             # external/irreversible/bash to a refused turn. refuse_active already accounts for
             # refuse_keep_tools (set in cognitive/layer.py).
-            if turn_context.refuse_active and tools:
+            if getattr(turn_context, "refuse_active", False) and tools:
                 _refuse_denylist = WRITE_TOOLS | EXTERNAL_TOOLS | IRREVERSIBLE_TOOLS | {"bash"}
                 _before = len(tools)
                 tools = [t for t in tools if t["name"] not in _refuse_denylist]

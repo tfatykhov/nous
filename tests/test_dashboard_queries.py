@@ -270,7 +270,7 @@ async def _insert_censor(session, *, trigger_pattern="test pattern",
             INSERT INTO heart.censors
                 (id, agent_id, trigger_pattern, action, reason, created_by,
                  activation_count, active)
-            VALUES (:id, :agent_id, :pattern, 'warn', 'test', :created_by,
+            VALUES (:id, :agent_id, :pattern, 'steer', 'test', :created_by,
                     :act_count, :active)
         """),
         {
