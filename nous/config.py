@@ -727,6 +727,10 @@ class Settings(BaseSettings):
     email_password: str = ""  # IMAP login password
     # F078.1: Guarded send_email tool (recipient allowlist + secret scan + rate limit)
     email_allowlist: str = ""  # CSV of allowed recipients (case-insensitive exact). Empty = reject all.
+    # F078.1.1: hot-reloadable allowlist file (one address per line, or CSV; '#' comments OK).
+    # Read at send-time (mtime-cached), so adding an address takes effect WITHOUT a restart.
+    # Effective allowlist = email_allowlist (env, static base) UNION this file's contents.
+    email_allowlist_file: str = ""
     email_tool_enabled: bool = True  # Master switch for the guarded send_email tool
     email_max_per_hour: int = 5  # In-process sliding-window rate limit
     email_smtp_host: str = "smtp.gmail.com"  # SMTP host for the send_email tool
