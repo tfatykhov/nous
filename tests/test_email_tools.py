@@ -280,3 +280,79 @@ def test_attachment_off_allowlist_rejected_before_read(no_real_send, tmp_path):
     resp = asyncio.run(tool(to="stranger@evil.com", subject="s", body="b", attachments=str(f)))
     assert "not on the email allowlist" in _text(resp)
     assert len(no_real_send) == 0
+
+
+# --- F078.1.3: html_body ---
+
+def test_html_body_none_plain_text(no_real_send):
+    """html_body=None → message is plain MIMEText (BC preserved)."""
+    from email.mime.text import MIMEText as _MIMEText
+
+    tool = create_send_email_tool(_make_settings())
+    asyncio.run(tool(to="tim@example.com", subject="hi", body="hello"))
+    assert len(no_real_send) == 1
+    msg = no_real_send[0][1][2]  # (settings, recipients, msg)
+    assert isinstance(msg, _MIMEText)
+    assert msg.get_content_type() == "text/plain"
+
+
+def test_html_body_set_no_attachments(no_real_send):
+    """html_body set, no attachments → top-level multipart/alternative with two
+    parts: text/plain first, text/html second."""
+    tool = create_send_email_tool(_make_settings())
+    asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="newsletter",
+            body="plain fallback",
+            html_body="<h1>Rich content</h1>",
+        )
+    )
+    assert len(no_real_send) == 1
+    msg = no_real_send[0][1][2]
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = msg.get_payload()
+    assert len(parts) == 2
+    assert parts[0].get_content_type() == "text/plain"
+    assert parts[1].get_content_type() == "text/html"
+
+
+def test_html_body_set_with_attachment(no_real_send, tmp_path):
+    """html_body + attachment → top-level multipart/mixed whose first part is
+    multipart/alternative, plus the attachment part."""
+    f = tmp_path / "report.pdf"
+    f.write_bytes(b"%PDF-1.4 fake")
+    tool = create_send_email_tool(_make_settings())
+    asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="report",
+            body="see attached",
+            html_body="<p>See attached</p>",
+            attachments=str(f),
+        )
+    )
+    assert len(no_real_send) == 1
+    msg = no_real_send[0][1][2]
+    assert msg.get_content_type() == "multipart/mixed"
+    parts = msg.get_payload()
+    assert parts[0].get_content_type() == "multipart/alternative"
+    alt_parts = parts[0].get_payload()
+    assert alt_parts[0].get_content_type() == "text/plain"
+    assert alt_parts[1].get_content_type() == "text/html"
+    assert parts[1].get_filename() == "report.pdf"
+
+
+def test_html_body_secret_scan_rejected(no_real_send):
+    """html_body containing a secret pattern is rejected."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="newsletter",
+            body="plain text is clean",
+            html_body="<p>key: sk-abcdEFGH1234567890zz</p>",
+        )
+    )
+    assert "secret" in _text(resp).lower()
+    assert len(no_real_send) == 0
