@@ -232,3 +232,51 @@ def test_allowlist_file_missing_falls_back_to_env(no_real_send, tmp_path):
     assert "not on the email allowlist" in _text(
         asyncio.run(tool(to="stranger@evil.com", subject="s", body="b"))
     )
+
+
+# --- F078.1.2: attachments ---
+
+def test_attachment_sends_multipart(no_real_send, tmp_path):
+    f = tmp_path / "report.docx"
+    f.write_bytes(b"PK\x03\x04 fake docx bytes")
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(tool(to="tim@example.com", subject="report", body="see attached", attachments=str(f)))
+    assert "Email sent" in _text(resp)
+    assert "1 attachment" in _text(resp)
+    assert len(no_real_send) == 1
+    msg = no_real_send[0][1][2]   # (settings, recipients, msg)
+    assert msg.is_multipart()
+    names = [p.get_filename() for p in msg.walk() if p.get_filename()]
+    assert "report.docx" in names
+
+
+def test_attachment_list(no_real_send, tmp_path):
+    f1 = tmp_path / "a.pdf"; f1.write_bytes(b"%PDF-1.4 x")
+    f2 = tmp_path / "b.csv"; f2.write_text("a,b\n1,2\n")
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(tool(to="tim@example.com", subject="s", body="b", attachments=[str(f1), str(f2)]))
+    assert "2 attachment" in _text(resp)
+    assert len(no_real_send) == 1
+
+
+def test_attachment_missing_rejects_no_send(no_real_send, tmp_path):
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(tool(to="tim@example.com", subject="s", body="b", attachments=str(tmp_path / "nope.docx")))
+    assert "not found" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_attachment_oversize_rejects_no_send(no_real_send, tmp_path):
+    f = tmp_path / "big.bin"; f.write_bytes(b"x" * 10)
+    tool = create_send_email_tool(_make_settings(email_max_attachment_mb=0))  # cap 0 => any file too big
+    resp = asyncio.run(tool(to="tim@example.com", subject="s", body="b", attachments=str(f)))
+    assert "exceed" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
+def test_attachment_off_allowlist_rejected_before_read(no_real_send, tmp_path):
+    f = tmp_path / "r.docx"; f.write_bytes(b"x")
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(tool(to="stranger@evil.com", subject="s", body="b", attachments=str(f)))
+    assert "not on the email allowlist" in _text(resp)
+    assert len(no_real_send) == 0

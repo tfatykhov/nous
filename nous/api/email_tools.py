@@ -21,6 +21,8 @@ import os
 import re
 import smtplib
 import time
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any
 
@@ -103,10 +105,65 @@ def _scan_secrets(text: str) -> bool:
     return any(p.search(text) for p in _SECRET_PATTERNS)
 
 
+def _normalize_paths(value: Any) -> list[str]:
+    """Coerce an attachments field (str or list) into a list of stripped paths."""
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else list(value)
+    return [str(p).strip() for p in items if p and str(p).strip()]
+
+
+def _build_message(
+    settings: Settings,
+    subject: str,
+    body: str,
+    from_addr: str,
+    to_list: list[str],
+    cc_list: list[str],
+    attachments: list[str],
+) -> tuple[Any | None, str | None]:
+    """Build the MIME message. Returns (msg, None) on success or (None, error).
+
+    With no attachments → plain MIMEText (unchanged from v1). With attachments →
+    MIMEMultipart; each path is validated (regular file, readable, within the
+    total size cap) before any send. NOTE: attachment *contents* are not
+    secret-scanned — the recipient allowlist (trusted recipients only) is the
+    guard, and this is strictly safer than the unguarded bash+smtplib path.
+    """
+    if not attachments:
+        msg: Any = MIMEText(body)
+    else:
+        msg = MIMEMultipart("mixed")
+        msg.attach(MIMEText(body))
+        cap = settings.email_max_attachment_mb * 1024 * 1024
+        total = 0
+        for path in attachments:
+            if not os.path.isfile(path):
+                return None, f"attachment not found or not a regular file: {path}"
+            try:
+                total += os.path.getsize(path)
+                if total > cap:
+                    return None, f"attachments exceed the {settings.email_max_attachment_mb}MB total limit"
+                with open(path, "rb") as fh:
+                    data = fh.read()
+            except OSError:
+                return None, f"attachment unreadable: {path}"
+            name = os.path.basename(path)
+            part = MIMEApplication(data, Name=name)
+            part["Content-Disposition"] = f'attachment; filename="{name}"'
+            msg.attach(part)
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_list)
+    if cc_list:
+        msg["Cc"] = ", ".join(cc_list)
+    return msg, None
+
+
 def _send_email_sync(
     settings: Settings,
     recipients: list[str],
-    msg: MIMEText,
+    msg: Any,  # MIMEText or MIMEMultipart (with attachments)
 ) -> None:
     """Blocking SMTP send. Runs in a worker thread via asyncio.to_thread."""
     server = smtplib.SMTP(settings.email_smtp_host, settings.email_smtp_port)
@@ -137,6 +194,7 @@ def create_send_email_tool(settings: Settings):
         subject: str,
         body: str,
         cc: Any = None,
+        attachments: Any = None,
     ) -> dict[str, Any]:
         """Send an email to allowlisted recipient(s).
 
@@ -145,6 +203,9 @@ def create_send_email_tool(settings: Settings):
             subject: Email subject line.
             body: Plain-text email body.
             cc: Optional CC address(es) — string or list. Each must be allowlisted.
+            attachments: Optional file path(s) — string or list — to attach (e.g. a
+                generated .docx/.pdf report). Each must be a readable file; the total
+                size must be within NOUS_EMAIL_MAX_ATTACHMENT_MB.
 
         Returns:
             MCP-compliant response confirming the send or naming the rejection reason.
@@ -194,13 +255,14 @@ def create_send_email_tool(settings: Settings):
                 "try again later."
             )
 
-        # 5. Send (smtplib is blocking → run in a worker thread).
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = settings.email or settings.email_user
-        msg["To"] = ", ".join(to_list)
-        if cc_list:
-            msg["Cc"] = ", ".join(cc_list)
+        # 5. Build the message (validates attachments) + send (smtplib blocks → worker thread).
+        attach_list = _normalize_paths(attachments)
+        msg, build_err = _build_message(
+            settings, subject, body, settings.email or settings.email_user,
+            to_list, cc_list, attach_list,
+        )
+        if build_err:
+            return _error(build_err)
         all_recipients = to_list + cc_list
 
         try:
@@ -218,7 +280,8 @@ def create_send_email_tool(settings: Settings):
         # 7. Record success for rate limiting and return confirmation.
         _send_times.append(now)
         cc_note = f" (cc: {', '.join(cc_list)})" if cc_list else ""
-        return _ok(f"Email sent to {', '.join(to_list)}{cc_note}.")
+        att_note = f" with {len(attach_list)} attachment(s)" if attach_list else ""
+        return _ok(f"Email sent to {', '.join(to_list)}{cc_note}{att_note}.")
 
     return send_email
 
@@ -229,10 +292,10 @@ def create_send_email_tool(settings: Settings):
 
 _SEND_EMAIL_SCHEMA = {
     "description": (
-        "Send a plain-text email to an allowlisted recipient. The recipient must be "
-        "on the configured allowlist (NOUS_EMAIL_ALLOWLIST) or the send is refused. "
+        "Send an email (optionally with file attachments) to an allowlisted recipient. "
+        "The recipient must be on the configured allowlist or the send is refused. "
         "Prefer this tool over ad-hoc bash+smtplib for sending email — it is the safe, "
-        "guarded path. The message is also scanned for secrets and rate-limited."
+        "guarded path. The message is scanned for secrets and rate-limited."
     ),
     "type": "object",
     "properties": {
@@ -253,6 +316,14 @@ _SEND_EMAIL_SCHEMA = {
             "type": ["string", "array"],
             "items": {"type": "string"},
             "description": "Optional CC address(es). String or list. Must be allowlisted.",
+        },
+        "attachments": {
+            "type": ["string", "array"],
+            "items": {"type": "string"},
+            "description": (
+                "Optional file path(s) to attach (e.g. a generated .docx/.pdf report). "
+                "String or list. Each must be a readable file; total size within the cap."
+            ),
         },
     },
     "required": ["to", "subject", "body"],

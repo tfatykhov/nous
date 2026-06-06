@@ -735,6 +735,7 @@ class Settings(BaseSettings):
     email_max_per_hour: int = 5  # In-process sliding-window rate limit
     email_smtp_host: str = "smtp.gmail.com"  # SMTP host for the send_email tool
     email_smtp_port: int = 587  # SMTP STARTTLS port
+    email_max_attachment_mb: int = 25  # F078.1.2: total attachment size cap for send_email (Gmail ~25MB)
     tim_chat_id: str = ""  # Tim's Telegram chat ID
     emerson_hook_url: str = ""  # Emerson presence hook URL
     emerson_hook_token: str = ""  # Emerson presence hook token
