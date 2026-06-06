@@ -180,3 +180,55 @@ def test_exception_sanitized_generic_message(monkeypatch):
     assert "app-password" not in text
     assert "nous@example.com" not in text
     assert secret_leak not in text
+
+
+# --- F078.1.1: hot-reloadable allowlist file (no restart) ---
+
+def test_allowlist_file_hot_reload(no_real_send, tmp_path):
+    """Appending an address to the allowlist FILE takes effect on the next send
+    using the SAME tool instance — no recreation, no restart."""
+    import os
+    import time as _t
+
+    f = tmp_path / "allowlist.txt"
+    f.write_text("bob@example.com\n# a comment line\n", encoding="utf-8")
+    # Empty env base so the file is the only source.
+    tool = create_send_email_tool(
+        _make_settings(email_allowlist="", email_allowlist_file=str(f))
+    )
+
+    # In the file -> allowed.
+    assert "Email sent" in _text(asyncio.run(tool(to="bob@example.com", subject="s", body="b")))
+    # Not yet in the file -> rejected.
+    assert "not on the email allowlist" in _text(
+        asyncio.run(tool(to="carol@example.com", subject="s", body="b"))
+    )
+
+    # Live edit: append carol, force a distinct mtime so the cache re-reads.
+    f.write_text("bob@example.com\ncarol@example.com\n", encoding="utf-8")
+    os.utime(f, (_t.time() + 5, _t.time() + 5))
+
+    # Same tool instance (no restart) now allows carol.
+    assert "Email sent" in _text(asyncio.run(tool(to="carol@example.com", subject="s", body="b")))
+
+
+def test_allowlist_file_union_with_env(no_real_send, tmp_path):
+    """Effective allowlist = env CSV UNION file contents."""
+    f = tmp_path / "al.txt"
+    f.write_text("filey@example.com\n", encoding="utf-8")
+    tool = create_send_email_tool(
+        _make_settings(email_allowlist="envy@example.com", email_allowlist_file=str(f))
+    )
+    assert "Email sent" in _text(asyncio.run(tool(to="envy@example.com", subject="s", body="b")))   # env base
+    assert "Email sent" in _text(asyncio.run(tool(to="filey@example.com", subject="s", body="b")))  # file
+
+
+def test_allowlist_file_missing_falls_back_to_env(no_real_send, tmp_path):
+    """A missing/unreadable file does not widen the allowlist (fail-closed)."""
+    tool = create_send_email_tool(
+        _make_settings(email_allowlist="tim@example.com", email_allowlist_file=str(tmp_path / "nope.txt"))
+    )
+    assert "Email sent" in _text(asyncio.run(tool(to="tim@example.com", subject="s", body="b")))     # env still works
+    assert "not on the email allowlist" in _text(
+        asyncio.run(tool(to="stranger@evil.com", subject="s", body="b"))
+    )

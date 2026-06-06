@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import smtplib
 import time
@@ -66,6 +67,37 @@ def _parse_allowlist(raw: str) -> set[str]:
     return {a.strip().lower() for a in (raw or "").split(",") if a.strip()}
 
 
+def _read_allowlist_file(path: str, cache: dict[str, Any]) -> set[str]:
+    """Read the hot-reloadable allowlist file, mtime-cached.
+
+    One address per line or CSV; '#' starts a comment. Re-reads only when the
+    file's mtime changes, so a live edit takes effect on the NEXT send with no
+    restart. On any read error, returns the last-known set (fail-closed — an
+    error never widens the allowlist).
+    """
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return cache.get("addrs", set())
+    if cache.get("mtime") == mtime:
+        return cache["addrs"]
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+    except OSError:
+        return cache.get("addrs", set())
+    addrs: set[str] = set()
+    for line in raw.splitlines():
+        line = line.split("#", 1)[0]
+        for a in line.split(","):
+            a = a.strip().lower()
+            if a:
+                addrs.add(a)
+    cache["mtime"] = mtime
+    cache["addrs"] = addrs
+    return addrs
+
+
 def _scan_secrets(text: str) -> bool:
     """Return True if the text matches any known secret pattern."""
     return any(p.search(text) for p in _SECRET_PATTERNS)
@@ -97,6 +129,8 @@ def create_send_email_tool(settings: Settings):
     """
     # Monotonic timestamps of successful sends, within the current hour window.
     _send_times: list[float] = []
+    # F078.1.1: mtime-cache for the hot-reloadable allowlist file.
+    _file_cache: dict[str, Any] = {"mtime": None, "addrs": set()}
 
     async def send_email(
         to: Any,
@@ -130,7 +164,11 @@ def create_send_email_tool(settings: Settings):
             return _error("No recipient provided in 'to'.")
 
         # 2. Recipient allowlist (the core guard). Empty allowlist => reject all.
+        # Effective = env CSV (static base) UNION the hot-reloadable file (read at
+        # send-time, mtime-cached) — adding an address to the file needs no restart.
         allowlist = _parse_allowlist(settings.email_allowlist)
+        if settings.email_allowlist_file:
+            allowlist |= _read_allowlist_file(settings.email_allowlist_file, _file_cache)
         for addr in to_list + cc_list:
             if addr.lower() not in allowlist:
                 return _error(
