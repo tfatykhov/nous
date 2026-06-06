@@ -203,9 +203,9 @@ def create_send_email_tool(settings: Settings):
         to: Any,
         subject: str,
         body: str,
-        html_body: Any = None,
         cc: Any = None,
         attachments: Any = None,
+        html_body: Any = None,
     ) -> dict[str, Any]:
         """Send an email to allowlisted recipient(s).
 
@@ -213,13 +213,13 @@ def create_send_email_tool(settings: Settings):
             to: Recipient address(es) — string or list. Each must be allowlisted.
             subject: Email subject line.
             body: Plain-text email body.
-            html_body: Optional HTML body. When provided, the email is sent as
-                multipart/alternative with the plain ``body`` as the fallback part.
-                Use this for styled newsletter-format emails.
             cc: Optional CC address(es) — string or list. Each must be allowlisted.
             attachments: Optional file path(s) — string or list — to attach (e.g. a
                 generated .docx/.pdf report). Each must be a readable file; the total
                 size must be within NOUS_EMAIL_MAX_ATTACHMENT_MB.
+            html_body: Optional HTML body. When provided, the email is sent as
+                multipart/alternative with the plain ``body`` as the fallback part.
+                Use this for styled newsletter-format emails.
 
         Returns:
             MCP-compliant response confirming the send or naming the rejection reason.
