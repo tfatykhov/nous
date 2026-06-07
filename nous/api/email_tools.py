@@ -121,20 +121,30 @@ def _build_message(
     to_list: list[str],
     cc_list: list[str],
     attachments: list[str],
+    html_body: str | None = None,
 ) -> tuple[Any | None, str | None]:
     """Build the MIME message. Returns (msg, None) on success or (None, error).
 
-    With no attachments → plain MIMEText (unchanged from v1). With attachments →
-    MIMEMultipart; each path is validated (regular file, readable, within the
-    total size cap) before any send. NOTE: attachment *contents* are not
-    secret-scanned — the recipient allowlist (trusted recipients only) is the
-    guard, and this is strictly safer than the unguarded bash+smtplib path.
+    With no attachments and no html_body → plain MIMEText (unchanged from v1).
+    With html_body → multipart/alternative with plain text first, HTML second.
+    With attachments → MIMEMultipart("mixed") wrapping the body part plus file
+    parts; each path is validated (regular file, readable, within the total size
+    cap) before any send. NOTE: attachment *contents* are not secret-scanned —
+    the recipient allowlist (trusted recipients only) is the guard, and this is
+    strictly safer than the unguarded bash+smtplib path.
     """
+    if html_body:
+        body_part: Any = MIMEMultipart("alternative")
+        body_part.attach(MIMEText(body))
+        body_part.attach(MIMEText(html_body, "html"))
+    else:
+        body_part = MIMEText(body)
+
     if not attachments:
-        msg: Any = MIMEText(body)
+        msg: Any = body_part
     else:
         msg = MIMEMultipart("mixed")
-        msg.attach(MIMEText(body))
+        msg.attach(body_part)
         cap = settings.email_max_attachment_mb * 1024 * 1024
         total = 0
         for path in attachments:
@@ -195,6 +205,7 @@ def create_send_email_tool(settings: Settings):
         body: str,
         cc: Any = None,
         attachments: Any = None,
+        html_body: Any = None,
     ) -> dict[str, Any]:
         """Send an email to allowlisted recipient(s).
 
@@ -206,6 +217,9 @@ def create_send_email_tool(settings: Settings):
             attachments: Optional file path(s) — string or list — to attach (e.g. a
                 generated .docx/.pdf report). Each must be a readable file; the total
                 size must be within NOUS_EMAIL_MAX_ATTACHMENT_MB.
+            html_body: Optional HTML body. When provided, the email is sent as
+                multipart/alternative with the plain ``body`` as the fallback part.
+                Use this for styled newsletter-format emails.
 
         Returns:
             MCP-compliant response confirming the send or naming the rejection reason.
@@ -239,7 +253,7 @@ def create_send_email_tool(settings: Settings):
                 )
 
         # 3. Secret scan (secondary guard).
-        if _scan_secrets(f"{subject}\n{body}"):
+        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}"):
             return _error(
                 "email appears to contain a secret (API key, password, or token); "
                 "refusing to send."
@@ -259,7 +273,7 @@ def create_send_email_tool(settings: Settings):
         attach_list = _normalize_paths(attachments)
         msg, build_err = _build_message(
             settings, subject, body, settings.email or settings.email_user,
-            to_list, cc_list, attach_list,
+            to_list, cc_list, attach_list, html_body=html_body or None,
         )
         if build_err:
             return _error(build_err)
@@ -311,6 +325,14 @@ _SEND_EMAIL_SCHEMA = {
         "body": {
             "type": "string",
             "description": "Plain-text email body.",
+        },
+        "html_body": {
+            "type": "string",
+            "description": (
+                "Optional rich-HTML email body. When provided, the email is sent as "
+                "multipart/alternative with the plain-text `body` as the fallback part "
+                "— use this for styled newsletter-format emails."
+            ),
         },
         "cc": {
             "type": ["string", "array"],
