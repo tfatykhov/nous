@@ -1109,9 +1109,17 @@ class Heart:
             merged = merged[:limit]
 
         # F079 unified pull: append the FULL body to the single TOP-ranked procedure
-        # only (others keep name+desc). One body, not N -> no bloat; one line ->
-        # SmartCompress-safe; richer than name+desc -> no separate get_procedure
-        # round-trip (no duplicate copy of the same procedure). Flag-gated.
+        # only (others keep name+desc). One body, not N -> no bloat. The body is
+        # whitespace-collapsed to ONE line so recall_deep's SmartCompress cannot shred it
+        # mid-body (it does per-LINE head/tail selection; a single line is atomic — it can
+        # still be dropped wholesale on >50-line recalls, but never partially mangled).
+        # Richer than name+desc -> no separate get_procedure round-trip for the top hit.
+        #
+        # "Top" = position after the final intra-Heart sort below. Caveat: a downstream
+        # consumer that re-sorts by score (rerank_by_score, e.g. chunk recall) can change
+        # the visible order — the bodied result is still the Heart-top procedure. F071: if
+        # that id is later excluded the turn shows no bodied procedure (closed by design in
+        # unified mode — passive off -> exclude set is empty).
         if getattr(self.settings, "recall_full_bodies", False):
             cap = getattr(self.settings, "recall_body_max_chars", 800)
             for r in merged:
@@ -1123,7 +1131,9 @@ class Heart:
                     )
                     if body:
                         r.summary = f"{r.summary} | {body}"
-                    break  # top-ranked procedure only
+                    # top-ranked procedure ONLY; stop even if its body was empty (no
+                    # fall-through to lower procedures — that is the "one body" invariant).
+                    break
 
         return merged
 
@@ -1160,19 +1170,23 @@ class Heart:
         elif isinstance(item, ProcedureSummary):
             # name+desc here; the FULL body is added only to the top-ranked procedure
             # after the final sort (see _recall) — unified pull, bounded to one body.
+            metadata: dict = {
+                "domain": item.domain,
+                "effectiveness": item.effectiveness,
+                "activation_count": item.activation_count,
+            }
+            # Body fields are consumed ONLY by the post-rank top-1 expansion, so carry them
+            # only when that path is active — keeps the OFF path metadata byte-identical and
+            # avoids copying the lists on every procedure result (F079 unified pull).
+            if getattr(self.settings, "recall_full_bodies", False):
+                metadata["core_patterns"] = list(item.core_patterns or [])
+                metadata["implementation_notes"] = list(item.implementation_notes or [])
             return RecallResult(
                 type="procedure",
                 id=item.id,
                 summary=f"{item.name}: {item.description}" if item.description else item.name,
                 score=score,
-                metadata={
-                    "domain": item.domain,
-                    "effectiveness": item.effectiveness,
-                    "activation_count": item.activation_count,
-                    # carried for the post-rank top-1 body expansion (F079 unified pull)
-                    "core_patterns": list(item.core_patterns or []),
-                    "implementation_notes": list(item.implementation_notes or []),
-                },
+                metadata=metadata,
             )
         elif isinstance(item, CensorMatch):
             return RecallResult(

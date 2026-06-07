@@ -104,6 +104,32 @@ class TestBuildSurfaces:
         r = await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
         assert not any(s.label == "Procedure Awareness" for s in r.sections)
 
+    @pytest.mark.asyncio
+    async def test_passive_off_skips_embedding_search(self):
+        """Track B (embedding similarity) is what passive-off drops — the search must
+        not even run, since recall_deep is the single surface for cosine-matched procs."""
+        engine = self._engine(proc_passive_injection_enabled=False)
+        await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
+        engine._heart.search_procedures.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_critic_track_survives_passive_off(self):
+        """M1: passive-off gates ONLY Track B (embedding). Critic-recommended skills
+        (Track A) have no recall_deep equivalent, so they must still reach context."""
+        from unittest.mock import AsyncMock
+        engine = self._engine(
+            proc_passive_injection_enabled=False, critic_skill_injection="enabled",
+        )
+        engine._heart.get_procedure_by_name = AsyncMock(return_value=_proc_summary("critic-pick"))
+        r = await engine.build(
+            agent_id="t", session_id="s1", input_text="do a task",
+            frame=self._frame(), critic_skills=["critic-pick"],
+        )
+        sec = [s for s in r.sections if s.label == "Known Procedures"]
+        assert sec, "Critic track must still inject when passive embeddings are off"
+        assert "critic-pick" in sec[0].content
+        engine._heart.search_procedures.assert_not_called()  # Track B still gated
+
 
 def test_decision_pipeline_carries_pattern():
     from nous.api.retrieval_pipeline import _decisions_to_pipeline
@@ -141,3 +167,29 @@ async def test_recall_gives_body_to_top_procedure_only(heart, session):
     # Exactly one procedure carries the full body (top-1) — bounded, no bloat.
     assert len(with_body) == 1
     assert "executive summary" in with_body[0].summary or "gather metrics" in with_body[0].summary
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_recall_full_bodies_off_is_byte_identical(heart, session):
+    """OFF path (recall_full_bodies=False): NO procedure summary carries a body and no
+    body lists are carried in metadata — byte-identical legacy name+desc (F079 §8)."""
+    from nous.heart.schemas import ProcedureInput
+    nonce = "offpathnonce42uniq"
+    for n in (1, 2):
+        await heart.store_procedure(
+            ProcedureInput(
+                name=f"proc-{nonce}-{n}", domain="reporting",
+                description=f"{nonce} produce report variant {n}",
+                core_patterns=[f"{nonce} executive summary step {n}"],
+                implementation_notes=[f"{nonce} gather metrics {n}"],
+            ),
+            session=session,
+        )
+    heart.settings.recall_full_bodies = False
+    results = await heart.recall(nonce, types=["procedure"], session=session)
+    mine = [r for r in results if nonce in r.summary]
+    assert len(mine) >= 2, "expected both seeded procedures retrieved"
+    assert all(" | " not in r.summary for r in mine), "OFF path must not add bodies"
+    assert all("core_patterns" not in (r.metadata or {}) for r in mine), \
+        "OFF path must not carry body lists in metadata"

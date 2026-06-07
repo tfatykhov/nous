@@ -221,23 +221,38 @@ duplication and context bloat.** The P1 implementation left THREE surfaces (pass
 showed the agent did recall_deep **then** get_procedure (a second copy of the same
 procedure). Unified design:
 
-1. **Passive injection OFF** — flag `proc_passive_injection_enabled` (default True;
-   set False for unified mode) skips the `## Known Procedures` section in `build()`.
-   Procedures enter context **only** via the pull path → no passive+pull duplication,
-   no per-turn passive bloat.
+1. **Passive embedding (Track B) OFF** — flag `proc_passive_injection_enabled`
+   (default True; set False for unified mode) skips only the **embedding-similarity**
+   procedure slots in `build()`. Those duplicate the recall_deep cosine path, so they
+   are the bloat. Cosine-matched procedures then enter context **only** via the pull
+   path → no passive+pull duplication. **Critic-recommended skills (Track A) are NOT
+   gated** (review M1): they are a classifier-driven push with no recall_deep equivalent
+   (recall_deep is pure cosine), so gating them would silently disable F024 skill
+   injection. Track A keeps firing in unified mode (capped at `critic_skill_slots`,
+   targeted, non-duplicative).
 2. **recall_deep gives the FULL one-line body to the TOP-ranked procedure ONLY**
    (others keep name+desc) — done after the final sort in `Heart._recall`. One body
    (no bloat, bounded regardless of how many procedures surface); generous cap
-   (`recall_body_max_chars` default 800, le=2000) so recall_deep alone suffices →
-   **no get_procedure round-trip → no duplicate copy.** One line ⇒ SmartCompress-safe.
-3. **get_procedure → fallback** (explicit deep-dive), not part of the routine flow.
+   (`recall_body_max_chars` default 800, le=2000) so recall_deep alone usually suffices.
+   The body is whitespace-collapsed to ONE line, so recall_deep's SmartCompress cannot
+   **shred** it mid-body (it does per-LINE head/tail selection; a single line is atomic).
+   It can still be dropped *wholesale* on >50-line recalls — rare for top-K=10 — and
+   `recall_deep` is not in the refetchable-cache set, so a dropped body isn't
+   recoverable that turn. Acceptable for the top-1 line that sits in the head region.
+3. **get_procedure → fallback** (explicit deep-dive). It remains a registered,
+   model-selectable tool; nothing *enforces* "fallback only" — duplication is
+   **behaviorally discouraged** (the live A/B saw 0 calls), not structurally impossible.
 4. Static awareness cue (unchanged) triggers the single flow.
+
+**Deploy coupling (operator):** unified mode is `proc_passive_injection_enabled=false`
++ `recall_full_bodies=true` + `proc_awareness_cue=true`. Turning passive off WITHOUT the
+cue leaves the agent no implicit list and no instruction to pull → procedures become
+undiscoverable. The three flags ship independently (all default OFF) but must be flipped
+together.
 
 **Live validation (eval instance, unified mode on):** `get_procedure` calls dropped
 to **0** (was 4–5; recall_deep body now suffices), passive sections = **0** (single
 surface). The exact-token follow metric was noisy at n=3 (1–2/3, non-monotonic in the
 cap) → **effectiveness needs the larger selection-accuracy measurement** (the gate),
-not n=3. The structural invariants (single surface, no dup, no bloat) are confirmed.
-
-All flags default OFF; unified mode = `proc_passive_injection_enabled=false` +
-`recall_full_bodies=true` + `proc_awareness_cue=true`.
+not n=3. The structural invariants (single surface, no dup, no bloat) are confirmed;
+the flag flip in prod is gated on that selection-accuracy measurement.

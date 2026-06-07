@@ -139,9 +139,13 @@ class Settings(BaseSettings):
     # single body stays well under NOUS_TOOL_SOFT_TRIM_CHARS (4000).
     recall_body_max_chars: int = Field(default=800, ge=1, le=2000)
     proc_awareness_cue: bool = False  # static cached directive: "pull a relevant procedure first"
-    # F079 unified pull: when False, the passive `## Known Procedures` context section is
-    # NOT built — procedures enter context ONLY via the pull path (recall_deep), giving a
-    # single unified surface (no passive+pull duplication, no per-turn passive bloat).
+    # F079 unified pull: when False, the passive embedding-similarity (Track B) procedure
+    # slots are NOT built — those duplicate the recall_deep cosine path, so cosine-matched
+    # procedures enter context ONLY via the pull path (single surface, no per-turn bloat).
+    # Critic-recommended skills (Track A) are NOT gated by this flag (no pull equivalent).
+    # OPERATOR COUPLING: the intended "unified mode" is this flag OFF + proc_awareness_cue
+    # ON + recall_full_bodies ON. Turning this OFF without the cue leaves the agent no
+    # implicit list AND no instruction to pull (a cross-flag warning fires below).
     proc_passive_injection_enabled: bool = True
 
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)

@@ -494,19 +494,20 @@ class ContextEngine:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
-        # F079 unified pull: when proc_passive_injection_enabled is False, procedures are
-        # delivered ONLY via the pull path (recall_deep) — skip the passive section so
-        # there is a single unified surface (no passive+pull duplication, no per-turn bloat).
-        if (
-            getattr(self._settings, "proc_passive_injection_enabled", True)
-            and budget.procedures > 0
-            and "procedure" not in skip_types
-        ):
+        # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
+        # EMBEDDING (Track B) passive slots — those duplicate the recall_deep cosine path,
+        # so they are the bloat. Critic-recommended skills (Track A) are NOT gated: they are
+        # a classifier-driven push with no pull-path equivalent (recall_deep is pure cosine),
+        # so disabling them would silently kill F024 skill injection (review M1).
+        if budget.procedures > 0 and "procedure" not in skip_types:
             try:
                 injection_mode = self._settings.critic_skill_injection
                 critic_slot_count = self._settings.critic_skill_slots
                 embedding_slot_count = self._settings.embedding_skill_slots
                 total_slots = critic_slot_count + embedding_slot_count
+                passive_embeddings = getattr(
+                    self._settings, "proc_passive_injection_enabled", True
+                )
 
                 # --- Track A: Critic-recommended skills ---
                 critic_procedures: list = []
@@ -543,13 +544,18 @@ class ContextEngine:
                         critic_names = set()
 
                 # --- Track B: Embedding similarity search ---
+                # F079: gated by passive_embeddings. These cosine hits duplicate the
+                # recall_deep pull path, so unified mode (flag off) drops them and lets
+                # recall_deep be the single surface for similarity-matched procedures.
                 unused_critic_slots = critic_slot_count - len(critic_procedures)
                 embedding_limit = embedding_slot_count + unused_critic_slots  # rollover
 
-                q_text = _query_texts.get("procedure", _default_query)
-                embedding_procedures = await self._heart.search_procedures(
-                    q_text, limit=embedding_limit, frame_type=frame.frame_id, session=session,
-                )
+                embedding_procedures: list = []
+                if passive_embeddings:
+                    q_text = _query_texts.get("procedure", _default_query)
+                    embedding_procedures = await self._heart.search_procedures(
+                        q_text, limit=embedding_limit, frame_type=frame.frame_id, session=session,
+                    )
 
                 if embedding_procedures:
                     # Standard pipeline: staleness -> frame boost -> dedup -> usage boost -> relevance
