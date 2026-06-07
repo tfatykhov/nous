@@ -173,12 +173,13 @@ class TestF079DeliveryCounters:
         "- [Jun 03 12:00] chat C\n- [Jun 04 13:00] chat D"
     )
 
-    def _entry(self, prompt: str) -> ContextLogEntry:
+    def _entry(self, prompt: str, loaded_counts=None) -> ContextLogEntry:
         return ContextLogEntry.from_payload(
             session_id="s1", turn_number=1, call_type="chat",
             model="test", system_prompt=prompt,
             messages=[{"role": "user", "content": "hi"}],
             tools=None, frame_id="task", context_window=200000,
+            loaded_counts=loaded_counts,
         )
 
     def test_known_procedures_marker_parsed(self):
@@ -227,6 +228,28 @@ class TestF079DeliveryCounters:
         assert e.loaded_episodes == 0
         assert e.recent_conversations == 0
         assert e.loaded_facts == 1
+
+    def test_loaded_counts_exact_over_marker_shaped_embedded(self):
+        # codex PR #485 (2nd pass): even the marker can appear inside a verbatim
+        # field (e.g. a description containing "\n- **important**"). The exact count
+        # threaded from the selected objects (recalled_*_ids) must win over any text
+        # parse. Here one procedure whose description embeds a "- **"-shaped line.
+        prompt = (
+            "## Known Procedures\n"
+            "- **proc-a** (general): note:\n- **important** caveat in the body\n"
+            "## Past Episodes\n- [success] result:\n- [detail] embedded marker-shaped line\n"
+        )
+        # Text parse would over-count (2 / 2); exact counts say 1 / 1.
+        e = self._entry(prompt, loaded_counts={"procedures": 1, "episodes": 1})
+        assert e.loaded_procedures == 1
+        assert e.loaded_episodes == 1
+
+    def test_stale_loaded_counts_ignored_when_section_absent(self):
+        # A utility call (no procedure section in THIS prompt) must report 0 even if
+        # a stale per-turn loaded_counts is passed.
+        e = self._entry("## Identity\nsafety gate prompt", loaded_counts={"procedures": 4, "episodes": 3})
+        assert e.loaded_procedures == 0
+        assert e.loaded_episodes == 0
 
 
 # ------------------------------------------------------------------
