@@ -287,9 +287,12 @@ The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
    as a UUID, and renders `core_patterns` + `implementation_notes` (was missing
    core_patterns). The tool **schema description** advertises name-first so the agent
    doesn't detour through `recall_deep` to find a UUID. `get_procedure_by_name` resolves
-   same-name duplicates **deterministically** (`ORDER BY activation_count desc, created_at
-   desc, id`) → the most-proven version, the same one every time (was an arbitrary
-   `LIMIT 1`; this path ships live regardless of the catalog flag).
+   same-name duplicates **deterministically** via a STABLE, non-volatile key
+   (`ORDER BY created_at desc, id` — the newest row; NOT activation_count, which drifts per
+   use and would make the resolved row change turn-to-turn). This is byte-identical to the
+   catalog's own winner selection (same ordering, same exact match), so the catalog entry
+   and the loaded body always agree, cache-stably (was an arbitrary `LIMIT 1`; this path
+   ships live regardless of the catalog flag).
 3. **Removed:** the §8.1 recall_deep top-1 body machinery (`recall_full_bodies`,
    `recall_body_max_chars`, `_procedure_body_line`, the post-rank expansion, and the
    per-result body metadata). recall_deep returns procedures as name+desc again — the
@@ -308,9 +311,13 @@ The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
    **cue-only fallback** when the catalog is off; it ALSO fires when the catalog is enabled
    but **failed/empty** this turn, so unified mode never loses all procedure awareness on a
    transient DB error.
-6. **Catalog hardening (codex rounds):** name-dedup keeps the SAME row
-   `get_procedure_by_name` resolves (highest activation_count, then newest) so the catalog
-   entry and the loaded body agree; fetch uses 3× headroom so dup rows can't crowd out
+6. **Catalog hardening (codex rounds):** name-dedup uses the EXACT name as key and
+   first-wins over the created_at-desc fetch (= the newest row), byte-identical to
+   `get_procedure_by_name`'s stable ordering, so the catalog entry and the loaded body
+   agree without drifting on activation counters (cache-stable); names are sanitized for
+   newlines only (`_inline_name`) to preserve the exact lookup key; the header **data-frames**
+   entries as reference data (not instructions) against single-line injection; fetch uses
+   3× headroom so dup rows can't crowd out
    unique names before the cap; `proc_catalog_max_chars` (default 4000, `ge=500`) is a hard
    total-size cap with a final truncate backstop; `get_procedure` retries a UUID-shaped
    input as a name after an id miss.

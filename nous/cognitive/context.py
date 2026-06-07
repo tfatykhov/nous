@@ -281,22 +281,20 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Procedure catalog build failed: %s", e)
                 procs, catalog_max, total_active = [], 0, 0
-            # Collapse same-name rows to ONE entry, keeping the SAME row get_procedure(<name>)
-            # resolves: match its EXACT (case-sensitive) name and ordering — highest
-            # activation_count, then created_at desc / id via list_all's order (= first-seen
-            # on an activation tie). Case-sensitive so a case-distinct procedure (which
-            # get_procedure CAN load) is not hidden; winner == loaded body.
+            # Collapse same-name rows to ONE entry using the EXACT name as key (no strip/
+            # lower) and FIRST-WINS over `procs` (which is created_at desc, id) → the newest
+            # row. This is byte-identical to what _get_by_name resolves (same stable ordering,
+            # same exact match), so the catalog entry and the loaded body always agree, and
+            # the winner never drifts with activation counters (cache-stable). A name with
+            # surrounding/embedded whitespace stays its own key → not hidden, still loadable.
             winners: dict[str, object] = {}
             order: list[str] = []
             for p in procs:
-                key = (getattr(p, "name", "") or "").strip()  # case-sensitive: matches _get_by_name
+                key = getattr(p, "name", "") or ""  # EXACT: matches _get_by_name
                 if not key:
                     continue
-                act = getattr(p, "activation_count", 0) or 0
                 if key not in winners:
                     order.append(key)
-                    winners[key] = p
-                elif act > (getattr(winners[key], "activation_count", 0) or 0):
                     winners[key] = p
             distinct_total = len(order)
             deduped = [winners[k] for k in order[:catalog_max]]
