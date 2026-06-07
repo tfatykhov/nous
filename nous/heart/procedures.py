@@ -10,7 +10,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
@@ -99,6 +99,28 @@ class ProcedureManager:
                 return result
         return await self._store(input, session)
 
+    async def _embed_with_retry(self, embed_text: str, *, attempts: int = 2) -> list[float] | None:
+        """Embed with one retry; on final failure log ERROR (not a quiet warning).
+
+        A NULL embedding makes the row invisible to vector search and the dedup
+        cosine gate (audit bug 8), so the failure must be loud, not swallowed.
+        """
+        if not self.embeddings:
+            return None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self.embeddings.embed(embed_text)
+            except Exception:
+                if attempt >= attempts:
+                    logger.error(
+                        "Embedding generation failed after %d attempts; storing procedure with "
+                        "NULL embedding (invisible to vector search/dedup until reembed_all)",
+                        attempts,
+                    )
+                    return None
+                logger.warning("Embedding attempt %d/%d failed for procedure, retrying", attempt, attempts)
+        return None
+
     async def _store(self, input: ProcedureInput, session: AsyncSession) -> ProcedureDetail:
         # Generate embedding from all body fields (issue #197)
         embedding = None
@@ -108,10 +130,7 @@ class ProcedureManager:
                 input.goals, input.core_tools, input.core_concepts,
                 input.implementation_notes,
             )
-            try:
-                embedding = await self.embeddings.embed(embed_text)
-            except Exception:
-                logger.warning("Embedding generation failed for procedure store")
+            embedding = await self._embed_with_retry(embed_text)
 
         procedure = Procedure(
             agent_id=self.agent_id,
@@ -143,6 +162,63 @@ class ProcedureManager:
             "tags": input.tags or [],
         })
 
+        return self._to_detail(procedure)
+
+    # ------------------------------------------------------------------
+    # update_body() — in-place skill refresh (audit bug 9)
+    # ------------------------------------------------------------------
+
+    async def update_body(
+        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession | None = None
+    ) -> ProcedureDetail:
+        """Refresh a procedure's body fields in place, preserving learned stats.
+
+        Used by learn_skill on a name collision instead of retire+store, which
+        reset activation/success/failure counts and orphaned task affinity
+        (audit bug 9). Counts, created_at, and supersession state are untouched.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                result = await self._update_body(procedure_id, input, session)
+                await session.commit()
+                return result
+        return await self._update_body(procedure_id, input, session)
+
+    async def _update_body(
+        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession
+    ) -> ProcedureDetail:
+        procedure = await self._get_procedure_orm(procedure_id, session)
+        if procedure is None:
+            raise ValueError(f"Procedure {procedure_id} not found")
+
+        embedding = procedure.embedding
+        if self.embeddings:
+            embed_text = _build_embed_text(
+                input.name, input.description, input.core_patterns,
+                input.goals, input.core_tools, input.core_concepts,
+                input.implementation_notes,
+            )
+            # Re-embed from the new body. On failure _embed_with_retry returns None and
+            # logs ERROR; store NULL (consistent with _store) rather than keep the now-stale
+            # vector for the old body — otherwise the row is served/deduped under an obsolete
+            # embedding and reembed_all can't tell it needs repair.
+            embedding = await self._embed_with_retry(embed_text)
+
+        procedure.name = input.name
+        procedure.domain = input.domain
+        procedure.description = input.description
+        procedure.goals = input.goals or None
+        procedure.core_patterns = input.core_patterns or None
+        procedure.core_tools = input.core_tools or None
+        procedure.core_concepts = input.core_concepts or None
+        procedure.implementation_notes = input.implementation_notes or None
+        procedure.tags = input.tags or None
+        procedure.runtime_metadata = input.runtime_metadata
+        if input.active is not None:
+            procedure.active = input.active
+        procedure.embedding = embedding
+        procedure.updated_at = datetime.now(UTC)
+        await session.flush()
         return self._to_detail(procedure)
 
     # ------------------------------------------------------------------
@@ -628,6 +704,26 @@ class ProcedureManager:
         procedure = await self._get_procedure_orm(procedure_id, session)
         if procedure is None:
             raise ValueError(f"Procedure {procedure_id} not found")
+        if procedure.active:
+            return
+        # B6: an active row with the same lower(name) already exists -> flipping this
+        # one active would violate the (agent_id, lower(name)) WHERE active unique index
+        # (migration 058) and, uncaught, abort the whole reactivate_skills loop. Skip
+        # with a warning instead (the live row already provides the capability).
+        clash = await session.execute(
+            select(Procedure.id)
+            .where(func.lower(Procedure.name) == (procedure.name or "").lower())
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.active == True)  # noqa: E712
+            .where(Procedure.id != procedure_id)
+            .limit(1)
+        )
+        if clash.scalars().first() is not None:
+            logger.warning(
+                "Skipping reactivation of %s — an active procedure with the same name exists",
+                procedure.name,
+            )
+            return
         procedure.active = True
         await session.flush()
 
@@ -692,8 +788,34 @@ class ProcedureManager:
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == False)  # noqa: E712
             .where(Procedure.tags.contains(["skill"]))
+            # Dedup Phase 0: never resurrect a deliberately-consolidated duplicate.
+            # A superseded row was archived because its capability now lives in the
+            # canonical procedure; reactivate_skills must not un-archive it.
+            .where(Procedure.superseded_by.is_(None))
         )
         return [self._to_detail(p) for p in result.scalars().all()]
+
+    async def is_name_superseded(self, name: str, session: AsyncSession | None = None) -> bool:
+        """True if an archived (consolidated) procedure with this exact name exists.
+
+        Dedup Phase 0: the bootstrap re-import path checks this before recreating a
+        skill from disk. A superseded row means the capability was merged into a
+        canonical procedure — recreating it would resurrect the duplicate.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._is_name_superseded(name, session)
+        return await self._is_name_superseded(name, session)
+
+    async def _is_name_superseded(self, name: str, session: AsyncSession) -> bool:
+        result = await session.execute(
+            select(Procedure.id)
+            .where(func.lower(Procedure.name) == name.lower())
+            .where(Procedure.agent_id == self.agent_id)
+            .where(Procedure.superseded_by.isnot(None))
+            .limit(1)
+        )
+        return result.scalars().first() is not None
 
     async def get_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
         """Fetch active procedure by exact name match."""
@@ -709,10 +831,11 @@ class ProcedureManager:
         # activation_count, which changes per use and would make the resolved row drift, and
         # whose NULLs sort first under DESC). This is the SAME ordering the Procedure Catalog
         # uses to pick its displayed winner (list_all is created_at desc, id), so the catalog
-        # entry and the loaded body always agree. Exact (case/whitespace-sensitive) match.
+        # entry and the loaded body always agree. Case-insensitive match (B6) — pairs with the
+        # (agent_id, lower(name)) WHERE active unique index so a casing variant still resolves.
         result = await session.execute(
             select(Procedure)
-            .where(Procedure.name == name)
+            .where(func.lower(Procedure.name) == name.lower())
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
             .order_by(Procedure.created_at.desc(), Procedure.id)

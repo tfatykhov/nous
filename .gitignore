@@ -19,3 +19,10 @@ nous.db
 # gen_nous_procedure_qrels.py against your own nous-prod-snapshot.
 tests/fixtures/qrels_nous_prod*.jsonl
 tests/fixtures/qrels_longmemeval.jsonl
+
+# F074: BEAM harness — sibling clone of mohammadtavakoli78/BEAM
+tools/beam/
+# F074: per-run reports
+reports/beam/
+# F074: HuggingFace cache (~/.cache/nous-eval/beam) is outside repo
+scripts/diag/_proc_*.json

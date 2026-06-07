@@ -436,6 +436,27 @@ class Heart:
 
         return result
 
+    async def update_procedure_body(
+        self, procedure_id: UUID, input: ProcedureInput, session: AsyncSession | None = None
+    ) -> ProcedureDetail:
+        """Refresh a procedure's body in place, preserving learned stats (audit bug 9)."""
+        result = await self.procedures.update_body(procedure_id, input, session)
+
+        # Mirror store_procedure: re-link the refreshed body in the graph.
+        if self._bus is not None:
+            await self._bus.emit(Event(
+                type="procedure_stored",
+                agent_id=self.agent_id,
+                data={
+                    "procedure_id": str(result.id),
+                    "name": input.name,
+                    "domain": input.domain or "",
+                    "description": input.description or "",
+                    "tags": input.tags or [],
+                },
+            ))
+        return result
+
     async def activate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Mark a procedure as activated."""
         return await self.procedures.activate(procedure_id, session)
@@ -489,6 +510,10 @@ class Heart:
     async def get_procedure_by_name(self, name: str, session: AsyncSession | None = None) -> ProcedureDetail | None:
         """Fetch active procedure by exact name."""
         return await self.procedures.get_by_name(name, session)
+
+    async def is_procedure_name_superseded(self, name: str, session: AsyncSession | None = None) -> bool:
+        """True if a consolidated (archived) procedure with this name exists (dedup Phase 0)."""
+        return await self.procedures.is_name_superseded(name, session)
 
     async def reactivate_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> None:
         """Reactivate an inactive procedure."""

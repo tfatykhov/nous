@@ -87,12 +87,27 @@ def _parse_frontmatter(text: str) -> dict[str, str | list[str] | dict[str, str]]
     # `current_pending` is True after we see `key:` with empty value but
     # before we know if it's a list (`  - item`) or dict (`  sub: val`).
     current_pending: bool = False
+    # Block scalar (`key: |` literal / `key: >` folded). Without this, a
+    # `description: |` line captured the literal "|" as the value and the
+    # indented body was silently dropped (audit: empty-description rows).
+    current_scalar_style: str | None = None  # 'literal' | 'folded'
+    current_scalar_lines: list[str] | None = None
 
     def _flush_block() -> None:
         nonlocal current_key, current_list, current_dict, current_pending
+        nonlocal current_scalar_style, current_scalar_lines
         if current_key is None:
             return
-        if current_list is not None:
+        if current_scalar_style is not None:
+            raw = current_scalar_lines or []
+            indents = [len(ln) - len(ln.lstrip()) for ln in raw if ln.strip()]
+            base = min(indents) if indents else 0
+            dedented = [ln[base:] if len(ln) >= base else ln.lstrip() for ln in raw]
+            if current_scalar_style == "folded":
+                result[current_key] = " ".join(s.strip() for s in dedented if s.strip())
+            else:
+                result[current_key] = "\n".join(dedented).strip()
+        elif current_list is not None:
             result[current_key] = current_list
         elif current_dict is not None:
             result[current_key] = current_dict
@@ -103,8 +118,18 @@ def _parse_frontmatter(text: str) -> dict[str, str | list[str] | dict[str, str]]
         current_list = None
         current_dict = None
         current_pending = False
+        current_scalar_style = None
+        current_scalar_lines = None
 
     for line in lines:
+        # Block scalar continuation: collect blank or more-indented lines.
+        if current_key is not None and current_scalar_style is not None:
+            if line.strip() == "" or re.match(r"^\s", line):
+                current_scalar_lines.append(line)
+                continue
+            # dedent: a non-indented, non-blank line ends the scalar.
+            _flush_block()
+
         # Block list continuation: "  - item"
         list_match = re.match(r"^\s+-\s+(.*)", line)
         if current_key and (current_list is not None or current_pending) and list_match:
@@ -136,6 +161,12 @@ def _parse_frontmatter(text: str) -> dict[str, str | list[str] | dict[str, str]]
                 # Start of a block — kind (list vs dict) determined by next line.
                 current_key = key
                 current_pending = True
+            elif re.match(r"^[|>][+-]?\d*$", value):
+                # YAML block scalar: `|` literal / `>` folded (with optional
+                # chomping/indent indicator). Body is the following indented lines.
+                current_key = key
+                current_scalar_style = "folded" if value[0] == ">" else "literal"
+                current_scalar_lines = []
             else:
                 parsed = _parse_yaml_value(value)
                 result[key] = parsed

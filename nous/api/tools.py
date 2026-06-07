@@ -958,18 +958,19 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             missing_requires = [var for var in manifest.requires if not _os.environ.get(var)]
             skill_active = len(missing_requires) == 0
 
-            # 3. Check for existing procedure with same name (dedup)
+            # 3. Check for existing procedure with same name (dedup, case-insensitive)
             existing = await heart.get_procedure_by_name(manifest.name)
-            updated = False
-            if existing:
-                await heart.retire_procedure(existing.id)
-                updated = True
+            updated = existing is not None
 
-            # 4. Convert to ProcedureInput and store
+            # 4. Convert to ProcedureInput and store / update in place
             proc_input = _skill_parser.to_procedure_input(manifest)
-            if not skill_active:
-                proc_input.active = False
-            result = await heart.store_procedure(proc_input)
+            proc_input.active = skill_active
+            if existing:
+                # Update in place to preserve activation/success/failure counts and
+                # task affinity (retire+store reset them — audit bug 9).
+                result = await heart.update_procedure_body(existing.id, proc_input)
+            else:
+                result = await heart.store_procedure(proc_input)
 
             action = "updated" if updated else "registered"
             if not skill_active:
