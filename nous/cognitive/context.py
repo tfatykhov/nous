@@ -243,19 +243,22 @@ class ContextEngine:
         # procedure by name and calls get_procedure(<name>) to load the full steps (depth).
         catalog_rendered = False
         if getattr(self._settings, "proc_catalog_enabled", False):
-            catalog_max = getattr(self._settings, "proc_catalog_max", 100)
-            desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
-            max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
-            # Fetch with headroom so duplicate rows can't crowd out unique names before
-            # dedup (dups are bypassable — see procedure-subsystem-audit).
-            fetch_limit = min(catalog_max * 3, 500)
+            # Whole catalog build is best-effort: any failure (DB error, or a bad/non-int
+            # setting) → no catalog, never crash the turn. Size-reads live inside the try so
+            # the block fails safe end-to-end.
+            catalog_max = 100
+            procs: list = []
             try:
+                catalog_max = self._settings.proc_catalog_max
+                # Fetch with headroom so duplicate rows can't crowd out unique names before
+                # dedup (dups are bypassable — see procedure-subsystem-audit).
+                fetch_limit = min(catalog_max * 3, 500)
                 procs, _total = await self._heart.list_procedures(
                     limit=fetch_limit, active_only=True, session=session,
                 )
             except Exception as e:
                 logger.warning("Procedure catalog build failed: %s", e)
-                procs = []
+                procs, catalog_max = [], 0
             # Collapse same-name rows to ONE entry, keeping the SAME row get_procedure(<name>)
             # resolves (highest activation_count, then newest) so the catalog entry and the
             # loaded body agree. `procs` is created_at desc, so first-seen = newest → on an
@@ -275,6 +278,8 @@ class ContextEngine:
             distinct_total = len(order)
             deduped = [winners[k] for k in order[:catalog_max]]
             if deduped:
+                desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
+                max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
                 header = (
                     "You have a library of learned procedures (reusable how-to "
                     "knowledge from past work), listed below by name. The full steps "
