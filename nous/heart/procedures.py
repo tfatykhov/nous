@@ -389,6 +389,10 @@ class ProcedureManager:
                     activation_count=p.activation_count or 0,
                     effectiveness=effectiveness,
                     score=final_score,
+                    # F079 P1: carry body fields for the pull path (recall_deep).
+                    # `p` is the full ORM row already in scope — no extra query.
+                    core_patterns=list(p.core_patterns or []),
+                    implementation_notes=list(p.implementation_notes or []),
                 )
             )
 

@@ -131,6 +131,12 @@ class Settings(BaseSettings):
     # F038-2.1: Procedure score floor (embedding mode only)
     procedure_score_floor: float = 0.40
 
+    # F079 P1: pull-path delivery (procedures reach the model via recall_deep, not
+    # passive injection). Both default OFF (dark-launch).
+    recall_full_bodies: bool = False  # recall_deep returns a usable procedure body slice
+    recall_body_max_chars: int = Field(default=240, ge=1)  # one-line body cap (SmartCompress-safe)
+    proc_awareness_cue: bool = False  # static cached directive: "pull a relevant procedure first"
+
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
     relevance_drop_ratio: float = 0.5
 

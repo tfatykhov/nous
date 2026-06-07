@@ -61,6 +61,26 @@ from nous.storage.models import ConversationState
 logger = logging.getLogger(__name__)
 
 
+def _format_procedure_recall_summary(item, full_bodies: bool, cap: int) -> str:
+    """F079 P1: build the recall_deep summary line for a procedure.
+
+    Off (default): legacy ``"name: description"`` (byte-identical). On: append a
+    usable body slice (implementation_notes + core_patterns) as ONE
+    whitespace-collapsed, char-capped line so it survives the runner's SmartCompress
+    of recall_deep (head/tail line selection) without multi-line shredding.
+    """
+    summary = f"{item.name}: {item.description}" if item.description else item.name
+    if not full_bodies:
+        return summary
+    parts = list(item.implementation_notes or []) + list(item.core_patterns or [])
+    body = " ".join(" ".join(str(p).split()) for p in parts if str(p).strip())
+    if body:
+        if len(body) > cap:
+            body = body[:cap].rstrip() + "…"
+        summary = f"{summary} | {body}"
+    return summary
+
+
 class Heart:
     """Memory organ for Nous agents.
 
@@ -1119,7 +1139,12 @@ class Heart:
                 },
             )
         elif isinstance(item, ProcedureSummary):
-            summary = f"{item.name}: {item.description}" if item.description else item.name
+            # F079 P1: pull path delivers a usable body slice (not just name+desc).
+            summary = _format_procedure_recall_summary(
+                item,
+                getattr(self.settings, "recall_full_bodies", False),
+                getattr(self.settings, "recall_body_max_chars", 240),
+            )
             return RecallResult(
                 type="procedure",
                 id=item.id,

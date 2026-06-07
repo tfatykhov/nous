@@ -32,6 +32,7 @@ TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
     "Context Safety": "static",
+    "Procedure Awareness": "static",  # F079 P1: static cue -> cached, never busts
     "Epistemic Routing": "dynamic",  # §2
     "User Profile": "semi_stable",
     "Active Censors": "semi_stable",
@@ -226,6 +227,30 @@ class ContextEngine:
                     content=anti_halluc,
                     token_estimate=self._estimate_tokens(anti_halluc),
                     tier=SECTION_TIERS.get("Context Safety", "dynamic"),
+                )
+            )
+
+        # F079 P1: static procedure-awareness cue. Procedures are delivered via the
+        # PULL path (recall_deep/get_procedure), not auto-injected — this directive
+        # tells the agent to search for a relevant procedure before acting. It is
+        # FULLY STATIC (no per-turn / no CRUD dependency) so it caches once and never
+        # busts; bodies ride in the messages on demand. Flag-gated; off => no section.
+        if getattr(self._settings, "proc_awareness_cue", False):
+            awareness_text = (
+                "You have a library of learned procedures (reusable how-to knowledge "
+                "captured from past work). They are NOT auto-loaded into this prompt. "
+                "When you start a task that may match one — implementing, fixing, "
+                "generating a report, sending email, debugging, researching, etc. — "
+                "call `recall_deep` first to retrieve the relevant procedure, then "
+                "follow its steps before acting (use `get_procedure` for the full body)."
+            )
+            sections.append(
+                ContextSection(
+                    priority=2,
+                    label="Procedure Awareness",
+                    content=awareness_text,
+                    token_estimate=self._estimate_tokens(awareness_text),
+                    tier=SECTION_TIERS.get("Procedure Awareness", "static"),
                 )
             )
 
