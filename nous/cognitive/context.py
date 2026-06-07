@@ -41,6 +41,16 @@ SECTION_TIERS: dict[str, str] = {
 }
 # Everything else defaults to "dynamic" via ContextSection.tier default
 
+
+def _one_line(s: object) -> str:
+    """Collapse all whitespace (incl. newlines) to single spaces.
+
+    Used when rendering learned/skill-authored procedure names/descriptions into the
+    system prompt: prevents a value containing newlines (e.g. "\\n## Identity ...") from
+    injecting extra lines or fake `##` section headings (untrusted-content hardening).
+    """
+    return " ".join(str(s or "").split())
+
 # Sources exempt from relevance filter gap detection
 FILTER_EXEMPT_SOURCES: set[str] = {
     "pre_prune_extraction",
@@ -248,25 +258,27 @@ class ContextEngine:
             # the block fails safe end-to-end.
             catalog_max = 100
             procs: list = []
+            total_active = 0
             try:
                 catalog_max = self._settings.proc_catalog_max
                 # Fetch with headroom so duplicate rows can't crowd out unique names before
                 # dedup (dups are bypassable — see procedure-subsystem-audit).
                 fetch_limit = min(catalog_max * 3, 500)
-                procs, _total = await self._heart.list_procedures(
+                procs, total_active = await self._heart.list_procedures(
                     limit=fetch_limit, active_only=True, session=session,
                 )
             except Exception as e:
                 logger.warning("Procedure catalog build failed: %s", e)
-                procs, catalog_max = [], 0
+                procs, catalog_max, total_active = [], 0, 0
             # Collapse same-name rows to ONE entry, keeping the SAME row get_procedure(<name>)
-            # resolves (highest activation_count, then newest) so the catalog entry and the
-            # loaded body agree. `procs` is created_at desc, so first-seen = newest → on an
-            # activation tie we keep the newest, matching _get_by_name's ordering.
+            # resolves: match its EXACT (case-sensitive) name and ordering — highest
+            # activation_count, then created_at desc / id via list_all's order (= first-seen
+            # on an activation tie). Case-sensitive so a case-distinct procedure (which
+            # get_procedure CAN load) is not hidden; winner == loaded body.
             winners: dict[str, object] = {}
             order: list[str] = []
             for p in procs:
-                key = (getattr(p, "name", "") or "").strip().lower()
+                key = (getattr(p, "name", "") or "").strip()  # case-sensitive: matches _get_by_name
                 if not key:
                     continue
                 act = getattr(p, "activation_count", 0) or 0
@@ -291,21 +303,27 @@ class ContextEngine:
                 used = len(header) + 1
                 shown = 0
                 for p in deduped:
-                    domain = getattr(p, "domain", None) or "general"
-                    desc = (getattr(p, "description", None) or "").strip()
+                    # _one_line: untrusted procedure text can't inject newlines / fake headings.
+                    name = _one_line(getattr(p, "name", ""))
+                    domain = _one_line(getattr(p, "domain", None) or "general")
+                    desc = _one_line(getattr(p, "description", None))
                     if len(desc) > desc_cap:
                         desc = desc[:desc_cap].rstrip() + "…"
-                    row = f"- {p.name} ({domain}): {desc}" if desc else f"- {p.name} ({domain})"
+                    row = f"- {name} ({domain}): {desc}" if desc else f"- {name} ({domain})"
                     if used + len(row) + 1 > max_chars and shown > 0:
                         break
                     lines.append(row)
                     used += len(row) + 1
                     shown += 1
-                omitted = max(0, distinct_total - shown)  # approx operator signal
-                if omitted > 0:
+                # Omitted = distinct names not shown (dup-collapse + caps); "+" when the fetch
+                # window itself may hide more uniques (active rows exceeded the fetch window).
+                omitted = max(0, distinct_total - shown)
+                window_capped = total_active > len(procs)
+                if omitted > 0 or window_capped:
+                    more = f"{omitted}+" if window_capped else str(omitted)
                     lines.append(
-                        f"…and {omitted} more not shown (catalog truncated for size; "
-                        f"raise NOUS_PROC_CATALOG_MAX / NOUS_PROC_CATALOG_MAX_CHARS)."
+                        f"…and {more} more not shown (catalog truncated; raise "
+                        f"NOUS_PROC_CATALOG_MAX / NOUS_PROC_CATALOG_MAX_CHARS)."
                     )
                 catalog_text = "\n".join(lines)
                 # Absolute hard cap (backstops the header + first-row + notice, none of which
@@ -720,7 +738,7 @@ class ContextEngine:
                         # points back into the cached catalog. Names only → no content dup;
                         # dynamic tier → the per-turn picks never bust the static catalog.
                         rec_names = [
-                            getattr(p, "name", "") for p in critic_procedures
+                            _one_line(getattr(p, "name", "")) for p in critic_procedures
                             if getattr(p, "name", "")
                         ]
                         if rec_names:
