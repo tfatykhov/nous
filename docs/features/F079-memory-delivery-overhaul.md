@@ -269,7 +269,9 @@ reranks on name+desc, so it can pick the wrong top-1 to body).
 The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
 "catalog + auto-inline body" intent): split breadth from depth.
 
-1. **Breadth — static `## Procedure Catalog`** (`proc_catalog_enabled`, default OFF).
+1. **Breadth — static `## Procedure Catalog`** (`proc_catalog_enabled`, **default ON** as
+   of merge — catalog-first is the intended delivery mode; **prod must pin it OFF until the
+   dedup work lands**, see the gate below).
    Lists active procedures as `- name (domain): description` — **stable fields only** (NO
    activation_count/effectiveness, which change per use). It is query-independent → rides
    the **static cache tier** → byte-identical *between procedure CRUD events* and cached
@@ -322,8 +324,17 @@ The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
    total-size cap with a final truncate backstop; `get_procedure` retries a UUID-shaped
    input as a name after an id miss.
 
-**Unified mode** = `proc_passive_injection_enabled=false` + `proc_catalog_enabled=true`
-(breadth via catalog, depth via get_procedure). All flags default OFF.
+**Default delivery mode (as of merge):** `proc_catalog_enabled=true` (breadth via catalog,
+depth via get_procedure). With the catalog rendered, the duplicating Track-B embedding
+slots are auto-suppressed and Critic picks become the option-C slim pointer, so
+`proc_passive_injection_enabled` stays `true` (its only remaining role is the safety-net
+that re-enables Track B if the catalog query fails). `proc_awareness_cue` stays `false`
+(moot when the catalog is on). `recall_full_bodies` was removed.
+
+**PROD DEPLOY GATE (hard):** the catalog is default-ON in code but must NOT ship to prod
+until skill-path dedup lands — it faithfully lists the 51/62 duplicate procedures. Pin
+`NOUS_PROC_CATALOG_ENABLED=false` in the prod env until then (and run the selection-accuracy
+measurement on a dup-heavy corpus). This is now a process/ops gate, not a code default.
 
 **Live validation (real Nous instance on :8077 vs nous_eval_live, catalog on):**
 - Catalog reaches the prompt: the agent listed all 4 procedure names *"from my procedure

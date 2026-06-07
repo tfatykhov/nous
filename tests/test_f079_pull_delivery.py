@@ -61,30 +61,34 @@ class TestBuildSurfaces:
     # --- Passive embedding (Track B) gate -------------------------------------
 
     @pytest.mark.asyncio
-    async def test_passive_section_present_by_default(self):
-        engine = self._engine(proc_passive_injection_enabled=True)
+    async def test_passive_section_present_when_catalog_off(self):
+        # Legacy passive path: catalog OFF + passive ON -> the embedding "Known Procedures".
+        engine = self._engine(proc_catalog_enabled=False, proc_passive_injection_enabled=True)
         r = await self._build(engine)
         assert any(s.label == "Known Procedures" for s in r.sections)
 
     @pytest.mark.asyncio
     async def test_passive_section_absent_when_disabled(self):
-        engine = self._engine(proc_passive_injection_enabled=False)
+        engine = self._engine(proc_catalog_enabled=False, proc_passive_injection_enabled=False)
         r = await self._build(engine)
         assert not any(s.label == "Known Procedures" for s in r.sections)
 
     @pytest.mark.asyncio
     async def test_passive_off_skips_embedding_search(self):
         """passive-off drops only Track B (embedding) — the search must not even run."""
-        engine = self._engine(proc_passive_injection_enabled=False)
+        engine = self._engine(proc_catalog_enabled=False, proc_passive_injection_enabled=False)
         await self._build(engine)
         engine._heart.search_procedures.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_critic_track_survives_passive_off(self):
         """Critic-recommended skills (Track A) have no recall_deep equivalent, so they
-        must still reach context when passive embeddings are off."""
+        must still reach context when passive embeddings are off (catalog also off here)."""
         from unittest.mock import AsyncMock
-        engine = self._engine(proc_passive_injection_enabled=False, critic_skill_injection="enabled")
+        engine = self._engine(
+            proc_catalog_enabled=False, proc_passive_injection_enabled=False,
+            critic_skill_injection="enabled",
+        )
         engine._heart.get_procedure_by_name = AsyncMock(return_value=_proc_summary("critic-pick"))
         r = await self._build(engine, critic_skills=["critic-pick"])
         sec = [s for s in r.sections if s.label == "Known Procedures"]
@@ -95,8 +99,16 @@ class TestBuildSurfaces:
     # --- Catalog (breadth) ----------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_catalog_absent_by_default(self):
+    async def test_catalog_present_by_default(self):
+        # F079 catalog-first is now the DEFAULT delivery mode.
         engine = self._engine()
+        r = await self._build(engine)
+        assert any(s.label == "Procedure Catalog" for s in r.sections)
+        engine._heart.list_procedures.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_catalog_absent_when_disabled(self):
+        engine = self._engine(proc_catalog_enabled=False)
         r = await self._build(engine)
         assert not any(s.label == "Procedure Catalog" for s in r.sections)
         engine._heart.list_procedures.assert_not_called()

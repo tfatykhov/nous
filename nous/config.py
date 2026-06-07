@@ -141,8 +141,14 @@ class Settings(BaseSettings):
     #     fires at session-end/idle when the cache is already cold; it re-caches immediately.
     #   DEPTH — the full untruncated body loaded on demand via get_procedure(<name>) when
     #     the agent SELECTS one from the catalog.
-    # All default OFF (dark-launch).
-    proc_catalog_enabled: bool = False  # render the static breadth catalog
+    # Default ON (catalog-first is the intended delivery mode). With the catalog rendered,
+    # the duplicating Track-B embedding slots are auto-suppressed and Critic picks become a
+    # slim pointer (option C), so proc_passive_injection_enabled below can stay True (it is
+    # the safety-net that re-enables Track B only if the catalog query fails).
+    # **PROD DEPLOY GATE:** do NOT ship this ON to prod until skill-path dedup lands — the
+    # catalog faithfully lists duplicate procedures (51/62 audit). Pin
+    # NOUS_PROC_CATALOG_ENABLED=false in the prod env until then.
+    proc_catalog_enabled: bool = True  # render the static breadth catalog (catalog-first)
     proc_catalog_max: int = Field(default=100, ge=1, le=500)  # safety cap on catalog row count
     proc_catalog_desc_chars: int = Field(default=120, ge=20, le=500)  # per-row desc truncation
     proc_catalog_max_chars: int = Field(default=4000, ge=500, le=40000)  # hard total-size cap (>= header + 1 row)
