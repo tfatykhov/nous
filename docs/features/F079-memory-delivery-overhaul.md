@@ -294,12 +294,26 @@ The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
    `recall_body_max_chars`, `_procedure_body_line`, the post-rank expansion, and the
    per-result body metadata). recall_deep returns procedures as name+desc again — the
    catalog is breadth, get_procedure is depth. This dissolves the codex P2.
-4. **Unchanged / enforced:** Track-A Critic skills stay ungated (M1). Track-B passive
-   embedding is gated off when `proc_passive_injection_enabled=false` **OR**
-   `proc_catalog_enabled=true` — so catalog+passive can never double-list the same
-   procedure (unified mode is enforced in code, not just by operator convention).
-   `proc_awareness_cue` survives as the **cue-only fallback** (instruction, no list) used
-   only when `proc_catalog_enabled` is off.
+4. **Critic (option C — one surface, marked):** Track-A Critic skills stay ungated (M1),
+   but when the catalog is rendered they are NOT re-listed in full (that re-duplicated
+   name+desc). Instead a slim **dynamic** `★ Recommended for this task: …` pointer names
+   this turn's Critic picks and points back into the cached catalog. Names only → no
+   content duplication; dynamic tier → the per-turn picks never bust the static catalog.
+   (Literal `★` *inside* the catalog body was rejected — it would make the catalog
+   per-turn and bust the static cache every turn.) When the catalog is OFF, Critic falls
+   back to the full `## Known Procedures` section (unchanged).
+5. **Track-B / cue / failure:** Track-B passive embedding is gated off when
+   `proc_passive_injection_enabled=false` **OR** a catalog actually rendered — so
+   catalog+passive can never double-list (enforced in code). `proc_awareness_cue` is the
+   **cue-only fallback** when the catalog is off; it ALSO fires when the catalog is enabled
+   but **failed/empty** this turn, so unified mode never loses all procedure awareness on a
+   transient DB error.
+6. **Catalog hardening (codex rounds):** name-dedup keeps the SAME row
+   `get_procedure_by_name` resolves (highest activation_count, then newest) so the catalog
+   entry and the loaded body agree; fetch uses 3× headroom so dup rows can't crowd out
+   unique names before the cap; `proc_catalog_max_chars` (default 4000, `ge=500`) is a hard
+   total-size cap with a final truncate backstop; `get_procedure` retries a UUID-shaped
+   input as a name after an id miss.
 
 **Unified mode** = `proc_passive_injection_enabled=false` + `proc_catalog_enabled=true`
 (breadth via catalog, depth via get_procedure). All flags default OFF.

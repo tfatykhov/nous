@@ -244,28 +244,37 @@ class ContextEngine:
         catalog_rendered = False
         if getattr(self._settings, "proc_catalog_enabled", False):
             catalog_max = getattr(self._settings, "proc_catalog_max", 100)
+            desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
+            max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
+            # Fetch with headroom so duplicate rows can't crowd out unique names before
+            # dedup (dups are bypassable — see procedure-subsystem-audit).
+            fetch_limit = min(catalog_max * 3, 500)
             try:
-                procs, total = await self._heart.list_procedures(
-                    limit=catalog_max, active_only=True, session=session,
+                procs, _total = await self._heart.list_procedures(
+                    limit=fetch_limit, active_only=True, session=session,
                 )
             except Exception as e:
                 logger.warning("Procedure catalog build failed: %s", e)
-                procs, total = [], 0
-            # Collapse same-name duplicates to ONE entry (name-dedup is bypassable, so the
-            # DB can hold several active rows per name — see procedure-subsystem-audit). The
-            # list is already in deterministic order (created_at desc, id), so first-wins is
-            # stable/cacheable. get_procedure(<name>) then resolves the most-proven row.
-            deduped: list = []
-            seen_names: set[str] = set()
+                procs = []
+            # Collapse same-name rows to ONE entry, keeping the SAME row get_procedure(<name>)
+            # resolves (highest activation_count, then newest) so the catalog entry and the
+            # loaded body agree. `procs` is created_at desc, so first-seen = newest → on an
+            # activation tie we keep the newest, matching _get_by_name's ordering.
+            winners: dict[str, object] = {}
+            order: list[str] = []
             for p in procs:
                 key = (getattr(p, "name", "") or "").strip().lower()
-                if not key or key in seen_names:
+                if not key:
                     continue
-                seen_names.add(key)
-                deduped.append(p)
+                act = getattr(p, "activation_count", 0) or 0
+                if key not in winners:
+                    order.append(key)
+                    winners[key] = p
+                elif act > (getattr(winners[key], "activation_count", 0) or 0):
+                    winners[key] = p
+            distinct_total = len(order)
+            deduped = [winners[k] for k in order[:catalog_max]]
             if deduped:
-                desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
-                max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
                 header = (
                     "You have a library of learned procedures (reusable how-to "
                     "knowledge from past work), listed below by name. The full steps "
@@ -282,20 +291,22 @@ class ContextEngine:
                     if len(desc) > desc_cap:
                         desc = desc[:desc_cap].rstrip() + "…"
                     row = f"- {p.name} ({domain}): {desc}" if desc else f"- {p.name} ({domain})"
-                    # Hard total-size bound (description is unbounded Text and the row cap can
-                    # be large) so an enabled catalog can never produce an oversized prompt.
                     if used + len(row) + 1 > max_chars and shown > 0:
                         break
                     lines.append(row)
                     used += len(row) + 1
                     shown += 1
-                omitted = total - shown  # vs DB total (dup-collapse + caps); operator signal
+                omitted = max(0, distinct_total - shown)  # approx operator signal
                 if omitted > 0:
                     lines.append(
                         f"…and {omitted} more not shown (catalog truncated for size; "
                         f"raise NOUS_PROC_CATALOG_MAX / NOUS_PROC_CATALOG_MAX_CHARS)."
                     )
                 catalog_text = "\n".join(lines)
+                # Absolute hard cap (backstops the header + first-row + notice, none of which
+                # the per-row loop bounds): a catalog can never exceed max_chars.
+                if len(catalog_text) > max_chars:
+                    catalog_text = catalog_text[:max_chars].rstrip()
                 sections.append(
                     ContextSection(
                         priority=2,
@@ -306,8 +317,14 @@ class ContextEngine:
                     )
                 )
                 catalog_rendered = True
-        if not catalog_rendered and getattr(self._settings, "proc_awareness_cue", False):
-            # Cue-only fallback (no list) when the full catalog is disabled.
+        # Emit the cue-only fallback (no list) when the catalog isn't shown — either it's
+        # disabled and the operator opted into the cue, OR it was ENABLED but failed/empty
+        # this turn (its own instruction is gone, so back-stop awareness regardless of the
+        # cue flag, so unified mode never loses ALL procedure awareness on a transient error).
+        _catalog_on = getattr(self._settings, "proc_catalog_enabled", False)
+        if not catalog_rendered and (
+            getattr(self._settings, "proc_awareness_cue", False) or _catalog_on
+        ):
             awareness_text = (
                 "You have a library of learned procedures (reusable how-to knowledge "
                 "captured from past work). They are NOT auto-loaded into this prompt. "
@@ -690,19 +707,46 @@ class ContextEngine:
                             # ProcedureDetail (Critic track) has no .score — use 1.0 as priority
                             recalled_score_map[mid] = getattr(p, "score", None) or 1.0
 
-                    proc_text = self._format_procedures(all_procedures)
-                    proc_text = self._truncate_to_budget(
-                        proc_text, self._scaled_budget(budget.procedures),
-                    )
-                    sections.append(
-                        ContextSection(
-                            priority=7,
-                            label="Known Procedures",
-                            content=proc_text,
-                            token_estimate=self._estimate_tokens(proc_text),
-                            tier=SECTION_TIERS.get("Known Procedures", "dynamic"),
+                    if catalog_rendered and critic_procedures:
+                        # F079 option C: the catalog already lists every procedure (breadth),
+                        # so don't re-list Critic's picks with their full name+desc (that is
+                        # the duplication F079 set out to kill). Instead emit a slim DYNAMIC
+                        # pointer that highlights THIS turn's recommendations by name and
+                        # points back into the cached catalog. Names only → no content dup;
+                        # dynamic tier → the per-turn picks never bust the static catalog.
+                        rec_names = [
+                            getattr(p, "name", "") for p in critic_procedures
+                            if getattr(p, "name", "")
+                        ]
+                        if rec_names:
+                            rec_text = (
+                                "★ Recommended for this task (see your Procedure Catalog): "
+                                + ", ".join(f"`{n}`" for n in rec_names)
+                                + " — load with get_procedure before acting."
+                            )
+                            sections.append(
+                                ContextSection(
+                                    priority=7,
+                                    label="Recommended Procedures",
+                                    content=rec_text,
+                                    token_estimate=self._estimate_tokens(rec_text),
+                                    tier=SECTION_TIERS.get("Recommended Procedures", "dynamic"),
+                                )
+                            )
+                    else:
+                        proc_text = self._format_procedures(all_procedures)
+                        proc_text = self._truncate_to_budget(
+                            proc_text, self._scaled_budget(budget.procedures),
                         )
-                    )
+                        sections.append(
+                            ContextSection(
+                                priority=7,
+                                label="Known Procedures",
+                                content=proc_text,
+                                token_estimate=self._estimate_tokens(proc_text),
+                                tier=SECTION_TIERS.get("Known Procedures", "dynamic"),
+                            )
+                        )
             except Exception as e:
                 logger.warning("Procedure context build failed: %s", e)
 

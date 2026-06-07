@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     proc_catalog_enabled: bool = False  # render the static breadth catalog
     proc_catalog_max: int = Field(default=100, ge=1, le=500)  # safety cap on catalog row count
     proc_catalog_desc_chars: int = Field(default=120, ge=20, le=500)  # per-row desc truncation
-    proc_catalog_max_chars: int = Field(default=4000, ge=200, le=40000)  # hard total-size cap on the rendered catalog
+    proc_catalog_max_chars: int = Field(default=4000, ge=500, le=40000)  # hard total-size cap (>= header + 1 row)
     proc_awareness_cue: bool = False  # cue-only fallback (instruction, no list) when catalog off
     # When False, the passive embedding-similarity (Track B) procedure slots are skipped —
     # those duplicate the recall_deep cosine path. Critic-recommended skills (Track A) are

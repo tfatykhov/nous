@@ -1023,14 +1023,18 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 pid: _UUID | None = _UUID(procedure_id)
             except ValueError:
                 pid = None  # not a UUID -> treat as a name (catalog-first depth path)
-            try:
-                detail = (
-                    await heart.get_procedure(pid) if pid is not None
-                    else await heart.get_procedure_by_name(procedure_id)
-                )
-            except ValueError:
-                # well-formed UUID but no such procedure -> unify with the name-miss reply
-                detail = None
+            detail = None
+            if pid is not None:
+                try:
+                    detail = await heart.get_procedure(pid)
+                except ValueError:
+                    detail = None  # well-formed UUID but no such row
+                if detail is None:
+                    # The id missed — but a procedure's NAME can itself be a UUID string
+                    # (catalog lists names), so retry the exact input as a name.
+                    detail = await heart.get_procedure_by_name(procedure_id)
+            else:
+                detail = await heart.get_procedure_by_name(procedure_id)
             if detail is None:
                 return {"content": [{"type": "text",
                                      "text": f"No procedure found for '{procedure_id}'."}]}

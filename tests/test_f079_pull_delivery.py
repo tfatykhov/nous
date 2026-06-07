@@ -148,12 +148,17 @@ class TestBuildSurfaces:
 
     @pytest.mark.asyncio
     async def test_catalog_overflow_line_when_capped(self):
-        """When more procedures exist than are returned, an honest operator note appears
-        (NOT a 'ask to list them' pointer — no list-all tool exists)."""
-        engine = self._engine(proc_catalog_enabled=True, catalog_total=150)  # 2 returned, 150 total
+        """When distinct procedures exceed the row cap, an honest operator note appears
+        (NOT an 'ask to list them' pointer — no list-all tool exists)."""
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+        procs = [ProcedureSummary(id=uuid4(), name=f"proc{i}", domain="d", description="x",
+                                  activation_count=1, effectiveness=None, score=0.9)
+                 for i in range(5)]
+        engine = self._engine(catalog_procs=procs, proc_catalog_enabled=True, proc_catalog_max=2)
         r = await self._build(engine)
         content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
-        assert "148 more" in content
+        assert "3 more not shown" in content   # 5 distinct, cap 2 -> 3 omitted
         assert "NOUS_PROC_CATALOG_MAX" in content
         assert "ask to list" not in content.lower()
 
@@ -213,6 +218,34 @@ class TestBuildSurfaces:
         content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
         assert len(content) < 1200          # bounded well below 50*~110 chars
         assert "more not shown" in content  # omitted note present
+
+    @pytest.mark.asyncio
+    async def test_option_c_catalog_plus_critic_emits_slim_pointer(self):
+        """Option C: with the catalog on, Critic's picks are a slim DYNAMIC pointer (names
+        only) into the catalog — NOT a full Known Procedures re-listing (no content dup)."""
+        from unittest.mock import AsyncMock
+        engine = self._engine(proc_catalog_enabled=True, critic_skill_injection="enabled")
+        engine._heart.get_procedure_by_name = AsyncMock(return_value=_proc_summary("critic-pick"))
+        r = await self._build(engine, critic_skills=["critic-pick"])
+        labels = [s.label for s in r.sections]
+        assert "Procedure Catalog" in labels
+        assert "Recommended Procedures" in labels      # slim pointer present
+        assert "Known Procedures" not in labels         # full re-listing suppressed
+        rec = next(s for s in r.sections if s.label == "Recommended Procedures")
+        assert "critic-pick" in rec.content
+        assert rec.tier == "dynamic"                    # per-turn → doesn't bust static catalog
+        assert "desc critic-pick" not in rec.content    # names only, no description dup
+
+    @pytest.mark.asyncio
+    async def test_no_catalog_critic_uses_full_known_procedures(self):
+        """Catalog OFF: Critic falls back to the full Known Procedures section (unchanged)."""
+        from unittest.mock import AsyncMock
+        engine = self._engine(proc_catalog_enabled=False, critic_skill_injection="enabled")
+        engine._heart.get_procedure_by_name = AsyncMock(return_value=_proc_summary("critic-pick"))
+        r = await self._build(engine, critic_skills=["critic-pick"])
+        labels = [s.label for s in r.sections]
+        assert "Known Procedures" in labels
+        assert "Recommended Procedures" not in labels
 
     @pytest.mark.asyncio
     async def test_catalog_failure_falls_back_to_cue_and_track_b(self):
@@ -295,8 +328,8 @@ class TestGetProcedureToolResolution:
 
     @pytest.mark.asyncio
     async def test_uuid_not_found_returns_clean_message(self):
-        """A well-formed UUID with no match returns the SAME not-found reply as a name
-        miss (heart.get_procedure raises ValueError; the handler unifies it)."""
+        """A well-formed UUID with no match: handler retries the input as a NAME (a
+        procedure's name can itself be a UUID), then returns the unified not-found reply."""
         from unittest.mock import AsyncMock, MagicMock
         from nous.api.tools import ToolDispatcher, register_nous_tools
         from nous.config import Settings
@@ -307,4 +340,4 @@ class TestGetProcedureToolResolution:
         register_nous_tools(d, MagicMock(), heart, Settings(_env_file=None))
         out = await d._handlers["get_procedure"](str(uuid4()))
         assert "No procedure found" in out["content"][0]["text"]
-        heart.get_procedure_by_name.assert_not_called()
+        heart.get_procedure_by_name.assert_awaited_once()  # retried as name after id miss
