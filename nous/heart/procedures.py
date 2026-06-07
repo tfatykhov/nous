@@ -528,8 +528,12 @@ class ProcedureManager:
         count_q = select(sa_func.count()).select_from(Procedure).where(*conditions)
         total = (await session.execute(count_q)).scalar() or 0
 
+        # Secondary sort by id: created_at can tie (NOW() is txn-start time, so
+        # same-transaction batch inserts share it) — without a tiebreaker the row order
+        # is non-deterministic, which would bust the static-tier Procedure Catalog cache
+        # turn-to-turn (F079 §8.2).
         q = (select(Procedure).where(*conditions)
-             .order_by(Procedure.created_at.desc()).limit(limit).offset(offset))
+             .order_by(Procedure.created_at.desc(), Procedure.id).limit(limit).offset(offset))
         result = await session.execute(q)
         procs = list(result.scalars().all())
 
@@ -699,11 +703,19 @@ class ProcedureManager:
         return await self._get_by_name(name, session)
 
     async def _get_by_name(self, name: str, session: AsyncSession) -> ProcedureDetail | None:
+        # Deterministic tiebreak: same `name` can have multiple active rows (name-dedup is
+        # bypassable — see procedure-subsystem-audit). Without ORDER BY, LIMIT 1 returns an
+        # arbitrary row. Order by created_at DESC, id — a STABLE, non-volatile key (NOT
+        # activation_count, which changes per use and would make the resolved row drift, and
+        # whose NULLs sort first under DESC). This is the SAME ordering the Procedure Catalog
+        # uses to pick its displayed winner (list_all is created_at desc, id), so the catalog
+        # entry and the loaded body always agree. Exact (case/whitespace-sensitive) match.
         result = await session.execute(
             select(Procedure)
             .where(Procedure.name == name)
             .where(Procedure.agent_id == self.agent_id)
             .where(Procedure.active == True)  # noqa: E712
+            .order_by(Procedure.created_at.desc(), Procedure.id)
             .limit(1)
         )
         procedure = result.scalars().first()

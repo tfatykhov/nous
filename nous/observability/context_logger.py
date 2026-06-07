@@ -24,6 +24,8 @@ SECTION_MARKERS: dict[str, str] = {
     "## Related Decisions": "related_decisions",
     "## Relevant Facts": "relevant_facts",
     "## Known Procedures": "known_procedures",
+    "## Procedure Catalog": "procedure_catalog",        # F079 catalog-first breadth
+    "## Recommended Procedures": "recommended_procedures",  # F079 option C Critic pointer
     "## Past Episodes": "past_episodes",
     "## Recent Conversations": "recent_conversations",
     "## Tool Instructions": "frame_instructions",
@@ -185,7 +187,12 @@ class ContextLogEntry:
         # approximation (same limitation the facts/decisions counters have always had).
         facts_count = _count_items("relevant_facts")
         decisions_count = _count_items("related_decisions")
-        procedures_count = _count_items("known_procedures", "- **")  # context.py:1047
+        # F079: procedures arrive either as the passive "Known Procedures" list (- **name**)
+        # or the catalog-first "Procedure Catalog" (- name (domain)); count whichever rendered.
+        procedures_count = (
+            _count_items("known_procedures", "- **")  # context.py:1047
+            + _count_items("procedure_catalog", "- ")
+        )
         episodes_count = _count_items("past_episodes", "- [")        # context.py:1063
         recent_conversations_count = _count_items("recent_conversations", "- [")  # context.py:609
 

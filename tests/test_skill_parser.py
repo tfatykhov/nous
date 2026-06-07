@@ -743,20 +743,27 @@ class TestGetProcedureTool:
         from unittest.mock import AsyncMock
         from nous.api.tools import create_nous_tools
 
+        # F079 catalog-first: a well-formed UUID with no match (heart.get_procedure raises
+        # ValueError) returns the unified not-found reply, not an "Error:" string.
         mock_heart.get_procedure = AsyncMock(side_effect=ValueError("Procedure xyz not found"))
 
         tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
         result = await tools["get_procedure"](procedure_id="00000000-0000-0000-0000-000000000000")
 
         text = result["content"][0]["text"]
-        assert "Error" in text
+        assert "No procedure found" in text
 
     @pytest.mark.asyncio
     async def test_get_procedure_invalid_uuid(self, mock_brain, mock_heart, mock_settings):
+        # F079 catalog-first: a non-UUID string is now treated as a procedure NAME
+        # (catalog lists names) and resolved via get_procedure_by_name; a miss returns the
+        # unified not-found reply rather than an "Error: invalid UUID".
+        from unittest.mock import AsyncMock
         from nous.api.tools import create_nous_tools
 
+        mock_heart.get_procedure_by_name = AsyncMock(return_value=None)
         tools = create_nous_tools(mock_brain, mock_heart, settings=mock_settings)
         result = await tools["get_procedure"](procedure_id="not-a-uuid")
 
         text = result["content"][0]["text"]
-        assert "Error" in text
+        assert "No procedure found" in text

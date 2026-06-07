@@ -1005,21 +1005,39 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
     async def get_procedure(
         procedure_id: str,
     ) -> dict[str, Any]:
-        """Fetch full procedure/skill details by ID.
+        """Fetch a procedure/skill's full body by name or UUID.
 
-        Use after recall_deep returns a procedure result to read the full
-        skill body, triggers, tools, and implementation notes.
+        Use after seeing a procedure in the Procedure Catalog (or a recall_deep
+        result) to load its full steps before acting. Accepts either the
+        procedure's name (as shown in the catalog, preferred) or its UUID.
 
         Args:
-            procedure_id: UUID of the procedure (from recall_deep results)
+            procedure_id: the procedure's name (preferred) or UUID
 
         Returns:
             MCP-compliant response with full procedure details
         """
         try:
             from uuid import UUID as _UUID
-            pid = _UUID(procedure_id)
-            detail = await heart.get_procedure(pid)
+            try:
+                pid: _UUID | None = _UUID(procedure_id)
+            except ValueError:
+                pid = None  # not a UUID -> treat as a name (catalog-first depth path)
+            detail = None
+            if pid is not None:
+                try:
+                    detail = await heart.get_procedure(pid)
+                except ValueError:
+                    detail = None  # well-formed UUID but no such row
+                if detail is None:
+                    # The id missed — but a procedure's NAME can itself be a UUID string
+                    # (catalog lists names), so retry the exact input as a name.
+                    detail = await heart.get_procedure_by_name(procedure_id)
+            else:
+                detail = await heart.get_procedure_by_name(procedure_id)
+            if detail is None:
+                return {"content": [{"type": "text",
+                                     "text": f"No procedure found for '{procedure_id}'."}]}
 
             lines = [
                 f"**{detail.name}** ({detail.domain or 'general'})",
@@ -1030,8 +1048,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 lines.append(f"Triggers: {', '.join(detail.goals)}")
             if detail.core_tools:
                 lines.append(f"Tools: {', '.join(detail.core_tools)}")
+            if detail.core_patterns:
+                lines.append("")
+                lines.append("Core patterns:")
+                for pat in detail.core_patterns:
+                    lines.append(f"- {pat}")
             if detail.implementation_notes:
                 lines.append("")
+                lines.append("Implementation notes:")
                 for note in detail.implementation_notes:
                     lines.append(note)
             lines.append(f"\nActivated: {detail.activation_count}x | Status: {'active' if detail.active else 'inactive'}")
@@ -1040,8 +1064,6 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
-        except ValueError as e:
-            return {"content": [{"type": "text", "text": f"Error: {e}"}]}
         except Exception as e:
             logger.exception("get_procedure tool failed")
             return {"content": [{"type": "text", "text": f"Error fetching procedure: {e}"}]}
@@ -1502,13 +1524,17 @@ _LEARN_SKILL_SCHEMA: dict[str, Any] = {
 _GET_PROCEDURE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Fetch full procedure/skill details by ID. Use after recall_deep returns a "
-        "procedure result to read the full skill body, triggers, tools, and instructions."
+        "Load a procedure/skill's full body (steps, core patterns, triggers, tools). "
+        "Call this with the procedure's NAME as shown in your Procedure Catalog before "
+        "acting on a matching task — no search/UUID lookup needed. A UUID also works."
     ),
     "properties": {
         "procedure_id": {
             "type": "string",
-            "description": "UUID of the procedure (from recall_deep results metadata)",
+            "description": (
+                "The procedure's NAME exactly as listed in the Procedure Catalog "
+                "(preferred), or its UUID."
+            ),
         },
     },
     "required": ["procedure_id"],

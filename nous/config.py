@@ -131,14 +131,33 @@ class Settings(BaseSettings):
     # F038-2.1: Procedure score floor (embedding mode only)
     procedure_score_floor: float = 0.40
 
-    # F079 P1: pull-path delivery (procedures reach the model via recall_deep, not
-    # passive injection). Both default OFF (dark-launch).
-    recall_full_bodies: bool = False  # recall_deep returns a usable procedure body slice
-    # One-line body cap. Bounded: keep (cap x procedures-per-recall) well under
-    # NOUS_TOOL_SOFT_TRIM_CHARS (4000) so a richer recall_deep result isn't soft-trimmed
-    # (which would shred middle results, and recall_deep originals aren't cached).
-    recall_body_max_chars: int = Field(default=240, ge=1, le=1000)
-    proc_awareness_cue: bool = False  # static cached directive: "pull a relevant procedure first"
+    # F079 catalog-first procedure delivery (progressive disclosure, à la Claude Code):
+    #   BREADTH — a static `## Procedure Catalog` listing active procedure names+descs
+    #     (proc_catalog_enabled). Renders stable fields only (no activation/effectiveness),
+    #     so it is byte-identical BETWEEN procedure CRUD events → cached on the static tier.
+    #     NOTE: it is NOT immutable — a learned/edited/retired procedure changes the bytes
+    #     and busts the static block (identity+safety+catalog share one breakpoint) on the
+    #     next turn. Acceptable: procedure CRUD (sleep learning) is rare vs turns, and sleep
+    #     fires at session-end/idle when the cache is already cold; it re-caches immediately.
+    #   DEPTH — the full untruncated body loaded on demand via get_procedure(<name>) when
+    #     the agent SELECTS one from the catalog.
+    # Default ON (catalog-first is the intended delivery mode). With the catalog rendered,
+    # the duplicating Track-B embedding slots are auto-suppressed and Critic picks become a
+    # slim pointer (option C), so proc_passive_injection_enabled below can stay True (it is
+    # the safety-net that re-enables Track B only if the catalog query fails).
+    # **PROD DEPLOY GATE:** do NOT ship this ON to prod until skill-path dedup lands — the
+    # catalog faithfully lists duplicate procedures (51/62 audit). Pin
+    # NOUS_PROC_CATALOG_ENABLED=false in the prod env until then.
+    proc_catalog_enabled: bool = True  # render the static breadth catalog (catalog-first)
+    proc_catalog_max: int = Field(default=100, ge=1, le=500)  # safety cap on catalog row count
+    proc_catalog_desc_chars: int = Field(default=120, ge=20, le=500)  # per-row desc truncation
+    proc_catalog_max_chars: int = Field(default=4000, ge=500, le=40000)  # hard total-size cap (>= header + 1 row)
+    proc_awareness_cue: bool = False  # cue-only fallback (instruction, no list) when catalog off
+    # When False, the passive embedding-similarity (Track B) procedure slots are skipped —
+    # those duplicate the recall_deep cosine path. Critic-recommended skills (Track A) are
+    # NOT gated by this flag (no pull equivalent). Unified mode = this flag OFF +
+    # proc_catalog_enabled ON (breadth via catalog, depth via get_procedure).
+    proc_passive_injection_enabled: bool = True
 
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
     relevance_drop_ratio: float = 0.5

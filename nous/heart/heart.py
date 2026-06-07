@@ -61,32 +61,6 @@ from nous.storage.models import ConversationState
 logger = logging.getLogger(__name__)
 
 
-def _format_procedure_recall_summary(item, full_bodies: bool, cap: int) -> str:
-    """F079 P1: build the recall_deep summary line for a procedure.
-
-    Off (default): legacy ``"name: description"`` (byte-identical). On: append a
-    usable body slice (implementation_notes + core_patterns) as ONE
-    whitespace-collapsed, char-capped line so it survives the runner's SmartCompress
-    of recall_deep (head/tail line selection) without multi-line shredding.
-    """
-    summary = f"{item.name}: {item.description}" if item.description else item.name
-    if not full_bodies:
-        return summary
-    # core_patterns first (concise "what to do"), then implementation_notes (verbose).
-    parts = list(item.core_patterns or []) + list(item.implementation_notes or [])
-    body = " ".join(" ".join(str(p).split()) for p in parts if str(p).strip())
-    if body and cap > 0:
-        if len(body) > cap:
-            cut = body[:cap]
-            # Prefer a word boundary so we don't end mid-word (only if not too short).
-            sp = cut.rfind(" ")
-            if sp > cap // 2:
-                cut = cut[:sp]
-            body = cut.rstrip() + "…"
-        summary = f"{summary} | {body}"
-    return summary
-
-
 class Heart:
     """Memory organ for Nous agents.
 
@@ -1112,6 +1086,9 @@ class Heart:
             merged.sort(key=lambda r: r.score, reverse=True)
             merged = merged[:limit]
 
+        # F079 catalog-first: recall_deep returns procedures as name+desc summaries (like
+        # facts/episodes). Procedure BREADTH is the static `## Procedure Catalog` and DEPTH
+        # is get_procedure(<name>) on selection — recall_deep no longer inlines bodies.
         return merged
 
     def _to_recall_result(self, memory_type: str, item: object, score: float) -> RecallResult | None:
@@ -1145,16 +1122,12 @@ class Heart:
                 },
             )
         elif isinstance(item, ProcedureSummary):
-            # F079 P1: pull path delivers a usable body slice (not just name+desc).
-            summary = _format_procedure_recall_summary(
-                item,
-                getattr(self.settings, "recall_full_bodies", False),
-                getattr(self.settings, "recall_body_max_chars", 240),
-            )
+            # name+desc summary only; the full body is loaded on demand via
+            # get_procedure(<name>) (F079 catalog-first depth path).
             return RecallResult(
                 type="procedure",
                 id=item.id,
-                summary=summary,
+                summary=f"{item.name}: {item.description}" if item.description else item.name,
                 score=score,
                 metadata={
                     "domain": item.domain,

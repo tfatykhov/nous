@@ -100,7 +100,7 @@ is the prerequisite that makes all the rest measurable.
 | flag | default | gates |
 |---|---|---|
 | (none) | — | Phase 0 telemetry (markers + counters) — pure observability |
-| `NOUS_RECALL_FULL_BODIES` | false | P1.1 richer recall_deep bodies |
+| ~~`NOUS_RECALL_FULL_BODIES`~~ | — | **REMOVED in §8.2** (catalog-first replaced the recall_deep top-1 body). Superseded by `NOUS_PROC_CATALOG_ENABLED` / `NOUS_PROC_CATALOG_MAX` / `NOUS_PROC_CATALOG_DESC_CHARS`. |
 | `NOUS_REINFORCE_PULLS` | false | P1.2 reinforce pulled memories |
 | `NOUS_CONV_FRAME_PROC_EPISODE` | false | P2.1 un-zero conversation frame procedures/episodes |
 | `NOUS_PROCEDURE_SCORE_FLOOR` (exists) + parity toggle | 0.40 | P2.2 floor parity |
@@ -212,3 +212,148 @@ lowering. (They only mattered *if* we kept passive injection.) Passive procedure
 - **Caching invariant:** nothing new added to the per-turn `dynamic` tier; the awareness cue is static
   (cache-stable); bodies ride in messages (cached as history). Confirm the `static` block hash is
   unchanged turn-over-turn with the cue on.
+
+## 8.1 Unified delivery (refinement — single surface, no dup, no bloat)
+
+Goal clarified 2026-06-07: **one unified way to pull procedures into context; avoid
+duplication and context bloat.** The P1 implementation left THREE surfaces (passive
+`## Known Procedures` + recall_deep body slice + get_procedure), and the live A/B
+showed the agent did recall_deep **then** get_procedure (a second copy of the same
+procedure). Unified design:
+
+1. **Passive embedding (Track B) OFF** — flag `proc_passive_injection_enabled`
+   (default True; set False for unified mode) skips only the **embedding-similarity**
+   procedure slots in `build()`. Those duplicate the recall_deep cosine path, so they
+   are the bloat. Cosine-matched procedures then enter context **only** via the pull
+   path → no passive+pull duplication. **Critic-recommended skills (Track A) are NOT
+   gated** (review M1): they are a classifier-driven push with no recall_deep equivalent
+   (recall_deep is pure cosine), so gating them would silently disable F024 skill
+   injection. Track A keeps firing in unified mode (capped at `critic_skill_slots`,
+   targeted, non-duplicative).
+2. **recall_deep gives the FULL one-line body to the TOP-ranked procedure ONLY**
+   (others keep name+desc) — done after the final sort in `Heart._recall`. One body
+   (no bloat, bounded regardless of how many procedures surface); generous cap
+   (`recall_body_max_chars` default 800, le=2000) so recall_deep alone usually suffices.
+   The body is whitespace-collapsed to ONE line, so recall_deep's SmartCompress cannot
+   **shred** it mid-body (it does per-LINE head/tail selection; a single line is atomic).
+   It can still be dropped *wholesale* on >50-line recalls — rare for top-K=10 — and
+   `recall_deep` is not in the refetchable-cache set, so a dropped body isn't
+   recoverable that turn. Acceptable for the top-1 line that sits in the head region.
+3. **get_procedure → fallback** (explicit deep-dive). It remains a registered,
+   model-selectable tool; nothing *enforces* "fallback only" — duplication is
+   **behaviorally discouraged** (the live A/B saw 0 calls), not structurally impossible.
+4. Static awareness cue (unchanged) triggers the single flow.
+
+**Deploy coupling (operator):** unified mode is `proc_passive_injection_enabled=false`
++ `recall_full_bodies=true` + `proc_awareness_cue=true`. Turning passive off WITHOUT the
+cue leaves the agent no implicit list and no instruction to pull → procedures become
+undiscoverable. The three flags ship independently (all default OFF) but must be flipped
+together.
+
+**Live validation (eval instance, unified mode on):** `get_procedure` calls dropped
+to **0** (was 4–5; recall_deep body now suffices), passive sections = **0** (single
+surface). The exact-token follow metric was noisy at n=3 (1–2/3, non-monotonic in the
+cap) → **effectiveness needs the larger selection-accuracy measurement** (the gate),
+not n=3. The structural invariants (single surface, no dup, no bloat) are confirmed;
+the flag flip in prod is gated on that selection-accuracy measurement.
+
+## 8.2 Catalog-first delivery (supersedes 8.1's recall_deep top-1 body)
+
+Decision 2026-06-07 (`8c9039d6`): the §8.1 "recall_deep gives the top-1 a one-line
+body" approach conflated **breadth** (what procedures exist) and **depth** (the full
+steps for the one I'm using) into a single ranker-chosen, truncated surface. Two
+weaknesses: depth was truncated and *the cosine ranker* (not the agent) chose which one
+body to show; breadth was capped at cosine top-K. This also produced a codex P2 (the CE
+reranks on name+desc, so it can pick the wrong top-1 to body).
+
+The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
+"catalog + auto-inline body" intent): split breadth from depth.
+
+1. **Breadth — static `## Procedure Catalog`** (`proc_catalog_enabled`, **default ON** as
+   of merge — catalog-first is the intended delivery mode; **prod must pin it OFF until the
+   dedup work lands**, see the gate below).
+   Lists active procedures as `- name (domain): description` — **stable fields only** (NO
+   activation_count/effectiveness, which change per use). It is query-independent → rides
+   the **static cache tier** → byte-identical *between procedure CRUD events* and cached
+   then. It is NOT immutable: a learned/edited/retired procedure changes the bytes and
+   busts the static block (identity+safety+catalog share one breakpoint) on the next turn
+   — acceptable because procedure CRUD (sleep learning) is rare vs turns and sleep fires
+   at session-end/idle when the cache is cold anyway. Bounded by `proc_catalog_max` (row
+   cap, default 100) AND `proc_catalog_desc_chars` (per-row description truncation, default
+   120 — keeps every NAME while bounding total size; `description` is unbounded `Text`).
+   The list orders by `created_at desc, id` (deterministic — same-txn timestamp ties don't
+   reshuffle it). Not gated by frame `budget.procedures`, so it appears even in the
+   conversation frame (but skipped on the initiation path, where build() isn't called).
+2. **Depth — `get_procedure(<name>)`** loads the **full untruncated** body on selection.
+   `get_procedure` now accepts a **name** (falls back to `get_procedure_by_name`) as well
+   as a UUID, and renders `core_patterns` + `implementation_notes` (was missing
+   core_patterns). The tool **schema description** advertises name-first so the agent
+   doesn't detour through `recall_deep` to find a UUID. `get_procedure_by_name` resolves
+   same-name duplicates **deterministically** via a STABLE, non-volatile key
+   (`ORDER BY created_at desc, id` — the newest row; NOT activation_count, which drifts per
+   use and would make the resolved row change turn-to-turn). This is byte-identical to the
+   catalog's own winner selection (same ordering, same exact match), so the catalog entry
+   and the loaded body always agree, cache-stably (was an arbitrary `LIMIT 1`; this path
+   ships live regardless of the catalog flag).
+3. **Removed:** the §8.1 recall_deep top-1 body machinery (`recall_full_bodies`,
+   `recall_body_max_chars`, `_procedure_body_line`, the post-rank expansion, and the
+   per-result body metadata). recall_deep returns procedures as name+desc again — the
+   catalog is breadth, get_procedure is depth. This dissolves the codex P2.
+4. **Critic (option C — one surface, marked):** Track-A Critic skills stay ungated (M1),
+   but when the catalog is rendered they are NOT re-listed in full (that re-duplicated
+   name+desc). Instead a slim **dynamic** `★ Recommended for this task: …` pointer names
+   this turn's Critic picks and points back into the cached catalog. Names only → no
+   content duplication; dynamic tier → the per-turn picks never bust the static catalog.
+   (Literal `★` *inside* the catalog body was rejected — it would make the catalog
+   per-turn and bust the static cache every turn.) When the catalog is OFF, Critic falls
+   back to the full `## Known Procedures` section (unchanged).
+5. **Track-B / cue / failure:** Track-B passive embedding is gated off when
+   `proc_passive_injection_enabled=false` **OR** a catalog actually rendered — so
+   catalog+passive can never double-list (enforced in code). `proc_awareness_cue` is the
+   **cue-only fallback** when the catalog is off; it ALSO fires when the catalog is enabled
+   but **failed/empty** this turn, so unified mode never loses all procedure awareness on a
+   transient DB error.
+6. **Catalog hardening (codex rounds):** name-dedup uses the EXACT name as key and
+   first-wins over the created_at-desc fetch (= the newest row), byte-identical to
+   `get_procedure_by_name`'s stable ordering, so the catalog entry and the loaded body
+   agree without drifting on activation counters (cache-stable); names are sanitized for
+   newlines only (`_inline_name`) to preserve the exact lookup key; the header **data-frames**
+   entries as reference data (not instructions) against single-line injection; fetch uses
+   3× headroom so dup rows can't crowd out
+   unique names before the cap; `proc_catalog_max_chars` (default 4000, `ge=500`) is a hard
+   total-size cap with a final truncate backstop; `get_procedure` retries a UUID-shaped
+   input as a name after an id miss.
+
+**Default delivery mode (as of merge):** `proc_catalog_enabled=true` (breadth via catalog,
+depth via get_procedure). With the catalog rendered, the duplicating Track-B embedding
+slots are auto-suppressed and Critic picks become the option-C slim pointer, so
+`proc_passive_injection_enabled` stays `true` (its only remaining role is the safety-net
+that re-enables Track B if the catalog query fails). `proc_awareness_cue` stays `false`
+(moot when the catalog is on). `recall_full_bodies` was removed.
+
+**PROD DEPLOY GATE (hard):** the catalog is default-ON in code but must NOT ship to prod
+until skill-path dedup lands — it faithfully lists the 51/62 duplicate procedures. Pin
+`NOUS_PROC_CATALOG_ENABLED=false` in the prod env until then (and run the selection-accuracy
+measurement on a dup-heavy corpus). This is now a process/ops gate, not a code default.
+
+**Live validation (real Nous instance on :8077 vs nous_eval_live, catalog on):**
+- Catalog reaches the prompt: the agent listed all 4 procedure names *"from my procedure
+  catalog"* with **no search call**.
+- Name selection works: on a "draft release notes" task the agent reported *"I called
+  `get_procedure` with the name exactly as listed in my Procedure Catalog (no search or
+  UUID lookup needed)"* and loaded the full body (the VALIDATION-TOKEN + required format
+  surfaced verbatim).
+- The real-instance test caught a wiring gap the unit tests missed: the handler accepted
+  names but the **advertised tool schema** still said "UUID", so the agent first detoured
+  through `recall_deep`. Fixing the schema string closed it.
+
+**HARD prerequisite before flipping `proc_catalog_enabled` in any environment:** skill-path
+dedup must land first. The catalog faithfully lists DB duplicates — the procedure audit
+found 51/62 are skill-path dups (the live `nous` DB shows 6+ identical "Always run tests
+before merging" rows; 3 drifted "Send Email via Gmail SMTP" rows). A catalog of dozens of
+near-identical lines defeats both the no-bloat goal AND agent selection (the live
+validation used 4 *clean* procedures — the opposite of the deployment condition). The flip
+is gated on (a) dedup landing and (b) the selection-accuracy measurement running on a
+**dup-heavy** corpus, not the 4-proc smoke. This rework deletes §8.1's body path, so there
+is no automatic fallback if catalog-first underperforms the gate — the dedup+measurement
+gate is the safety net.
