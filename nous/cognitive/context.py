@@ -33,6 +33,7 @@ SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
     "Context Safety": "static",
     "Procedure Awareness": "static",  # F079 P1: static cue -> cached, never busts
+    "Procedure Catalog": "static",  # F079 catalog-first: query-independent breadth list -> cached
     "Epistemic Routing": "dynamic",  # §2
     "User Profile": "semi_stable",
     "Active Censors": "semi_stable",
@@ -235,7 +236,50 @@ class ContextEngine:
         # tells the agent to search for a relevant procedure before acting. It is
         # FULLY STATIC (no per-turn / no CRUD dependency) so it caches once and never
         # busts; bodies ride in the messages on demand. Flag-gated; off => no section.
-        if getattr(self._settings, "proc_awareness_cue", False):
+        # F079 catalog-first BREADTH: list every active procedure (name/domain/desc only,
+        # NO activation/effectiveness — those change per use and would bust the cache).
+        # The list is query-independent, so this whole section is byte-identical across
+        # turns and rides the static cache tier. Bodies are NOT here: the agent selects a
+        # procedure by name and calls get_procedure(<name>) to load the full steps (depth).
+        if getattr(self._settings, "proc_catalog_enabled", False):
+            catalog_max = getattr(self._settings, "proc_catalog_max", 100)
+            try:
+                procs, total = await self._heart.list_procedures(
+                    limit=catalog_max, active_only=True, session=session,
+                )
+            except Exception as e:
+                logger.warning("Procedure catalog build failed: %s", e)
+                procs, total = [], 0
+            if procs:
+                lines = [
+                    "You have a library of learned procedures (reusable how-to "
+                    "knowledge from past work), listed below by name. The full steps "
+                    "are NOT in this prompt. Before acting on a task that matches one, "
+                    "call `get_procedure` with its name to load the full body, then "
+                    "follow it.",
+                    "",
+                ]
+                for p in procs:
+                    domain = getattr(p, "domain", None) or "general"
+                    desc = getattr(p, "description", None) or ""
+                    lines.append(
+                        f"- {p.name} ({domain}): {desc}" if desc
+                        else f"- {p.name} ({domain})"
+                    )
+                if total > len(procs):
+                    lines.append(f"…and {total - len(procs)} more (ask to list them).")
+                catalog_text = "\n".join(lines)
+                sections.append(
+                    ContextSection(
+                        priority=2,
+                        label="Procedure Catalog",
+                        content=catalog_text,
+                        token_estimate=self._estimate_tokens(catalog_text),
+                        tier=SECTION_TIERS.get("Procedure Catalog", "static"),
+                    )
+                )
+        elif getattr(self._settings, "proc_awareness_cue", False):
+            # Cue-only fallback (no list) when the full catalog is disabled.
             awareness_text = (
                 "You have a library of learned procedures (reusable how-to knowledge "
                 "captured from past work). They are NOT auto-loaded into this prompt. "

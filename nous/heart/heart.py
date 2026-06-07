@@ -61,28 +61,6 @@ from nous.storage.models import ConversationState
 logger = logging.getLogger(__name__)
 
 
-def _procedure_body_line(core_patterns, implementation_notes, cap: int) -> str:
-    """F079: build a ONE-line, whitespace-collapsed, char-capped body for a procedure.
-
-    Used for the *single* top-ranked procedure in a recall (unified pull): gives the
-    agent enough to act without a separate get_procedure round-trip, while staying one
-    line (survives the runner's SmartCompress head/tail selection) and bounded (one
-    body, not N). core_patterns first (concise "what to do"), then implementation_notes.
-    Returns "" if there's no body.
-    """
-    parts = list(core_patterns or []) + list(implementation_notes or [])
-    body = " ".join(" ".join(str(p).split()) for p in parts if str(p).strip())
-    if not body or cap <= 0:
-        return ""
-    if len(body) > cap:
-        cut = body[:cap]
-        sp = cut.rfind(" ")  # prefer a word boundary (only if not too short)
-        if sp > cap // 2:
-            cut = cut[:sp]
-        body = cut.rstrip() + "…"
-    return body
-
-
 class Heart:
     """Memory organ for Nous agents.
 
@@ -1108,33 +1086,9 @@ class Heart:
             merged.sort(key=lambda r: r.score, reverse=True)
             merged = merged[:limit]
 
-        # F079 unified pull: append the FULL body to the single TOP-ranked procedure
-        # only (others keep name+desc). One body, not N -> no bloat. The body is
-        # whitespace-collapsed to ONE line so recall_deep's SmartCompress cannot shred it
-        # mid-body (it does per-LINE head/tail selection; a single line is atomic — it can
-        # still be dropped wholesale on >50-line recalls, but never partially mangled).
-        # Richer than name+desc -> no separate get_procedure round-trip for the top hit.
-        #
-        # "Top" = position after the final intra-Heart sort below. Caveat: a downstream
-        # consumer that re-sorts by score (rerank_by_score, e.g. chunk recall) can change
-        # the visible order — the bodied result is still the Heart-top procedure. F071: if
-        # that id is later excluded the turn shows no bodied procedure (closed by design in
-        # unified mode — passive off -> exclude set is empty).
-        if getattr(self.settings, "recall_full_bodies", False):
-            cap = getattr(self.settings, "recall_body_max_chars", 800)
-            for r in merged:
-                if r.type == "procedure":
-                    body = _procedure_body_line(
-                        (r.metadata or {}).get("core_patterns"),
-                        (r.metadata or {}).get("implementation_notes"),
-                        cap,
-                    )
-                    if body:
-                        r.summary = f"{r.summary} | {body}"
-                    # top-ranked procedure ONLY; stop even if its body was empty (no
-                    # fall-through to lower procedures — that is the "one body" invariant).
-                    break
-
+        # F079 catalog-first: recall_deep returns procedures as name+desc summaries (like
+        # facts/episodes). Procedure BREADTH is the static `## Procedure Catalog` and DEPTH
+        # is get_procedure(<name>) on selection — recall_deep no longer inlines bodies.
         return merged
 
     def _to_recall_result(self, memory_type: str, item: object, score: float) -> RecallResult | None:
@@ -1168,25 +1122,18 @@ class Heart:
                 },
             )
         elif isinstance(item, ProcedureSummary):
-            # name+desc here; the FULL body is added only to the top-ranked procedure
-            # after the final sort (see _recall) — unified pull, bounded to one body.
-            metadata: dict = {
-                "domain": item.domain,
-                "effectiveness": item.effectiveness,
-                "activation_count": item.activation_count,
-            }
-            # Body fields are consumed ONLY by the post-rank top-1 expansion, so carry them
-            # only when that path is active — keeps the OFF path metadata byte-identical and
-            # avoids copying the lists on every procedure result (F079 unified pull).
-            if getattr(self.settings, "recall_full_bodies", False):
-                metadata["core_patterns"] = list(item.core_patterns or [])
-                metadata["implementation_notes"] = list(item.implementation_notes or [])
+            # name+desc summary only; the full body is loaded on demand via
+            # get_procedure(<name>) (F079 catalog-first depth path).
             return RecallResult(
                 type="procedure",
                 id=item.id,
                 summary=f"{item.name}: {item.description}" if item.description else item.name,
                 score=score,
-                metadata=metadata,
+                metadata={
+                    "domain": item.domain,
+                    "effectiveness": item.effectiveness,
+                    "activation_count": item.activation_count,
+                },
             )
         elif isinstance(item, CensorMatch):
             return RecallResult(

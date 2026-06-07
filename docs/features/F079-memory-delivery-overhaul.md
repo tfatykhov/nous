@@ -256,3 +256,55 @@ surface). The exact-token follow metric was noisy at n=3 (1–2/3, non-monotonic
 cap) → **effectiveness needs the larger selection-accuracy measurement** (the gate),
 not n=3. The structural invariants (single surface, no dup, no bloat) are confirmed;
 the flag flip in prod is gated on that selection-accuracy measurement.
+
+## 8.2 Catalog-first delivery (supersedes 8.1's recall_deep top-1 body)
+
+Decision 2026-06-07 (`8c9039d6`): the §8.1 "recall_deep gives the top-1 a one-line
+body" approach conflated **breadth** (what procedures exist) and **depth** (the full
+steps for the one I'm using) into a single ranker-chosen, truncated surface. Two
+weaknesses: depth was truncated and *the cosine ranker* (not the agent) chose which one
+body to show; breadth was capped at cosine top-K. This also produced a codex P2 (the CE
+reranks on name+desc, so it can pick the wrong top-1 to body).
+
+The fix mirrors **Claude Code progressive disclosure** (and the F079 spec's own
+"catalog + auto-inline body" intent): split breadth from depth.
+
+1. **Breadth — static `## Procedure Catalog`** (`proc_catalog_enabled`, default OFF).
+   Lists **all** active procedures as `- name (domain): description` — **stable fields
+   only** (NO activation_count/effectiveness, which change per use and would bust the
+   cache). It is query-independent → rides the **static cache tier** → byte-identical
+   every turn → caches once. Bounded by `proc_catalog_max` (default 100). The header
+   tells the agent to call `get_procedure(<name>)` for the steps. This is *not* gated by
+   frame `budget.procedures`, so it appears even in the conversation frame.
+2. **Depth — `get_procedure(<name>)`** loads the **full untruncated** body on selection.
+   `get_procedure` now accepts a **name** (falls back to `get_procedure_by_name`) as well
+   as a UUID, and renders `core_patterns` + `implementation_notes` (was missing
+   core_patterns). The tool **schema description** advertises name-first so the agent
+   doesn't detour through `recall_deep` to find a UUID.
+3. **Removed:** the §8.1 recall_deep top-1 body machinery (`recall_full_bodies`,
+   `recall_body_max_chars`, `_procedure_body_line`, the post-rank expansion, and the
+   per-result body metadata). recall_deep returns procedures as name+desc again — the
+   catalog is breadth, get_procedure is depth. This dissolves the codex P2.
+4. **Unchanged:** Track-B passive embedding stays gated off by
+   `proc_passive_injection_enabled`; Track-A Critic skills stay ungated (M1).
+   `proc_awareness_cue` survives as the **cue-only fallback** (instruction, no list) used
+   only when `proc_catalog_enabled` is off.
+
+**Unified mode** = `proc_passive_injection_enabled=false` + `proc_catalog_enabled=true`
+(breadth via catalog, depth via get_procedure). All flags default OFF.
+
+**Live validation (real Nous instance on :8077 vs nous_eval_live, catalog on):**
+- Catalog reaches the prompt: the agent listed all 4 procedure names *"from my procedure
+  catalog"* with **no search call**.
+- Name selection works: on a "draft release notes" task the agent reported *"I called
+  `get_procedure` with the name exactly as listed in my Procedure Catalog (no search or
+  UUID lookup needed)"* and loaded the full body (the VALIDATION-TOKEN + required format
+  surfaced verbatim).
+- The real-instance test caught a wiring gap the unit tests missed: the handler accepted
+  names but the **advertised tool schema** still said "UUID", so the agent first detoured
+  through `recall_deep`. Fixing the schema string closed it.
+
+**Known follow-up:** the catalog faithfully lists DB duplicates — the procedure audit
+found 51/62 are skill-path dups (the live `nous` DB shows 6+ identical "Always run tests
+before merging" rows). Pair the catalog with the dedup work or it lists near-identical
+entries.

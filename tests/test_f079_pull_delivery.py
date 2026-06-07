@@ -1,69 +1,46 @@
-"""F079 — unified procedure pull: single surface (recall_deep), no duplication, no bloat.
+"""F079 — catalog-first procedure delivery (progressive disclosure).
 
-- procedures enter context ONLY via the pull path when proc_passive_injection_enabled
-  is False (the passive `## Known Procedures` section is skipped);
-- recall_deep gives the FULL one-line body to the TOP-ranked procedure only (others
-  keep name+desc) — one body (no bloat), richer than name+desc (no get_procedure
-  round-trip = no duplicate copy).
+BREADTH: a static, cacheable `## Procedure Catalog` lists every active procedure by
+  name+domain+desc (stable fields only -> byte-identical across turns -> caches).
+DEPTH:   get_procedure(<name>) loads the full untruncated body on selection.
 
-Body-line logic is a pure helper (DB-free). Top-1 expansion + passive toggle are
-exercised via build() (mocked) and a PG-required recall test.
+Passive embedding slots (Track B) stay gated off behind proc_passive_injection_enabled;
+Critic-recommended skills (Track A) are NOT gated (no pull equivalent).
 """
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from nous.cognitive.context import SECTION_TIERS
-from nous.heart.heart import _procedure_body_line
 from nous.heart.schemas import ProcedureSummary
 
 
-class TestProcedureBodyLine:
-    def test_empty_returns_blank(self):
-        assert _procedure_body_line([], [], 800) == ""
-
-    def test_collapses_newlines_to_one_line(self):
-        out = _procedure_body_line(["result:\n- detail a\n- detail b"], [], 800)
-        assert "\n" not in out
-        assert "result: - detail a - detail b" in out
-
-    def test_core_patterns_lead_then_notes(self):
-        out = _procedure_body_line(["pattern1"], ["note1"], 800)
-        assert out.index("pattern1") < out.index("note1")
-
-    def test_word_boundary_cap_with_ellipsis(self):
-        out = _procedure_body_line(["alpha beta gamma delta epsilon zeta eta"], [], 20)
-        assert out.endswith("…")
-        assert "  " not in out  # no mid-word/double-space artifact
-
-    def test_cap_zero_returns_blank(self):
-        assert _procedure_body_line(["x"], [], 0) == ""
-
-
-class TestAwarenessTier:
-    def test_awareness_section_is_static_tier(self):
+class TestSectionTiers:
+    def test_catalog_and_awareness_are_static(self):
+        # Both procedure breadth surfaces must ride the static cache tier.
+        assert SECTION_TIERS.get("Procedure Catalog") == "static"
         assert SECTION_TIERS.get("Procedure Awareness") == "static"
 
 
 def _proc_summary(name: str, score: float = 0.9) -> ProcedureSummary:
     return ProcedureSummary(
         id=uuid4(), name=name, domain="reporting", description=f"desc {name}",
-        activation_count=1, effectiveness=None, score=score,
-        core_patterns=[f"{name} pattern"], implementation_notes=[f"{name} note"],
+        activation_count=7, effectiveness=0.5, score=score,
     )
 
 
 class TestBuildSurfaces:
-    """Passive `## Known Procedures` section appears iff proc_passive_injection_enabled."""
-
-    def _engine(self, **flags):
+    def _engine(self, catalog_procs=None, **flags):
         from unittest.mock import AsyncMock, MagicMock
         from nous.cognitive.context import ContextEngine
         from nous.config import Settings
         heart = MagicMock()
         heart.search_procedures = AsyncMock(return_value=[_proc_summary("p1")])
+        procs = catalog_procs if catalog_procs is not None else [_proc_summary("p1"), _proc_summary("p2")]
+        heart.list_procedures = AsyncMock(return_value=(procs, len(procs)))
         for m in ("search_facts", "search_episodes", "list_facts_by_category",
                   "list_censors", "list_episodes"):
             setattr(heart, m, AsyncMock(return_value=[]))
@@ -77,58 +54,96 @@ class TestBuildSurfaces:
         from nous.cognitive.schemas import FrameSelection
         return FrameSelection(frame_id="task", frame_name="Task", confidence=0.9, match_method="test")
 
+    async def _build(self, engine, text="do a task", **kw):
+        return await engine.build(agent_id="t", session_id="s1", input_text=text, frame=self._frame(), **kw)
+
+    # --- Passive embedding (Track B) gate -------------------------------------
+
     @pytest.mark.asyncio
     async def test_passive_section_present_by_default(self):
         engine = self._engine(proc_passive_injection_enabled=True)
-        r = await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
+        r = await self._build(engine)
         assert any(s.label == "Known Procedures" for s in r.sections)
 
     @pytest.mark.asyncio
     async def test_passive_section_absent_when_disabled(self):
         engine = self._engine(proc_passive_injection_enabled=False)
-        r = await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
+        r = await self._build(engine)
         assert not any(s.label == "Known Procedures" for s in r.sections)
 
     @pytest.mark.asyncio
-    async def test_awareness_cue_present_static_byte_stable(self):
-        engine = self._engine(proc_awareness_cue=True)
-        r1 = await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
-        aware = [s for s in r1.sections if s.label == "Procedure Awareness"]
-        assert len(aware) == 1 and aware[0].tier == "static"
-        r2 = await engine.build(agent_id="t", session_id="s1", input_text="other task", frame=self._frame())
-        assert [s for s in r2.sections if s.label == "Procedure Awareness"][0].content == aware[0].content
-
-    @pytest.mark.asyncio
-    async def test_awareness_cue_absent_by_default(self):
-        engine = self._engine(proc_awareness_cue=False)
-        r = await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
-        assert not any(s.label == "Procedure Awareness" for s in r.sections)
-
-    @pytest.mark.asyncio
     async def test_passive_off_skips_embedding_search(self):
-        """Track B (embedding similarity) is what passive-off drops — the search must
-        not even run, since recall_deep is the single surface for cosine-matched procs."""
+        """passive-off drops only Track B (embedding) — the search must not even run."""
         engine = self._engine(proc_passive_injection_enabled=False)
-        await engine.build(agent_id="t", session_id="s1", input_text="do a task", frame=self._frame())
+        await self._build(engine)
         engine._heart.search_procedures.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_critic_track_survives_passive_off(self):
-        """M1: passive-off gates ONLY Track B (embedding). Critic-recommended skills
-        (Track A) have no recall_deep equivalent, so they must still reach context."""
+        """Critic-recommended skills (Track A) have no recall_deep equivalent, so they
+        must still reach context when passive embeddings are off."""
         from unittest.mock import AsyncMock
-        engine = self._engine(
-            proc_passive_injection_enabled=False, critic_skill_injection="enabled",
-        )
+        engine = self._engine(proc_passive_injection_enabled=False, critic_skill_injection="enabled")
         engine._heart.get_procedure_by_name = AsyncMock(return_value=_proc_summary("critic-pick"))
-        r = await engine.build(
-            agent_id="t", session_id="s1", input_text="do a task",
-            frame=self._frame(), critic_skills=["critic-pick"],
-        )
+        r = await self._build(engine, critic_skills=["critic-pick"])
         sec = [s for s in r.sections if s.label == "Known Procedures"]
         assert sec, "Critic track must still inject when passive embeddings are off"
         assert "critic-pick" in sec[0].content
-        engine._heart.search_procedures.assert_not_called()  # Track B still gated
+        engine._heart.search_procedures.assert_not_called()
+
+    # --- Catalog (breadth) ----------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_catalog_absent_by_default(self):
+        engine = self._engine()
+        r = await self._build(engine)
+        assert not any(s.label == "Procedure Catalog" for s in r.sections)
+        engine._heart.list_procedures.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_catalog_lists_procedures_when_enabled(self):
+        engine = self._engine(proc_catalog_enabled=True)
+        r = await self._build(engine)
+        cat = [s for s in r.sections if s.label == "Procedure Catalog"]
+        assert len(cat) == 1 and cat[0].tier == "static"
+        assert "p1" in cat[0].content and "p2" in cat[0].content
+        assert "get_procedure" in cat[0].content  # tells the agent how to load depth
+
+    @pytest.mark.asyncio
+    async def test_catalog_excludes_volatile_fields(self):
+        """Cache-stability: activation/effectiveness change per use, so the catalog
+        must NOT render them (only name/domain/desc)."""
+        engine = self._engine(proc_catalog_enabled=True)
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        assert "activated" not in content.lower()
+        assert "effectiveness" not in content.lower()
+        assert "7x" not in content  # the mock's activation_count
+
+    @pytest.mark.asyncio
+    async def test_catalog_byte_stable_across_turns(self):
+        engine = self._engine(proc_catalog_enabled=True)
+        r1 = await self._build(engine, text="task one")
+        r2 = await self._build(engine, text="a totally different task two")
+        c1 = next(s.content for s in r1.sections if s.label == "Procedure Catalog")
+        c2 = next(s.content for s in r2.sections if s.label == "Procedure Catalog")
+        assert c1 == c2  # query-independent -> cacheable
+
+    @pytest.mark.asyncio
+    async def test_catalog_overrides_cue(self):
+        """When the full catalog is on, the cue-only fallback is suppressed (one surface)."""
+        engine = self._engine(proc_catalog_enabled=True, proc_awareness_cue=True)
+        r = await self._build(engine)
+        assert any(s.label == "Procedure Catalog" for s in r.sections)
+        assert not any(s.label == "Procedure Awareness" for s in r.sections)
+
+    @pytest.mark.asyncio
+    async def test_cue_fallback_when_catalog_off(self):
+        engine = self._engine(proc_catalog_enabled=False, proc_awareness_cue=True)
+        r = await self._build(engine)
+        aware = [s for s in r.sections if s.label == "Procedure Awareness"]
+        assert len(aware) == 1 and aware[0].tier == "static"
+        assert not any(s.label == "Procedure Catalog" for s in r.sections)
 
 
 def test_decision_pipeline_carries_pattern():
@@ -142,54 +157,54 @@ def test_decision_pipeline_carries_pattern():
     assert _decisions_to_pipeline([d])[0].metadata["pattern"] == "prefer-cursor-pagination"
 
 
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_recall_gives_body_to_top_procedure_only(heart, session):
-    """PG-required: recall surfaces a body for exactly the TOP procedure (no bloat),
-    and that body is richer than name+desc (no get_procedure round-trip needed)."""
-    from nous.heart.schemas import ProcedureInput
-    nonce = "zqxnonce77uniq"
-    for n in (1, 2):
-        await heart.store_procedure(
-            ProcedureInput(
-                name=f"proc-{nonce}-{n}", domain="reporting",
-                description=f"{nonce} produce report variant {n}",
-                core_patterns=[f"{nonce} executive summary step {n}"],
-                implementation_notes=[f"{nonce} gather metrics {n}"],
-            ),
-            session=session,
-        )
-    heart.settings.recall_full_bodies = True
-    results = await heart.recall(nonce, types=["procedure"], session=session)
-    mine = [r for r in results if nonce in r.summary]
-    assert len(mine) >= 2, "expected both seeded procedures retrieved"
-    with_body = [r for r in mine if " | " in r.summary]
-    # Exactly one procedure carries the full body (top-1) — bounded, no bloat.
-    assert len(with_body) == 1
-    assert "executive summary" in with_body[0].summary or "gather metrics" in with_body[0].summary
+class TestGetProcedureToolResolution:
+    """Catalog-first DEPTH: get_procedure must resolve by NAME (what the catalog shows),
+    not only UUID, and render the full body (core_patterns + implementation_notes)."""
 
+    def _dispatcher(self, detail):
+        from unittest.mock import AsyncMock, MagicMock
+        from nous.api.tools import ToolDispatcher, register_nous_tools
+        from nous.config import Settings
+        heart = MagicMock()
+        heart.get_procedure = AsyncMock(return_value=detail)
+        heart.get_procedure_by_name = AsyncMock(return_value=detail)
+        brain = MagicMock()
+        d = ToolDispatcher()
+        register_nous_tools(d, brain, heart, Settings(_env_file=None))
+        return d, heart
 
-@pytest.mark.postgres_only
-@pytest.mark.asyncio
-async def test_recall_full_bodies_off_is_byte_identical(heart, session):
-    """OFF path (recall_full_bodies=False): NO procedure summary carries a body and no
-    body lists are carried in metadata — byte-identical legacy name+desc (F079 §8)."""
-    from nous.heart.schemas import ProcedureInput
-    nonce = "offpathnonce42uniq"
-    for n in (1, 2):
-        await heart.store_procedure(
-            ProcedureInput(
-                name=f"proc-{nonce}-{n}", domain="reporting",
-                description=f"{nonce} produce report variant {n}",
-                core_patterns=[f"{nonce} executive summary step {n}"],
-                implementation_notes=[f"{nonce} gather metrics {n}"],
-            ),
-            session=session,
+    @staticmethod
+    def _detail(name="report-skill"):
+        return SimpleNamespace(
+            name=name, domain="reporting", description="produce a report",
+            goals=["report"], core_tools=["write_file"],
+            core_patterns=["start with an executive summary"],
+            implementation_notes=["gather metrics first"],
+            activation_count=3, active=True, effectiveness=0.5,
         )
-    heart.settings.recall_full_bodies = False
-    results = await heart.recall(nonce, types=["procedure"], session=session)
-    mine = [r for r in results if nonce in r.summary]
-    assert len(mine) >= 2, "expected both seeded procedures retrieved"
-    assert all(" | " not in r.summary for r in mine), "OFF path must not add bodies"
-    assert all("core_patterns" not in (r.metadata or {}) for r in mine), \
-        "OFF path must not carry body lists in metadata"
+
+    @pytest.mark.asyncio
+    async def test_resolves_by_name_and_renders_full_body(self):
+        detail = self._detail()
+        d, heart = self._dispatcher(detail)
+        out = await d._handlers["get_procedure"]("report-skill")
+        text = out["content"][0]["text"]
+        heart.get_procedure_by_name.assert_awaited_once_with("report-skill")
+        heart.get_procedure.assert_not_called()  # name -> no UUID path
+        assert "executive summary" in text       # core_patterns rendered
+        assert "gather metrics first" in text     # implementation_notes rendered
+
+    @pytest.mark.asyncio
+    async def test_resolves_by_uuid(self):
+        detail = self._detail()
+        d, heart = self._dispatcher(detail)
+        pid = str(uuid4())
+        await d._handlers["get_procedure"](pid)
+        heart.get_procedure.assert_awaited_once()
+        heart.get_procedure_by_name.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_name_returns_not_found(self):
+        d, _ = self._dispatcher(None)
+        out = await d._handlers["get_procedure"]("nope")
+        assert "No procedure found" in out["content"][0]["text"]

@@ -131,21 +131,20 @@ class Settings(BaseSettings):
     # F038-2.1: Procedure score floor (embedding mode only)
     procedure_score_floor: float = 0.40
 
-    # F079 P1: pull-path delivery (procedures reach the model via recall_deep, not
-    # passive injection). Both default OFF (dark-launch).
-    recall_full_bodies: bool = False  # recall_deep gives the FULL body to the TOP procedure only
-    # One-line body cap for the top procedure. Generous enough that recall_deep alone
-    # suffices (no separate get_procedure round-trip = no duplicate copy), bounded so a
-    # single body stays well under NOUS_TOOL_SOFT_TRIM_CHARS (4000).
-    recall_body_max_chars: int = Field(default=800, ge=1, le=2000)
-    proc_awareness_cue: bool = False  # static cached directive: "pull a relevant procedure first"
-    # F079 unified pull: when False, the passive embedding-similarity (Track B) procedure
-    # slots are NOT built — those duplicate the recall_deep cosine path, so cosine-matched
-    # procedures enter context ONLY via the pull path (single surface, no per-turn bloat).
-    # Critic-recommended skills (Track A) are NOT gated by this flag (no pull equivalent).
-    # OPERATOR COUPLING: the intended "unified mode" is this flag OFF + proc_awareness_cue
-    # ON + recall_full_bodies ON. Turning this OFF without the cue leaves the agent no
-    # implicit list AND no instruction to pull (a cross-flag warning fires below).
+    # F079 catalog-first procedure delivery (progressive disclosure, à la Claude Code):
+    #   BREADTH — a static, cacheable `## Procedure Catalog` listing ALL active procedure
+    #     names+descs (proc_catalog_enabled). Stable fields only (no activation/effectiveness)
+    #     so it is byte-identical across turns → caches; bodies are NOT here.
+    #   DEPTH — the full untruncated body loaded on demand via get_procedure(<name>) when
+    #     the agent SELECTS one from the catalog.
+    # All default OFF (dark-launch).
+    proc_catalog_enabled: bool = False  # render the static breadth catalog
+    proc_catalog_max: int = Field(default=100, ge=1, le=500)  # safety cap on catalog size
+    proc_awareness_cue: bool = False  # cue-only fallback (instruction, no list) when catalog off
+    # When False, the passive embedding-similarity (Track B) procedure slots are skipped —
+    # those duplicate the recall_deep cosine path. Critic-recommended skills (Track A) are
+    # NOT gated by this flag (no pull equivalent). Unified mode = this flag OFF +
+    # proc_catalog_enabled ON (breadth via catalog, depth via get_procedure).
     proc_passive_injection_enabled: bool = True
 
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
