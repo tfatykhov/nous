@@ -265,7 +265,13 @@ async def test_build_truncates_to_budget(context_engine, session):
 
 
 async def test_build_skips_zero_budget(context_engine, brain, heart, session):
-    """Conversation frame skips procedures (budget=0)."""
+    """Conversation frame skips the budget-gated passive procedures section (budget=0).
+
+    F079: the catalog-first `## Procedure Catalog` is intentionally NOT budget-gated (it
+    renders even in the conversation frame), so disable it here to isolate the passive
+    budget behavior this test covers.
+    """
+    context_engine._settings.proc_catalog_enabled = False
     await _seed_procedures(heart, session)
     frame = _frame_selection("conversation", frame_name="Conversation")
     sid = f"test-ctx-skip-{uuid.uuid4().hex[:8]}"
@@ -273,7 +279,7 @@ async def test_build_skips_zero_budget(context_engine, brain, heart, session):
 
     result = await context_engine.build("nous-default", sid, "hello there", frame, session=session)
 
-    # Procedures section should not be present (budget=0)
+    # Passive procedures section should not be present (budget=0)
     procedure_sections = [s for s in result.sections if "procedure" in s.label.lower()]
     assert len(procedure_sections) == 0
 
