@@ -1018,6 +1018,9 @@ def _decisions_to_pipeline(
                 "stakes": d.stakes,
                 "confidence": d.confidence,
                 "raw_score": d.score,
+                # F079 P1: surface the abstract pattern so recall_deep delivers it
+                # (it's on DecisionSummary but was previously dropped by the formatter).
+                "pattern": d.pattern,
             },
         )
         for d in decisions

@@ -72,11 +72,17 @@ def _format_procedure_recall_summary(item, full_bodies: bool, cap: int) -> str:
     summary = f"{item.name}: {item.description}" if item.description else item.name
     if not full_bodies:
         return summary
-    parts = list(item.implementation_notes or []) + list(item.core_patterns or [])
+    # core_patterns first (concise "what to do"), then implementation_notes (verbose).
+    parts = list(item.core_patterns or []) + list(item.implementation_notes or [])
     body = " ".join(" ".join(str(p).split()) for p in parts if str(p).strip())
-    if body:
+    if body and cap > 0:
         if len(body) > cap:
-            body = body[:cap].rstrip() + "…"
+            cut = body[:cap]
+            # Prefer a word boundary so we don't end mid-word (only if not too short).
+            sp = cut.rfind(" ")
+            if sp > cap // 2:
+                cut = cut[:sp]
+            body = cut.rstrip() + "…"
         summary = f"{summary} | {body}"
     return summary
 

@@ -134,7 +134,10 @@ class Settings(BaseSettings):
     # F079 P1: pull-path delivery (procedures reach the model via recall_deep, not
     # passive injection). Both default OFF (dark-launch).
     recall_full_bodies: bool = False  # recall_deep returns a usable procedure body slice
-    recall_body_max_chars: int = Field(default=240, ge=1)  # one-line body cap (SmartCompress-safe)
+    # One-line body cap. Bounded: keep (cap x procedures-per-recall) well under
+    # NOUS_TOOL_SOFT_TRIM_CHARS (4000) so a richer recall_deep result isn't soft-trimmed
+    # (which would shred middle results, and recall_deep originals aren't cached).
+    recall_body_max_chars: int = Field(default=240, ge=1, le=1000)
     proc_awareness_cue: bool = False  # static cached directive: "pull a relevant procedure first"
 
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
