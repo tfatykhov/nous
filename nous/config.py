@@ -132,14 +132,19 @@ class Settings(BaseSettings):
     procedure_score_floor: float = 0.40
 
     # F079 catalog-first procedure delivery (progressive disclosure, à la Claude Code):
-    #   BREADTH — a static, cacheable `## Procedure Catalog` listing ALL active procedure
-    #     names+descs (proc_catalog_enabled). Stable fields only (no activation/effectiveness)
-    #     so it is byte-identical across turns → caches; bodies are NOT here.
+    #   BREADTH — a static `## Procedure Catalog` listing active procedure names+descs
+    #     (proc_catalog_enabled). Renders stable fields only (no activation/effectiveness),
+    #     so it is byte-identical BETWEEN procedure CRUD events → cached on the static tier.
+    #     NOTE: it is NOT immutable — a learned/edited/retired procedure changes the bytes
+    #     and busts the static block (identity+safety+catalog share one breakpoint) on the
+    #     next turn. Acceptable: procedure CRUD (sleep learning) is rare vs turns, and sleep
+    #     fires at session-end/idle when the cache is already cold; it re-caches immediately.
     #   DEPTH — the full untruncated body loaded on demand via get_procedure(<name>) when
     #     the agent SELECTS one from the catalog.
     # All default OFF (dark-launch).
     proc_catalog_enabled: bool = False  # render the static breadth catalog
-    proc_catalog_max: int = Field(default=100, ge=1, le=500)  # safety cap on catalog size
+    proc_catalog_max: int = Field(default=100, ge=1, le=500)  # safety cap on catalog row count
+    proc_catalog_desc_chars: int = Field(default=120, ge=20, le=500)  # per-row desc truncation (size bound)
     proc_awareness_cue: bool = False  # cue-only fallback (instruction, no list) when catalog off
     # When False, the passive embedding-similarity (Track B) procedure slots are skipped —
     # those duplicate the recall_deep cosine path. Critic-recommended skills (Track A) are

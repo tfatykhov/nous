@@ -33,14 +33,15 @@ def _proc_summary(name: str, score: float = 0.9) -> ProcedureSummary:
 
 
 class TestBuildSurfaces:
-    def _engine(self, catalog_procs=None, **flags):
+    def _engine(self, catalog_procs=None, catalog_total=None, **flags):
         from unittest.mock import AsyncMock, MagicMock
         from nous.cognitive.context import ContextEngine
         from nous.config import Settings
         heart = MagicMock()
         heart.search_procedures = AsyncMock(return_value=[_proc_summary("p1")])
         procs = catalog_procs if catalog_procs is not None else [_proc_summary("p1"), _proc_summary("p2")]
-        heart.list_procedures = AsyncMock(return_value=(procs, len(procs)))
+        total = catalog_total if catalog_total is not None else len(procs)
+        heart.list_procedures = AsyncMock(return_value=(procs, total))
         for m in ("search_facts", "search_episodes", "list_facts_by_category",
                   "list_censors", "list_episodes"):
             setattr(heart, m, AsyncMock(return_value=[]))
@@ -145,6 +146,42 @@ class TestBuildSurfaces:
         assert len(aware) == 1 and aware[0].tier == "static"
         assert not any(s.label == "Procedure Catalog" for s in r.sections)
 
+    @pytest.mark.asyncio
+    async def test_catalog_overflow_line_when_capped(self):
+        """When more procedures exist than are returned, an honest operator note appears
+        (NOT a 'ask to list them' pointer — no list-all tool exists)."""
+        engine = self._engine(proc_catalog_enabled=True, catalog_total=150)  # 2 returned, 150 total
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        assert "148 more" in content
+        assert "NOUS_PROC_CATALOG_MAX" in content
+        assert "ask to list" not in content.lower()
+
+    @pytest.mark.asyncio
+    async def test_catalog_truncates_long_descriptions(self):
+        """Per-row description cap bounds size while keeping every name (description is
+        unbounded Text)."""
+        long_desc = "x" * 1000
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+        p = ProcedureSummary(id=uuid4(), name="bigproc", domain="d", description=long_desc,
+                             activation_count=1, effectiveness=None, score=0.9)
+        engine = self._engine(catalog_procs=[p], proc_catalog_enabled=True, proc_catalog_desc_chars=120)
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        assert "bigproc" in content          # name preserved
+        assert "…" in content                # truncation marker
+        assert "x" * 1000 not in content     # full desc not injected
+
+    @pytest.mark.asyncio
+    async def test_catalog_supersedes_passive_track_b(self):
+        """catalog ON forces Track B off even if passive injection is left ON — so the same
+        procedure can never be listed twice (catalog + Known Procedures)."""
+        engine = self._engine(proc_catalog_enabled=True, proc_passive_injection_enabled=True)
+        r = await self._build(engine)
+        assert any(s.label == "Procedure Catalog" for s in r.sections)
+        engine._heart.search_procedures.assert_not_called()  # Track B suppressed by catalog
+
 
 def test_decision_pipeline_carries_pattern():
     from nous.api.retrieval_pipeline import _decisions_to_pipeline
@@ -208,3 +245,19 @@ class TestGetProcedureToolResolution:
         d, _ = self._dispatcher(None)
         out = await d._handlers["get_procedure"]("nope")
         assert "No procedure found" in out["content"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_uuid_not_found_returns_clean_message(self):
+        """A well-formed UUID with no match returns the SAME not-found reply as a name
+        miss (heart.get_procedure raises ValueError; the handler unifies it)."""
+        from unittest.mock import AsyncMock, MagicMock
+        from nous.api.tools import ToolDispatcher, register_nous_tools
+        from nous.config import Settings
+        heart = MagicMock()
+        heart.get_procedure = AsyncMock(side_effect=ValueError("Procedure x not found"))
+        heart.get_procedure_by_name = AsyncMock(return_value=None)
+        d = ToolDispatcher()
+        register_nous_tools(d, MagicMock(), heart, Settings(_env_file=None))
+        out = await d._handlers["get_procedure"](str(uuid4()))
+        assert "No procedure found" in out["content"][0]["text"]
+        heart.get_procedure_by_name.assert_not_called()

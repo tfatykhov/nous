@@ -251,6 +251,10 @@ class ContextEngine:
                 logger.warning("Procedure catalog build failed: %s", e)
                 procs, total = [], 0
             if procs:
+                # Per-row description cap bounds total size (description is unbounded Text;
+                # proc_catalog_max can be large) while preserving every NAME (the breadth
+                # contract) — a whole-block tail-truncate would drop the last names instead.
+                desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
                 lines = [
                     "You have a library of learned procedures (reusable how-to "
                     "knowledge from past work), listed below by name. The full steps "
@@ -261,13 +265,20 @@ class ContextEngine:
                 ]
                 for p in procs:
                     domain = getattr(p, "domain", None) or "general"
-                    desc = getattr(p, "description", None) or ""
+                    desc = (getattr(p, "description", None) or "").strip()
+                    if len(desc) > desc_cap:
+                        desc = desc[:desc_cap].rstrip() + "…"
                     lines.append(
                         f"- {p.name} ({domain}): {desc}" if desc
                         else f"- {p.name} ({domain})"
                     )
                 if total > len(procs):
-                    lines.append(f"…and {total - len(procs)} more (ask to list them).")
+                    # No agent-facing list-all tool exists, so don't tell it to "ask";
+                    # this is an operator signal to raise NOUS_PROC_CATALOG_MAX.
+                    lines.append(
+                        f"…and {total - len(procs)} more (catalog capped at "
+                        f"{catalog_max}; raise NOUS_PROC_CATALOG_MAX to list all)."
+                    )
                 catalog_text = "\n".join(lines)
                 sections.append(
                     ContextSection(
@@ -549,8 +560,14 @@ class ContextEngine:
                 critic_slot_count = self._settings.critic_skill_slots
                 embedding_slot_count = self._settings.embedding_skill_slots
                 total_slots = critic_slot_count + embedding_slot_count
-                passive_embeddings = getattr(
-                    self._settings, "proc_passive_injection_enabled", True
+                # Track B (cosine embedding slots) duplicates both the recall_deep pull
+                # path AND the catalog. Gate it off when EITHER passive injection is
+                # disabled OR the catalog is on — so catalog+passive can never double-list
+                # the same procedure (enforces "unified mode" rather than relying on the
+                # operator to set both flags consistently).
+                passive_embeddings = (
+                    getattr(self._settings, "proc_passive_injection_enabled", True)
+                    and not getattr(self._settings, "proc_catalog_enabled", False)
                 )
 
                 # --- Track A: Critic-recommended skills ---
