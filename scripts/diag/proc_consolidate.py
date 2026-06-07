@@ -384,6 +384,21 @@ def emit_migration_sql() -> str:
             f"WHERE id = {_lit(pid)} AND agent_id = {a} AND trim(description) = ANY({markers});"
         )
     out.append("")
+    # Safety net (codex P1): the 059 unique index is global across agents, but the cluster
+    # consolidation above only touches the known agent's clusters. Archive any REMAINING active
+    # (agent_id, lower(name)) duplicate across ALL agents so the index can always be created —
+    # keep the newest (created_at desc, id), archive the rest (reversible, superseded_by=kept).
+    # No-op when there are none. Not agent-scoped on purpose.
+    out.append("-- ===== safety net: archive any remaining active (agent_id, lower(name)) duplicates (all agents) =====")
+    out.append(
+        "WITH ranked AS (SELECT id, "
+        "row_number() OVER (PARTITION BY agent_id, lower(name) ORDER BY created_at DESC, id) AS rn, "
+        "first_value(id) OVER (PARTITION BY agent_id, lower(name) ORDER BY created_at DESC, id) AS keep_id "
+        "FROM heart.procedures WHERE active) "
+        "UPDATE heart.procedures p SET active = false, archived_at = now(), superseded_by = r.keep_id "
+        "FROM ranked r WHERE p.id = r.id AND r.rn > 1;"
+    )
+    out.append("")
     return "\n".join(out)
 
 
