@@ -158,19 +158,30 @@ class ContextLogEntry:
             role = msg.get("role", "unknown")
             role_counts[role] = role_counts.get(role, 0) + 1
 
-        # Heuristic memory item counts from section content (one "- " bullet per item).
-        def _count_items(key: str) -> int:
+        # Heuristic memory item counts from section content (one bullet per item).
+        def _count_items(key: str, marker: str | None = None) -> int:
             text = sections.get(key, "")
-            return text.count("\n-") + (1 if text.strip() else 0)
+            if not text.strip():
+                return 0
+            if marker is not None:
+                # Count only TOP-LEVEL item lines. The formatter emits exactly one
+                # item per line starting with `marker`; an embedded "\n- " inside a
+                # verbatim-interpolated field (e.g. a multiline episode summary or
+                # procedure description) is NOT a delivered item. (codex PR #485)
+                return sum(1 for ln in text.split("\n") if ln.startswith(marker))
+            # Legacy heuristic for facts/decisions (mixed "- [subj]"/bare "- " bullets).
+            return text.count("\n-") + 1
 
         facts_count = _count_items("relevant_facts")
         decisions_count = _count_items("related_decisions")
         # F079 Phase 0: previously-unpopulated counters (the columns + INSERT already
         # existed; only the population was missing, so procedure/episode delivery was
-        # invisible on the dashboard). Markers added to SECTION_MARKERS above.
-        procedures_count = _count_items("known_procedures")
-        episodes_count = _count_items("past_episodes")
-        recent_conversations_count = _count_items("recent_conversations")
+        # invisible on the dashboard). Markers added to SECTION_MARKERS above. Use the
+        # type-specific top-level marker so embedded bullets in unconstrained text
+        # (descriptions/summaries) don't inflate the count.
+        procedures_count = _count_items("known_procedures", "- **")  # context.py:1047
+        episodes_count = _count_items("past_episodes", "- [")        # context.py:1063
+        recent_conversations_count = _count_items("recent_conversations", "- [")  # context.py:609
 
         tool_names = [t.get("name", "") for t in tools_list]
 

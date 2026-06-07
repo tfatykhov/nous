@@ -205,6 +205,21 @@ class TestF079DeliveryCounters:
         assert d["loaded_episodes"] == 2
         assert d["recent_conversations"] == 4
 
+    def test_embedded_bullets_not_overcounted(self):
+        # codex PR #485 P2: a verbatim multiline description/summary containing
+        # "\n- ..." must NOT inflate the count — only top-level items count.
+        prompt = (
+            "## Known Procedures\n"
+            "- **proc-a** (general): result follows:\n- embedded detail one\n- embedded detail two\n"
+            "- **proc-b** (general): clean one\n"
+            "## Past Episodes\n"
+            "- [success] did a thing\n  - sub bullet\n- detail line\n"
+            "- [partial] second episode\n"
+        )
+        e = self._entry(prompt)
+        assert e.loaded_procedures == 2  # proc-a + proc-b, not the 2 embedded bullets
+        assert e.loaded_episodes == 2    # two "- [" episodes, not the embedded "- detail"
+
     def test_absent_sections_count_zero(self):
         # No procedure/episode/recent sections -> counters are 0 (no false positives).
         e = self._entry("## Identity\nI am Nous\n## Relevant Facts\n- only a fact")
