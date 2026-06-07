@@ -143,7 +143,6 @@ class ContextLogEntry:
         frame_id: str,
         context_window: int,
         trace_id: str | None = None,
-        loaded_counts: dict[str, int] | None = None,
     ) -> ContextLogEntry:
         entry_id = uuid4().hex[:16]
         sections = parse_system_sections(system_prompt)
@@ -176,29 +175,19 @@ class ContextLogEntry:
         # F079 Phase 0: previously-unpopulated counters (the columns + INSERT already
         # existed; only the population was missing, so procedure/episode delivery was
         # invisible on the dashboard).
-        # PREFER exact per-section counts derived from the turn's selected objects
-        # (`recalled_*_ids`, passed as `loaded_counts`) — text-parsing the rendered
-        # prompt cannot distinguish a real item from a marker-shaped line embedded in
-        # a verbatim field (codex PR #485). Fall back to the line heuristic only when
-        # counts aren't supplied (e.g. utility calls with no TurnContext).
-        lc = loaded_counts or {}
-
-        def _resolve(key: str, lc_key: str, marker: str | None) -> int:
-            parsed = _count_items(key, marker)
-            # Section absent/empty in THIS prompt -> 0 (also guards against a stale
-            # per-turn loaded_counts leaking into a utility call whose prompt has no
-            # such section). Section present -> prefer the exact count derived from
-            # the selected objects; fall back to the line heuristic if not supplied.
-            if parsed == 0:
-                return 0
-            return lc.get(lc_key, parsed)
-
-        facts_count = _resolve("relevant_facts", "facts", None)
-        decisions_count = _resolve("related_decisions", "decisions", None)
-        procedures_count = _resolve("known_procedures", "procedures", "- **")
-        episodes_count = _resolve("past_episodes", "episodes", "- [")
-        # Not a recalled type (temporal titles tier); single-line `- [time] title`.
-        recent_conversations_count = _count_items("recent_conversations", "- [")
+        # Count items in the RENDERED (post-truncation) section — that is what the
+        # model actually received. NOTE: deliberately NOT the pre-truncation
+        # `recalled_*_ids` counts, which over-state delivery (they're collected before
+        # `_truncate_to_budget` and include episodes that `_format_episodes` skips,
+        # e.g. abandoned ones) — codex PR #485 P1. Top-level item marker keeps the
+        # common embedded-bullet case from inflating the count; a field that embeds a
+        # literal marker-shaped line ("\n- **x**") is a known, rare telemetry
+        # approximation (same limitation the facts/decisions counters have always had).
+        facts_count = _count_items("relevant_facts")
+        decisions_count = _count_items("related_decisions")
+        procedures_count = _count_items("known_procedures", "- **")  # context.py:1047
+        episodes_count = _count_items("past_episodes", "- [")        # context.py:1063
+        recent_conversations_count = _count_items("recent_conversations", "- [")  # context.py:609
 
         tool_names = [t.get("name", "") for t in tools_list]
 
@@ -355,7 +344,6 @@ class ContextLogger:
         context_window: int,
         payload: dict | None = None,
         trace_id: str | None = None,
-        loaded_counts: dict[str, int] | None = None,
     ) -> ContextLogEntry:
         entry = ContextLogEntry.from_payload(
             session_id=session_id,
@@ -368,7 +356,6 @@ class ContextLogger:
             frame_id=frame_id,
             context_window=context_window,
             trace_id=trace_id,
-            loaded_counts=loaded_counts,
         )
         self._entries.append(entry)
         self._entries_by_id[entry.id] = entry

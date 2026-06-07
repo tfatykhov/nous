@@ -88,23 +88,6 @@ def _build_exclude_ids(
         "procedure": set(turn_context.recalled_procedure_ids or []),
     }
 
-
-def _recalled_counts(turn_context) -> dict[str, int]:
-    """F079 Phase 0: exact per-section item counts from the turn's selected objects.
-
-    Authoritative source for the context-log delivery counters — derived from the
-    `recalled_*_ids` that `ContextEngine.build` populated at injection time, so the
-    telemetry never relies on parsing the rendered prompt (codex PR #485).
-    """
-    if turn_context is None:
-        return {}
-    return {
-        "facts":      len(turn_context.recalled_fact_ids or []),
-        "decisions":  len(turn_context.recalled_decision_ids or []),
-        "episodes":   len(turn_context.recalled_episode_ids or []),
-        "procedures": len(turn_context.recalled_procedure_ids or []),
-    }
-
 # Frame-gated tool access (D5)
 FRAME_TOOLS: dict[str, list[str]] = {
     "conversation": ["record_decision", "learn_fact", "learn_skill", "recall_deep", "recall_recent", "recall_hubs", "get_procedure", "create_censor", "bash", "read_file", "write_file", "web_search", "web_fetch", "cache_retrieve", "spawn_task", "spawn_sync", "schedule_task", "list_tasks", "cancel_task", "run_python", "send_file", "send_email", "heartbeat_check_create", "heartbeat_check_manage", "dag_create", "dag_manage", "ingest_document"],
@@ -438,7 +421,6 @@ class AgentRunner:
             self._current_turn_number = (len(conversation.messages) + 1) // 2
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
-            self._current_recalled_counts = _recalled_counts(turn_context)
 
             # 4-6. Build system prompt and run tool loop
             response_text = ""
@@ -856,9 +838,6 @@ class AgentRunner:
                     frame_id=self._current_frame_id,
                     context_window=self._get_context_window_size(),
                     payload=payload if self._settings.context_log_full_payload else None,
-                    # F079 Phase 0: exact per-section counts from the turn's selected
-                    # objects, so telemetry doesn't rely on parsing the rendered prompt.
-                    loaded_counts=getattr(self, "_current_recalled_counts", None),
                 )
                 self._last_context_entry_id = _entry.id
                 # F036: Attach cache break info to context log entry
@@ -1000,7 +979,6 @@ class AgentRunner:
             self._current_turn_number = (len(conversation.messages) + 1) // 2
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "chat"
-            self._current_recalled_counts = _recalled_counts(turn_context)
 
             corrections = self._pending_corrections.pop(session_id, None)
             system_prompt = self._build_system_prompt(
