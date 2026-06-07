@@ -212,3 +212,32 @@ lowering. (They only mattered *if* we kept passive injection.) Passive procedure
 - **Caching invariant:** nothing new added to the per-turn `dynamic` tier; the awareness cue is static
   (cache-stable); bodies ride in messages (cached as history). Confirm the `static` block hash is
   unchanged turn-over-turn with the cue on.
+
+## 8.1 Unified delivery (refinement — single surface, no dup, no bloat)
+
+Goal clarified 2026-06-07: **one unified way to pull procedures into context; avoid
+duplication and context bloat.** The P1 implementation left THREE surfaces (passive
+`## Known Procedures` + recall_deep body slice + get_procedure), and the live A/B
+showed the agent did recall_deep **then** get_procedure (a second copy of the same
+procedure). Unified design:
+
+1. **Passive injection OFF** — flag `proc_passive_injection_enabled` (default True;
+   set False for unified mode) skips the `## Known Procedures` section in `build()`.
+   Procedures enter context **only** via the pull path → no passive+pull duplication,
+   no per-turn passive bloat.
+2. **recall_deep gives the FULL one-line body to the TOP-ranked procedure ONLY**
+   (others keep name+desc) — done after the final sort in `Heart._recall`. One body
+   (no bloat, bounded regardless of how many procedures surface); generous cap
+   (`recall_body_max_chars` default 800, le=2000) so recall_deep alone suffices →
+   **no get_procedure round-trip → no duplicate copy.** One line ⇒ SmartCompress-safe.
+3. **get_procedure → fallback** (explicit deep-dive), not part of the routine flow.
+4. Static awareness cue (unchanged) triggers the single flow.
+
+**Live validation (eval instance, unified mode on):** `get_procedure` calls dropped
+to **0** (was 4–5; recall_deep body now suffices), passive sections = **0** (single
+surface). The exact-token follow metric was noisy at n=3 (1–2/3, non-monotonic in the
+cap) → **effectiveness needs the larger selection-accuracy measurement** (the gate),
+not n=3. The structural invariants (single surface, no dup, no bloat) are confirmed.
+
+All flags default OFF; unified mode = `proc_passive_injection_enabled=false` +
+`recall_full_bodies=true` + `proc_awareness_cue=true`.

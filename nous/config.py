@@ -133,12 +133,16 @@ class Settings(BaseSettings):
 
     # F079 P1: pull-path delivery (procedures reach the model via recall_deep, not
     # passive injection). Both default OFF (dark-launch).
-    recall_full_bodies: bool = False  # recall_deep returns a usable procedure body slice
-    # One-line body cap. Bounded: keep (cap x procedures-per-recall) well under
-    # NOUS_TOOL_SOFT_TRIM_CHARS (4000) so a richer recall_deep result isn't soft-trimmed
-    # (which would shred middle results, and recall_deep originals aren't cached).
-    recall_body_max_chars: int = Field(default=240, ge=1, le=1000)
+    recall_full_bodies: bool = False  # recall_deep gives the FULL body to the TOP procedure only
+    # One-line body cap for the top procedure. Generous enough that recall_deep alone
+    # suffices (no separate get_procedure round-trip = no duplicate copy), bounded so a
+    # single body stays well under NOUS_TOOL_SOFT_TRIM_CHARS (4000).
+    recall_body_max_chars: int = Field(default=800, ge=1, le=2000)
     proc_awareness_cue: bool = False  # static cached directive: "pull a relevant procedure first"
+    # F079 unified pull: when False, the passive `## Known Procedures` context section is
+    # NOT built — procedures enter context ONLY via the pull path (recall_deep), giving a
+    # single unified surface (no passive+pull duplication, no per-turn passive bloat).
+    proc_passive_injection_enabled: bool = True
 
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
     relevance_drop_ratio: float = 0.5

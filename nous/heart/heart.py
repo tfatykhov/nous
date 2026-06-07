@@ -61,30 +61,26 @@ from nous.storage.models import ConversationState
 logger = logging.getLogger(__name__)
 
 
-def _format_procedure_recall_summary(item, full_bodies: bool, cap: int) -> str:
-    """F079 P1: build the recall_deep summary line for a procedure.
+def _procedure_body_line(core_patterns, implementation_notes, cap: int) -> str:
+    """F079: build a ONE-line, whitespace-collapsed, char-capped body for a procedure.
 
-    Off (default): legacy ``"name: description"`` (byte-identical). On: append a
-    usable body slice (implementation_notes + core_patterns) as ONE
-    whitespace-collapsed, char-capped line so it survives the runner's SmartCompress
-    of recall_deep (head/tail line selection) without multi-line shredding.
+    Used for the *single* top-ranked procedure in a recall (unified pull): gives the
+    agent enough to act without a separate get_procedure round-trip, while staying one
+    line (survives the runner's SmartCompress head/tail selection) and bounded (one
+    body, not N). core_patterns first (concise "what to do"), then implementation_notes.
+    Returns "" if there's no body.
     """
-    summary = f"{item.name}: {item.description}" if item.description else item.name
-    if not full_bodies:
-        return summary
-    # core_patterns first (concise "what to do"), then implementation_notes (verbose).
-    parts = list(item.core_patterns or []) + list(item.implementation_notes or [])
+    parts = list(core_patterns or []) + list(implementation_notes or [])
     body = " ".join(" ".join(str(p).split()) for p in parts if str(p).strip())
-    if body and cap > 0:
-        if len(body) > cap:
-            cut = body[:cap]
-            # Prefer a word boundary so we don't end mid-word (only if not too short).
-            sp = cut.rfind(" ")
-            if sp > cap // 2:
-                cut = cut[:sp]
-            body = cut.rstrip() + "…"
-        summary = f"{summary} | {body}"
-    return summary
+    if not body or cap <= 0:
+        return ""
+    if len(body) > cap:
+        cut = body[:cap]
+        sp = cut.rfind(" ")  # prefer a word boundary (only if not too short)
+        if sp > cap // 2:
+            cut = cut[:sp]
+        body = cut.rstrip() + "…"
+    return body
 
 
 class Heart:
@@ -1112,6 +1108,23 @@ class Heart:
             merged.sort(key=lambda r: r.score, reverse=True)
             merged = merged[:limit]
 
+        # F079 unified pull: append the FULL body to the single TOP-ranked procedure
+        # only (others keep name+desc). One body, not N -> no bloat; one line ->
+        # SmartCompress-safe; richer than name+desc -> no separate get_procedure
+        # round-trip (no duplicate copy of the same procedure). Flag-gated.
+        if getattr(self.settings, "recall_full_bodies", False):
+            cap = getattr(self.settings, "recall_body_max_chars", 800)
+            for r in merged:
+                if r.type == "procedure":
+                    body = _procedure_body_line(
+                        (r.metadata or {}).get("core_patterns"),
+                        (r.metadata or {}).get("implementation_notes"),
+                        cap,
+                    )
+                    if body:
+                        r.summary = f"{r.summary} | {body}"
+                    break  # top-ranked procedure only
+
         return merged
 
     def _to_recall_result(self, memory_type: str, item: object, score: float) -> RecallResult | None:
@@ -1145,21 +1158,20 @@ class Heart:
                 },
             )
         elif isinstance(item, ProcedureSummary):
-            # F079 P1: pull path delivers a usable body slice (not just name+desc).
-            summary = _format_procedure_recall_summary(
-                item,
-                getattr(self.settings, "recall_full_bodies", False),
-                getattr(self.settings, "recall_body_max_chars", 240),
-            )
+            # name+desc here; the FULL body is added only to the top-ranked procedure
+            # after the final sort (see _recall) — unified pull, bounded to one body.
             return RecallResult(
                 type="procedure",
                 id=item.id,
-                summary=summary,
+                summary=f"{item.name}: {item.description}" if item.description else item.name,
                 score=score,
                 metadata={
                     "domain": item.domain,
                     "effectiveness": item.effectiveness,
                     "activation_count": item.activation_count,
+                    # carried for the post-rank top-1 body expansion (F079 unified pull)
+                    "core_patterns": list(item.core_patterns or []),
+                    "implementation_notes": list(item.implementation_notes or []),
                 },
             )
         elif isinstance(item, CensorMatch):

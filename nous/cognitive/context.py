@@ -494,7 +494,14 @@ class ContextEngine:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
-        if budget.procedures > 0 and "procedure" not in skip_types:
+        # F079 unified pull: when proc_passive_injection_enabled is False, procedures are
+        # delivered ONLY via the pull path (recall_deep) — skip the passive section so
+        # there is a single unified surface (no passive+pull duplication, no per-turn bloat).
+        if (
+            getattr(self._settings, "proc_passive_injection_enabled", True)
+            and budget.procedures > 0
+            and "procedure" not in skip_types
+        ):
             try:
                 injection_mode = self._settings.critic_skill_injection
                 critic_slot_count = self._settings.critic_skill_slots
