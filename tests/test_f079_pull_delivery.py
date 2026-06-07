@@ -158,7 +158,7 @@ class TestBuildSurfaces:
         engine = self._engine(catalog_procs=procs, proc_catalog_enabled=True, proc_catalog_max=2)
         r = await self._build(engine)
         content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
-        assert "3 more not shown" in content   # 5 distinct, cap 2 -> 3 omitted
+        assert "3+ more not shown" in content   # 5 distinct, cap 2 -> 3 omitted (lower bound)
         assert "NOUS_PROC_CATALOG_MAX" in content
         assert "ask to list" not in content.lower()
 
