@@ -241,6 +241,7 @@ class ContextEngine:
         # The list is query-independent, so this whole section is byte-identical across
         # turns and rides the static cache tier. Bodies are NOT here: the agent selects a
         # procedure by name and calls get_procedure(<name>) to load the full steps (depth).
+        catalog_rendered = False
         if getattr(self._settings, "proc_catalog_enabled", False):
             catalog_max = getattr(self._settings, "proc_catalog_max", 100)
             try:
@@ -250,34 +251,49 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Procedure catalog build failed: %s", e)
                 procs, total = [], 0
-            if procs:
-                # Per-row description cap bounds total size (description is unbounded Text;
-                # proc_catalog_max can be large) while preserving every NAME (the breadth
-                # contract) — a whole-block tail-truncate would drop the last names instead.
+            # Collapse same-name duplicates to ONE entry (name-dedup is bypassable, so the
+            # DB can hold several active rows per name — see procedure-subsystem-audit). The
+            # list is already in deterministic order (created_at desc, id), so first-wins is
+            # stable/cacheable. get_procedure(<name>) then resolves the most-proven row.
+            deduped: list = []
+            seen_names: set[str] = set()
+            for p in procs:
+                key = (getattr(p, "name", "") or "").strip().lower()
+                if not key or key in seen_names:
+                    continue
+                seen_names.add(key)
+                deduped.append(p)
+            if deduped:
                 desc_cap = getattr(self._settings, "proc_catalog_desc_chars", 120)
-                lines = [
+                max_chars = getattr(self._settings, "proc_catalog_max_chars", 4000)
+                header = (
                     "You have a library of learned procedures (reusable how-to "
                     "knowledge from past work), listed below by name. The full steps "
                     "are NOT in this prompt. Before acting on a task that matches one, "
                     "call `get_procedure` with its name to load the full body, then "
-                    "follow it.",
-                    "",
-                ]
-                for p in procs:
+                    "follow it."
+                )
+                lines = [header, ""]
+                used = len(header) + 1
+                shown = 0
+                for p in deduped:
                     domain = getattr(p, "domain", None) or "general"
                     desc = (getattr(p, "description", None) or "").strip()
                     if len(desc) > desc_cap:
                         desc = desc[:desc_cap].rstrip() + "…"
+                    row = f"- {p.name} ({domain}): {desc}" if desc else f"- {p.name} ({domain})"
+                    # Hard total-size bound (description is unbounded Text and the row cap can
+                    # be large) so an enabled catalog can never produce an oversized prompt.
+                    if used + len(row) + 1 > max_chars and shown > 0:
+                        break
+                    lines.append(row)
+                    used += len(row) + 1
+                    shown += 1
+                omitted = total - shown  # vs DB total (dup-collapse + caps); operator signal
+                if omitted > 0:
                     lines.append(
-                        f"- {p.name} ({domain}): {desc}" if desc
-                        else f"- {p.name} ({domain})"
-                    )
-                if total > len(procs):
-                    # No agent-facing list-all tool exists, so don't tell it to "ask";
-                    # this is an operator signal to raise NOUS_PROC_CATALOG_MAX.
-                    lines.append(
-                        f"…and {total - len(procs)} more (catalog capped at "
-                        f"{catalog_max}; raise NOUS_PROC_CATALOG_MAX to list all)."
+                        f"…and {omitted} more not shown (catalog truncated for size; "
+                        f"raise NOUS_PROC_CATALOG_MAX / NOUS_PROC_CATALOG_MAX_CHARS)."
                     )
                 catalog_text = "\n".join(lines)
                 sections.append(
@@ -289,7 +305,8 @@ class ContextEngine:
                         tier=SECTION_TIERS.get("Procedure Catalog", "static"),
                     )
                 )
-        elif getattr(self._settings, "proc_awareness_cue", False):
+                catalog_rendered = True
+        if not catalog_rendered and getattr(self._settings, "proc_awareness_cue", False):
             # Cue-only fallback (no list) when the full catalog is disabled.
             awareness_text = (
                 "You have a library of learned procedures (reusable how-to knowledge "
@@ -562,12 +579,12 @@ class ContextEngine:
                 total_slots = critic_slot_count + embedding_slot_count
                 # Track B (cosine embedding slots) duplicates both the recall_deep pull
                 # path AND the catalog. Gate it off when EITHER passive injection is
-                # disabled OR the catalog is on — so catalog+passive can never double-list
-                # the same procedure (enforces "unified mode" rather than relying on the
-                # operator to set both flags consistently).
+                # disabled OR a catalog was actually RENDERED this turn — so catalog+passive
+                # can never double-list the same procedure, but a transient catalog-query
+                # failure (catalog_rendered=False) still falls back to passive discovery.
                 passive_embeddings = (
                     getattr(self._settings, "proc_passive_injection_enabled", True)
-                    and not getattr(self._settings, "proc_catalog_enabled", False)
+                    and not catalog_rendered
                 )
 
                 # --- Track A: Critic-recommended skills ---

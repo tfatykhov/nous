@@ -182,6 +182,53 @@ class TestBuildSurfaces:
         assert any(s.label == "Procedure Catalog" for s in r.sections)
         engine._heart.search_procedures.assert_not_called()  # Track B suppressed by catalog
 
+    @pytest.mark.asyncio
+    async def test_catalog_dedupes_same_name(self):
+        """Same-name active rows collapse to ONE catalog entry (dups are bypassable)."""
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+        dups = [
+            ProcedureSummary(id=uuid4(), name="send-email", domain="ops", description="v1",
+                             activation_count=1, effectiveness=None, score=0.9),
+            ProcedureSummary(id=uuid4(), name="send-email", domain="ops", description="v2",
+                             activation_count=1, effectiveness=None, score=0.9),
+        ]
+        engine = self._engine(catalog_procs=dups, catalog_total=2, proc_catalog_enabled=True)
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        assert content.count("- send-email") == 1
+
+    @pytest.mark.asyncio
+    async def test_catalog_hard_char_cap(self):
+        """The rendered catalog is bounded by proc_catalog_max_chars regardless of row
+        count / description length, with an omitted-count note."""
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+        procs = [ProcedureSummary(id=uuid4(), name=f"proc{i}", domain="d",
+                                  description="d" * 100, activation_count=1,
+                                  effectiveness=None, score=0.9) for i in range(50)]
+        engine = self._engine(catalog_procs=procs, catalog_total=50,
+                              proc_catalog_enabled=True, proc_catalog_max_chars=600)
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        assert len(content) < 1200          # bounded well below 50*~110 chars
+        assert "more not shown" in content  # omitted note present
+
+    @pytest.mark.asyncio
+    async def test_catalog_failure_falls_back_to_cue_and_track_b(self):
+        """A transient list_procedures failure must NOT silently remove both surfaces:
+        the cue fallback fires AND Track B passive discovery still runs."""
+        from unittest.mock import AsyncMock
+        engine = self._engine(
+            proc_catalog_enabled=True, proc_passive_injection_enabled=True,
+            proc_awareness_cue=True,
+        )
+        engine._heart.list_procedures = AsyncMock(side_effect=RuntimeError("db down"))
+        r = await self._build(engine)
+        assert not any(s.label == "Procedure Catalog" for s in r.sections)
+        assert any(s.label == "Procedure Awareness" for s in r.sections)  # cue fallback
+        engine._heart.search_procedures.assert_called()  # Track B fallback (not suppressed)
+
 
 def test_decision_pipeline_carries_pattern():
     from nous.api.retrieval_pipeline import _decisions_to_pipeline
