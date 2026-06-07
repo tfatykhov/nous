@@ -385,9 +385,12 @@ def _format_pipeline_text(
                 category = dec.metadata.get("category", "")
                 stakes = dec.metadata.get("stakes", "")
                 confidence = dec.metadata.get("confidence", 0.0)
+                # F079 P1: include the abstract pattern when present (B-pull-thin).
+                pattern = dec.metadata.get("pattern")
+                pattern_str = f" | pattern: {pattern}" if pattern else ""
                 results_text.append(
                     f"{i}. {dec.description} | {category} | {stakes} | "
-                    f"confidence: {confidence:.2f} "
+                    f"confidence: {confidence:.2f}{pattern_str} "
                     f"(id: {dec.id}{score_str})"
                 )
             for j, n in enumerate(brain_graph, len(decision_results) + 1):
