@@ -555,6 +555,13 @@ class Procedure(Base):
     active: Mapped[bool | None] = mapped_column(Boolean, server_default="true")
     encoded_frame: Mapped[str | None] = mapped_column(String(100))
     encoded_censors = mapped_column(JSONB, nullable=True)
+    # Dedup Phase 0 (migration 057): supersession bookkeeping. superseded_by points
+    # at the canonical procedure that absorbed this one during consolidation; the
+    # restart resurrection loop (bootstrap/reactivate) keys off it. Plain UUID (no DB
+    # FK) — we never hard-delete procedures, so ON DELETE behavior is moot, and a
+    # constraint-free column keeps migration 057 splitter-safe for the auto-migrator.
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

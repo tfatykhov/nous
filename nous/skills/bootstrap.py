@@ -49,6 +49,14 @@ async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
                 logger.debug("Skill %s already registered, skipping", manifest.name)
                 continue
 
+            # Dedup Phase 0: don't resurrect a deliberately-consolidated duplicate.
+            # If a row with this name was archived (superseded_by set) its capability
+            # now lives in a canonical procedure — recreating it from disk would
+            # reintroduce the duplicate on every restart (the audit's B1 loop).
+            if await heart.is_procedure_name_superseded(manifest.name):
+                logger.info("Skill %s was consolidated into a canonical procedure, skipping re-import", manifest.name)
+                continue
+
             proc_input = parser.to_procedure_input(manifest)
             await heart.store_procedure(proc_input)
             registered += 1

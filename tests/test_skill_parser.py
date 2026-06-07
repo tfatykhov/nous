@@ -34,6 +34,25 @@ class TestParseFrontmatter:
         result = _parse_frontmatter(text)
         assert result["triggers"] == ["web search", "google", "find online"]
 
+    def test_block_scalar_literal(self):
+        # `description: |` must capture the indented body, not the literal "|"
+        # (audit: empty-description rows like investigate/cso/office-hours).
+        text = "name: investigate\ndescription: |\n  Root-cause debugging.\n  No fixes first.\ndomain: debug"
+        result = _parse_frontmatter(text)
+        assert result["description"] == "Root-cause debugging.\nNo fixes first."
+        assert result["domain"] == "debug"
+
+    def test_block_scalar_folded(self):
+        # `description: >` folds lines with spaces.
+        text = "name: dr\ndescription: >\n  Multi-source research\n  with confidence ratings.\n"
+        result = _parse_frontmatter(text)
+        assert result["description"] == "Multi-source research with confidence ratings."
+
+    def test_block_scalar_with_chomping_indicator(self):
+        text = "name: x\ndescription: |-\n  one line\n"
+        result = _parse_frontmatter(text)
+        assert result["description"] == "one line"
+
     def test_mixed_scalars_and_lists(self):
         text = (
             "name: serper-search\n"
@@ -254,6 +273,7 @@ class TestLearnSkillTool:
         mock_detail.id = uuid4()
         mock_detail.active = True
         heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.update_procedure_body = AsyncMock(return_value=mock_detail)
         heart.retire_procedure = AsyncMock()
 
         return heart
@@ -323,8 +343,11 @@ class TestLearnSkillTool:
 
         text = result["content"][0]["text"]
         assert "updated successfully" in text
-        mock_heart.retire_procedure.assert_called_once_with(existing.id)
-        mock_heart.store_procedure.assert_called_once()
+        # bug 9 fix: update in place (preserve counts) instead of retire+store
+        mock_heart.update_procedure_body.assert_called_once()
+        assert mock_heart.update_procedure_body.call_args.args[0] == existing.id
+        mock_heart.retire_procedure.assert_not_called()
+        mock_heart.store_procedure.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_learn_skill_local_file_not_found(self, mock_brain, mock_heart, mock_settings):
@@ -706,6 +729,7 @@ class TestGetProcedureTool:
         mock_detail.effectiveness = 0.8
         heart.get_procedure = AsyncMock(return_value=mock_detail)
         heart.store_procedure = AsyncMock(return_value=mock_detail)
+        heart.update_procedure_body = AsyncMock(return_value=mock_detail)
         heart.retire_procedure = AsyncMock()
 
         return heart
