@@ -150,6 +150,71 @@ class TestContextLogEntry:
 
 
 # ------------------------------------------------------------------
+# F079 Phase 0: procedure/episode/recent-conversation delivery counters
+# (previously unpopulated -> dashboard was blind to procedure/episode injection)
+# ------------------------------------------------------------------
+
+
+class TestF079DeliveryCounters:
+    # Section bodies in the exact formats build() emits:
+    #   procedures: "- **name** (domain): desc | ..." (context.py:1047)
+    #   episodes:   "- [outcome] summary (date)"       (context.py:1063)
+    #   recent:     "- [time] title"                   (context.py:609)
+    _PROMPT = (
+        "## Identity\nI am Nous\n"
+        "## Related Decisions\n- decision one\n- decision two\n"
+        "## Relevant Facts\n- fact one\n- fact two\n- fact three\n"
+        "## Known Procedures\n"
+        "- **send-email** (comms): send mail | activated 5x\n"
+        "- **dag-debug** (general): debug DAGs | activated 9x\n"
+        "- **deep-research** (general): research | activated 3x\n"
+        "## Past Episodes\n- [success] did a thing (2026-06-01)\n- [partial] tried another (2026-06-02)\n"
+        "## Recent Conversations\n- [Jun 01 10:00] chat A\n- [Jun 02 11:00] chat B\n"
+        "- [Jun 03 12:00] chat C\n- [Jun 04 13:00] chat D"
+    )
+
+    def _entry(self, prompt: str) -> ContextLogEntry:
+        return ContextLogEntry.from_payload(
+            session_id="s1", turn_number=1, call_type="chat",
+            model="test", system_prompt=prompt,
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None, frame_id="task", context_window=200000,
+        )
+
+    def test_known_procedures_marker_parsed(self):
+        sections = parse_system_sections(self._PROMPT)
+        assert "known_procedures" in sections
+        assert "past_episodes" in sections
+        assert "recent_conversations" in sections
+
+    def test_exact_counts(self):
+        e = self._entry(self._PROMPT)
+        # Exact counts, not just >0 (an off-by-N would pass a >0 assertion).
+        assert e.loaded_procedures == 3
+        assert e.loaded_episodes == 2
+        assert e.recent_conversations == 4
+        # Controls — existing counters still correct.
+        assert e.loaded_facts == 3
+        assert e.loaded_decisions == 2
+        assert "known_procedures" in e.sections_present
+        assert "past_episodes" in e.sections_present
+
+    def test_to_dict_carries_counters(self):
+        d = self._entry(self._PROMPT).to_dict()
+        assert d["loaded_procedures"] == 3
+        assert d["loaded_episodes"] == 2
+        assert d["recent_conversations"] == 4
+
+    def test_absent_sections_count_zero(self):
+        # No procedure/episode/recent sections -> counters are 0 (no false positives).
+        e = self._entry("## Identity\nI am Nous\n## Relevant Facts\n- only a fact")
+        assert e.loaded_procedures == 0
+        assert e.loaded_episodes == 0
+        assert e.recent_conversations == 0
+        assert e.loaded_facts == 1
+
+
+# ------------------------------------------------------------------
 # FullPayloadStore
 # ------------------------------------------------------------------
 

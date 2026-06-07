@@ -23,6 +23,8 @@ SECTION_MARKERS: dict[str, str] = {
     "## Working Memory": "working_memory",
     "## Related Decisions": "related_decisions",
     "## Relevant Facts": "relevant_facts",
+    "## Known Procedures": "known_procedures",
+    "## Past Episodes": "past_episodes",
     "## Recent Conversations": "recent_conversations",
     "## Tool Instructions": "frame_instructions",
     "[Execution Ledger]": "execution_ledger",
@@ -156,11 +158,19 @@ class ContextLogEntry:
             role = msg.get("role", "unknown")
             role_counts[role] = role_counts.get(role, 0) + 1
 
-        # Heuristic memory item counts from section content
-        facts_text = sections.get("relevant_facts", "")
-        facts_count = facts_text.count("\n-") + (1 if facts_text.strip() else 0)
-        decisions_text = sections.get("related_decisions", "")
-        decisions_count = decisions_text.count("\n-") + (1 if decisions_text.strip() else 0)
+        # Heuristic memory item counts from section content (one "- " bullet per item).
+        def _count_items(key: str) -> int:
+            text = sections.get(key, "")
+            return text.count("\n-") + (1 if text.strip() else 0)
+
+        facts_count = _count_items("relevant_facts")
+        decisions_count = _count_items("related_decisions")
+        # F079 Phase 0: previously-unpopulated counters (the columns + INSERT already
+        # existed; only the population was missing, so procedure/episode delivery was
+        # invisible on the dashboard). Markers added to SECTION_MARKERS above.
+        procedures_count = _count_items("known_procedures")
+        episodes_count = _count_items("past_episodes")
+        recent_conversations_count = _count_items("recent_conversations")
 
         tool_names = [t.get("name", "") for t in tools_list]
 
@@ -184,6 +194,9 @@ class ContextLogEntry:
             message_roles=role_counts,
             loaded_facts=facts_count,
             loaded_decisions=decisions_count,
+            loaded_procedures=procedures_count,
+            loaded_episodes=episodes_count,
+            recent_conversations=recent_conversations_count,
             sections_text=sections,
         )
 
