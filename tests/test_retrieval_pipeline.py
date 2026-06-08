@@ -283,6 +283,23 @@ class TestCoherentRanking:
         assert "procedure" in types_arg
         assert stats.coherent_ranking_applied is False
 
+    @pytest.mark.asyncio
+    async def test_explicit_procedure_request_honored_when_enabled(self):
+        # codex P1: coherent ranking excludes procedures/censors only from the
+        # implicit "all" pool; an explicit memory_types=["procedure"] is honored.
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={}, contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(coherent_ranking_enabled=True)
+
+        await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain, settings=settings,
+            limit=10, memory_types=["procedure"],
+        )
+
+        assert heart.recall.await_args.kwargs["types"] == ["procedure"]
+
 
 class TestRunRecallPipeline:
     @pytest.mark.asyncio

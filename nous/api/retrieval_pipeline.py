@@ -351,13 +351,15 @@ async def _run_stages(
                 if t in ["episode", "fact", "procedure", "censor"]
             ]
 
-        # F080: coherent ranking makes the recall pool knowledge-only. Censors
-        # and procedures are excluded — they have dedicated surfaces and would
-        # otherwise compete on incomparable score scales (raw-cosine censor
-        # floor >=0.7; procedure utility boost >1.0). recall_deep-only: this is
-        # the single exclusion site (the cognitive path uses per-type search_*,
-        # not heart.recall). Default OFF => heart_types unchanged.
-        if getattr(settings, "coherent_ranking_enabled", False):
+        # F080: coherent ranking makes the IMPLICIT recall pool knowledge-only.
+        # Censors and procedures are excluded from the default ("all") search —
+        # they have dedicated surfaces and would otherwise compete on incomparable
+        # score scales (raw-cosine censor floor >=0.7; procedure utility boost >1.0).
+        # Gated on ``search_all`` so an EXPLICIT memory_types=["procedure"]/["censor"]
+        # request is still honored (the advertised tool contract + procedure-only
+        # eval probes, codex P1). recall_deep-only — the cognitive path uses per-type
+        # search_*, not heart.recall.
+        if search_all and getattr(settings, "coherent_ranking_enabled", False):
             heart_types = [t for t in heart_types if t not in ("censor", "procedure")]
 
         if heart_types:
