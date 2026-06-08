@@ -108,6 +108,10 @@ class PipelineStats:
     # exclusion set was passed. Surfaced in recall_deep INFO log so the
     # duplication-tax measurement is grep-able from prod.
     excluded_in_context: int = 0
+    # F080: True iff coherent ranking was active for this call (censors +
+    # procedures excluded from the ranked pool). Observability only — not
+    # formatted into recall_deep text, so it does not affect the snapshot.
+    coherent_ranking_applied: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +309,7 @@ async def run_recall_pipeline(
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
+        coherent_ranking_applied=getattr(settings, "coherent_ranking_enabled", False),  # F080
     )
     return results, stats
 
@@ -345,6 +350,15 @@ async def _run_stages(
                 for t in search_types
                 if t in ["episode", "fact", "procedure", "censor"]
             ]
+
+        # F080: coherent ranking makes the recall pool knowledge-only. Censors
+        # and procedures are excluded — they have dedicated surfaces and would
+        # otherwise compete on incomparable score scales (raw-cosine censor
+        # floor >=0.7; procedure utility boost >1.0). recall_deep-only: this is
+        # the single exclusion site (the cognitive path uses per-type search_*,
+        # not heart.recall). Default OFF => heart_types unchanged.
+        if getattr(settings, "coherent_ranking_enabled", False):
+            heart_types = [t for t in heart_types if t not in ("censor", "procedure")]
 
         if heart_types:
             acc.searched_heart = True

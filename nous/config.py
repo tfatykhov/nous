@@ -728,6 +728,14 @@ class Settings(BaseSettings):
     # Default True; set False to restore pre-F030.1 behavior (chain CE then MMR).
     mmr_skip_after_ce: bool = True
 
+    # F080: coherent cross-type ranking. When true, recall_deep excludes
+    # censors and procedures from the ranked recall pool — they are capabilities
+    # / guardrails with their own surfaces (Active Censors; Procedure Catalog +
+    # get_procedure), not knowledge. The remaining facts/episodes/decisions/chunks
+    # already share the normalized RRF [0,1] space, so no calibration is needed.
+    # Default OFF => byte-identical recall_deep output.
+    coherent_ranking_enabled: bool = False
+
     # F042: Cross-encoder reranking
     cross_encoder_enabled: bool = False
     # BGE reranker-v2-m3 empirically beats MiniLM by +18.4pp chunks_off /
