@@ -217,6 +217,7 @@ def _make_settings(
     heart_graph_neighbors_per_seed=3,
     episode_chunks_enabled=False,
     episode_chunk_recall_limit=10,
+    coherent_ranking_enabled=False,
 ):
     return SimpleNamespace(
         graph_recall_enabled=graph_recall_enabled,
@@ -230,12 +231,57 @@ def _make_settings(
         heart_graph_neighbors_per_seed=heart_graph_neighbors_per_seed,
         episode_chunks_enabled=episode_chunks_enabled,
         episode_chunk_recall_limit=episode_chunk_recall_limit,
+        coherent_ranking_enabled=coherent_ranking_enabled,
     )
 
 
 # ---------------------------------------------------------------------------
 # run_recall_pipeline: structured behavior
 # ---------------------------------------------------------------------------
+
+
+class TestCoherentRanking:
+    """F080: when coherent_ranking_enabled, recall_deep excludes censors +
+    procedures from the ranked pool (knowledge-only). Asserts on the ``types``
+    the pipeline requests from ``heart.recall`` — what isn't searched can't rank.
+    """
+
+    @pytest.mark.asyncio
+    async def test_excludes_censor_and_procedure_when_enabled(self):
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={}, contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(coherent_ranking_enabled=True)
+
+        _results, stats = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain, settings=settings,
+            limit=10, memory_types=["all"],
+        )
+
+        types_arg = heart.recall.await_args.kwargs["types"]
+        assert "censor" not in types_arg
+        assert "procedure" not in types_arg
+        assert set(types_arg) == {"episode", "fact"}
+        assert stats.coherent_ranking_applied is True
+
+    @pytest.mark.asyncio
+    async def test_keeps_censor_and_procedure_when_disabled(self):
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={}, contradictions=[], decision_results=[],
+        )
+        settings = _make_settings(coherent_ranking_enabled=False)
+
+        _results, stats = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain, settings=settings,
+            limit=10, memory_types=["all"],
+        )
+
+        types_arg = heart.recall.await_args.kwargs["types"]
+        assert "censor" in types_arg
+        assert "procedure" in types_arg
+        assert stats.coherent_ranking_applied is False
 
 
 class TestRunRecallPipeline:
