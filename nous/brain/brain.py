@@ -1217,16 +1217,28 @@ class Brain:
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_proc))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_proc))
 
-        # F080: order by edge weight (best first) with a stable id tiebreak BEFORE
-        # the LIMIT, so a per-seed cap keeps the strongest edges rather than an
-        # arbitrary subset (codex P1), and results are deterministic run-to-run.
+        # F080: order strongest-edge-first, then deduplicate to ONE row per
+        # neighbor in Python before applying the fan-out cap (codex P1). A node
+        # linked via multiple edges (e.g. informed_by from the graph linker +
+        # related_to from the densifier) otherwise returns several rows that
+        # consume the cap and crowd out other neighbors. DB-agnostic (no Postgres
+        # DISTINCT ON, so SQLite-backed tests still run); a generous SQL bound caps
+        # the fetch on god-nodes while preserving the strongest edges for dedup.
         union_q = (
             source_q.union_all(target_q)
             .order_by(text("edge_weight DESC"), text("neighbor_id"))
-            .limit(limit)
+            .limit(max(limit * 5, 50))
         )
         result = await session.execute(union_q)
-        rows = result.all()
+        rows = []
+        _seen_neighbor_ids: set = set()
+        for r in result.all():
+            if r.neighbor_id in _seen_neighbor_ids:
+                continue  # keep only the max-weight edge per neighbor (ordered above)
+            _seen_neighbor_ids.add(r.neighbor_id)
+            rows.append(r)
+            if len(rows) >= limit:
+                break
 
         if not rows:
             return []

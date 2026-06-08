@@ -592,6 +592,47 @@ async def test_neighbors_neighbor_type_filter(brain, session):
     assert neighbors[0].id == decision.id
 
 
+async def test_neighbors_dedupes_multi_edge_neighbor(brain, session):
+    """F080 (codex P1): a neighbor connected via multiple edges (e.g. informed_by
+    from the linker + related_to from the densifier) must collapse to ONE row
+    (max weight) BEFORE the fan-out cap, so duplicate edges don't consume slots
+    and crowd out other distinct neighbors.
+    """
+    from uuid import uuid4
+
+    from nous.storage.models import GraphEdge
+
+    fact_id = uuid4()
+    d = await brain.record(_record_input(description="decision D"), session=session)
+    e = await brain.record(_record_input(description="decision E"), session=session)
+
+    # Two edges fact->D (same neighbor, different relations) + one edge fact->E.
+    session.add(GraphEdge(
+        source_id=fact_id, target_id=d.id, source_type="fact", target_type="decision",
+        agent_id=brain.agent_id, relation="informed_by", weight=0.9,
+        auto_linked=True, extraction_method="heuristic",
+    ))
+    session.add(GraphEdge(
+        source_id=fact_id, target_id=d.id, source_type="fact", target_type="decision",
+        agent_id=brain.agent_id, relation="related_to", weight=0.7,
+        auto_linked=True, extraction_method="inferred",
+    ))
+    session.add(GraphEdge(
+        source_id=fact_id, target_id=e.id, source_type="fact", target_type="decision",
+        agent_id=brain.agent_id, relation="informed_by", weight=0.8,
+        auto_linked=True, extraction_method="heuristic",
+    ))
+    await session.flush()
+
+    neighbors = await brain.neighbors(
+        fact_id, node_type="fact", limit=2, session=session, neighbor_type="decision",
+    )
+    ids = [n.id for n in neighbors]
+    assert d.id in ids and e.id in ids  # both distinct neighbors survive the cap
+    assert ids.count(d.id) == 1  # D collapsed to one row (the 0.9 edge)
+    assert len(neighbors) == 2
+
+
 # ---------------------------------------------------------------------------
 # 18a-Path-A. test_neighbors_resolves_content_for_all_node_types
 # ---------------------------------------------------------------------------
