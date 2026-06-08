@@ -637,13 +637,28 @@ class ContextEngine:
             and getattr(self._settings, "proc_selection_graph_primary", False)
         ):
             try:
+                # Respect critic injection mode for the fallback (codex P1): only
+                # "enabled" actually injects critic skills; "log_only" logs intent
+                # without injecting; "disabled" suppresses them entirely — matching
+                # the passive Track-A semantics below.
+                injection_mode = getattr(
+                    self._settings, "critic_skill_injection", "disabled",
+                )
+                fallback_skills = (
+                    list(critic_skills or []) if injection_mode == "enabled" else []
+                )
+                if injection_mode == "log_only" and critic_skills:
+                    logger.info(
+                        "F080 §14.7 log_only: would use critic skills as fallback: %s",
+                        critic_skills,
+                    )
                 slots = (
                     self._settings.critic_skill_slots
                     + self._settings.embedding_skill_slots
                 )
                 selected = await self._select_procedures(
                     slots=slots,
-                    critic_skills=critic_skills or [],
+                    critic_skills=fallback_skills,
                     recalled_ids=recalled_ids,
                     recalled_score_map=recalled_score_map,
                     session=session,
@@ -1345,7 +1360,10 @@ class ContextEngine:
         seeds.sort(key=lambda s: recalled_score_map.get(s[0], 0.0) or 0.0, reverse=True)
 
         per_seed = getattr(self._settings, "proc_graph_neighbors_per_seed", 3)
-        best: dict[UUID, tuple[float, object]] = {}
+        # Phase 1: graph traversal — collect the best score per procedure id WITHOUT
+        # fetching bodies (codex P2: avoid up to seeds*per_seed get_procedure calls
+        # just to keep `slots`). Bodies are fetched once, ranked, in phase 2.
+        scores: dict[UUID, float] = {}
         for mid, stype in seeds[:_SEED_CAP]:
             try:
                 seed_uuid = UUID(mid)
@@ -1362,22 +1380,25 @@ class ContextEngine:
                 continue
             for n in neighbors:
                 score = (getattr(n, "edge_weight", 0.0) or 0.0) * seed_score
-                prev = best.get(n.id)
-                if prev is not None and prev[0] >= score:
-                    continue
-                try:
-                    detail = await self._heart.get_procedure(n.id, session=session)
-                except ValueError:
-                    continue  # stale edge → procedure deleted; benign
-                except Exception as e:
-                    logger.warning("F080 §14.7: get_procedure failed for %s: %s", n.id, e)
-                    continue
-                if not getattr(detail, "active", False):
-                    continue  # archived/superseded → never surface
-                best[n.id] = (score, detail)
+                if score > scores.get(n.id, -1.0):
+                    scores[n.id] = score
 
-        selected = [d for _s, d in sorted(best.values(), key=lambda x: (-x[0], str(x[1].id)))]
-        selected = selected[:slots]
+        # Phase 2: rank by score, fetch bodies only for enough top candidates to
+        # fill the slots (skip stale/inactive and continue down the ranked list).
+        selected: list = []
+        for pid, _score in sorted(scores.items(), key=lambda x: (-x[1], str(x[0]))):
+            if len(selected) >= slots:
+                break
+            try:
+                detail = await self._heart.get_procedure(pid, session=session)
+            except ValueError:
+                continue  # stale edge → procedure deleted; benign
+            except Exception as e:
+                logger.warning("F080 §14.7: get_procedure failed for %s: %s", pid, e)
+                continue
+            if not getattr(detail, "active", False):
+                continue  # archived/superseded → never surface
+            selected.append(detail)
 
         # Fallback: critic-recommended skills fill remaining slots.
         if len(selected) < slots and critic_skills:

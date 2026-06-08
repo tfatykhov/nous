@@ -168,6 +168,42 @@ class TestGraphPrimarySelection:
         assert "runbook-x" in result.system_prompt
         assert result.recalled_ids.get("procedure") == [str(proc.id)]
 
+    @pytest.mark.asyncio
+    async def test_build_flag_on_fallback_respects_disabled_injection(self):
+        """critic_skill_injection='disabled' must suppress the critic fallback even
+        under graph-primary selection (codex P1) — no section, no name lookup."""
+        proc = _make_procedure_detail("runbook-x")
+        settings = Settings(
+            _env_file=None,
+            proc_selection_graph_primary=True,
+            critic_skill_injection="disabled",
+            relevance_floor_enabled=False,
+        )
+        brain = MagicMock()
+        brain.embeddings = None
+        brain.query = AsyncMock(return_value=[])
+        brain.neighbors = AsyncMock(return_value=[])  # no graph hits
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[])
+        heart.list_facts_by_category = AsyncMock(return_value=[])
+        heart.list_working_memory = AsyncMock(return_value=[])
+        heart.list_censors = AsyncMock(return_value=[])
+        heart.list_episodes = AsyncMock(return_value=[])
+        heart.list_procedures = AsyncMock(return_value=([], 0))
+        heart.get_procedure = AsyncMock()
+        heart.get_procedure_by_name = AsyncMock(return_value=proc)
+        engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+        result = await engine.build(
+            agent_id="test", session_id="s1", input_text="do the deploy thing",
+            frame=_frame(), critic_skills=["runbook-x"],
+        )
+
+        assert "Recommended Procedures" not in result.system_prompt
+        heart.get_procedure_by_name.assert_not_called()
+
 
 class TestDualTrackDisabled:
     """Tests when critic_skill_injection=disabled (default)."""
