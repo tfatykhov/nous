@@ -1208,6 +1208,14 @@ class Brain:
         if neighbor_type:
             source_q = source_q.where(GraphEdge.target_type == neighbor_type)
             target_q = target_q.where(GraphEdge.source_type == neighbor_type)
+            # F080: for procedure neighbors, exclude edges pointing at inactive /
+            # superseded skills BEFORE the LIMIT, so a capped fetch returns N
+            # *active* procedures rather than N edges that may be filtered to
+            # fewer (mirrors the F070 neighbor_type pushdown rationale above).
+            if neighbor_type == "procedure":
+                _active_proc = select(Procedure.id).where(Procedure.active == True)  # noqa: E712
+                source_q = source_q.where(GraphEdge.target_id.in_(_active_proc))
+                target_q = target_q.where(GraphEdge.source_id.in_(_active_proc))
 
         union_q = source_q.union_all(target_q).limit(limit)
         result = await session.execute(union_q)

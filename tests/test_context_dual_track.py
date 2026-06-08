@@ -91,7 +91,7 @@ class TestGraphPrimarySelection:
         )
 
         assert [p.id for p in selected] == [proc.id]
-        body = engine._format_procedure_bodies(selected, 1200)
+        body = "\n".join(engine._format_procedure_bodies(selected, 1200))
         assert "deploy-runbook" in body
         assert "pattern1" in body  # body (not just name) is preloaded
 
@@ -126,8 +126,47 @@ class TestGraphPrimarySelection:
         long_proc = _make_procedure_detail("x").model_copy(
             update={"description": "Z" * 5000}
         )
-        body = engine._format_procedure_bodies([long_proc], 200)
-        assert len(body) <= 201  # cap + ellipsis
+        blocks = engine._format_procedure_bodies([long_proc], 200)
+        assert len(blocks) == 1
+        assert len(blocks[0]) <= 201  # cap + ellipsis
+
+    @pytest.mark.asyncio
+    async def test_build_flag_on_renders_section_and_syncs_recalled_ids(self):
+        """End-to-end through build(): flag-ON renders 'Recommended Procedures'
+        (here via critic fallback, no graph seeds) and records exactly the shown
+        procedure's id — guards the wiring + the recalled-ids/budget sync."""
+        proc = _make_procedure_detail("runbook-x")
+        settings = Settings(
+            _env_file=None,
+            proc_selection_graph_primary=True,
+            critic_skill_injection="enabled",
+            relevance_floor_enabled=False,
+        )
+        brain = MagicMock()
+        brain.embeddings = None
+        brain.query = AsyncMock(return_value=[])
+        brain.neighbors = AsyncMock(return_value=[])  # no graph hits → critic fallback
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[])
+        heart.list_facts_by_category = AsyncMock(return_value=[])
+        heart.list_working_memory = AsyncMock(return_value=[])
+        heart.list_censors = AsyncMock(return_value=[])
+        heart.list_episodes = AsyncMock(return_value=[])
+        heart.list_procedures = AsyncMock(return_value=([], 0))
+        heart.get_procedure = AsyncMock()
+        heart.get_procedure_by_name = AsyncMock(return_value=proc)
+        engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+        result = await engine.build(
+            agent_id="test", session_id="s1", input_text="do the deploy thing",
+            frame=_frame(), critic_skills=["runbook-x"],
+        )
+
+        assert "Recommended Procedures" in result.system_prompt
+        assert "runbook-x" in result.system_prompt
+        assert result.recalled_ids.get("procedure") == [str(proc.id)]
 
 
 class TestDualTrackDisabled:

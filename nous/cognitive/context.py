@@ -652,27 +652,40 @@ class ContextEngine:
                     cap = getattr(
                         self._settings, "proc_recommended_body_max_chars", 1200,
                     )
-                    proc_text = self._format_procedure_bodies(selected, cap)
-                    proc_text = self._truncate_to_budget(
-                        proc_text, self._scaled_budget(budget.procedures),
-                    )
-                    sections.append(
-                        ContextSection(
-                            priority=7,
-                            label="Recommended Procedures",
-                            content=proc_text,
-                            token_estimate=self._estimate_tokens(proc_text),
-                            tier=SECTION_TIERS.get("Recommended Procedures", "dynamic"),
+                    blocks = self._format_procedure_bodies(selected, cap)
+                    # B-cog-A: accumulate bodies under the procedure budget and keep
+                    # the recalled-ids set in sync with what actually survives — a
+                    # tail body cut by the budget must NOT be recorded as "shown"
+                    # (else F071 would exclude it from recall_deep though the LLM
+                    # never saw it). The first block always shows (a single body can
+                    # exceed a tiny budget; the per-item cap bounds it).
+                    budget_tokens = self._scaled_budget(budget.procedures)
+                    shown_blocks: list[str] = []
+                    shown_procs: list = []
+                    used = 0
+                    for p, block in zip(selected, blocks):
+                        cost = self._estimate_tokens(block)
+                        if shown_blocks and used + cost > budget_tokens:
+                            break
+                        shown_blocks.append(block)
+                        shown_procs.append(p)
+                        used += cost
+                    if shown_procs:
+                        proc_text = "\n\n".join(shown_blocks)
+                        sections.append(
+                            ContextSection(
+                                priority=7,
+                                label="Recommended Procedures",
+                                content=proc_text,
+                                token_estimate=self._estimate_tokens(proc_text),
+                                tier=SECTION_TIERS.get("Recommended Procedures", "dynamic"),
+                            )
                         )
-                    )
-                    # B-cog-A: collect ids AFTER the section is built. Bodies are
-                    # per-item capped, not row-dropped, so every selected procedure
-                    # is shown — the recalled ids match what the LLM sees.
-                    for p in selected:
-                        mid = str(p.id)
-                        recalled_ids["procedure"].append(mid)
-                        recalled_content_map[mid] = getattr(p, "name", "")
-                        recalled_score_map[mid] = 1.0
+                        for p in shown_procs:
+                            mid = str(p.id)
+                            recalled_ids["procedure"].append(mid)
+                            recalled_content_map[mid] = getattr(p, "name", "")
+                            recalled_score_map[mid] = 1.0
             except Exception as e:
                 logger.warning("F080 §14.7 procedure selection failed: %s", e)
 
@@ -1344,8 +1357,8 @@ class ContextEngine:
                     seed_uuid, node_type=stype, neighbor_type="procedure",
                     limit=per_seed, session=session,
                 )
-            except Exception:
-                logger.warning("F080 §14.7: neighbor fetch failed for seed %s", mid)
+            except Exception as e:
+                logger.warning("F080 §14.7: neighbor fetch failed for seed %s: %s", mid, e)
                 continue
             for n in neighbors:
                 score = (getattr(n, "edge_weight", 0.0) or 0.0) * seed_score
@@ -1354,9 +1367,12 @@ class ContextEngine:
                     continue
                 try:
                     detail = await self._heart.get_procedure(n.id, session=session)
-                except Exception:
-                    continue  # not found / fetch error → skip
-                if detail is None or not getattr(detail, "active", False):
+                except ValueError:
+                    continue  # stale edge → procedure deleted; benign
+                except Exception as e:
+                    logger.warning("F080 §14.7: get_procedure failed for %s: %s", n.id, e)
+                    continue
+                if not getattr(detail, "active", False):
                     continue  # archived/superseded → never surface
                 best[n.id] = (score, detail)
 
@@ -1371,19 +1387,21 @@ class ContextEngine:
                     break
                 try:
                     detail = await self._heart.get_procedure_by_name(name, session=session)
-                except Exception:
+                except Exception as e:
+                    logger.warning("F080 §14.7: critic-skill lookup failed for %r: %s", name, e)
                     continue
                 if detail is not None and detail.id not in have and getattr(detail, "active", True):
                     selected.append(detail)
                     have.add(detail.id)
         return selected[:slots]
 
-    def _format_procedure_bodies(self, details: list, per_item_cap: int) -> str:
-        """Render selected procedures with their BODIES (steps), per-item capped.
+    def _format_procedure_bodies(self, details: list, per_item_cap: int) -> list[str]:
+        """Render selected procedures as per-item BODY blocks (steps), each capped.
 
         Body = description + core patterns + implementation notes + tools,
         assembled compactly so the agent can act without a get_procedure
-        round-trip for the surfaced picks.
+        round-trip. Returns one block per procedure (aligned with ``details``)
+        so the caller can fit them to budget and keep recalled-ids in sync.
         """
         blocks: list[str] = []
         for p in details:
@@ -1406,7 +1424,7 @@ class ContextEngine:
             if len(block) > per_item_cap:
                 block = block[:per_item_cap].rstrip() + "…"
             blocks.append(block)
-        return "\n\n".join(blocks)
+        return blocks
 
     def _format_episodes(self, episodes: list) -> str:
         """Format episodes for context.
