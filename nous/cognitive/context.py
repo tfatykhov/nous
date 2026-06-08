@@ -627,13 +627,66 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
 
+        # 7. F080 §14.7: graph-primary procedure selection — preloads the BODIES of
+        # procedures activated via K-line graph edges from recalled facts/decisions,
+        # with critic-recommended skills as fallback. Replaces the passive-injection
+        # path below when the flag is on (default OFF => passive path unchanged).
+        if (
+            budget.procedures > 0
+            and "procedure" not in skip_types
+            and getattr(self._settings, "proc_selection_graph_primary", False)
+        ):
+            try:
+                slots = (
+                    self._settings.critic_skill_slots
+                    + self._settings.embedding_skill_slots
+                )
+                selected = await self._select_procedures(
+                    slots=slots,
+                    critic_skills=critic_skills or [],
+                    recalled_ids=recalled_ids,
+                    recalled_score_map=recalled_score_map,
+                    session=session,
+                )
+                if selected:
+                    cap = getattr(
+                        self._settings, "proc_recommended_body_max_chars", 1200,
+                    )
+                    proc_text = self._format_procedure_bodies(selected, cap)
+                    proc_text = self._truncate_to_budget(
+                        proc_text, self._scaled_budget(budget.procedures),
+                    )
+                    sections.append(
+                        ContextSection(
+                            priority=7,
+                            label="Recommended Procedures",
+                            content=proc_text,
+                            token_estimate=self._estimate_tokens(proc_text),
+                            tier=SECTION_TIERS.get("Recommended Procedures", "dynamic"),
+                        )
+                    )
+                    # B-cog-A: collect ids AFTER the section is built. Bodies are
+                    # per-item capped, not row-dropped, so every selected procedure
+                    # is shown — the recalled ids match what the LLM sees.
+                    for p in selected:
+                        mid = str(p.id)
+                        recalled_ids["procedure"].append(mid)
+                        recalled_content_map[mid] = getattr(p, "name", "")
+                        recalled_score_map[mid] = 1.0
+            except Exception as e:
+                logger.warning("F080 §14.7 procedure selection failed: %s", e)
+
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
         # EMBEDDING (Track B) passive slots — those duplicate the recall_deep cosine path,
         # so they are the bloat. Critic-recommended skills (Track A) are NOT gated: they are
         # a classifier-driven push with no pull-path equivalent (recall_deep is pure cosine),
         # so disabling them would silently kill F024 skill injection (review M1).
-        if budget.procedures > 0 and "procedure" not in skip_types:
+        if (
+            budget.procedures > 0
+            and "procedure" not in skip_types
+            and not getattr(self._settings, "proc_selection_graph_primary", False)
+        ):
             try:
                 injection_mode = self._settings.critic_skill_injection
                 critic_slot_count = self._settings.critic_skill_slots
@@ -1251,6 +1304,109 @@ class ContextEngine:
             desc_str = f": {desc} | " if desc else ": "
             lines.append(f"- **{name}** ({domain}){desc_str}activated {count}x{eff_str}")
         return "\n".join(lines)
+
+    async def _select_procedures(
+        self,
+        *,
+        slots: int,
+        critic_skills: list[str],
+        recalled_ids: dict[str, list[str]],
+        recalled_score_map: dict[str, float],
+        session,
+    ) -> list:
+        """F080 §14.7: graph-primary (K-line) procedure selection with critic fallback.
+
+        Primary: for each already-recalled fact/decision seed (episodes are
+        recalled later in build(), and carry no procedure edges today), pull
+        procedure neighbors via the graph — structural, not cosine — and score
+        each ``edge_weight * seed_recall_score``. Fetch the body and drop
+        inactive/superseded skills. Fallback: critic-recommended skills fill any
+        remaining slots. Returns active ``ProcedureDetail`` objects, best first.
+        """
+        # Top-N seeds by recall score keep the per-turn graph fan-out bounded.
+        _SEED_CAP = 8
+        seeds: list[tuple[str, str]] = (
+            [(mid, "fact") for mid in recalled_ids.get("fact", [])]
+            + [(mid, "decision") for mid in recalled_ids.get("decision", [])]
+        )
+        seeds.sort(key=lambda s: recalled_score_map.get(s[0], 0.0) or 0.0, reverse=True)
+
+        per_seed = getattr(self._settings, "proc_graph_neighbors_per_seed", 3)
+        best: dict[UUID, tuple[float, object]] = {}
+        for mid, stype in seeds[:_SEED_CAP]:
+            try:
+                seed_uuid = UUID(mid)
+            except (ValueError, TypeError):
+                continue
+            seed_score = recalled_score_map.get(mid, 0.0) or 0.0
+            try:
+                neighbors = await self._brain.neighbors(
+                    seed_uuid, node_type=stype, neighbor_type="procedure",
+                    limit=per_seed, session=session,
+                )
+            except Exception:
+                logger.warning("F080 §14.7: neighbor fetch failed for seed %s", mid)
+                continue
+            for n in neighbors:
+                score = (getattr(n, "edge_weight", 0.0) or 0.0) * seed_score
+                prev = best.get(n.id)
+                if prev is not None and prev[0] >= score:
+                    continue
+                try:
+                    detail = await self._heart.get_procedure(n.id, session=session)
+                except Exception:
+                    continue  # not found / fetch error → skip
+                if detail is None or not getattr(detail, "active", False):
+                    continue  # archived/superseded → never surface
+                best[n.id] = (score, detail)
+
+        selected = [d for _s, d in sorted(best.values(), key=lambda x: (-x[0], str(x[1].id)))]
+        selected = selected[:slots]
+
+        # Fallback: critic-recommended skills fill remaining slots.
+        if len(selected) < slots and critic_skills:
+            have = {getattr(d, "id", None) for d in selected}
+            for name in list(dict.fromkeys(critic_skills)):
+                if len(selected) >= slots:
+                    break
+                try:
+                    detail = await self._heart.get_procedure_by_name(name, session=session)
+                except Exception:
+                    continue
+                if detail is not None and detail.id not in have and getattr(detail, "active", True):
+                    selected.append(detail)
+                    have.add(detail.id)
+        return selected[:slots]
+
+    def _format_procedure_bodies(self, details: list, per_item_cap: int) -> str:
+        """Render selected procedures with their BODIES (steps), per-item capped.
+
+        Body = description + core patterns + implementation notes + tools,
+        assembled compactly so the agent can act without a get_procedure
+        round-trip for the surfaced picks.
+        """
+        blocks: list[str] = []
+        for p in details:
+            name = getattr(p, "name", "")
+            domain = getattr(p, "domain", None) or "general"
+            parts: list[str] = [f"### {name} ({domain})"]
+            desc = getattr(p, "description", None)
+            if desc:
+                parts.append(desc)
+            patterns = getattr(p, "core_patterns", None) or []
+            if patterns:
+                parts.append("Patterns: " + "; ".join(patterns))
+            notes = getattr(p, "implementation_notes", None) or []
+            if notes:
+                parts.append("Notes: " + "; ".join(notes))
+            tools = getattr(p, "core_tools", None) or []
+            if tools:
+                parts.append("Tools: " + ", ".join(tools))
+            block = "\n".join(parts)
+            if len(block) > per_item_cap:
+                block = block[:per_item_cap].rstrip() + "…"
+            blocks.append(block)
+        return "\n\n".join(blocks)
 
     def _format_episodes(self, episodes: list) -> str:
         """Format episodes for context.

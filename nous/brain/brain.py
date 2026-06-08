@@ -1272,11 +1272,16 @@ class Brain:
             for c in c_result.all():
                 descriptions[c.id] = (c.content, c.created_at)
 
-        # Procedure: heart.procedures.description
+        # Procedure: heart.procedures.description. F080: only ACTIVE procedures —
+        # archived/superseded skills (active=false, set by name-dedup) must never
+        # be surfaced as graph neighbors. Inactive ids are simply absent from
+        # ``descriptions`` and dropped in the results loop below (this also fixes
+        # a live Path-A resurrection of dead skills via auto_linked edges).
         if ids_by_type.get("procedure"):
             p_result = await session.execute(
                 select(Procedure.id, Procedure.description, Procedure.created_at)
                 .where(Procedure.id.in_(ids_by_type["procedure"]))
+                .where(Procedure.active == True)  # noqa: E712
             )
             for p in p_result.all():
                 # Procedure.description is nullable — fall back to placeholder
@@ -1294,6 +1299,11 @@ class Brain:
         results = []
         for r in rows:
             ntype, rel, weight, method = edge_map[r.neighbor_id]
+            # F080: an inactive/superseded procedure was filtered out of the
+            # description resolution above — drop it rather than surfacing an
+            # archived skill as a "[procedure] <uuid>" placeholder.
+            if ntype == "procedure" and r.neighbor_id not in descriptions:
+                continue
             if r.neighbor_id in descriptions:
                 desc, created = descriptions[r.neighbor_id]
                 # Defensive: keep placeholder if resolved description is empty
