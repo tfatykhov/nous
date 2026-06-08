@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1217,28 +1217,45 @@ class Brain:
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_proc))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_proc))
 
-        # F080: order strongest-edge-first, then deduplicate to ONE row per
-        # neighbor in Python before applying the fan-out cap (codex P1). A node
-        # linked via multiple edges (e.g. informed_by from the graph linker +
-        # related_to from the densifier) otherwise returns several rows that
-        # consume the cap and crowd out other neighbors. DB-agnostic (no Postgres
-        # DISTINCT ON, so SQLite-backed tests still run); a generous SQL bound caps
-        # the fetch on god-nodes while preserving the strongest edges for dedup.
+        # F080: deduplicate to ONE row per neighbor (the max-weight edge) and cap,
+        # all in SQL via a window function, so the dedup happens BEFORE the cap
+        # (codex P1) — a node linked via multiple edges (informed_by from the graph
+        # linker + related_to from the densifier) can't consume the fan-out cap with
+        # duplicates. COALESCE sorts NULL weights LAST (Postgres would otherwise put
+        # NULL first under DESC). ROW_NUMBER works on both Postgres and the SQLite
+        # used in tests (avoids Postgres-only DISTINCT ON).
+        combined = source_q.union_all(target_q).subquery()
+        _w = func.coalesce(combined.c.edge_weight, -1.0)
+        ranked = (
+            select(
+                combined.c.neighbor_id,
+                combined.c.neighbor_type,
+                combined.c.edge_relation,
+                combined.c.edge_weight,
+                combined.c.extraction_method,
+                func.row_number()
+                .over(
+                    partition_by=combined.c.neighbor_id,
+                    order_by=[_w.desc(), combined.c.neighbor_id],
+                )
+                .label("rn"),
+            )
+            .subquery()
+        )
         union_q = (
-            source_q.union_all(target_q)
-            .order_by(text("edge_weight DESC"), text("neighbor_id"))
-            .limit(max(limit * 5, 50))
+            select(
+                ranked.c.neighbor_id,
+                ranked.c.neighbor_type,
+                ranked.c.edge_relation,
+                ranked.c.edge_weight,
+                ranked.c.extraction_method,
+            )
+            .where(ranked.c.rn == 1)
+            .order_by(func.coalesce(ranked.c.edge_weight, -1.0).desc(), ranked.c.neighbor_id)
+            .limit(limit)
         )
         result = await session.execute(union_q)
-        rows = []
-        _seen_neighbor_ids: set = set()
-        for r in result.all():
-            if r.neighbor_id in _seen_neighbor_ids:
-                continue  # keep only the max-weight edge per neighbor (ordered above)
-            _seen_neighbor_ids.add(r.neighbor_id)
-            rows.append(r)
-            if len(rows) >= limit:
-                break
+        rows = result.all()
 
         if not rows:
             return []
