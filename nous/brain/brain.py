@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import case, delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1180,6 +1180,7 @@ class Brain:
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
             GraphEdge.extraction_method.label("extraction_method"),
+            GraphEdge.id.label("edge_id"),
         ).where(
             GraphEdge.source_id == node_id,
             GraphEdge.source_type == node_type,
@@ -1192,6 +1193,7 @@ class Brain:
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
             GraphEdge.extraction_method.label("extraction_method"),
+            GraphEdge.id.label("edge_id"),
         ).where(
             GraphEdge.target_id == node_id,
             GraphEdge.target_type == node_type,
@@ -1208,8 +1210,60 @@ class Brain:
         if neighbor_type:
             source_q = source_q.where(GraphEdge.target_type == neighbor_type)
             target_q = target_q.where(GraphEdge.source_type == neighbor_type)
+            # F080: for procedure neighbors, exclude edges pointing at inactive /
+            # superseded skills BEFORE the LIMIT, so a capped fetch returns N
+            # *active* procedures rather than N edges that may be filtered to
+            # fewer (mirrors the F070 neighbor_type pushdown rationale above).
+            if neighbor_type == "procedure":
+                _active_proc = select(Procedure.id).where(Procedure.active == True)  # noqa: E712
+                source_q = source_q.where(GraphEdge.target_id.in_(_active_proc))
+                target_q = target_q.where(GraphEdge.source_id.in_(_active_proc))
 
-        union_q = source_q.union_all(target_q).limit(limit)
+        # F080: deduplicate to ONE row per neighbor (the max-weight edge) and cap,
+        # all in SQL via a window function, so the dedup happens BEFORE the cap
+        # (codex P1) — a node linked via multiple edges (informed_by from the graph
+        # linker + related_to from the densifier) can't consume the fan-out cap with
+        # duplicates. COALESCE sorts NULL weights LAST (Postgres would otherwise put
+        # NULL first under DESC). ROW_NUMBER works on both Postgres and the SQLite
+        # used in tests (avoids Postgres-only DISTINCT ON).
+        combined = source_q.union_all(target_q).subquery()
+        _w = func.coalesce(combined.c.edge_weight, -1.0)
+        ranked = (
+            select(
+                combined.c.neighbor_id,
+                combined.c.neighbor_type,
+                combined.c.edge_relation,
+                combined.c.edge_weight,
+                combined.c.extraction_method,
+                func.row_number()
+                .over(
+                    partition_by=combined.c.neighbor_id,
+                    # Deterministic tie-break for equal-weight duplicate edges
+                    # (common with the default weight 1.0): prefer NON-inferred
+                    # provenance (so F065 penalties are stable), then the unique
+                    # edge id. partition_by neighbor_id can't tie-break itself.
+                    order_by=[
+                        _w.desc(),
+                        case((combined.c.extraction_method == "inferred", 1), else_=0).asc(),
+                        combined.c.edge_id,
+                    ],
+                )
+                .label("rn"),
+            )
+            .subquery()
+        )
+        union_q = (
+            select(
+                ranked.c.neighbor_id,
+                ranked.c.neighbor_type,
+                ranked.c.edge_relation,
+                ranked.c.edge_weight,
+                ranked.c.extraction_method,
+            )
+            .where(ranked.c.rn == 1)
+            .order_by(func.coalesce(ranked.c.edge_weight, -1.0).desc(), ranked.c.neighbor_id)
+            .limit(limit)
+        )
         result = await session.execute(union_q)
         rows = result.all()
 
@@ -1272,11 +1326,16 @@ class Brain:
             for c in c_result.all():
                 descriptions[c.id] = (c.content, c.created_at)
 
-        # Procedure: heart.procedures.description
+        # Procedure: heart.procedures.description. F080: only ACTIVE procedures —
+        # archived/superseded skills (active=false, set by name-dedup) must never
+        # be surfaced as graph neighbors. Inactive ids are simply absent from
+        # ``descriptions`` and dropped in the results loop below (this also fixes
+        # a live Path-A resurrection of dead skills via auto_linked edges).
         if ids_by_type.get("procedure"):
             p_result = await session.execute(
                 select(Procedure.id, Procedure.description, Procedure.created_at)
                 .where(Procedure.id.in_(ids_by_type["procedure"]))
+                .where(Procedure.active == True)  # noqa: E712
             )
             for p in p_result.all():
                 # Procedure.description is nullable — fall back to placeholder
@@ -1294,6 +1353,11 @@ class Brain:
         results = []
         for r in rows:
             ntype, rel, weight, method = edge_map[r.neighbor_id]
+            # F080: an inactive/superseded procedure was filtered out of the
+            # description resolution above — drop it rather than surfacing an
+            # archived skill as a "[procedure] <uuid>" placeholder.
+            if ntype == "procedure" and r.neighbor_id not in descriptions:
+                continue
             if r.neighbor_id in descriptions:
                 desc, created = descriptions[r.neighbor_id]
                 # Defensive: keep placeholder if resolved description is empty

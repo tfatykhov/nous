@@ -55,6 +55,156 @@ def _make_procedure_summary(name: str, score: float = 0.8, domain: str = "test")
     )
 
 
+class TestGraphPrimarySelection:
+    """F080 §14.7: graph-primary (K-line) procedure selection with critic fallback."""
+
+    def _engine(self, *, neighbors, get_procedure=None, get_by_name=None):
+        from nous.brain.schemas import NeighborResult  # noqa: F401 (kept local)
+
+        settings = Settings(_env_file=None, proc_selection_graph_primary=True)
+        brain = MagicMock()
+        brain.neighbors = AsyncMock(return_value=neighbors)
+        heart = MagicMock()
+        heart.get_procedure = AsyncMock(return_value=get_procedure)
+        heart.get_procedure_by_name = AsyncMock(return_value=get_by_name)
+        return ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+    def _nbr(self, proc_id, weight=0.8):
+        from nous.brain.schemas import NeighborResult
+
+        return NeighborResult(
+            id=proc_id, node_type="procedure", description="d",
+            edge_relation="summarized_by", edge_weight=weight,
+            created_at=datetime.now(timezone.utc), extraction_method="auto_linked",
+        )
+
+    @pytest.mark.asyncio
+    async def test_graph_primary_selects_linked_procedure_with_body(self):
+        proc = _make_procedure_detail("deploy-runbook")
+        engine = self._engine(neighbors=[self._nbr(proc.id)], get_procedure=proc)
+        fid = str(uuid4())
+
+        selected = await engine._select_procedures(
+            slots=5, critic_skills=[],
+            recalled_ids={"fact": [fid], "decision": []},
+            recalled_score_map={fid: 0.9}, session=None,
+        )
+
+        assert [p.id for p in selected] == [proc.id]
+        body = "\n".join(engine._format_procedure_bodies(selected, 1200))
+        assert "deploy-runbook" in body
+        assert "pattern1" in body  # body (not just name) is preloaded
+
+    @pytest.mark.asyncio
+    async def test_inactive_procedure_never_surfaced(self):
+        archived = _make_procedure_detail("archived-skill").model_copy(
+            update={"active": False}
+        )
+        engine = self._engine(neighbors=[self._nbr(archived.id)], get_procedure=archived)
+        fid = str(uuid4())
+
+        selected = await engine._select_procedures(
+            slots=5, critic_skills=[],
+            recalled_ids={"fact": [fid]}, recalled_score_map={fid: 0.9}, session=None,
+        )
+        assert selected == []  # active=False => dropped
+
+    @pytest.mark.asyncio
+    async def test_critic_fallback_when_no_graph_hits(self):
+        crit = _make_procedure_detail("critic-skill")
+        engine = self._engine(neighbors=[], get_by_name=crit)
+
+        selected = await engine._select_procedures(
+            slots=5, critic_skills=["critic-skill"],
+            recalled_ids={"fact": [str(uuid4())]}, recalled_score_map={}, session=None,
+        )
+        assert [p.id for p in selected] == [crit.id]
+
+    @pytest.mark.asyncio
+    async def test_body_format_respects_per_item_cap(self):
+        engine = self._engine(neighbors=[])
+        long_proc = _make_procedure_detail("x").model_copy(
+            update={"description": "Z" * 5000}
+        )
+        blocks = engine._format_procedure_bodies([long_proc], 200)
+        assert len(blocks) == 1
+        assert len(blocks[0]) <= 201  # cap + ellipsis
+
+    @pytest.mark.asyncio
+    async def test_build_flag_on_renders_section_and_syncs_recalled_ids(self):
+        """End-to-end through build(): flag-ON renders 'Recommended Procedures'
+        (here via critic fallback, no graph seeds) and records exactly the shown
+        procedure's id — guards the wiring + the recalled-ids/budget sync."""
+        proc = _make_procedure_detail("runbook-x")
+        settings = Settings(
+            _env_file=None,
+            proc_selection_graph_primary=True,
+            critic_skill_injection="enabled",
+            relevance_floor_enabled=False,
+        )
+        brain = MagicMock()
+        brain.embeddings = None
+        brain.query = AsyncMock(return_value=[])
+        brain.neighbors = AsyncMock(return_value=[])  # no graph hits → critic fallback
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[])
+        heart.list_facts_by_category = AsyncMock(return_value=[])
+        heart.list_working_memory = AsyncMock(return_value=[])
+        heart.list_censors = AsyncMock(return_value=[])
+        heart.list_episodes = AsyncMock(return_value=[])
+        heart.list_procedures = AsyncMock(return_value=([], 0))
+        heart.get_procedure = AsyncMock()
+        heart.get_procedure_by_name = AsyncMock(return_value=proc)
+        engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+        result = await engine.build(
+            agent_id="test", session_id="s1", input_text="do the deploy thing",
+            frame=_frame(), critic_skills=["runbook-x"],
+        )
+
+        assert "Recommended Procedures" in result.system_prompt
+        assert "runbook-x" in result.system_prompt
+        assert result.recalled_ids.get("procedure") == [str(proc.id)]
+
+    @pytest.mark.asyncio
+    async def test_build_flag_on_fallback_respects_disabled_injection(self):
+        """critic_skill_injection='disabled' must suppress the critic fallback even
+        under graph-primary selection (codex P1) — no section, no name lookup."""
+        proc = _make_procedure_detail("runbook-x")
+        settings = Settings(
+            _env_file=None,
+            proc_selection_graph_primary=True,
+            critic_skill_injection="disabled",
+            relevance_floor_enabled=False,
+        )
+        brain = MagicMock()
+        brain.embeddings = None
+        brain.query = AsyncMock(return_value=[])
+        brain.neighbors = AsyncMock(return_value=[])  # no graph hits
+        heart = MagicMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        heart.search_facts = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[])
+        heart.list_facts_by_category = AsyncMock(return_value=[])
+        heart.list_working_memory = AsyncMock(return_value=[])
+        heart.list_censors = AsyncMock(return_value=[])
+        heart.list_episodes = AsyncMock(return_value=[])
+        heart.list_procedures = AsyncMock(return_value=([], 0))
+        heart.get_procedure = AsyncMock()
+        heart.get_procedure_by_name = AsyncMock(return_value=proc)
+        engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+        result = await engine.build(
+            agent_id="test", session_id="s1", input_text="do the deploy thing",
+            frame=_frame(), critic_skills=["runbook-x"],
+        )
+
+        assert "Recommended Procedures" not in result.system_prompt
+        heart.get_procedure_by_name.assert_not_called()
+
+
 class TestDualTrackDisabled:
     """Tests when critic_skill_injection=disabled (default)."""
 

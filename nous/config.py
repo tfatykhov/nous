@@ -159,6 +159,18 @@ class Settings(BaseSettings):
     # proc_catalog_enabled ON (breadth via catalog, depth via get_procedure).
     proc_passive_injection_enabled: bool = True
 
+    # F080 §14.7: graph-primary procedure selection. When True, the every-turn
+    # "Recommended Procedures" section is filled by K-line graph activation
+    # (recalled facts/decisions -> brain.neighbors(neighbor_type="procedure"))
+    # with critic-recommended skills as fallback, and the selected procedures'
+    # BODIES are preloaded (not just a name pointer). Bypasses the Track-B
+    # embedding injection. Default OFF => existing passive-injection behavior.
+    proc_selection_graph_primary: bool = False
+    # Per-item char cap for a preloaded procedure body in the Recommended section.
+    proc_recommended_body_max_chars: int = 1200
+    # Graph K-line fan-out: procedure neighbors pulled per recalled seed.
+    proc_graph_neighbors_per_seed: int = 3
+
     # F017: Diminishing returns cutoff (used by adaptive relevance filter)
     relevance_drop_ratio: float = 0.5
 
