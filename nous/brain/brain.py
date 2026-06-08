@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import case, delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1180,6 +1180,7 @@ class Brain:
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
             GraphEdge.extraction_method.label("extraction_method"),
+            GraphEdge.id.label("edge_id"),
         ).where(
             GraphEdge.source_id == node_id,
             GraphEdge.source_type == node_type,
@@ -1192,6 +1193,7 @@ class Brain:
             GraphEdge.relation.label("edge_relation"),
             GraphEdge.weight.label("edge_weight"),
             GraphEdge.extraction_method.label("extraction_method"),
+            GraphEdge.id.label("edge_id"),
         ).where(
             GraphEdge.target_id == node_id,
             GraphEdge.target_type == node_type,
@@ -1236,7 +1238,15 @@ class Brain:
                 func.row_number()
                 .over(
                     partition_by=combined.c.neighbor_id,
-                    order_by=[_w.desc(), combined.c.neighbor_id],
+                    # Deterministic tie-break for equal-weight duplicate edges
+                    # (common with the default weight 1.0): prefer NON-inferred
+                    # provenance (so F065 penalties are stable), then the unique
+                    # edge id. partition_by neighbor_id can't tie-break itself.
+                    order_by=[
+                        _w.desc(),
+                        case((combined.c.extraction_method == "inferred", 1), else_=0).asc(),
+                        combined.c.edge_id,
+                    ],
                 )
                 .label("rn"),
             )
