@@ -1217,7 +1217,14 @@ class Brain:
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_proc))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_proc))
 
-        union_q = source_q.union_all(target_q).limit(limit)
+        # F080: order by edge weight (best first) with a stable id tiebreak BEFORE
+        # the LIMIT, so a per-seed cap keeps the strongest edges rather than an
+        # arbitrary subset (codex P1), and results are deterministic run-to-run.
+        union_q = (
+            source_q.union_all(target_q)
+            .order_by(text("edge_weight DESC"), text("neighbor_id"))
+            .limit(limit)
+        )
         result = await session.execute(union_q)
         rows = result.all()
 
