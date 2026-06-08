@@ -46,6 +46,9 @@ class TestBuildSurfaces:
                   "list_censors", "list_episodes"):
             setattr(heart, m, AsyncMock(return_value=[]))
         heart.get_procedure_by_name = AsyncMock(return_value=None)
+        # F079 covers the legacy passive catalog/known-procedures delivery; pin
+        # §14 graph-primary OFF (now default-ON) unless a test overrides via **flags.
+        flags.setdefault("proc_selection_graph_primary", False)
         settings = Settings(_env_file=None, relevance_floor_enabled=False, **flags)
         brain = MagicMock(); brain.embeddings = None; brain.query = AsyncMock(return_value=[])
         return ContextEngine(brain, heart, settings, identity_prompt="Test")

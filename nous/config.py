@@ -159,13 +159,13 @@ class Settings(BaseSettings):
     # proc_catalog_enabled ON (breadth via catalog, depth via get_procedure).
     proc_passive_injection_enabled: bool = True
 
-    # F080 §14.7: graph-primary procedure selection. When True, the every-turn
-    # "Recommended Procedures" section is filled by K-line graph activation
-    # (recalled facts/decisions -> brain.neighbors(neighbor_type="procedure"))
-    # with critic-recommended skills as fallback, and the selected procedures'
-    # BODIES are preloaded (not just a name pointer). Bypasses the Track-B
-    # embedding injection. Default OFF => existing passive-injection behavior.
-    proc_selection_graph_primary: bool = False
+    # F080 §14.7: procedure selection ladder (graph K-line -> critic -> cosine).
+    # The every-turn "Recommended Procedures" section preloads the BODY of the
+    # query-relevant procedure (no get_procedure round-trip). Validated 2026-06-08
+    # on the prod snapshot: with the cosine leg it reaches 14/14 coverage at 1.64/2
+    # judged relevance (graph alone was sparse at 6/14). Default ON; set false to
+    # restore the passive name-pointer injection.
+    proc_selection_graph_primary: bool = True
     # Per-item char cap for a preloaded procedure body in the Recommended section.
     proc_recommended_body_max_chars: int = 1200
     # Graph K-line fan-out: procedure neighbors pulled per recalled seed.
@@ -745,8 +745,10 @@ class Settings(BaseSettings):
     # / guardrails with their own surfaces (Active Censors; Procedure Catalog +
     # get_procedure), not knowledge. The remaining facts/episodes/decisions/chunks
     # already share the normalized RRF [0,1] space, so no calibration is needed.
-    # Default OFF => byte-identical recall_deep output.
-    coherent_ranking_enabled: bool = False
+    # Validated 2026-06-08 on a fresh post-dedup prod snapshot: 0/12 censor+procedure
+    # leak; excluding them shifts top-10 from ~40 procedure slots to knowledge.
+    # Default ON; set false to restore the legacy ranked pool.
+    coherent_ranking_enabled: bool = True
 
     # F042: Cross-encoder reranking
     cross_encoder_enabled: bool = False

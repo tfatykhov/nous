@@ -662,6 +662,7 @@ class ContextEngine:
                     recalled_ids=recalled_ids,
                     recalled_score_map=recalled_score_map,
                     session=session,
+                    query=input_text,
                 )
                 if selected:
                     cap = getattr(
@@ -1341,15 +1342,19 @@ class ContextEngine:
         recalled_ids: dict[str, list[str]],
         recalled_score_map: dict[str, float],
         session,
+        query: str = "",
     ) -> list:
-        """F080 §14.7: graph-primary (K-line) procedure selection with critic fallback.
+        """§14.7 procedure selection ladder: graph K-line -> critic -> cosine.
 
-        Primary: for each already-recalled fact/decision seed (episodes are
-        recalled later in build(), and carry no procedure edges today), pull
-        procedure neighbors via the graph — structural, not cosine — and score
-        each ``edge_weight * seed_recall_score``. Fetch the body and drop
-        inactive/superseded skills. Fallback: critic-recommended skills fill any
-        remaining slots. Returns active ``ProcedureDetail`` objects, best first.
+        Graph (primary): for each recalled fact/decision seed, pull procedure
+        neighbors via graph edges (structural K-line, scored ``edge_weight *
+        seed_score``) — precise when an edge exists. Critic: classifier-recommended
+        skills. Cosine: embedding similarity over ``query`` — carries coverage
+        because the graph is sparse (a prod-snapshot A/B judged cosine picks ~2x
+        more relevant than the graph leg, which fired on only ~43% of queries).
+        Post-F080 the cosine leg is non-redundant — procedures are excluded from
+        recall_deep, so this is the sole cosine procedure path. All legs fetch the
+        full body and drop inactive/superseded skills. Active ``ProcedureDetail``.
         """
         # Top-N seeds by recall score keep the per-turn graph fan-out bounded.
         _SEED_CAP = 8
@@ -1412,6 +1417,32 @@ class ContextEngine:
                     logger.warning("F080 §14.7: critic-skill lookup failed for %r: %s", name, e)
                     continue
                 if detail is not None and detail.id not in have and getattr(detail, "active", True):
+                    selected.append(detail)
+                    have.add(detail.id)
+
+        # Cosine fallback: embedding similarity over the query fills remaining slots.
+        # Post-F080 this is non-redundant (procedures excluded from recall_deep) and an
+        # A/B on the prod snapshot judged cosine picks ~2x more relevant than the sparse
+        # graph leg — so it carries coverage while graph/critic add precision.
+        if len(selected) < slots and query:
+            have = {getattr(d, "id", None) for d in selected}
+            try:
+                cos = await self._heart.search_procedures(
+                    query, limit=slots * 2, session=session,
+                )
+            except Exception as e:
+                logger.warning("F080 §14.7: cosine procedure fallback failed: %s", e)
+                cos = []
+            for summ in cos:
+                if len(selected) >= slots:
+                    break
+                if summ.id in have:
+                    continue
+                try:
+                    detail = await self._heart.get_procedure(summ.id, session=session)
+                except Exception:
+                    continue
+                if detail is not None and getattr(detail, "active", False):
                     selected.append(detail)
                     have.add(detail.id)
         return selected[:slots]
