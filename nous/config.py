@@ -167,7 +167,10 @@ class Settings(BaseSettings):
     # restore the passive name-pointer injection.
     proc_selection_graph_primary: bool = True
     # Per-item char cap for a preloaded procedure body in the Recommended section.
-    proc_recommended_body_max_chars: int = 1200
+    # Sized to fit a real (full-fidelity) skill body; oversized skills are capped
+    # with a pointer to get_procedure for the untruncated full body. The total is
+    # still bounded by the per-frame procedure budget (build() accumulates).
+    proc_recommended_body_max_chars: int = 2500
     # Graph K-line fan-out: procedure neighbors pulled per recalled seed.
     proc_graph_neighbors_per_seed: int = 3
 

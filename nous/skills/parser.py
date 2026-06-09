@@ -406,7 +406,13 @@ class SkillParser:
             impl_notes.append("source:local")
         if manifest.version:
             impl_notes.append(f"version:{manifest.version}")
-        if manifest.first_section:
+        # Persist the FULL skill body (raw_content), not just the first H2
+        # section — otherwise multi-section skills are truncated to a stub at
+        # import (91.7% of routing/instruction signal lives in the body, decision
+        # 199ae559). first_section is kept only as a fallback if the body is empty.
+        if manifest.raw_content:
+            impl_notes.append(manifest.raw_content)
+        elif manifest.first_section:
             impl_notes.append(manifest.first_section)
 
         # Tags: "skill" + frame tags + source tag

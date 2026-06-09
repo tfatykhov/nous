@@ -41,7 +41,7 @@ def _build_embed_text(
 
     Includes all body fields, not just metadata, for full-body search accuracy.
     """
-    return (
+    text = (
         f"{name} {description or ''} "
         f"{' '.join(core_patterns or [])} "
         f"{' '.join(goals or [])} "
@@ -49,6 +49,16 @@ def _build_embed_text(
         f"{' '.join(core_concepts or [])} "
         f"{' '.join(implementation_notes or [])}"
     ).strip()
+    # Bound the EMBEDDING input only — OpenAI text-embedding-3 caps at 8191 tokens;
+    # full skill bodies (F081) can exceed that and would 400 → NULL embedding →
+    # invisible to vector search. The STORED body stays full; metadata
+    # (name/description) leads so the body never crowds out the routing signal.
+    # Conservative CHAR bound (tiktoken is not a dependency): realistic skill
+    # markdown (English prose + code) runs >=2 chars/token, so 16000 chars stays
+    # under 8191 tokens. _embed_with_retry NULLs+logs on a pathological (e.g.
+    # CJK-dense) overflow as the backstop — but skill bodies are English markdown.
+    _EMBED_CHAR_CAP = 16000
+    return text[:_EMBED_CHAR_CAP] if len(text) > _EMBED_CHAR_CAP else text
 
 
 class ProcedureManager:
@@ -792,6 +802,11 @@ class ProcedureManager:
             # A superseded row was archived because its capability now lives in the
             # canonical procedure; reactivate_skills must not un-archive it.
             .where(Procedure.superseded_by.is_(None))
+            # F081: never resurrect a deliberately ARCHIVED skill either (e.g. a
+            # source-gone stub archived by the re-import). archived_at is set on
+            # any intentional archival; only env-inactive skills (archived_at NULL)
+            # are eligible for requirements-based reactivation.
+            .where(Procedure.archived_at.is_(None))
         )
         return [self._to_detail(p) for p in result.scalars().all()]
 

@@ -168,6 +168,22 @@ class TestSkillParser:
         assert "# Serper Search" in manifest.raw_content
         assert "---" not in manifest.raw_content  # frontmatter stripped
 
+    def test_to_procedure_input_persists_full_body(self):
+        # Fix: the FULL skill body (all sections) is stored in implementation_notes,
+        # not just the first H2 section — multi-section skills no longer truncate
+        # to a stub at import (decision 821e11c8).
+        manifest = self.parser.parse(FULL_SKILL_MD)
+        pi = self.parser.to_procedure_input(manifest)
+        body = "\n".join(
+            n for n in pi.implementation_notes
+            if not n.startswith(("source:", "version:"))
+        )
+        assert "When to Use" in body
+        assert "How to Use" in body            # the SECOND section now survives
+        assert "Summarize findings" in body    # content from the last section
+        # source metadata still recorded separately
+        assert any(n.startswith("source:") for n in pi.implementation_notes)
+
     def test_parse_no_frontmatter_raises(self):
         with pytest.raises(ValueError, match="frontmatter"):
             self.parser.parse("# Just a heading\nNo frontmatter here.")
