@@ -695,6 +695,15 @@ class FactManager:
                     # ContradictionWarning instead of raising mid-learn.
                     classification = None
                     conf = 0.0
+                # codex P1 (round 3): low-confidence verdicts must not
+                # route here either — a 0.1-confidence CONTRADICTION wrote
+                # an edge + decremented the old fact, and a low-confidence
+                # UNRELATED suppressed the warning entirely. Falling
+                # through to the plain ContradictionWarning is the
+                # conservative pre-classifier behavior. (UPDATE keeps its
+                # stricter 0.8 gate below.)
+                if classification is not None and conf < 0.5:
+                    classification = None
 
             if classification:
                 if relation == "UNRELATED":

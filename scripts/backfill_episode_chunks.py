@@ -53,32 +53,46 @@ class Stats:
     embed_failures: int = 0
 
 
-async def _next_batch(db, agent_id: str | None, limit: int) -> list[tuple[str, str, str]]:
+async def _next_batch(
+    db, agent_id: str | None, limit: int,
+    exclude_ids: set[str] | None = None,
+) -> list[tuple[str, str, str]]:
     """Return up to ``limit`` (episode_id, agent_id, transcript) tuples
-    for episodes that have a non-null transcript and no existing chunks.
+    for episodes that have a non-null transcript and no dialogue chunks.
 
     NOT EXISTS naturally skips episodes whose chunks were just inserted by
-    the previous iteration, so the outer loop can simply re-query until
-    this returns empty.
+    the previous iteration. ``exclude_ids`` removes episodes already
+    attempted this run BEFORE the LIMIT applies (codex P1, round 3): the
+    stable created_at ordering otherwise keeps permanently-failing oldest
+    episodes at the front of every batch, starving everything behind them.
     """
+    from sqlalchemy import bindparam
     from sqlalchemy import text as sa_text
     where = "e.transcript IS NOT NULL AND length(trim(e.transcript)) > 0"
     params: dict = {"limit": limit}
     if agent_id is not None:
         where += " AND e.agent_id = :a"
         params["a"] = agent_id
+    exclude_clause = ""
+    if exclude_ids:
+        exclude_clause = "AND e.id::text NOT IN :excl "
+        params["excl"] = list(exclude_ids)
+    stmt = sa_text(
+        f"SELECT e.id::text, e.agent_id, e.transcript "
+        f"FROM heart.episodes e "
+        f"WHERE {where} "
+        f"  AND NOT EXISTS ("
+        f"    SELECT 1 FROM heart.episode_chunks ec WHERE ec.episode_id = e.id"
+        f"      AND ec.source_kind = 'dialogue'"
+        f"  ) "
+        f"{exclude_clause}"
+        f"ORDER BY e.created_at "
+        f"LIMIT :limit"
+    )
+    if exclude_ids:
+        stmt = stmt.bindparams(bindparam("excl", expanding=True))
     async with db.session() as s:
-        rows = (await s.execute(sa_text(
-            f"SELECT e.id::text, e.agent_id, e.transcript "
-            f"FROM heart.episodes e "
-            f"WHERE {where} "
-            f"  AND NOT EXISTS ("
-            f"    SELECT 1 FROM heart.episode_chunks ec WHERE ec.episode_id = e.id"
-            f"      AND ec.source_kind = 'dialogue'"
-            f"  ) "
-            f"ORDER BY e.created_at "
-            f"LIMIT :limit"
-        ), params)).all()
+        rows = (await s.execute(stmt, params)).all()
     return [(r[0], r[1], r[2]) for r in rows]
 
 
@@ -198,10 +212,14 @@ async def main() -> int:
         where += " AND e.agent_id = :a"
         pre_params["a"] = args.agent_id
     async with db.session() as s:
+        # codex P1 (round 3): same source-kind predicate as _next_batch —
+        # an unqualified NOT EXISTS counted doc/code-chunk-only episodes as
+        # ineligible and exited before _next_batch could backfill them.
         eligible = (await s.execute(sa_text(
             f"SELECT COUNT(*) FROM heart.episodes e "
             f"WHERE {where} AND NOT EXISTS ("
             f"  SELECT 1 FROM heart.episode_chunks ec WHERE ec.episode_id = e.id"
+            f"    AND ec.source_kind = 'dialogue'"
             f")"
         ), pre_params)).scalar()
 
@@ -236,10 +254,11 @@ async def main() -> int:
     try:
         # codex P1 (PR #495): episodes that fail without inserting a chunk
         # (too-short transcript, repeated embed failure, vector-count
-        # mismatch) stay eligible and are re-selected by every batch —
-        # without --limit one bad episode loops the run forever and an
-        # embed failure retries the API unbounded. Attempt each episode at
-        # most once per run; cross-run retry semantics are unchanged.
+        # mismatch) stay eligible — without exclusion one bad episode loops
+        # the run forever (unbounded API retries). Attempt each episode at
+        # most once per run, excluded in SQL BEFORE the batch LIMIT so
+        # failing oldest rows can't starve everything behind them
+        # (codex round 3). Cross-run retry semantics are unchanged.
         attempted: set[str] = set()
         while True:
             if args.limit and stats.episodes_seen >= args.limit:
@@ -248,16 +267,19 @@ async def main() -> int:
                 args.limit - stats.episodes_seen if args.limit else EPISODE_BATCH
             )
             batch_size = min(EPISODE_BATCH, remaining_budget)
-            batch = await _next_batch(db, args.agent_id, batch_size)
-            fresh = [(e, a, t) for e, a, t in batch if e not in attempted]
-            if not fresh:
-                if batch:
+            batch = await _next_batch(
+                db, args.agent_id, batch_size, exclude_ids=attempted
+            )
+            if not batch:
+                if attempted:
                     logger.info(
-                        "Stopping: remaining %d eligible episode(s) already "
-                        "attempted this run (see failures above)", len(batch),
+                        "Run complete: %d episode(s) attempted; any without "
+                        "a dialogue chunk failed this run (see logs above) "
+                        "and will be retried on the next run",
+                        len(attempted),
                     )
                 break
-            for episode_id, agent_id, transcript in fresh:
+            for episode_id, agent_id, transcript in batch:
                 attempted.add(episode_id)
                 stats.episodes_seen += 1
                 await _process_episode(
