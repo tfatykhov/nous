@@ -598,7 +598,7 @@ class TestFactExtractor:
             },
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
-        heart.search_facts = AsyncMock(return_value=[])  # No existing
+        heart.find_similar_facts = AsyncMock(return_value=[])  # No existing
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -632,7 +632,7 @@ class TestFactExtractor:
         # Return existing fact with .score above 0.92 threshold -> should be deduped
         existing_fact = MagicMock(spec=FactSummary)
         existing_fact.score = 0.95  # Above 0.92 threshold -> deduped
-        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -660,7 +660,7 @@ class TestFactExtractor:
         # Return existing fact with .score below 0.92 -> should NOT be deduped
         existing_fact = MagicMock(spec=FactSummary)
         existing_fact.score = 0.85  # Below 0.92 -> allowed through
-        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -685,7 +685,7 @@ class TestFactExtractor:
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
 
-        heart.search_facts = AsyncMock(return_value=[])  # No existing match
+        heart.find_similar_facts = AsyncMock(return_value=[])  # No existing match
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -712,7 +712,7 @@ class TestFactExtractor:
             {"subject": "user", "content": "Maybe likes Java", "category": "preference", "confidence": 0.4},
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -737,7 +737,7 @@ class TestFactExtractor:
             for i in range(8)  # 8 facts, only 5 should be stored
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -791,7 +791,7 @@ class TestFactExtractor:
     async def test_uses_candidate_facts_skips_llm(self):
         """008.4: When candidate_facts present, store directly without LLM call."""
         extractor, heart, bus, llm_client = self._make_extractor()
-        heart.search_facts = AsyncMock(return_value=[])  # No duplicates
+        heart.find_similar_facts = AsyncMock(return_value=[])  # No duplicates
         heart.learn = AsyncMock()
 
         event = _make_event(
@@ -830,7 +830,7 @@ class TestFactExtractor:
 
         existing_fact = MagicMock(spec=FactSummary)
         existing_fact.score = 0.95  # Above 0.92 -> deduped
-        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         heart.learn = AsyncMock()
 
         event = _make_event(
@@ -853,7 +853,7 @@ class TestFactExtractor:
             {"subject": "user", "content": "User likes tests", "category": "preference", "confidence": 0.9},
         ]
         extractor, heart, bus, llm_client = self._make_extractor()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]
@@ -877,7 +877,7 @@ class TestFactExtractor:
     async def test_candidate_facts_max_5(self):
         """008.4: candidate_facts respects max 5 limit."""
         extractor, heart, bus, llm_client = self._make_extractor()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
 
         event = _make_event(
@@ -1992,7 +1992,7 @@ class TestReviewFixes:
                 "confidence": 0.95,
             },
         ]
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock()
         llm_client.call = AsyncMock(return_value=MagicMock(
             content=[{"type": "text", "text": json.dumps(facts_json)}]

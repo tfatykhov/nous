@@ -63,6 +63,7 @@ async def create_components(settings: Settings) -> dict:
             api_key=settings.openai_api_key,
             model=settings.embedding_model,
             dimensions=settings.embedding_dimensions,
+            cache_size=settings.embedding_cache_size,
         )
 
     brain = Brain(database, settings, embedding_provider)

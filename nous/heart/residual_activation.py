@@ -222,7 +222,7 @@ class ResidualActivator:
         agent_id: str,
         session_id: str,
         current_turn: int,
-        surfaced: list[tuple[UUID, str, float]],
+        surfaced: list[tuple],
     ) -> None:
         """Write surfaced items back to WM.items with residual JSONB keys.
 
@@ -236,7 +236,10 @@ class ResidualActivator:
         try:
             top_k = int(getattr(self._settings, "residual_top_k_carried", 20))
             # Rank-normalize surfaced scores so activation lives in [0, 1].
-            max_score = max((s for _id, _t, s in surfaced), default=0.0)
+            # Tuples are (id, type, score) or (id, type, score, snippet) —
+            # the 4th element (audit E2) carries real content so WM entries
+            # render meaningfully instead of as "residual fact" stubs.
+            max_score = max((entry[2] for entry in surfaced), default=0.0)
             if max_score <= 0:
                 return
             # ``loaded_at`` is a required ``datetime`` on WorkingMemoryItem
@@ -248,11 +251,13 @@ class ResidualActivator:
             # IS a load event into WM.
             now_iso = datetime.now(UTC).isoformat()
             entries: list[dict] = []
-            for node_id, node_type, score in surfaced[:top_k]:
+            for entry in surfaced[:top_k]:
+                node_id, node_type, score = entry[0], entry[1], entry[2]
+                snippet = str(entry[3]).strip() if len(entry) > 3 and entry[3] else ""
                 entries.append({
                     "type": node_type,
                     "ref_id": str(node_id),
-                    "summary": f"residual {node_type}",
+                    "summary": snippet[:160] or f"residual {node_type}",
                     "relevance": float(score) / max_score,
                     "loaded_at": now_iso,
                     "activation": float(score) / max_score,
@@ -262,9 +267,11 @@ class ResidualActivator:
                 agent_id=agent_id,
                 session_id=session_id,
                 items=entries,
+                max_residual_items=top_k,
             )
         except Exception:
             logger.warning(
                 "F055: record_surfaced failed for %s/%s (turn=%d, n=%d)",
                 agent_id, session_id, current_turn, len(surfaced),
+                exc_info=True,  # review P3: the WHY must reach the log
             )

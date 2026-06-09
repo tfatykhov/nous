@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from functools import lru_cache
 from uuid import UUID
 
 from sqlalchemy import text
@@ -31,26 +32,53 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+@lru_cache(maxsize=8)
+def _cached_settings(_env_fingerprint: tuple) -> "object":
+    """Construct Settings at most once per env-fingerprint (audit P3).
+
+    The three resolvers below ran a full pydantic-settings construction
+    (~300-field env + .env parse) on EVERY hybrid_search call — 2-3x per
+    search, ~10x per recall. The cache key is the tuple of env vars these
+    resolvers actually depend on, so tests that monkeypatch NOUS_RRF_K /
+    NOUS_VECTOR_WEIGHT / NOUS_HYBRID_SEARCH_KEYWORD_ENABLED still see
+    fresh values (changed env → new fingerprint → new Settings).
+    RuntimeConfig overrides are NOT cached — they are consulted per call.
+    """
+    from nous.config import Settings
+
+    return Settings()
+
+
+def _resolver_settings() -> "object | None":
+    import os
+
+    fingerprint = (
+        os.environ.get("NOUS_RRF_K"),
+        os.environ.get("NOUS_VECTOR_WEIGHT"),
+        os.environ.get("NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"),
+    )
+    try:
+        return _cached_settings(fingerprint)
+    except Exception:
+        return None
+
+
 def _resolve_vector_weight() -> float:
     """Resolve vector_weight from runtime config > settings > default 0.7."""
-    from nous.config import Settings
     from nous.runtime_config import RuntimeConfig
 
-    try:
-        settings = Settings()
-    except Exception:
+    settings = _resolver_settings()
+    if settings is None:
         return 0.7
     return RuntimeConfig.get().get_vector_weight(settings)
 
 
 def _resolve_rrf_k() -> int:
     """Resolve rrf_k from runtime config > settings > default 60."""
-    from nous.config import Settings
     from nous.runtime_config import RuntimeConfig
 
-    try:
-        settings = Settings()
-    except Exception:
+    settings = _resolver_settings()
+    if settings is None:
         return 60
     return RuntimeConfig.get().get_rrf_k(settings)
 
@@ -64,11 +92,8 @@ def _resolve_keyword_enabled() -> bool:
     No RuntimeConfig override path — this is intentionally a static config
     flip, not a per-request knob.
     """
-    from nous.config import Settings
-
-    try:
-        settings = Settings()
-    except Exception:
+    settings = _resolver_settings()
+    if settings is None:
         return True
     return bool(getattr(settings, "hybrid_search_keyword_enabled", True))
 

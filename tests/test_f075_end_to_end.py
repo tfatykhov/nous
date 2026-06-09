@@ -147,7 +147,7 @@ async def test_pre_learn_dedup_bypass_polarity_extracted_facts():
         heart = MagicMock()
         existing_id = uuid4()
         # search_facts returns a near-duplicate above threshold
-        heart.search_facts = AsyncMock(return_value=[FactSummary(
+        heart.find_similar_facts = AsyncMock(return_value=[FactSummary(
             id=existing_id,
             content="existing",
             category=None,
@@ -213,7 +213,7 @@ async def test_malformed_date_stays_backfill_eligible():
 
     async def captured_learn_input(raw_event_date):
         heart = MagicMock()
-        heart.search_facts = AsyncMock(return_value=[])  # no dedup hit
+        heart.find_similar_facts = AsyncMock(return_value=[])  # no dedup hit
         captured = {}
 
         async def _learn(fact_input):

@@ -1433,9 +1433,21 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("F080 §14.7: cosine procedure fallback failed: %s", e)
                 cos = []
+            # Audit R1 (2026-06-09): apply the same relevance floor the
+            # passive path enforced (procedure_score_floor, default 0.40).
+            # Without it this leg preloaded up to `slots` full bodies
+            # (2500 chars each) for arbitrarily-poor matches on every turn
+            # — there was no score check at all. `continue` (not break) so
+            # no monotonic-ordering assumption on search_procedures (the
+            # utility boost can reorder); the list is at most slots*2 long.
+            floor = float(
+                getattr(self._settings, "procedure_score_floor", 0.40) or 0.0
+            )
             for summ in cos:
                 if len(selected) >= slots:
                     break
+                if summ.score is not None and summ.score < floor:
+                    continue
                 if summ.id in have:
                     continue
                 try:

@@ -615,7 +615,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         memory_types: list[str] | None = None,
         _session_id: str | None = None,
     ) -> dict[str, Any]:
-        """Search across all memory types in Heart and Brain.
+        """Search memory in Heart and Brain.
 
         Thin wrapper around ``run_recall_pipeline`` (F051 refactor): the
         pipeline runs the full retrieval stack and returns structured
@@ -623,9 +623,17 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         Args:
             query: Search query string
-            limit: Maximum results to return
+            limit: Per-leg result cap (each search leg is capped
+                individually; the combined list can exceed it — audit B7)
             memory_types: Types to search (episode, fact, procedure, censor, decision)
-                         If None or contains "all", searches everything
+                If None or contains "all": with coherent ranking enabled
+                (F080, default ON) the default pool is knowledge-only —
+                episodes, facts, chunks, decisions. Procedures and censors
+                are EXCLUDED from the default pool (procedures are served
+                by the catalog/§14 selection + get_procedure; censors by
+                the always-on Active Censors section). Pass an explicit
+                memory_types list containing "procedure" or "censor" to
+                search those types here (audit R2).
             _session_id: F051.4/F055 — session identifier injected by
                 ``ToolDispatcher.dispatch``. When F055 (Cross-Turn Residual
                 Activation) ships, the residual_activations path reads this
@@ -779,7 +787,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 try:
                     import asyncio
                     surfaced = [
-                        (r.id, r.type, float(r.score) if r.score is not None else 0.0)
+                        (
+                            r.id,
+                            r.type,
+                            float(r.score) if r.score is not None else 0.0,
+                            (r.description or "")[:160],  # audit E2: real summary
+                        )
                         for r in results
                     ]
                     asyncio.create_task(
@@ -1449,7 +1462,13 @@ _RECALL_DEEP_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "enum": ["all", "episode", "fact", "procedure", "censor", "decision"],
             },
-            "description": "Types to search. If omitted or contains 'all', searches everything.",
+            "description": (
+                "Types to search. If omitted or contains 'all', searches the "
+                "knowledge pool: episodes, facts, decisions (+ transcript "
+                "chunks). Procedures and censors are NOT in the default pool "
+                "— name them explicitly (e.g. [\"procedure\"]) to search them; "
+                "a null default-pool result does not mean none exist."
+            ),
         },
     },
     "required": ["query"],

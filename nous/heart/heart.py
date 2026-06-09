@@ -366,6 +366,19 @@ class Heart:
         """Hybrid search over facts."""
         return await self.facts.search(query, limit, category, active_only, exclude_categories, session)
 
+    async def find_similar_facts(
+        self,
+        content: str,
+        limit: int = 5,
+        session: AsyncSession | None = None,
+    ) -> list[FactSummary]:
+        """Raw-cosine nearest-neighbor probe for write-path dedup (audit S1).
+
+        Scores are raw cosine similarity in [0, 1] — thresholdable, unlike
+        the rank-encoded RRF scores from search_facts. No access tracking.
+        """
+        return await self.facts.find_similar_for_dedup(content, limit, session)
+
     async def list_facts_by_category(
         self,
         categories: list[str],

@@ -107,7 +107,7 @@ async def test_resolve_dedup_checks_lower_hits_when_top_is_distinct():
     ranked #2. With the tiebreaker on, dedup against the lower paraphrase."""
     opp, para = _hit("MRR is up 5%", 0.97), _hit("MRR fell by 5 percent", 0.95)
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[opp, para])
+    heart.find_similar_facts = AsyncMock(return_value=[opp, para])
     # top opposite -> DISTINCT (skip), lower paraphrase -> DUPLICATE (dedup)
     heart.facts.is_distinct_fact = AsyncMock(side_effect=[True, False])
     ext = _extractor(heart, tiebreaker=True)
@@ -124,7 +124,7 @@ async def test_resolve_dedup_stores_when_all_hits_distinct():
     id is returned for native-dedup exclusion (codex P2)."""
     a, b = _hit("x up", 0.97), _hit("y down", 0.95)
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[a, b])
+    heart.find_similar_facts = AsyncMock(return_value=[a, b])
     heart.facts.is_distinct_fact = AsyncMock(return_value=True)
     ext = _extractor(heart, tiebreaker=True)
     canonical, exclude_ids = await ext._resolve_dedup("z", None)
@@ -138,7 +138,7 @@ async def test_resolve_dedup_flag_off_dedups_top_hit_without_llm():
     exclusion ids (native dedup behaves exactly as pre-F377)."""
     top = _hit("anchor", 0.97)
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[top])
+    heart.find_similar_facts = AsyncMock(return_value=[top])
     heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=False)
 
@@ -149,80 +149,46 @@ async def test_resolve_dedup_flag_off_dedups_top_hit_without_llm():
 
 
 @pytest.mark.asyncio
-async def test_resolve_dedup_decides_top_hit_at_limit_1_scoring():
-    """#469/P2-5: widening the dedup search must not drop the rank-1 hit below
-    threshold. A single-channel duplicate scores above threshold at limit=1 but
-    below at limit=5 (RRF penalty_rank = limit + 1); phase 1 resolves the top hit
-    at limit=1, so it is still deduped instead of wrongly stored."""
-    dup_id = uuid4()
-
-    async def fake_search(content, limit):
-        # same fact, limit-dependent RRF score (single-channel penalty grows)
-        score = 0.94 if limit == 1 else 0.83
-        return [_hit("near-dup", score, id=dup_id)]
-
+async def test_resolve_dedup_sub_threshold_hit_stores_without_llm():
+    """Audit S1 regression: the probe score is raw COSINE, so a merely-nearest
+    fact below fact_dedup_threshold must neither dedup nor pay a tiebreaker
+    call. (Under the old RRF probe the nearest fact scored ~0.98 regardless of
+    similarity, so this case never existed — every candidate hit the LLM.)"""
+    near_but_unrelated = _hit("the deploy uses blue-green rollout", 0.61)
     heart = MagicMock()
-    heart.search_facts = AsyncMock(side_effect=fake_search)
-    heart.facts.is_distinct_fact = AsyncMock(return_value=False)  # genuine duplicate
+    heart.find_similar_facts = AsyncMock(return_value=[near_but_unrelated])
+    heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=True)
 
-    canonical, exclude_ids = await ext._resolve_dedup("near duplicate", None)
-    assert canonical == dup_id  # deduped via the limit=1 decision, not missed
+    canonical, exclude_ids = await ext._resolve_dedup("user prefers dark mode", None)
+    assert canonical is None
     assert exclude_ids == []
+    heart.facts.is_distinct_fact.assert_not_called()
+    assert heart.find_similar_facts.await_count == 1  # single probe, no widening
 
 
 @pytest.mark.asyncio
-async def test_resolve_dedup_finds_superseder_when_top_is_soft_penalized():
-    """#470/P2-6: apply_supersession_filter runs after truncation, so at limit=1
-    a superseded rank-1 fact is soft-penalized ×0.3 below threshold (superseder
-    absent). The widened pass must still run (top.superseded_by is set) and dedup
-    against the superseder that surfaces at limit=5."""
-    old_id, superseder_id = uuid4(), uuid4()
-
-    async def fake_search(content, limit):
-        if limit == 1:
-            # superseded old fact, ×0.3 soft-penalized below threshold
-            return [_hit("old value", 0.30, id=old_id, superseded_by=superseder_id)]
-        # limit=5: old fact dropped by the supersession filter; superseder surfaces
-        return [_hit("current value", 0.95, id=superseder_id)]
-
+async def test_resolve_dedup_scan_stops_at_first_sub_threshold_hit():
+    """Hits are similarity-descending; once one falls below threshold nothing
+    further can clear it, so the scan breaks (no wasted tiebreaker calls)."""
+    above, below = _hit("close paraphrase", 0.95), _hit("loosely related", 0.80)
     heart = MagicMock()
-    heart.search_facts = AsyncMock(side_effect=fake_search)
-    heart.facts.is_distinct_fact = AsyncMock(return_value=False)  # superseder is a real dup
+    heart.find_similar_facts = AsyncMock(return_value=[above, below])
+    heart.facts.is_distinct_fact = AsyncMock(return_value=True)  # above -> DISTINCT
     ext = _extractor(heart, tiebreaker=True)
 
-    canonical, exclude_ids = await ext._resolve_dedup("the value", None)
-    assert canonical == superseder_id
+    canonical, exclude_ids = await ext._resolve_dedup("candidate", None)
+    assert canonical is None
+    assert exclude_ids == [above.id]
+    # only the above-threshold hit was tiebroken
+    assert heart.facts.is_distinct_fact.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_resolve_dedup_low_confidence_top_finds_dup():
-    """#470/P2-7: apply_supersession_filter also ×confidence-penalizes low-conf
-    hits and re-sorts. A low-confidence rank-1 hit pushed below threshold at
-    limit=1 must not short-circuit — the widened pass surfaces the high-confidence
-    duplicate the filter re-sort brings to the top at limit=5."""
-    lowconf_id, dup_id = uuid4(), uuid4()
-
-    async def fake_search(content, limit):
-        if limit == 1:
-            return [_hit("low-conf note", 0.40, id=lowconf_id)]  # not superseded
-        return [_hit("the real duplicate", 0.95, id=dup_id)]
-
+async def test_resolve_dedup_empty_probe_stores():
+    """No similar facts at all → store; tiebreaker never consulted."""
     heart = MagicMock()
-    heart.search_facts = AsyncMock(side_effect=fake_search)
-    heart.facts.is_distinct_fact = AsyncMock(return_value=False)
-    ext = _extractor(heart, tiebreaker=True)
-
-    canonical, exclude_ids = await ext._resolve_dedup("the value", None)
-    assert canonical == dup_id  # generic gate widens despite a non-superseded top
-
-
-@pytest.mark.asyncio
-async def test_resolve_dedup_empty_search_stores_without_widening():
-    """The only short-circuit left: limit=1 returns nothing → genuinely no fact to
-    dedup against → store, no widened search."""
-    heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[])
+    heart.find_similar_facts = AsyncMock(return_value=[])
     heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=True)
 
@@ -230,7 +196,28 @@ async def test_resolve_dedup_empty_search_stores_without_widening():
     assert canonical is None
     assert exclude_ids == []
     heart.facts.is_distinct_fact.assert_not_called()
-    assert heart.search_facts.await_count == 1  # no phase-2 widening
+    assert heart.find_similar_facts.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_dedup_flag_off_date_differing_top_dedups_against_next_hit():
+    """Pinned behavior decision (review): with the tiebreaker OFF and a
+    date-differing top hit, the scan continues to the next above-threshold
+    hit and dedups against it. The pre-rewrite code examined ONLY the top
+    hit (would have stored); continuing is intentionally more correct — a
+    true duplicate hiding behind a distinct-date event should still dedup."""
+    from datetime import date
+    dated = _hit("same event other day", 0.97, event_date=date(2024, 1, 1))
+    true_dup = _hit("true duplicate", 0.95)
+    heart = MagicMock()
+    heart.find_similar_facts = AsyncMock(return_value=[dated, true_dup])
+    heart.facts.is_distinct_fact = AsyncMock()
+    ext = _extractor(heart, tiebreaker=False)
+
+    canonical, exclude_ids = await ext._resolve_dedup("candidate", date(2024, 6, 1))
+    assert canonical == true_dup.id
+    assert exclude_ids == []
+    heart.facts.is_distinct_fact.assert_not_called()  # flag off -> no LLM
 
 
 @pytest.mark.asyncio
@@ -240,7 +227,7 @@ async def test_resolve_dedup_skips_distinct_event_date():
     from datetime import date
     hit = _hit("same text", 0.97, event_date=date(2024, 1, 1))
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[hit])
+    heart.find_similar_facts = AsyncMock(return_value=[hit])
     heart.facts.is_distinct_fact = AsyncMock()
     ext = _extractor(heart, tiebreaker=True)
 

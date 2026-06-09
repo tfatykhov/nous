@@ -268,6 +268,17 @@ class CensorManager:
             domain_clause = "AND (domain = :domain OR domain IS NULL)"
             params["domain"] = domain
 
+        # Audit D9 (2026-06-09): pgvector's HNSW index only serves a plain
+        # `ORDER BY embedding <=> :q LIMIT n` — the previous
+        # `ORDER BY similarity DESC` (an alias) with no LIMIT forced a full
+        # scan computing 1536-dim distance per row on every censor check.
+        # Distance-ASC == similarity-DESC, so result ordering is unchanged;
+        # LIMIT 50 is far above any realistic simultaneous-match count.
+        # HNSW is APPROXIMATE and this is a guardrail-enforcement path —
+        # raise ef_search above the LIMIT so agent_id/active post-filters
+        # can't evict true matches from the candidate horizon (default 40
+        # < LIMIT 50; review P2). SET LOCAL is transaction-scoped.
+        await session.execute(text("SET LOCAL hnsw.ef_search = 120"))
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.censors
@@ -276,7 +287,8 @@ class CensorManager:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
               {domain_clause}
-            ORDER BY similarity DESC
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT 50
         """)
 
         result = await session.execute(sql, params)
@@ -391,6 +403,11 @@ class CensorManager:
             domain_clause = "AND (domain = :domain OR domain IS NULL)"
             params["domain"] = domain
 
+        # Audit D9: distance-ordered so the HNSW index serves the query
+        # (ordering identical — distance ASC == similarity DESC).
+        # ef_search raised above any plausible :limit so post-filters can't
+        # evict true matches from the approximate candidate set (review P2).
+        await session.execute(text("SET LOCAL hnsw.ef_search = 120"))
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.censors
@@ -399,7 +416,7 @@ class CensorManager:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
               {domain_clause}
-            ORDER BY similarity DESC
+            ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """)
 

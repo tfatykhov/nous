@@ -184,19 +184,25 @@ async def sqlite_find_duplicate(
     result = await session.execute(query)
     facts = result.scalars().all()
 
+    threshold = (
+        float(self._settings.fact_native_cosine_threshold)
+        if getattr(self, "_settings", None) is not None else 0.95
+    )
     matches = []  # (date_match: bool, sim: float, fact)
     for fact in facts:
         fact_emb = _parse_embedding(fact.embedding)
         if fact_emb:
             sim = cosine_similarity(embedding, fact_emb)
-            if sim > 0.95:
+            if sim > threshold:
                 date_match = fact.event_date == candidate_event_date
                 matches.append((date_match, sim, fact))
     if not matches:
         return None
     # date-match first (True > False), then highest cosine
     matches.sort(key=lambda m: (m[0], m[1]), reverse=True)
-    return matches[0][2]
+    # Audit S3: production now returns (fact, similarity) so _learn can
+    # band-route the hit — mirror that contract.
+    return matches[0][2], matches[0][1]
 
 
 async def sqlite_find_contradiction(

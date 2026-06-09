@@ -442,15 +442,29 @@ class FactManager:
             except Exception:
                 logger.warning("Embedding generation failed for fact learn")
 
-        # Near-duplicate detection: cosine similarity > 0.95.
+        # Near-duplicate detection: cosine similarity > threshold.
         # F075: pass candidate's event_date so _find_duplicate prefers same-date
         # matches over different-date ones above threshold.
+        #
+        # Audit S3 (2026-06-09): when the operator lowers the dedup threshold
+        # below the contradiction band (prod runs 0.80 vs band 0.85-0.95),
+        # a blind _confirm would swallow the band entirely — a CONFLICTING
+        # fact at 0.86 would increment confirmation_count on the stale fact
+        # and be discarded. So in-band dupes are classified (same F027
+        # classifier _find_contradiction uses) BEFORE confirming, and routed:
+        # UNRELATED/REFINEMENT/UPDATE-new/CONTRADICTION proceed to insert
+        # with a post-flush action; only UPDATE-old, low-confidence verdicts,
+        # classifier failure, or out-of-band similarity confirm the dupe.
+        band_action: str | None = None
+        band_dupe: Fact | None = None
+        band_sim: float = 0.0
         if embedding is not None:
-            dupe = await self._find_duplicate(
+            found = await self._find_duplicate(
                 embedding, exclude_ids, session,
                 candidate_event_date=input.event_date,
             )
-            if dupe is not None:
+            if found is not None:
+                dupe, dupe_similarity = found
                 # F075 dedup bypass: distinct event_dates = distinct events.
                 # Same entity, same content shape, but on different dates is
                 # not a duplicate — it's a separate event temporal_reasoning
@@ -463,8 +477,18 @@ class FactManager:
                 ):
                     pass  # do NOT return; treat as new event
                 else:
-                    # Confirm existing fact instead of creating new
-                    return await self._confirm(dupe.id, session)
+                    band_action = await self._classify_dupe_in_band(
+                        dupe, dupe_similarity, input, check_contradictions
+                    )
+                    if band_action is None:
+                        # Confirm existing fact instead of creating new
+                        return await self._confirm_duplicate(dupe, input, session)
+                    # Routed: insert proceeds; exclude the dupe from the
+                    # supersession + contradiction passes below so it is
+                    # not re-classified or superseded against the verdict.
+                    band_dupe = dupe
+                    band_sim = dupe_similarity
+                    exclude_ids.append(dupe.id)
 
         # F023: Admission gate — score candidate before storage
         admission_result: AdmissionResult | None = None
@@ -542,15 +566,27 @@ class FactManager:
         session.add(fact)
         await session.flush()
 
+        # Audit S3: apply the in-band dupe verdict now that the new fact
+        # has an id. Returns a ContradictionWarning for CONTRADICTION.
+        band_warning: ContradictionWarning | None = None
+        if band_action is not None and band_dupe is not None:
+            band_warning = await self._apply_band_action(
+                fact, band_dupe, band_action, band_sim, session
+            )
+
         # Subject + similarity supersession (006.2)
         # F075: pass the new fact's event_date so supersession can bypass
         # candidates with distinct dates — same entity on a different date
         # is a new event, not a supersession.
+        # Audit S11: exclude_ids threaded through so facts the F377
+        # tiebreaker (or the band classifier above) just ruled distinct
+        # are not silently superseded against that verdict.
         if check_contradictions and input.subject and embedding is not None:
             await self._supersede_by_subject(
                 fact.id, input.subject, embedding, session,
                 new_content=input.content,
                 new_event_date=input.event_date,
+                exclude_ids=exclude_ids,
             )
 
         await self._emit_event(
@@ -564,6 +600,8 @@ class FactManager:
         )
 
         detail = self._to_detail(fact)
+        if band_warning is not None:
+            detail.contradiction_warning = band_warning
 
         if check_contradictions:
             # Contradiction detection: similarity 0.85-0.95 with different content
@@ -649,8 +687,16 @@ class FactManager:
             if classification:
                 relation = classification.get("relation", "")
                 current = classification.get("current_fact", "")
-                conf = float(classification.get("confidence", 0.0))
+                try:
+                    conf = float(classification.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    # Same fail-open contract as _classify_dupe_in_band —
+                    # malformed confidence falls through to the plain
+                    # ContradictionWarning instead of raising mid-learn.
+                    classification = None
+                    conf = 0.0
 
+            if classification:
                 if relation == "UNRELATED":
                     return None
 
@@ -752,6 +798,7 @@ class FactManager:
         session: AsyncSession,
         new_content: str = "",
         new_event_date: date | None = None,
+        exclude_ids: list[UUID] | None = None,
     ) -> None:
         """Supersede older facts with same subject AND similar content (006.2).
 
@@ -778,7 +825,14 @@ class FactManager:
                 Fact.id != new_fact_id,
             )
         )
+        excluded = set(exclude_ids or [])
         for old in result.scalars().all():
+            # Audit S11: a fact the F377 tiebreaker (or the S3 band
+            # classifier) just ruled DISTINCT must not be superseded —
+            # at similarity > 0.95 this path skips LLM disambiguation
+            # entirely, silently undoing the store-both verdict.
+            if old.id in excluded:
+                continue
             # F075: skip supersession on date-disagreement.
             if (
                 new_event_date is not None
@@ -830,27 +884,154 @@ class FactManager:
             return 0.0
         return dot / (norm_a * norm_b)
 
+    async def _classify_dupe_in_band(
+        self,
+        dupe: Fact,
+        similarity: float,
+        input: FactInput,
+        check_contradictions: bool,
+    ) -> str | None:
+        """Audit S3: route an above-dedup-threshold hit that falls inside the
+        contradiction band (0.85-0.95) through the F027 classifier instead of
+        blindly confirming it.
+
+        With the operator threshold below the band (prod runs 0.80), a blind
+        confirm swallows the band — conflicting facts reinforce the stale one.
+
+        Returns a band action ("unrelated" | "refines" | "supersede_old" |
+        "contradiction") when the new fact should be INSERTED, or None when
+        the dupe should be confirmed (similarity >= 0.95 true duplicate,
+        sub-band paraphrase, UPDATE where the old fact is current,
+        low-confidence verdict, no LLM, or classifier failure — fail-open to
+        dedup, mirroring the F377 tiebreaker contract).
+        """
+        if (
+            not check_contradictions
+            or self._llm is None
+            or not (
+                self.CONTRADICTION_SIMILARITY_MIN
+                <= similarity
+                < self.CONTRADICTION_SIMILARITY_MAX
+            )
+        ):
+            return None
+        classification = await self._classify_fact_pair(dupe.content, input.content)
+        if not classification:
+            return None
+        relation = classification.get("relation", "")
+        current = classification.get("current_fact", "")
+        try:
+            conf = float(classification.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            # Malformed confidence must land on the documented fail-open
+            # path (confirm), not raise out of _learn mid-transaction.
+            return None
+        if relation == "UNRELATED":
+            return "unrelated"
+        if relation == "REFINEMENT":
+            return "refines"
+        if relation == "UPDATE" and current == "new" and conf >= 0.8:
+            return "supersede_old"
+        if relation == "CONTRADICTION":
+            return "contradiction"
+        return None
+
+    async def _apply_band_action(
+        self,
+        new_fact: Fact,
+        dupe: Fact,
+        action: str,
+        similarity: float,
+        session: AsyncSession,
+    ) -> ContradictionWarning | None:
+        """Apply a _classify_dupe_in_band verdict post-flush.
+
+        Mirrors the F027 routing in _find_contradiction so the two band
+        entry points (dedup hit vs post-insert scan) act identically.
+        """
+        if action == "refines":
+            await self._create_graph_edge(
+                new_fact.id, dupe.id, "fact", "fact", "refines", 0.8, session,
+            )
+            return None
+        if action == "supersede_old":
+            dupe.superseded_by = new_fact.id
+            dupe.active = False
+            dupe.confidence = max(0.0, (dupe.confidence or 1.0) * 0.3)
+            await self._create_graph_edge(
+                new_fact.id, dupe.id, "fact", "fact", "supersedes", 1.0, session,
+            )
+            return None
+        if action == "contradiction":
+            new_fact.contradiction_of = dupe.id
+            await self._create_graph_edge(
+                new_fact.id, dupe.id, "fact", "fact", "contradicts", 1.0, session,
+            )
+            dupe.confidence = max(0.0, (dupe.confidence or 1.0) - 0.2)
+            return ContradictionWarning(
+                existing_fact_id=dupe.id,
+                existing_content=dupe.content[:500],
+                similarity=similarity,
+                message=(
+                    f"Potential contradiction detected (similarity {similarity:.2f}). "
+                    f"Existing fact: '{dupe.content[:100]}' — review and resolve."
+                ),
+            )
+        return None  # "unrelated" — both facts stand, no link
+
+    async def _confirm_duplicate(
+        self,
+        dupe: Fact,
+        input: FactInput,
+        session: AsyncSession,
+    ) -> FactDetail:
+        """Confirm an existing fact as the dedup outcome of a new candidate.
+
+        Audit S3: merge event_date onto an undated duplicate — with temporal
+        extraction on, a dated candidate colliding with an older undated
+        paraphrase was silently de-dated (the F075 bypass requires BOTH sides
+        non-null, and plain _confirm never copied the date).
+        """
+        if input.event_date is not None and dupe.event_date is None:
+            dupe.event_date = input.event_date
+            dupe.event_date_classified_at = (
+                input.event_date_classified_at or datetime.now(UTC)
+            )
+        return await self._confirm(dupe.id, session)
+
     async def _find_duplicate(
         self,
         embedding: list[float],
         exclude_ids: list[UUID],
         session: AsyncSession,
         candidate_event_date: date | None = None,
-    ) -> Fact | None:
+    ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
+
+        Returns ``(fact, similarity)`` so the caller can band-route the hit
+        (audit S3), or None when nothing clears the threshold.
 
         Threshold is `Settings.fact_native_cosine_threshold` (default 0.95;
         F056 #377 made this env-tunable via NOUS_FACT_NATIVE_COSINE_THRESHOLD
         because the dedup eval showed 0.95 misses all semantic paraphrases).
 
+        Audit S10: the query is a plain ``ORDER BY distance LIMIT 20`` so the
+        HNSW index serves it — the previous compound ORDER BY (date-match
+        first) forced a sequential scan over every active fact on every
+        learn. Threshold and the F075 date preference are applied in Python
+        over the top-20 instead.
+
         F075 (codex PR #461 P2): when ``candidate_event_date`` is provided,
-        prefer above-threshold matches with the same event_date over those
-        with a different (or NULL) date. ``IS NOT DISTINCT FROM`` treats
-        NULL=NULL as equal, so an undated candidate matches an undated
-        existing first. Without this preference, a March-10-candidate
-        could see a March-12 fact as the top vector hit, trigger the F075
-        bypass, and silently insert a duplicate of an already-stored
-        March-10 fact lurking just below it.
+        prefer above-threshold matches with the same event_date (NULL == NULL
+        counts as same) over nearer different-date hits. Without this
+        preference, a March-10 candidate could see a March-12 fact as the top
+        vector hit, trigger the F075 bypass, and silently insert a duplicate
+        of an already-stored March-10 fact lurking just below it.
+        NOTE (review): the date preference now only sees the top-20 nearest
+        rows — a same-date duplicate ranked 21+ by cosine is invisible to it.
+        That horizon is the price of HNSW-servability; 20 comfortably covers
+        any realistic above-threshold cluster (the old SQL date-first ordering
+        saw ALL above-threshold rows but could never use the index).
         """
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
@@ -863,8 +1044,6 @@ class FactManager:
         params: dict = {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
-            "threshold": threshold,
-            "candidate_event_date": candidate_event_date,
         }
         if exclude_ids:
             placeholders = ", ".join(f":excl_{i}" for i in range(len(exclude_ids)))
@@ -872,31 +1051,36 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
-        # Order by:
-        # 1. date-match first (NOT DISTINCT = TRUE sorts before FALSE in DESC)
-        # 2. cosine distance (smaller = closer)
         sql = text(f"""
-            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+            SELECT id, event_date,
+                   1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts
             WHERE agent_id = :agent_id
               AND active = true
               AND embedding IS NOT NULL
-              AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
               {exclude_clause}
-            ORDER BY
-                (event_date IS NOT DISTINCT FROM :candidate_event_date) DESC,
-                embedding <=> CAST(:embedding AS vector)
-            LIMIT 1
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT 20
         """)
 
         result = await session.execute(sql, params)
-        row = result.first()
-        if row is None:
+        above = [r for r in result.all() if float(r.similarity) > threshold]
+        if not above:
             return None
 
+        # F075 date preference in Python (rows are distance-ordered, so the
+        # first date-match is the nearest one; None == None is a match).
+        chosen = next(
+            (r for r in above if r.event_date == candidate_event_date),
+            above[0],
+        )
+
         # Fetch the ORM object
-        fact_result = await session.execute(select(Fact).where(Fact.id == row.id))
-        return fact_result.scalars().first()
+        fact_result = await session.execute(select(Fact).where(Fact.id == chosen.id))
+        fact = fact_result.scalars().first()
+        if fact is None:
+            return None
+        return fact, float(chosen.similarity)
 
     async def _find_max_similarity(
         self,
@@ -1182,6 +1366,94 @@ class FactManager:
                 event_date=f.event_date,  # F075
             )
             for f in facts
+        ]
+
+    # ------------------------------------------------------------------
+    # find_similar_for_dedup()
+    # ------------------------------------------------------------------
+
+    async def find_similar_for_dedup(
+        self,
+        content: str,
+        limit: int = 5,
+        session: AsyncSession | None = None,
+    ) -> list[FactSummary]:
+        """Raw-cosine nearest-neighbor probe for write-path dedup (audit S1).
+
+        Unlike :meth:`search`, the ``score`` on each summary is the raw
+        cosine similarity in ``[0, 1]`` — a calibrated closeness measure a
+        dedup threshold can be meaningfully compared against. RRF scores
+        from ``search()`` encode *rank*, not closeness: the nearest fact
+        scores ~0.98 at limit=1 no matter how dissimilar it is, which made
+        every RRF-thresholded dedup pre-check fire unconditionally.
+
+        Also deliberately does NOT fire access tracking — a dedup probe is
+        not a recall, and tracking it inflated ``recall_count`` /
+        ``last_recalled_at`` on facts no consumer ever saw (audit S9).
+
+        Returns ``[]`` when the embedding cannot be generated, so dedup
+        degrades the same way ``_learn``'s embed-failure path does.
+        Results are similarity-descending.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._find_similar_for_dedup(content, limit, session)
+        return await self._find_similar_for_dedup(content, limit, session)
+
+    async def _find_similar_for_dedup(
+        self,
+        content: str,
+        limit: int,
+        session: AsyncSession,
+    ) -> list[FactSummary]:
+        if not self.embeddings:
+            return []
+        try:
+            embedding = await self.embeddings.embed(content)
+        except Exception:
+            logger.warning("Embedding generation failed for dedup probe")
+            return []
+
+        embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        sql = text("""
+            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+            FROM heart.facts
+            WHERE agent_id = :agent_id
+              AND active = true
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT :limit
+        """)
+        rows = (await session.execute(sql, {
+            "embedding": embedding_str,
+            "agent_id": self.agent_id,
+            "limit": limit,
+        })).all()
+        if not rows:
+            return []
+
+        ids = [r.id for r in rows]
+        sims = {r.id: float(r.similarity) for r in rows}
+        fact_result = await session.execute(select(Fact).where(Fact.id.in_(ids)))
+        facts = {f.id: f for f in fact_result.scalars().all()}
+
+        return [
+            FactSummary(
+                id=f.id,
+                content=f.content,
+                category=f.category,
+                subject=f.subject,
+                confidence=f.confidence or 1.0,
+                active=f.active if f.active is not None else True,
+                score=sims.get(f.id),
+                superseded_by=f.superseded_by,
+                actionable=f.actionable,
+                actionable_confidence=f.actionable_confidence,
+                tags=list(f.tags or []),
+                event_date=f.event_date,
+            )
+            for fid in ids
+            if (f := facts.get(fid)) is not None
         ]
 
     # ------------------------------------------------------------------

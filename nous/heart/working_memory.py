@@ -417,19 +417,41 @@ class WorkingMemoryManager:
             row = result.scalar_one_or_none()
             return list(row) if row else []
 
+    @staticmethod
+    def _is_residual_item(item: object) -> bool:
+        """F055 residual entries carry the extra JSONB keys record_surfaced
+        writes; items loaded via load_item never have them."""
+        return (
+            isinstance(item, dict)
+            and "activation" in item
+            and "last_surfaced_turn" in item
+        )
+
     async def upsert_residual_items(
         self,
         agent_id: str,
         session_id: str,
         items: list[dict],
+        max_residual_items: int | None = None,
     ) -> None:
-        """F055: persist residual-activation entries into WorkingMemory.items.
+        """F055: merge residual-activation entries into WorkingMemory.items.
 
-        Replaces the items list wholesale — caller composes the final list
-        (after rank-norm + top-K bounding). Uses an isolated DB session so
-        it can be safely fired as ``asyncio.create_task`` from recall_deep.
+        Audit E2 (2026-06-09): MERGE, not wholesale replace. The old
+        wholesale assignment clobbered curated items loaded via load_item
+        (replacing real summaries with placeholder stubs in the next turn's
+        prompt) and reduced F055's decay model to a single-recall window.
+        Merge semantics:
+        - non-residual items are preserved untouched;
+        - residual entries are unioned by ref_id — a re-surfaced item is
+          refreshed by the new entry; carried entries not in this recall's
+          surfaced set are KEPT, because decay is applied read-side by
+          load_activations (turn-distance decay + floor governs lifetime);
+        - residual entries are activation-descending and capped at
+          ``max_residual_items`` when provided.
 
-        Creates the WorkingMemory row if missing (matches F049 lifecycle).
+        Uses an isolated DB session so it can be safely fired as
+        ``asyncio.create_task`` from recall_deep. Creates the WorkingMemory
+        row if missing (matches F049 lifecycle).
         """
         async with self.db.session() as session:
             wm = await session.execute(
@@ -439,6 +461,29 @@ class WorkingMemoryManager:
                 .with_for_update()
             )
             existing = wm.scalars().first()
+            existing_items = list(existing.items or []) if existing is not None else []
+
+            non_residual = [d for d in existing_items if not self._is_residual_item(d)]
+            merged: dict[str, dict] = {}
+            for d in existing_items:
+                if self._is_residual_item(d) and d.get("ref_id") is not None:
+                    merged[str(d["ref_id"])] = d
+            for d in items:
+                if isinstance(d, dict) and d.get("ref_id") is not None:
+                    merged[str(d["ref_id"])] = d
+            def _activation(d: dict) -> float:
+                # One corrupt JSONB value must not kill residual persistence
+                # for the whole session (review P3) — coerce defensively.
+                try:
+                    return float(d.get("activation", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            residual = sorted(merged.values(), key=_activation, reverse=True)
+            if max_residual_items is not None and max_residual_items >= 0:
+                residual = residual[:max_residual_items]
+            new_items = non_residual + residual
+
             if existing is None:
                 # Create row — F055's record_surfaced may fire before any
                 # other WM write (cold session start).
@@ -446,7 +491,7 @@ class WorkingMemoryManager:
                 new_wm = WorkingMemory(
                     agent_id=agent_id,
                     session_id=session_id,
-                    items=items,
+                    items=new_items,
                     open_threads=[],
                     current_task=None,
                     current_frame=None,
@@ -455,7 +500,7 @@ class WorkingMemoryManager:
                 )
                 session.add(new_wm)
             else:
-                existing.items = items
+                existing.items = new_items
             await session.commit()
 
     # ------------------------------------------------------------------
