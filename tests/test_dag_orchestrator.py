@@ -1607,3 +1607,69 @@ class TestStaleReadyRecovery:
         # may or may not dispatch depending on dependency edges.
         wave0_completed = [n for n in fetched.nodes if n.wave == 0]
         assert all(n.status == "completed" for n in wave0_completed)
+
+
+class TestDAGCompletionStatus:
+    """Audit DG-1: a DAG that finishes via skip_and_continue (some nodes
+    'skipped', rest 'completed') must finalize 'completed', not 'failed'."""
+
+    def _orchestrator_with_mock_store(self):
+        store = AsyncMock()
+        return DAGOrchestrator(
+            store=store,
+            subtask_mgr=AsyncMock(),
+            dynamic_loader=AsyncMock(),
+            settings=Settings(),
+        ), store
+
+    def _node(self, status, name="n", node_type="subtask"):
+        return SimpleNamespace(
+            id=uuid.uuid4(), name=name, status=status,
+            node_type=node_type, parent_node=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_completed_plus_skipped_finalizes_completed(self):
+        orch, store = self._orchestrator_with_mock_store()
+        dag = SimpleNamespace(
+            id=uuid.uuid4(),
+            nodes=[self._node("completed", "a"), self._node("skipped", "b")],
+        )
+        await orch._check_dag_completion(dag)
+        store.update_dag_status.assert_awaited_once()
+        args, kwargs = store.update_dag_status.await_args
+        assert args[1] == "completed"
+        assert "skipped" in (kwargs.get("result_summary") or args[2])
+
+    @pytest.mark.asyncio
+    async def test_all_completed_finalizes_completed(self):
+        orch, store = self._orchestrator_with_mock_store()
+        dag = SimpleNamespace(
+            id=uuid.uuid4(),
+            nodes=[self._node("completed", "a"), self._node("completed", "b")],
+        )
+        await orch._check_dag_completion(dag)
+        args, _ = store.update_dag_status.await_args
+        assert args[1] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_failed_node_still_finalizes_failed(self):
+        orch, store = self._orchestrator_with_mock_store()
+        dag = SimpleNamespace(
+            id=uuid.uuid4(),
+            nodes=[self._node("completed", "a"), self._node("failed", "b")],
+        )
+        await orch._check_dag_completion(dag)
+        args, _ = store.update_dag_status.await_args
+        assert args[1] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_all_blocked_still_finalizes_failed(self):
+        orch, store = self._orchestrator_with_mock_store()
+        dag = SimpleNamespace(
+            id=uuid.uuid4(),
+            nodes=[self._node("blocked", "a"), self._node("blocked", "b")],
+        )
+        await orch._check_dag_completion(dag)
+        args, _ = store.update_dag_status.await_args
+        assert args[1] == "failed"

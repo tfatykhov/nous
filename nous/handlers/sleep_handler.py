@@ -756,7 +756,12 @@ class SleepHandler:
             return False
 
         try:
-            results = await self._heart.search_facts(referenced_content, limit=3)
+            # Audit HD-2 (2026-06-09): raw-cosine probe, NOT search_facts.
+            # search_facts returns rank-encoded RRF scores (top hit ~0.95 for
+            # ANY query), so the score<0.80 guard below never fired and the top
+            # RRF hit was always superseded — even when it was an unrelated
+            # fact. find_similar_facts returns thresholdable cosine similarity.
+            results = await self._heart.find_similar_facts(referenced_content, limit=3)
             if not results:
                 logger.debug("UPDATES: no matching fact found for '%s'", referenced_content[:50])
                 # Fall back to learning as new fact

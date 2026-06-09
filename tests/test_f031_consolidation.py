@@ -258,6 +258,8 @@ class TestOrientContext:
         heart = AsyncMock()
         heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
         heart.search_facts = AsyncMock(return_value=[existing_fact])
+        # HD-2: UPDATES supersession now probes find_similar_facts (raw cosine).
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         heart.supersede_fact = AsyncMock(return_value=MagicMock())
         heart.learn = AsyncMock(return_value=MagicMock())
 
@@ -296,6 +298,8 @@ class TestOrientContext:
         heart = AsyncMock()
         heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
         heart.search_facts = AsyncMock(return_value=[existing_fact])
+        # HD-2: UPDATES supersession now probes find_similar_facts (raw cosine).
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         heart.supersede_fact = AsyncMock(return_value=MagicMock())
         heart.learn = AsyncMock(return_value=MagicMock())
 
@@ -332,6 +336,8 @@ class TestOrientContext:
         heart = AsyncMock()
         heart.list_episodes = AsyncMock(return_value=[ep1, ep1])
         heart.search_facts = AsyncMock(return_value=[low_match])
+        # HD-2: UPDATES supersession now probes find_similar_facts (raw cosine).
+        heart.find_similar_facts = AsyncMock(return_value=[low_match])
         heart.supersede_fact = AsyncMock()
         heart.learn = AsyncMock(return_value=MagicMock())
 

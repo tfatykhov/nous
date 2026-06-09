@@ -1375,10 +1375,21 @@ class DAGOrchestrator:
         if non_terminal:
             return
 
-        # All nodes are terminal — determine final status
-        if all(n.status == "completed" for n in dag.nodes):
+        # All nodes are terminal — determine final status.
+        # Audit DG-1 (2026-06-09): use _RESOLVED ({completed, skipped}) for the
+        # success branch, not "completed" only. A DAG that finished via the
+        # skip_and_continue success path (some nodes 'skipped', rest
+        # 'completed') previously fell through every branch to the "All nodes
+        # blocked" failure case and was finalized 'failed' despite succeeding.
+        if all(n.status in _RESOLVED for n in dag.nodes):
+            skipped = sum(1 for n in dag.nodes if n.status == "skipped")
+            summary = (
+                "All nodes completed successfully"
+                if not skipped
+                else f"All nodes resolved ({skipped} skipped via skip_and_continue)"
+            )
             await self._store.update_dag_status(
-                dag.id, "completed", result_summary="All nodes completed successfully"
+                dag.id, "completed", result_summary=summary
             )
         elif any(n.status == "failed" for n in dag.nodes):
             failed_names = [n.name for n in dag.nodes if n.status == "failed"]

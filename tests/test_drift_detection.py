@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from unittest.mock import AsyncMock, MagicMock
+
 from nous.observability.snapshots import BehaviorSnapshot
 from nous.observability.drift import Anomaly, DriftDetector
 
@@ -70,6 +72,50 @@ def _make_snapshot(delta: int = 0, **kwargs) -> BehaviorSnapshot:
     """Helper to create snapshots with offsets from 'now'."""
     ts = datetime.now(UTC) - timedelta(hours=delta)
     return BehaviorSnapshot(timestamp=ts, **kwargs)
+
+
+class TestBehaviorDriftCheckHasUpdates:
+    """Audit HB-1: BehaviorDriftCheck.run() must set has_updates=True when it
+    emits findings — the heartbeat runner gates on result.has_updates, so a
+    CheckResult(findings=...) without the flag silently drops every drift alert.
+    """
+
+    def _build_check(self):
+        from nous.heartbeat.checks import BehaviorDriftCheck
+
+        check = BehaviorDriftCheck.__new__(BehaviorDriftCheck)
+        # Bypass __init__ (which needs Heart/Brain); wire only what run() touches.
+        from nous.heartbeat.schemas import CheckResult  # noqa: F401
+        check._detector = MagicMock()
+        check._last_snapshot = None
+        check._last_anomalies = []
+        check._capture_snapshot = AsyncMock(
+            return_value=BehaviorSnapshot(timestamp=datetime.now(UTC))
+        )
+        check._load_baseline = AsyncMock(return_value=[object()])  # truthy baseline
+        check._store_snapshot = AsyncMock()
+        return check
+
+    @pytest.mark.asyncio
+    async def test_has_updates_true_when_anomaly_alert(self):
+        check = self._build_check()
+        check._detector.detect.return_value = [
+            Anomaly(
+                metric="fact_count_delta", current=99, mean=5.0, stddev=1.0,
+                z_score=94.0, direction="above", severity="alert",
+            )
+        ]
+        result = await check.run()
+        assert result.findings, "expected a drift finding"
+        assert result.has_updates is True
+
+    @pytest.mark.asyncio
+    async def test_has_updates_false_when_no_anomaly(self):
+        check = self._build_check()
+        check._detector.detect.return_value = []
+        result = await check.run()
+        assert result.findings == []
+        assert result.has_updates is False
 
 
 class TestDriftDetector:

@@ -262,17 +262,32 @@ class TestRecallDeep:
         assert "Brain Decisions" not in text
 
     @pytest.mark.asyncio
-    async def test_recall_deep_empty(self, tools):
-        """No results -> 'No results found.' in section output."""
-        # Use heart-only type "episode" — no episodes seeded by tool tests
-        result = await tools["recall_deep"](
-            query="zzz_nonexistent_query_no_match",
-            memory_types=["episode"],
-        )
+    async def test_recall_deep_empty(self, db, mock_embeddings):
+        """No results -> 'No results found.' in section output.
 
-        assert "content" in result
-        text = result["content"][0]["text"]
-        assert "No results found" in text
+        Built on an isolated agent_id so no other test's episodes leak in.
+        Before HT-1 (episode-search active-filter fix), this passed only
+        because episode search was structurally dead and returned nothing for
+        every query; under the shared default agent it would now surface
+        another test's seeded episode. Isolation makes the empty case real.
+        """
+        import uuid as _uuid
+
+        settings = Settings(agent_id=f"recall-empty-{_uuid.uuid4().hex[:8]}")
+        brain = Brain(database=db, settings=settings, embedding_provider=mock_embeddings)
+        heart = Heart(db, settings, embedding_provider=mock_embeddings)
+        try:
+            tools = create_nous_tools(brain, heart)
+            result = await tools["recall_deep"](
+                query="zzz_nonexistent_query_no_match",
+                memory_types=["episode"],
+            )
+            assert "content" in result
+            text = result["content"][0]["text"]
+            assert "No results found" in text
+        finally:
+            await brain.close()
+            await heart.close()
 
     @pytest.mark.integration
     @pytest.mark.asyncio

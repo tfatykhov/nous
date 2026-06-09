@@ -661,6 +661,19 @@ class CognitiveLayer:
                     )
                 if subtask_context:
                     system_prompt = system_prompt + "\n\n" + subtask_context
+                    # Audit CL-1 (2026-06-09): also route into the dynamic tier.
+                    # The F036 cache-split path (default-on) ignores the flat
+                    # system_prompt, so without this the parent agent never saw
+                    # any subtask result even though the rows were marked
+                    # delivered above — permanent silent loss. Mirrors the F078
+                    # censor fix; same guard (only when build populated tiers).
+                    if sections_by_tier:
+                        _existing_dyn = sections_by_tier.get("dynamic", "")
+                        sections_by_tier["dynamic"] = (
+                            _existing_dyn + "\n\n" + subtask_context
+                            if _existing_dyn
+                            else subtask_context
+                        )
                     logger.info(
                         "Injected %d subtask results into session %s",
                         len(undelivered), session_id,
@@ -910,6 +923,17 @@ class CognitiveLayer:
                 )
                 if hub_shift_block:
                     system_prompt += "\n\n" + hub_shift_block
+                    # Audit CL-2 (2026-06-09): route into the dynamic tier too;
+                    # the F036 split path ignores the flat string, so the shift
+                    # notice was persisted as a consumed snapshot but never
+                    # actually shown to the model. Mirrors the F078 censor fix.
+                    if sections_by_tier:
+                        _existing_dyn = sections_by_tier.get("dynamic", "")
+                        sections_by_tier["dynamic"] = (
+                            _existing_dyn + "\n\n" + hub_shift_block
+                            if _existing_dyn
+                            else hub_shift_block
+                        )
             except Exception:
                 # Belt and braces: pre_turn never fails on a diagnostic.
                 logger.warning(

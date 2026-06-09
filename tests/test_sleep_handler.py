@@ -728,6 +728,8 @@ class TestStructuredReflection:
         existing_fact.category = "technical"
         existing_fact.score = 0.95
         heart.search_facts = AsyncMock(return_value=[existing_fact])
+        # HD-2: UPDATES supersession now probes find_similar_facts (raw cosine).
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         heart.supersede_fact = AsyncMock()
 
         reflection = {

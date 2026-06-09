@@ -1313,10 +1313,18 @@ class Brain:
                 descriptions[d.id] = (d.description, d.created_at)
 
         # Fact: heart.facts.content
+        # Audit BR-1 (2026-06-09): only ACTIVE facts. For facts, active=false
+        # is a soft-delete / supersession marker (F027), so superseded and
+        # contradiction-resolved facts must never resurface as graph neighbors
+        # via Path A or decision 1-hop expansion — mirrors the F080 procedure
+        # fix below. (Episodes/chunks are intentionally NOT filtered here:
+        # episode active=false is the normal *closed* lifecycle state, and
+        # episode_chunks has no soft-delete column.)
         if ids_by_type.get("fact"):
             f_result = await session.execute(
                 select(Fact.id, Fact.content, Fact.created_at)
                 .where(Fact.id.in_(ids_by_type["fact"]))
+                .where(Fact.active == True)  # noqa: E712
             )
             for f in f_result.all():
                 descriptions[f.id] = (f.content, f.created_at)
@@ -1368,10 +1376,12 @@ class Brain:
         results = []
         for r in rows:
             ntype, rel, weight, method = edge_map[r.neighbor_id]
-            # F080: an inactive/superseded procedure was filtered out of the
-            # description resolution above — drop it rather than surfacing an
-            # archived skill as a "[procedure] <uuid>" placeholder.
-            if ntype == "procedure" and r.neighbor_id not in descriptions:
+            # F080 / Audit BR-1 (codex P1): an inactive/superseded procedure OR
+            # fact was filtered out of the description resolution above (both
+            # queries carry `active = true`). Drop it rather than surfacing an
+            # archived skill / superseded fact as a "[type] <uuid>" placeholder
+            # that would also consume a post-LIMIT ranking slot.
+            if ntype in ("procedure", "fact") and r.neighbor_id not in descriptions:
                 continue
             if r.neighbor_id in descriptions:
                 desc, created = descriptions[r.neighbor_id]

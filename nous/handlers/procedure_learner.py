@@ -548,7 +548,16 @@ class ProcedureLearner:
     # ==================================================================
 
     async def _is_duplicate(self, procedure_data: dict[str, Any]) -> bool:
-        """Check if a similar procedure already exists (>0.85 similarity)."""
+        """Check if a similar procedure already exists (>0.85 cosine similarity).
+
+        Audit HD-1 (2026-06-09): must use the raw-cosine probe, NOT
+        ``search_procedures``. ``search()`` returns normalized RRF scores that
+        encode RANK — the nearest procedure scores ~0.95 for ANY non-empty
+        query — so ``score > 0.85`` was true for essentially every candidate
+        and silently suppressed all auto-procedure creation (the observed
+        prod "K-line = 0"). ``find_similar_procedures`` returns actual cosine
+        similarity, against which a 0.85 near-duplicate floor is meaningful.
+        """
         name = procedure_data.get("name", "")
         description = procedure_data.get("description", "")
         patterns = " ".join(procedure_data.get("core_patterns", []))
@@ -557,9 +566,9 @@ class ProcedureLearner:
         if not query_text:
             return False
 
-        existing = await self._heart.search_procedures(query_text, limit=1)
+        existing = await self._heart.find_similar_procedures(query_text, limit=1)
         if existing and existing[0].score is not None and existing[0].score > 0.85:
-            logger.debug("Skipping duplicate procedure: %s (score=%.2f)", name, existing[0].score)
+            logger.debug("Skipping duplicate procedure: %s (cosine=%.2f)", name, existing[0].score)
             return True
         return False
 
