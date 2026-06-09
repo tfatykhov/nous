@@ -29,7 +29,7 @@ def _make_procedure_detail(name: str, domain: str = "test") -> ProcedureDetail:
         core_patterns=["pattern1"],
         core_tools=[],
         core_concepts=[],
-        implementation_notes=[],
+        implementation_notes=["Step 1: investigate the cause", "Step 2: apply the fix"],
         activation_count=1,
         success_count=0,
         failure_count=0,
@@ -93,7 +93,10 @@ class TestGraphPrimarySelection:
         assert [p.id for p in selected] == [proc.id]
         body = "\n".join(engine._format_procedure_bodies(selected, 1200))
         assert "deploy-runbook" in body
-        assert "pattern1" in body  # body (not just name) is preloaded
+        # the actual skill body (implementation_notes) is preloaded; trigger
+        # keywords (core_patterns) are NOT (matcher metadata, not instructions)
+        assert "Step 1: investigate the cause" in body
+        assert "pattern1" not in body
 
     @pytest.mark.asyncio
     async def test_inactive_procedure_never_surfaced(self):
@@ -128,7 +131,8 @@ class TestGraphPrimarySelection:
         )
         blocks = engine._format_procedure_bodies([long_proc], 200)
         assert len(blocks) == 1
-        assert len(blocks[0]) <= 201  # cap + ellipsis
+        assert blocks[0].count("Z") <= 200  # body truncated to the per-item cap
+        assert "get_procedure('x')" in blocks[0]  # pointer to the untruncated full skill
 
     @pytest.mark.asyncio
     async def test_build_flag_on_renders_section_and_syncs_recalled_ids(self):

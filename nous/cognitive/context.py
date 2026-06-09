@@ -1448,12 +1448,17 @@ class ContextEngine:
         return selected[:slots]
 
     def _format_procedure_bodies(self, details: list, per_item_cap: int) -> list[str]:
-        """Render selected procedures as per-item BODY blocks (steps), each capped.
+        """Render selected procedures as per-item BODY blocks, each capped.
 
-        Body = description + core patterns + implementation notes + tools,
-        assembled compactly so the agent can act without a get_procedure
-        round-trip. Returns one block per procedure (aligned with ``details``)
-        so the caller can fit them to budget and keep recalled-ids in sync.
+        Block = ``### name (domain)`` + description + the actual skill BODY (the
+        ``implementation_notes`` content with newlines preserved, minus the
+        ``source:``/``version:`` metadata lines). ``core_patterns`` (trigger
+        keywords) and ``core_tools`` (keyword dump) are matcher metadata, NOT
+        instructions, so they're excluded — the preload is the skill the agent
+        follows, not the keywords that matched it. Oversized bodies are capped
+        with a pointer to ``get_procedure`` for the untruncated full skill.
+        Returns one block per procedure (aligned with ``details``) so the caller
+        can fit them to budget and keep recalled-ids in sync.
         """
         blocks: list[str] = []
         for p in details:
@@ -1463,18 +1468,19 @@ class ContextEngine:
             desc = getattr(p, "description", None)
             if desc:
                 parts.append(desc)
-            patterns = getattr(p, "core_patterns", None) or []
-            if patterns:
-                parts.append("Patterns: " + "; ".join(patterns))
             notes = getattr(p, "implementation_notes", None) or []
-            if notes:
-                parts.append("Notes: " + "; ".join(notes))
-            tools = getattr(p, "core_tools", None) or []
-            if tools:
-                parts.append("Tools: " + ", ".join(tools))
-            block = "\n".join(parts)
+            body = "\n".join(
+                str(n) for n in notes
+                if not str(n).startswith(("source:", "version:"))
+            )
+            if body:
+                parts.append(body)
+            block = "\n\n".join(parts)
             if len(block) > per_item_cap:
-                block = block[:per_item_cap].rstrip() + "…"
+                block = (
+                    block[:per_item_cap].rstrip()
+                    + f"\n…(truncated — call get_procedure('{name}') for the full skill)"
+                )
             blocks.append(block)
         return blocks
 
