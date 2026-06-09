@@ -160,6 +160,7 @@ class _PipelineAccumulator:
     # Flags
     searched_decisions: bool = False
     searched_heart: bool = False
+    coherent_ranking_applied: bool = False  # F080: filter actually ran this call
     spreading_activation_used: bool = False
     graph_expansion_used: bool = False
     contradiction_checks_ran: bool = False
@@ -309,7 +310,7 @@ async def run_recall_pipeline(
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
-        coherent_ranking_applied=getattr(settings, "coherent_ranking_enabled", False),  # F080
+        coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
     )
     return results, stats
 
@@ -351,14 +352,17 @@ async def _run_stages(
                 if t in ["episode", "fact", "procedure", "censor"]
             ]
 
-        # F080: coherent ranking makes the recall pool knowledge-only. Censors
-        # and procedures are excluded — they have dedicated surfaces and would
-        # otherwise compete on incomparable score scales (raw-cosine censor
-        # floor >=0.7; procedure utility boost >1.0). recall_deep-only: this is
-        # the single exclusion site (the cognitive path uses per-type search_*,
-        # not heart.recall). Default OFF => heart_types unchanged.
-        if getattr(settings, "coherent_ranking_enabled", False):
+        # F080: coherent ranking makes the IMPLICIT recall pool knowledge-only.
+        # Censors and procedures are excluded from the default ("all") search —
+        # they have dedicated surfaces and would otherwise compete on incomparable
+        # score scales (raw-cosine censor floor >=0.7; procedure utility boost >1.0).
+        # Gated on ``search_all`` so an EXPLICIT memory_types=["procedure"]/["censor"]
+        # request is still honored (the advertised tool contract + procedure-only
+        # eval probes, codex P1). recall_deep-only — the cognitive path uses per-type
+        # search_*, not heart.recall.
+        if search_all and getattr(settings, "coherent_ranking_enabled", False):
             heart_types = [t for t in heart_types if t not in ("censor", "procedure")]
+            acc.coherent_ranking_applied = True
 
         if heart_types:
             acc.searched_heart = True

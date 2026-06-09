@@ -204,6 +204,48 @@ class TestGraphPrimarySelection:
         assert "Recommended Procedures" not in result.system_prompt
         heart.get_procedure_by_name.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_cosine_fallback_fills_when_graph_and_critic_empty(self):
+        """§14 ladder: graph misses + no critic -> cosine (embedding) fills the slot
+        with the query-relevant procedure (the A/B showed cosine carries coverage)."""
+        proc = _make_procedure_detail("cosine-skill")
+        settings = Settings(_env_file=None, proc_selection_graph_primary=True)
+        brain = MagicMock()
+        brain.neighbors = AsyncMock(return_value=[])  # graph misses
+        heart = MagicMock()
+        heart.get_procedure = AsyncMock(return_value=proc)
+        heart.get_procedure_by_name = AsyncMock()
+        heart.search_procedures = AsyncMock(return_value=[
+            _make_procedure_summary("cosine-skill").model_copy(update={"id": proc.id})
+        ])
+        engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+        selected = await engine._select_procedures(
+            slots=3, critic_skills=[], recalled_ids={"fact": [str(uuid4())]},
+            recalled_score_map={}, session=None, query="how do I do the thing",
+        )
+        assert [p.id for p in selected] == [proc.id]
+        heart.search_procedures.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cosine_fallback_skipped_without_query(self):
+        """No query -> no cosine leg (back-compat: callers that don't pass a query)."""
+        settings = Settings(_env_file=None, proc_selection_graph_primary=True)
+        brain = MagicMock()
+        brain.neighbors = AsyncMock(return_value=[])
+        heart = MagicMock()
+        heart.get_procedure = AsyncMock()
+        heart.get_procedure_by_name = AsyncMock()
+        heart.search_procedures = AsyncMock(return_value=[])
+        engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
+
+        selected = await engine._select_procedures(
+            slots=3, critic_skills=[], recalled_ids={"fact": [str(uuid4())]},
+            recalled_score_map={}, session=None,  # query="" default
+        )
+        assert selected == []
+        heart.search_procedures.assert_not_called()
+
 
 class TestDualTrackDisabled:
     """Tests when critic_skill_injection=disabled (default)."""
@@ -213,6 +255,7 @@ class TestDualTrackDisabled:
         """When disabled, critic_skills param is ignored -- pure embedding path."""
         settings = Settings(
             _env_file=None,
+            proc_selection_graph_primary=False,  # these test the legacy passive path
             critic_skill_injection="disabled",
             relevance_floor_enabled=False,
         )
@@ -245,6 +288,7 @@ class TestDualTrackDisabled:
         """When critic_skills is None, pure embedding path."""
         settings = Settings(
             _env_file=None,
+            proc_selection_graph_primary=False,  # these test the legacy passive path
             critic_skill_injection="enabled",
             relevance_floor_enabled=False,
         )
@@ -300,6 +344,7 @@ class TestDualTrackEnabled:
     def _setup_engine(self, heart, mode="enabled"):
         settings = Settings(
             _env_file=None,
+            proc_selection_graph_primary=False,  # these test the legacy passive path
             critic_skill_injection=mode,
             critic_skill_slots=2,
             embedding_skill_slots=3,
@@ -438,6 +483,7 @@ class TestDualTrackLogOnly:
 
         settings = Settings(
             _env_file=None,
+            proc_selection_graph_primary=False,  # these test the legacy passive path
             critic_skill_injection="log_only",
             relevance_floor_enabled=False,
         )
@@ -468,7 +514,10 @@ class TestBuildBackwardCompat:
     @pytest.mark.asyncio
     async def test_build_without_critic_skills(self):
         """build() works without critic_skills parameter (backward compat)."""
-        settings = Settings(_env_file=None, relevance_floor_enabled=False)
+        settings = Settings(
+            _env_file=None, relevance_floor_enabled=False,
+            proc_selection_graph_primary=False,  # tests the legacy passive path
+        )
         brain = MagicMock()
         brain.embeddings = None
         brain.query = AsyncMock(return_value=[])
