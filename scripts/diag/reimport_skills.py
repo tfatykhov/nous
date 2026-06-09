@@ -120,6 +120,24 @@ async def main() -> None:
                     url_fail.append((r, cur, str(e)[:40]))
                     print(f"{r['name'][:34]:34s} {'url-ERR':12s} {cur:5d} {'?':>6s}  KEEP (parse err: {str(e)[:24]})")
             else:
+                # Try the FILESYSTEM before declaring a non-HTTP source gone — a
+                # present local SKILL.md is re-importable (bootstrap records the
+                # path), and archiving it would lose its learned stats on the next
+                # bootstrap re-create (codex P1).
+                fpath = Path(src) if src and src not in ("inline", "local", "") else None
+                if fpath is not None and fpath.is_file():
+                    try:
+                        manifest = parser.parse(fpath.read_text(encoding="utf-8"), source_hint=src)
+                        pi = parser.to_procedure_input(manifest)
+                        full = _content_len(manifest.description, pi.implementation_notes)
+                        if full > cur:
+                            recover.append((r, pi, cur, full))
+                            print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {full:6d}  RE-IMPORT (+{full-cur})")
+                        else:
+                            print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {full:6d}  skip (no gain)")
+                        continue
+                    except Exception as e:
+                        print(f"{r['name'][:34]:34s} {'local-ERR':12s} {cur:5d} {'?':>6s}  treat as gone ({str(e)[:20]})")
                 kind = "inline" if src == "inline" else "path-gone"
                 if cur < args.stub_threshold:
                     gone_stub.append((r, cur, kind))

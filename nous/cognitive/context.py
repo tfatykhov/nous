@@ -1475,11 +1475,13 @@ class ContextEngine:
             )
             if body:
                 parts.append(body)
-            else:
-                # K-line / non-skill procedures have no markdown body — their
-                # instructions live in core_patterns/goals. Render those only as a
-                # fallback (skills with a real body never hit this, so the trigger-
-                # keyword noise stays out of the common path).
+            if "skill" not in (getattr(p, "tags", None) or []):
+                # Auto-learned (K-line) procedures store the executable STEPS in
+                # core_patterns and only caveats in implementation_notes
+                # (procedure_learner) — so always include patterns/goals for
+                # NON-skill procedures, else the steps are dropped. Skills keep
+                # their steps in the body and their core_patterns are trigger
+                # keywords, so skills correctly render the body alone.
                 patterns = getattr(p, "core_patterns", None) or []
                 goals = getattr(p, "goals", None) or []
                 if patterns:

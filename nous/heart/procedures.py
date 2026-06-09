@@ -49,12 +49,15 @@ def _build_embed_text(
         f"{' '.join(core_concepts or [])} "
         f"{' '.join(implementation_notes or [])}"
     ).strip()
-    # Bound the EMBEDDING input only — OpenAI text-embedding-3 caps at 8191 tokens
-    # (~32K chars); full skill bodies (F081) can exceed that and would 400 → NULL
-    # embedding → invisible to vector search. The STORED body stays full; metadata
-    # (name/description/patterns) leads so a huge body can't crowd out the routing
-    # signal, and ~28K chars captures it. Char-budget (not token) to stay dep-free.
-    _EMBED_CHAR_CAP = 28000
+    # Bound the EMBEDDING input only — OpenAI text-embedding-3 caps at 8191 tokens;
+    # full skill bodies (F081) can exceed that and would 400 → NULL embedding →
+    # invisible to vector search. The STORED body stays full; metadata
+    # (name/description) leads so the body never crowds out the routing signal.
+    # Conservative CHAR bound (tiktoken is not a dependency): realistic skill
+    # markdown (English prose + code) runs >=2 chars/token, so 16000 chars stays
+    # under 8191 tokens. _embed_with_retry NULLs+logs on a pathological (e.g.
+    # CJK-dense) overflow as the backstop — but skill bodies are English markdown.
+    _EMBED_CHAR_CAP = 16000
     return text[:_EMBED_CHAR_CAP] if len(text) > _EMBED_CHAR_CAP else text
 
 
