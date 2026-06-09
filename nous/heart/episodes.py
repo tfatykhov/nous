@@ -512,8 +512,17 @@ class EpisodeManager:
         # excluded every closed episode (the only ones worth recalling). And
         # `outcome != 'abandoned'` is NULL (→ excluded) for ongoing/recovered
         # episodes by SQL 3-valued logic. Together they excluded ALL episodes.
-        # Fix: active_filter=False (don't gate on lifecycle), and exclude only
+        #
+        # Fix (refined per codex P1): active_filter=False, but DON'T blanket-
+        # include every inactive row — the trivial-session path soft-deletes
+        # noise via deactivate_episode (active=false, ended_at=NULL). Include
+        # ongoing (active=true) OR genuinely-closed (ended_at IS NOT NULL) rows,
+        # which excludes deactivated-but-unfinished noise; still drop only
         # literal 'abandoned' via IS DISTINCT FROM so NULL-outcome rows pass.
+        _episode_where = (
+            "AND (t.active = true OR t.ended_at IS NOT NULL) "
+            "AND t.outcome IS DISTINCT FROM 'abandoned'"
+        )
         if variant_pairs and len(variant_pairs) > 1:
             results = await hybrid_search_multi(
                 session=session,
@@ -522,7 +531,7 @@ class EpisodeManager:
                 agent_id=self.agent_id,
                 limit=limit,
                 active_filter=False,
-                extra_where="AND t.outcome IS DISTINCT FROM 'abandoned'",
+                extra_where=_episode_where,
             )
         else:
             results = await hybrid_search(
@@ -533,7 +542,7 @@ class EpisodeManager:
                 agent_id=self.agent_id,
                 limit=limit,
                 active_filter=False,
-                extra_where="AND t.outcome IS DISTINCT FROM 'abandoned'",
+                extra_where=_episode_where,
             )
 
         if not results:
