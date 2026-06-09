@@ -95,14 +95,15 @@ class FactExtractor:
         """
         Args:
             dedup_via_search: when True (production default), pre-checks
-                ``search_facts(content)`` against ``fact_dedup_threshold``
-                before calling ``Heart.learn``. The pre-check uses HYBRID
-                search (vector + keyword RRF) which catches lexical
-                paraphrases pure cosine misses. F051.5 ingest sets this
-                False because hybrid RRF scores are unreliable on a
-                near-empty corpus (the lone existing fact RRF≈1.0 trips
-                dedup for every subsequent candidate). Heart.learn's
-                native cosine > 0.95 dedup still runs regardless.
+                ``find_similar_facts(content)`` (raw cosine, audit S1)
+                against ``fact_dedup_threshold`` before calling
+                ``Heart.learn``. F051.5 ingest sets this False to skip the
+                Leg-1 probe entirely during bulk ingest (the historical
+                "RRF≈1.0 on a near-empty corpus" failure no longer applies
+                — cosine is corpus-size-independent — but skipping a probe
+                per ingested row is still the right call for bulk loads).
+                Heart.learn's native cosine (Leg-2) dedup still runs
+                regardless.
         """
         self._heart = heart
         self._settings = settings
@@ -139,7 +140,7 @@ class FactExtractor:
     async def _resolve_dedup(
         self, content: str, candidate_event_date: "date | None"
     ) -> "tuple[UUID | None, list[UUID]]":
-        """Resolve the RRF dedup decision for a candidate.
+        """Resolve the Leg-1 dedup decision for a candidate.
 
         Returns ``(canonical_id, exclude_ids)``:
         - ``canonical_id`` is the existing fact to dedup against, or ``None`` to
@@ -149,13 +150,25 @@ class FactExtractor:
           native-cosine (Leg-2) dedup cannot silently re-merge them and undo the
           DISTINCT verdict (codex P2).
 
-        Examines every above-threshold RRF hit (not just the top one) when the
-        tiebreaker is enabled, so a high-overlap opposite ranked first cannot
-        hide a real duplicate ranked lower (codex P2). With the flag off, only
-        the top hit is examined and ``exclude_ids`` is empty — byte-identical to
-        the pre-F377 path. Hits whose ``event_date`` differs from the candidate
-        are skipped (F075: distinct dates = distinct events). Shared by both
-        producer paths (cf. #354)."""
+        Audit S1 (2026-06-09): the probe is ``find_similar_facts`` (raw
+        cosine), NOT ``search_facts`` (RRF). RRF scores encode rank, not
+        closeness — the nearest fact scored ~0.98 at limit=1 no matter how
+        dissimilar, so ``score > fact_dedup_threshold`` fired for virtually
+        every candidate once one embedded fact existed. That made the Haiku
+        tiebreaker the *only* real gate (every candidate paid an LLM call,
+        and a tiebreaker outage silently dropped all candidate facts) and,
+        with the flag off, suppressed nearly all extractor writes. Raw
+        cosine restores a calibrated threshold; the tiebreaker now runs only
+        on genuinely-close pairs. ``fact_dedup_threshold`` (default 0.92) is
+        therefore now a COSINE threshold. The single distance-ordered top-5
+        probe also replaces the old limit=1 + limit=5 two-pass dance — that
+        existed to compensate for the supersession filter's re-sort of RRF
+        scores (#469/#470), which the raw-cosine probe bypasses entirely
+        (superseded facts are inactive and never returned).
+
+        Hits whose ``event_date`` differs from the candidate are skipped
+        (F075: distinct dates = distinct events). Shared by both producer
+        paths (cf. #354)."""
         distinct_ids: list[UUID] = []
         if not self._dedup_via_search:
             return None, distinct_ids
@@ -164,53 +177,24 @@ class FactExtractor:
         tiebreaker = getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
         threshold = self._settings.fact_dedup_threshold
 
-        # `search_facts` returns the RECALL score, not a clean dedup signal:
-        # `apply_supersession_filter` (facts.py:338) penalises superseded (×0.3)
-        # and low-confidence (×conf) hits AND RE-SORTS after truncation, and RRF
-        # penalises single-channel hits by `limit + 1` (search.py). So the score
-        # at a given limit depends on the limit and the result-set composition.
-        # Two consequences, handled together rather than per-symptom:
-        #   • a single-channel rank-1 dup scores highest at limit=1 (#469/P2-5);
-        #   • a penalised rank-1 hit at limit=1 can sit below threshold while the
-        #     real winner (superseder / high-confidence dup) only rises to the top
-        #     after the filter re-sort at limit=5 (#470/P2-6, P2-7).
-        # So: decide an above-threshold TOP at limit=1 (closes P2-5), then — when
-        # the tiebreaker is on — ALWAYS run the limit=5 pass unless limit=1 found
-        # nothing at all. Gating on "any hit returned" (not on a symptom like
-        # superseded/low-conf) covers every current and future filter mutator.
-        top_hits = await self._heart.search_facts(content, limit=1)
-        top = top_hits[0] if top_hits else None
-        top_is_candidate = (
-            top is not None and top.score is not None and top.score > threshold
-        )
-        if top_is_candidate and not self._event_date_differs(top, candidate_event_date):
-            if await self._confirm_dedup(top.content, content):
-                return top.id, distinct_ids
-            distinct_ids.append(top.id)  # tiebreaker judged the top DISTINCT
+        # Single raw-cosine probe: similarity-descending, active facts only,
+        # no access-tracking side effects (audit S9). Embed failure → [] →
+        # store (Leg-2 also degrades on embed failure; consistent).
+        hits = await self._heart.find_similar_facts(content, limit=5)
 
-        # Legacy (flag off) examines only the top hit — byte-identical behaviour.
-        if not tiebreaker:
-            return None, distinct_ids
-
-        # No hit at all → genuinely nothing to dedup against → store. Any returned
-        # hit means the penalised/re-sorted limit=1 score can't be trusted to mean
-        # "no duplicate", so always widen (restores merged #468's limit=5 coverage).
-        if top is None:
-            return None, distinct_ids
-
-        # Phase 2 (flag-on) — the limit=5 filter re-sort surfaces the real winner
-        # (superseder / high-confidence dup) that a single limit=1 view hid, plus
-        # any lower-ranked true dup the top outranked.
-        for cand in await self._heart.search_facts(content, limit=5):
-            if cand.id == top.id:
-                continue  # already decided at limit=1 scoring
+        for cand in hits:
             if cand.score is None or cand.score <= threshold:
-                continue
+                break  # similarity-descending: nothing further can clear it
             if self._event_date_differs(cand, candidate_event_date):
-                continue
+                continue  # F075: distinct dates = distinct events
             if await self._confirm_dedup(cand.content, content):
                 return cand.id, distinct_ids
-            distinct_ids.append(cand.id)
+            distinct_ids.append(cand.id)  # tiebreaker judged DISTINCT
+            # Legacy (flag off) examines only the top hit; _confirm_dedup
+            # fails open to dedup when the flag is off, so reaching here
+            # with tiebreaker off is impossible — the guard is defensive.
+            if not tiebreaker:
+                break
         return None, distinct_ids
 
     @staticmethod

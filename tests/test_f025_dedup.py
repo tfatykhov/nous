@@ -33,7 +33,7 @@ class TestFactDedupBehavior:
         from nous.handlers.fact_extractor import FactExtractor
 
         heart = MagicMock()
-        heart.search_facts = AsyncMock(return_value=[MockSearchResult(score=0.88)])
+        heart.find_similar_facts = AsyncMock(return_value=[MockSearchResult(score=0.88)])
         heart.learn = AsyncMock(return_value=MagicMock(spec=["id", "content"]))
 
         settings = Settings(_env_file=None, fact_dedup_threshold=0.92)
@@ -61,7 +61,7 @@ class TestFactDedupBehavior:
         from nous.handlers.fact_extractor import FactExtractor
 
         heart = MagicMock()
-        heart.search_facts = AsyncMock(return_value=[MockSearchResult(score=0.95)])
+        heart.find_similar_facts = AsyncMock(return_value=[MockSearchResult(score=0.95)])
         heart.learn = AsyncMock()
 
         settings = Settings(_env_file=None, fact_dedup_threshold=0.92)
@@ -89,7 +89,7 @@ class TestFactDedupBehavior:
         from nous.handlers.fact_extractor import FactExtractor
 
         heart = MagicMock()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         heart.learn = AsyncMock(return_value=MagicMock(spec=["id", "content"]))
 
         settings = Settings(_env_file=None, fact_dedup_threshold=0.92)

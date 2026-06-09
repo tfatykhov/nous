@@ -578,8 +578,23 @@ class Brain:
             text("UPDATE heart.censors SET learned_from_decision = NULL WHERE learned_from_decision = :did"),
             {"did": decision_id},
         )
+        # Audit D1 (2026-06-09): brain.graph_edges lost its FK constraints in
+        # migration 016 (polymorphic endpoints), so CASCADE no longer covers
+        # it — edges must be deleted explicitly or they dangle forever,
+        # feeding ghost ids to spreading activation / neighbors / adjacency
+        # boost and inflating graph density. (Migration 060 cleans up edges
+        # stranded by deletes that ran before this fix.)
+        await session.execute(
+            text(
+                "DELETE FROM brain.graph_edges "
+                "WHERE (source_id = :did AND source_type = 'decision') "
+                "   OR (target_id = :did AND target_type = 'decision')"
+            ),
+            {"did": decision_id},
+        )
         # Delete the decision — CASCADE handles brain.thoughts, decision_tags,
-        # decision_reasons, decision_bridge, graph_edges, episode_decisions
+        # decision_reasons, decision_bridge, episode_decisions (NOT
+        # graph_edges — see above)
         await session.execute(
             text("DELETE FROM brain.decisions WHERE id = :did"),
             {"did": decision_id},

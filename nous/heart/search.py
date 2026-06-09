@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+from functools import lru_cache
 from uuid import UUID
 
 from sqlalchemy import text
@@ -31,26 +32,89 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+async def set_local_ef_search(session: AsyncSession, value: int) -> None:
+    """Prepare a filtered HNSW query — Postgres only, no-op elsewhere.
+
+    Two transaction-scoped GUCs:
+    - ``hnsw.ef_search``: widens the candidate horizon (pgvector
+      post-applies WHERE filters to the approximate walk, so a tight
+      horizon can return fewer rows than the LIMIT).
+    - ``hnsw.iterative_scan = strict_order`` (pgvector >= 0.8, codex P1):
+      keeps scanning in exact distance order until the LIMIT is satisfied
+      AFTER filtering — this removes the missed-match failure mode on
+      multi-tenant tables where other agents' nearby vectors could exhaust
+      a fixed horizon. Integrity-sensitive callers (fact dedup) rely on
+      this where available. Set DIRECTLY under a savepoint (codex round
+      7): probing ``current_setting(..., true)`` returns NULL on a fresh
+      backend before pgvector's library registers its GUCs, falsely
+      reporting "unavailable" right before the first vector query. The
+      SET itself either succeeds (registered GUC or accepted placeholder)
+      or errors on pgvector < 0.8 (reserved ``hnsw.`` prefix, unknown
+      parameter) — the savepoint absorbs that error so the surrounding
+      transaction degrades cleanly to the ef_search margin.
+
+    Guarded by dialect so SQLite test harnesses don't choke.
+    """
+    bind = getattr(session, "bind", None)
+    if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+        return
+    await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(value)}"))
+    try:
+        async with session.begin_nested():
+            await session.execute(
+                text("SET LOCAL hnsw.iterative_scan = strict_order")
+            )
+    except Exception:
+        pass  # pgvector < 0.8 — GUC absent; ef_search margin still applies
+
+
+@lru_cache(maxsize=8)
+def _cached_settings(_env_fingerprint: tuple) -> "object":
+    """Construct Settings at most once per env-fingerprint (audit P3).
+
+    The three resolvers below ran a full pydantic-settings construction
+    (~300-field env + .env parse) on EVERY hybrid_search call — 2-3x per
+    search, ~10x per recall. The cache key is the tuple of env vars these
+    resolvers actually depend on, so tests that monkeypatch NOUS_RRF_K /
+    NOUS_VECTOR_WEIGHT / NOUS_HYBRID_SEARCH_KEYWORD_ENABLED still see
+    fresh values (changed env → new fingerprint → new Settings).
+    RuntimeConfig overrides are NOT cached — they are consulted per call.
+    """
+    from nous.config import Settings
+
+    return Settings()
+
+
+def _resolver_settings() -> "object | None":
+    import os
+
+    fingerprint = (
+        os.environ.get("NOUS_RRF_K"),
+        os.environ.get("NOUS_VECTOR_WEIGHT"),
+        os.environ.get("NOUS_HYBRID_SEARCH_KEYWORD_ENABLED"),
+    )
+    try:
+        return _cached_settings(fingerprint)
+    except Exception:
+        return None
+
+
 def _resolve_vector_weight() -> float:
     """Resolve vector_weight from runtime config > settings > default 0.7."""
-    from nous.config import Settings
     from nous.runtime_config import RuntimeConfig
 
-    try:
-        settings = Settings()
-    except Exception:
+    settings = _resolver_settings()
+    if settings is None:
         return 0.7
     return RuntimeConfig.get().get_vector_weight(settings)
 
 
 def _resolve_rrf_k() -> int:
     """Resolve rrf_k from runtime config > settings > default 60."""
-    from nous.config import Settings
     from nous.runtime_config import RuntimeConfig
 
-    try:
-        settings = Settings()
-    except Exception:
+    settings = _resolver_settings()
+    if settings is None:
         return 60
     return RuntimeConfig.get().get_rrf_k(settings)
 
@@ -64,11 +128,8 @@ def _resolve_keyword_enabled() -> bool:
     No RuntimeConfig override path — this is intentionally a static config
     flip, not a per-request knob.
     """
-    from nous.config import Settings
-
-    try:
-        settings = Settings()
-    except Exception:
+    settings = _resolver_settings()
+    if settings is None:
         return True
     return bool(getattr(settings, "hybrid_search_keyword_enabled", True))
 

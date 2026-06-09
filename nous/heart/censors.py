@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import CensorDetail, CensorInput, CensorMatch
+from nous.heart.search import set_local_ef_search
 from nous.storage.database import Database
 from nous.storage.models import Censor, Event
 
@@ -268,6 +269,14 @@ class CensorManager:
             domain_clause = "AND (domain = :domain OR domain IS NULL)"
             params["domain"] = domain
 
+        # DELIBERATELY EXACT (codex P1, 2026-06-09): this is the censor
+        # ENFORCEMENT path — completeness is the point. A filtered HNSW scan
+        # is approximate (pgvector applies agent_id/active/threshold AFTER
+        # the candidate walk), so a true match can be silently missing and
+        # an unenforced steer/refuse/abort has no recovery. The censor table
+        # is tiny (~50 rows/agent), so the exact scan the audit's D9 flagged
+        # as a perf concern costs microseconds here; the read-only
+        # _semantic_search below keeps the index-served form instead.
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.censors
@@ -391,6 +400,13 @@ class CensorManager:
             domain_clause = "AND (domain = :domain OR domain IS NULL)"
             params["domain"] = domain
 
+        # Audit D9: distance-ordered so the HNSW index serves the query
+        # (ordering identical — distance ASC == similarity DESC). This is
+        # the read-only SEARCH surface — approximate top-k is acceptable
+        # here, unlike the enforcement path above which stays exact.
+        # ef_search raised above any plausible :limit so post-filters can't
+        # evict true matches from the approximate candidate set (review P2).
+        await set_local_ef_search(session, 120)
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.censors
@@ -399,7 +415,7 @@ class CensorManager:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
               {domain_clause}
-            ORDER BY similarity DESC
+            ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """)
 

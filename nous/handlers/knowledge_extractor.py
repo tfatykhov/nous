@@ -114,8 +114,14 @@ class KnowledgeExtractor:
                 if not content:
                     continue
 
-                # Dedup against existing facts
-                existing = await self._heart.search_facts(content, limit=1)
+                # Dedup against existing facts.
+                # Audit S2 (2026-06-09): probe via raw cosine, not
+                # search_facts — RRF scores encode rank (~0.98 for the
+                # nearest fact regardless of similarity), so the old
+                # `score > 0.85` skipped virtually every candidate once
+                # any embedded fact existed. Cosine 0.85 is a real
+                # paraphrase threshold.
+                existing = await self._heart.find_similar_facts(content, limit=1)
                 if (
                     existing
                     and existing[0].score is not None

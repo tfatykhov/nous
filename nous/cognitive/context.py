@@ -1427,15 +1427,32 @@ class ContextEngine:
         if len(selected) < slots and query:
             have = {getattr(d, "id", None) for d in selected}
             try:
-                cos = await self._heart.search_procedures(
+                # codex P2 (round 4): probe via RAW COSINE, not
+                # search_procedures — RRF scores encode rank (~0.95 for the
+                # nearest hit on ANY query), so a floor compared against
+                # them never filters. This is the same threshold-space
+                # mismatch as audit S1, recurring on the read side. The
+                # leg is finally what its name says: a cosine fallback.
+                cos = await self._heart.find_similar_procedures(
                     query, limit=slots * 2, session=session,
                 )
             except Exception as e:
                 logger.warning("F080 §14.7: cosine procedure fallback failed: %s", e)
                 cos = []
+            # Audit R1 (2026-06-09): relevance floor before body preload.
+            # Without it this leg preloaded up to `slots` full bodies
+            # (2500 chars each) for arbitrarily-poor matches on every turn.
+            # procedure_score_floor (0.40) is now compared against raw
+            # cosine — a calibrated closeness measure. `continue` (not
+            # break) so no ordering assumption; the list is ≤ slots*2.
+            floor = float(
+                getattr(self._settings, "procedure_score_floor", 0.40) or 0.0
+            )
             for summ in cos:
                 if len(selected) >= slots:
                     break
+                if summ.score is not None and summ.score < floor:
+                    continue
                 if summ.id in have:
                     continue
                 try:

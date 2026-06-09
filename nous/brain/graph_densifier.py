@@ -665,15 +665,21 @@ class GraphDensifier:
         """Link a chunk to other chunks in the same episode.
 
         Two edge types:
-        - Adjacent chunks (chunk_index ± 1): always linked, weight=1.0
-        - Non-adjacent: cosine ≥ ``cosine_threshold``
+        - Adjacent chunks (chunk_index ± 1, SAME source_kind): always
+          linked, weight=1.0. The source_kind guard (codex P2, PR #495):
+          dialogue chunks are MAX+1-allocated after document chunks, so the
+          first dialogue chunk is numerically adjacent to the last document
+          chunk — index adjacency across source kinds is an allocation
+          artifact, not a structural relationship.
+        - Non-adjacent (or cross-kind): cosine ≥ ``cosine_threshold``
 
         Returns count of edges created.
         """
         # Fetch this chunk's index for sequential check
         self_row = (await session.execute(
             text(
-                "SELECT chunk_index FROM heart.episode_chunks "
+                "SELECT chunk_index, source_kind, source_ref "
+                "FROM heart.episode_chunks "
                 "WHERE id = :i AND agent_id = :a"
             ),
             {"i": chunk_id, "a": self._agent_id},
@@ -681,6 +687,8 @@ class GraphDensifier:
         if not self_row:
             return 0
         self_idx = self_row.chunk_index
+        self_kind = self_row.source_kind
+        self_ref = self_row.source_ref
 
         # Fetch sibling chunks (same episode, different chunk_index).
         # Don't filter by embedding presence: adjacent siblings must link
@@ -690,7 +698,7 @@ class GraphDensifier:
         # by the threshold gate below.
         siblings = (await session.execute(
             text(
-                "SELECT id, chunk_index, "
+                "SELECT id, chunk_index, source_kind, source_ref, "
                 "  1 - (embedding <=> ("
                 "    SELECT embedding FROM heart.episode_chunks "
                 "    WHERE id = :i AND agent_id = :a"
@@ -707,7 +715,16 @@ class GraphDensifier:
         for row in siblings:
             sibling_idx = row.chunk_index
             sim = float(row.sim or 0.0)
-            is_adjacent = abs(sibling_idx - self_idx) == 1
+            # codex P2 (round 4½): same source_ref required too — two
+            # documents ingested under one episode share source_kind and
+            # consecutive indexes, but the last chunk of doc A and the
+            # first of doc B are unrelated streams. Dialogue chunks carry
+            # source_ref NULL, so None == None keeps them adjacent.
+            is_adjacent = (
+                abs(sibling_idx - self_idx) == 1
+                and row.source_kind == self_kind
+                and row.source_ref == self_ref
+            )
             if is_adjacent:
                 # Sequential link — always create, structural weight=1.0.
                 # Override the related_to multiplier (0.8) so the persisted

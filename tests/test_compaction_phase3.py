@@ -434,7 +434,7 @@ class TestKnowledgeExtractor:
         """Handler extracts facts from snapshot and stores via heart.learn()."""
         heart = MagicMock()
         heart.learn = AsyncMock()
-        heart.search_facts = AsyncMock(return_value=[])  # No duplicates
+        heart.find_similar_facts = AsyncMock(return_value=[])  # No duplicates
         settings = _mock_settings()
         bus = EventBus()
 
@@ -478,7 +478,7 @@ class TestKnowledgeExtractor:
         """Handler reads message_snapshot from event.data."""
         heart = MagicMock()
         heart.learn = AsyncMock()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         settings = _mock_settings()
         bus = EventBus()
 
@@ -565,7 +565,7 @@ class TestKnowledgeExtractor:
         # Return a high-similarity existing fact
         existing_fact = MagicMock()
         existing_fact.score = 0.92
-        heart.search_facts = AsyncMock(return_value=[existing_fact])
+        heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
         settings = _mock_settings()
         bus = EventBus()
 
@@ -602,7 +602,7 @@ class TestKnowledgeExtractor:
         """Facts with confidence < 0.6 are skipped."""
         heart = MagicMock()
         heart.learn = AsyncMock()
-        heart.search_facts = AsyncMock(return_value=[])
+        heart.find_similar_facts = AsyncMock(return_value=[])
         settings = _mock_settings()
         bus = EventBus()
 
@@ -639,7 +639,7 @@ class TestKnowledgeExtractor:
         """At most 5 facts are stored per compaction."""
         heart = MagicMock()
         heart.learn = AsyncMock()
-        heart.search_facts = AsyncMock(return_value=[])  # No duplicates
+        heart.find_similar_facts = AsyncMock(return_value=[])  # No duplicates
         settings = _mock_settings()
         bus = EventBus()
 

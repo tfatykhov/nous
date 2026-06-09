@@ -487,6 +487,89 @@ class ProcedureManager:
         return summaries
 
     # ------------------------------------------------------------------
+    # find_similar_for_selection() — §14 cosine leg (codex P2, PR #495)
+    # ------------------------------------------------------------------
+
+    async def find_similar_for_selection(
+        self,
+        query: str,
+        limit: int = 10,
+        session: AsyncSession | None = None,
+    ) -> list[ProcedureSummary]:
+        """Raw-cosine nearest-neighbor probe for §14 procedure selection.
+
+        Same rationale as FactManager.find_similar_for_dedup (audit S1):
+        ``search()`` returns normalized RRF scores that encode RANK, not
+        closeness — the nearest procedure scores ~0.95 for ANY query, so a
+        relevance floor compared against it never filters. The §14 cosine
+        leg needs a score a floor can be calibrated against; this returns
+        ``score`` = raw cosine similarity. Active procedures only.
+
+        Returns [] when embeddings are unavailable or the embed fails —
+        the §14 ladder then simply leaves the remaining slots empty.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                return await self._find_similar_for_selection(query, limit, session)
+        return await self._find_similar_for_selection(query, limit, session)
+
+    async def _find_similar_for_selection(
+        self,
+        query: str,
+        limit: int,
+        session: AsyncSession,
+    ) -> list[ProcedureSummary]:
+        if not self.embeddings:
+            return []
+        try:
+            embedding = await self.embeddings.embed(query)
+        except Exception:
+            logger.warning("Embedding generation failed for procedure selection probe")
+            return []
+
+        embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        # Same filtered-ANN horizon widening as the fact probes (codex P2):
+        # agent_id/active are post-applied to the approximate walk.
+        from nous.heart.search import set_local_ef_search
+        await set_local_ef_search(session, 100)
+        rows = (await session.execute(text("""
+            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
+            FROM heart.procedures
+            WHERE agent_id = :agent_id
+              AND active = true
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> CAST(:embedding AS vector)
+            LIMIT :limit
+        """), {
+            "embedding": embedding_str,
+            "agent_id": self.agent_id,
+            "limit": limit,
+        })).all()
+        if not rows:
+            return []
+
+        ids = [r.id for r in rows]
+        sims = {r.id: float(r.similarity) for r in rows}
+        proc_result = await session.execute(select(Procedure).where(Procedure.id.in_(ids)))
+        procedures = {p.id: p for p in proc_result.scalars().all()}
+
+        return [
+            ProcedureSummary(
+                id=p.id,
+                name=p.name,
+                domain=p.domain,
+                description=p.description,
+                activation_count=p.activation_count or 0,
+                effectiveness=self._compute_effectiveness(p),
+                score=sims.get(p.id),
+                core_patterns=list(p.core_patterns or []),
+                implementation_notes=list(p.implementation_notes or []),
+            )
+            for pid in ids
+            if (p := procedures.get(pid)) is not None
+        ]
+
+    # ------------------------------------------------------------------
     # get_evolution_candidates() — F037 Part 3
     # ------------------------------------------------------------------
 

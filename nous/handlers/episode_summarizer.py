@@ -257,7 +257,46 @@ class EpisodeSummarizer:
             return 0
 
         async with self._heart.db.session() as s:
-            for idx, (content, vec) in enumerate(zip(chunks, vectors)):
+            # Audit E1 (2026-06-09): serialize with ingest_document (F069)
+            # via the SAME episode-scoped advisory lock, and append after
+            # MAX(chunk_index) instead of numbering from 0. A document
+            # ingested mid-session occupies indexes 0..M on this episode;
+            # numbering transcript chunks from 0 collided on
+            # (episode_id, chunk_index) and ON CONFLICT DO NOTHING silently
+            # destroyed every transcript chunk with index <= M.
+            await s.execute(
+                sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                {"k": f"ingest_document:{episode_id}"},
+            )
+            # Idempotency moved from per-row index collision to a per-kind
+            # existence check: a re-summarize (F060 recovery, concurrent
+            # session_ended handlers) must not append a second copy now
+            # that indexes are MAX+1-allocated.
+            already = await s.execute(
+                sa_text(
+                    "SELECT 1 FROM heart.episode_chunks "
+                    "WHERE agent_id = :agent_id AND episode_id = :ep "
+                    "  AND source_kind = 'dialogue' LIMIT 1"
+                ),
+                {"agent_id": agent_id, "ep": str(episode_id)},
+            )
+            if already.first() is not None:
+                await s.commit()  # release the advisory lock
+                logger.info(
+                    "F067: dialogue chunks already stored for episode %s; skipping",
+                    episode_id,
+                )
+                return 0
+            next_idx_row = await s.execute(
+                sa_text(
+                    "SELECT COALESCE(MAX(chunk_index), -1) + 1 "
+                    "FROM heart.episode_chunks "
+                    "WHERE agent_id = :agent_id AND episode_id = :ep"
+                ),
+                {"agent_id": agent_id, "ep": str(episode_id)},
+            )
+            start_idx = int(next_idx_row.scalar() or 0)
+            for offset, (content, vec) in enumerate(zip(chunks, vectors)):
                 if not vec:
                     # Defensive — shouldn't happen given the length check above,
                     # but a single None in the batch is still skippable.
@@ -270,7 +309,7 @@ class EpisodeSummarizer:
                     "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
                 ), {
                     "agent_id": agent_id, "ep": str(episode_id),
-                    "idx": idx, "content": content, "vec": vec_lit,
+                    "idx": start_idx + offset, "content": content, "vec": vec_lit,
                 })
             await s.commit()
         return len(chunks)

@@ -395,7 +395,7 @@ async def test_extract_and_store_uses_explicit_candidate_facts() -> None:
     from nous.handlers.fact_extractor import FactExtractor
 
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[])  # no dupes
+    heart.find_similar_facts = AsyncMock(return_value=[])  # no dupes
     fact_id = uuid4()
     learned = MagicMock()
     learned.id = fact_id
@@ -424,7 +424,7 @@ async def test_extract_and_store_falls_back_to_summary_candidates() -> None:
     from nous.handlers.fact_extractor import FactExtractor
 
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[])
+    heart.find_similar_facts = AsyncMock(return_value=[])
     fact_id = uuid4()
     learned = MagicMock()
     learned.id = fact_id
@@ -457,7 +457,7 @@ async def test_extract_and_store_returns_canonical_uuid_on_dedup() -> None:
     existing_fact.score = 0.95  # > 0.92 default → dedup skip
 
     heart = MagicMock()
-    heart.search_facts = AsyncMock(return_value=[existing_fact])
+    heart.find_similar_facts = AsyncMock(return_value=[existing_fact])
     heart.learn = AsyncMock()  # should NOT be called (dedup skip)
 
     settings = MagicMock()
