@@ -33,17 +33,32 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 async def set_local_ef_search(session: AsyncSession, value: int) -> None:
-    """``SET LOCAL hnsw.ef_search`` — Postgres only, no-op elsewhere.
+    """Prepare a filtered HNSW query — Postgres only, no-op elsewhere.
 
-    Widens the HNSW candidate horizon for filtered ANN queries (pgvector
-    post-applies WHERE filters to the approximate walk, so a tight horizon
-    can return fewer rows than the LIMIT). Transaction-scoped. Guarded by
-    dialect so SQLite test harnesses don't choke on the statement.
+    Two transaction-scoped GUCs:
+    - ``hnsw.ef_search``: widens the candidate horizon (pgvector
+      post-applies WHERE filters to the approximate walk, so a tight
+      horizon can return fewer rows than the LIMIT).
+    - ``hnsw.iterative_scan = strict_order`` (pgvector >= 0.8, codex P1):
+      keeps scanning in exact distance order until the LIMIT is satisfied
+      AFTER filtering — this removes the missed-match failure mode on
+      multi-tenant tables where other agents' nearby vectors could exhaust
+      a fixed horizon. Integrity-sensitive callers (fact dedup) rely on
+      this where available. The availability probe uses
+      ``current_setting(..., true)`` (missing_ok) so older pgvector
+      versions degrade to the ef_search margin without erroring.
+
+    Guarded by dialect so SQLite test harnesses don't choke.
     """
     bind = getattr(session, "bind", None)
     if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
         return
     await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(value)}"))
+    has_iterative = (await session.execute(
+        text("SELECT current_setting('hnsw.iterative_scan', true)")
+    )).scalar()
+    if has_iterative is not None:
+        await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
 
 
 @lru_cache(maxsize=8)
