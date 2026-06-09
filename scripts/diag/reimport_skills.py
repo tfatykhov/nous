@@ -104,7 +104,10 @@ async def main() -> None:
         rows = (await sess.execute(text("""
             SELECT id, name, domain, description, implementation_notes, tags
             FROM heart.procedures
-            WHERE agent_id='nous-default' AND active AND 'skill'=ANY(tags)
+            -- repair every non-archived skill, incl. env-inactive ones (archived_at
+            -- NULL, active false) — they were imported through the same lossy parser
+            -- and reactivate later with a truncated body otherwise (codex P2).
+            WHERE agent_id='nous-default' AND archived_at IS NULL AND 'skill'=ANY(tags)
             ORDER BY name
         """))).mappings().all()
 
