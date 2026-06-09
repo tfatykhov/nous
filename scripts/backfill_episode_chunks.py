@@ -234,6 +234,13 @@ async def main() -> int:
     stats = Stats()
 
     try:
+        # codex P1 (PR #495): episodes that fail without inserting a chunk
+        # (too-short transcript, repeated embed failure, vector-count
+        # mismatch) stay eligible and are re-selected by every batch —
+        # without --limit one bad episode loops the run forever and an
+        # embed failure retries the API unbounded. Attempt each episode at
+        # most once per run; cross-run retry semantics are unchanged.
+        attempted: set[str] = set()
         while True:
             if args.limit and stats.episodes_seen >= args.limit:
                 break
@@ -242,9 +249,16 @@ async def main() -> int:
             )
             batch_size = min(EPISODE_BATCH, remaining_budget)
             batch = await _next_batch(db, args.agent_id, batch_size)
-            if not batch:
+            fresh = [(e, a, t) for e, a, t in batch if e not in attempted]
+            if not fresh:
+                if batch:
+                    logger.info(
+                        "Stopping: remaining %d eligible episode(s) already "
+                        "attempted this run (see failures above)", len(batch),
+                    )
                 break
-            for episode_id, agent_id, transcript in batch:
+            for episode_id, agent_id, transcript in fresh:
+                attempted.add(episode_id)
                 stats.episodes_seen += 1
                 await _process_episode(
                     db, embedder, settings,

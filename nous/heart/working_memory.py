@@ -494,8 +494,19 @@ class WorkingMemoryManager:
                 return act
 
             residual = sorted(merged.values(), key=_activation, reverse=True)
-            if max_residual_items is not None and max_residual_items >= 0:
-                residual = residual[:max_residual_items]
+            # codex P2 (round 2): the COMBINED list must respect the row's
+            # max_items capacity — capping only the residual portion let
+            # curated(20) + residual(20) = 40 escape the contract, and
+            # load_item's evict-one-then-append never recovers the
+            # oversize. Curated items keep priority (they're deliberate
+            # loads); residuals fill the remaining space.
+            row_cap = int(getattr(existing, "max_items", None) or 20)
+            remaining = max(0, row_cap - len(non_residual))
+            cap = (
+                remaining if max_residual_items is None
+                else min(remaining, max(0, max_residual_items))
+            )
+            residual = residual[:cap]
             new_items = non_residual + residual
 
             if existing is None:

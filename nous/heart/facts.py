@@ -926,6 +926,14 @@ class FactManager:
             # Malformed confidence must land on the documented fail-open
             # path (confirm), not raise out of _learn mid-transaction.
             return None
+        # codex P2 (round 2): a low-confidence verdict must not route — the
+        # band default is confirm, and acting on a 0.1-confidence
+        # CONTRADICTION inserts a fact, writes an edge, and decrements the
+        # existing fact's confidence. UPDATE keeps the stricter 0.8 gate it
+        # has always had (it deactivates a fact — the most destructive
+        # action); the others gate at 0.5.
+        if conf < 0.5:
+            return None
         if relation == "UNRELATED":
             return "unrelated"
         if relation == "REFINEMENT":

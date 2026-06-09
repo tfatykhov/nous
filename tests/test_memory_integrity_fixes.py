@@ -80,12 +80,19 @@ class TestClassifyDupeInBand:
     @pytest.mark.parametrize(
         "classification, expected",
         [
-            ({"relation": "UNRELATED"}, "unrelated"),
-            ({"relation": "REFINEMENT"}, "refines"),
+            ({"relation": "UNRELATED", "confidence": 0.9}, "unrelated"),
+            ({"relation": "REFINEMENT", "confidence": 0.9}, "refines"),
             ({"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}, "supersede_old"),
             ({"relation": "UPDATE", "current_fact": "old", "confidence": 0.9}, None),
             ({"relation": "UPDATE", "current_fact": "new", "confidence": 0.5}, None),
-            ({"relation": "CONTRADICTION"}, "contradiction"),
+            ({"relation": "CONTRADICTION", "confidence": 0.9}, "contradiction"),
+            # codex P2 (round 2): low-confidence verdicts fail open to
+            # confirm for EVERY relation, not just UPDATE — acting on a
+            # 0.1-confidence CONTRADICTION mutates the existing fact.
+            ({"relation": "CONTRADICTION", "confidence": 0.1}, None),
+            ({"relation": "UNRELATED", "confidence": 0.4}, None),
+            ({"relation": "REFINEMENT"}, None),  # missing conf -> 0.0 -> confirm
+            ({"relation": "CONTRADICTION", "confidence": "high"}, None),  # malformed
             (None, None),  # classifier failure -> fail open to dedup
             ({}, None),
         ],
@@ -321,6 +328,36 @@ class TestUpsertResidualItemsMerge:
             current_turn=8, decay_fn=lambda age: 0.5 ** age,
         )
         assert existing.items == [fresh]
+
+    @pytest.mark.asyncio
+    async def test_combined_list_respects_row_capacity(self):
+        """codex P2 (round 2): curated + residual together must not exceed
+        the row's max_items — a full curated set leaves no residual space."""
+        curated = [_curated(uuid4()) for _ in range(20)]
+        existing = SimpleNamespace(items=list(curated), max_items=20)
+        mgr, _ = _wm_manager(existing)
+
+        await mgr.upsert_residual_items(
+            "test", "s1", [_residual(uuid4(), 0.9)], max_residual_items=20,
+        )
+        assert len(existing.items) == 20
+        assert all("activation" not in d for d in existing.items)  # curated kept
+
+    @pytest.mark.asyncio
+    async def test_residuals_fill_remaining_capacity_only(self):
+        curated = [_curated(uuid4()) for _ in range(18)]
+        existing = SimpleNamespace(items=list(curated), max_items=20)
+        mgr, _ = _wm_manager(existing)
+
+        residuals = [_residual(uuid4(), 0.5 + i / 100) for i in range(5)]
+        await mgr.upsert_residual_items(
+            "test", "s1", residuals, max_residual_items=20,
+        )
+        assert len(existing.items) == 20  # 18 curated + 2 residual
+        kept = [d for d in existing.items if "activation" in d]
+        assert len(kept) == 2
+        # the two highest-activation residuals won the remaining slots
+        assert {d["ref_id"] for d in kept} == {residuals[-1]["ref_id"], residuals[-2]["ref_id"]}
 
     @pytest.mark.asyncio
     async def test_no_decay_fn_keeps_stored_ranking(self):
