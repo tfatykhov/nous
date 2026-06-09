@@ -528,6 +528,10 @@ class ProcedureManager:
             return []
 
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        # Same filtered-ANN horizon widening as the fact probes (codex P2):
+        # agent_id/active are post-applied to the approximate walk.
+        from nous.heart.search import set_local_ef_search
+        await set_local_ef_search(session, 100)
         rows = (await session.execute(text("""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.procedures

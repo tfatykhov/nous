@@ -678,7 +678,8 @@ class GraphDensifier:
         # Fetch this chunk's index for sequential check
         self_row = (await session.execute(
             text(
-                "SELECT chunk_index, source_kind FROM heart.episode_chunks "
+                "SELECT chunk_index, source_kind, source_ref "
+                "FROM heart.episode_chunks "
                 "WHERE id = :i AND agent_id = :a"
             ),
             {"i": chunk_id, "a": self._agent_id},
@@ -687,6 +688,7 @@ class GraphDensifier:
             return 0
         self_idx = self_row.chunk_index
         self_kind = self_row.source_kind
+        self_ref = self_row.source_ref
 
         # Fetch sibling chunks (same episode, different chunk_index).
         # Don't filter by embedding presence: adjacent siblings must link
@@ -696,7 +698,7 @@ class GraphDensifier:
         # by the threshold gate below.
         siblings = (await session.execute(
             text(
-                "SELECT id, chunk_index, source_kind, "
+                "SELECT id, chunk_index, source_kind, source_ref, "
                 "  1 - (embedding <=> ("
                 "    SELECT embedding FROM heart.episode_chunks "
                 "    WHERE id = :i AND agent_id = :a"
@@ -713,9 +715,15 @@ class GraphDensifier:
         for row in siblings:
             sibling_idx = row.chunk_index
             sim = float(row.sim or 0.0)
+            # codex P2 (round 4½): same source_ref required too — two
+            # documents ingested under one episode share source_kind and
+            # consecutive indexes, but the last chunk of doc A and the
+            # first of doc B are unrelated streams. Dialogue chunks carry
+            # source_ref NULL, so None == None keeps them adjacent.
             is_adjacent = (
                 abs(sibling_idx - self_idx) == 1
                 and row.source_kind == self_kind
+                and row.source_ref == self_ref
             )
             if is_adjacent:
                 # Sequential link — always create, structural weight=1.0.

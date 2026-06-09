@@ -162,6 +162,21 @@ async def _process_episode(
         if repair:
             # Rebuild from the transcript: drop the (possibly partial)
             # dialogue set; document/code chunks are untouched.
+            # codex P2: graph_edges endpoints are polymorphic with no FK —
+            # edges referencing the deleted chunk UUIDs would dangle forever
+            # (rebuilt chunks get new ids), feeding ghost nodes to spreading
+            # activation and density. Delete them in the same transaction.
+            await s.execute(sa_text(
+                "DELETE FROM brain.graph_edges ge "
+                "WHERE (ge.source_type = 'chunk' AND ge.source_id IN ("
+                "        SELECT id FROM heart.episode_chunks "
+                "        WHERE agent_id = :agent_id AND episode_id = :ep "
+                "          AND source_kind = 'dialogue')) "
+                "   OR (ge.target_type = 'chunk' AND ge.target_id IN ("
+                "        SELECT id FROM heart.episode_chunks "
+                "        WHERE agent_id = :agent_id AND episode_id = :ep "
+                "          AND source_kind = 'dialogue'))"
+            ), {"agent_id": agent_id, "ep": episode_id})
             await s.execute(sa_text(
                 "DELETE FROM heart.episode_chunks "
                 "WHERE agent_id = :agent_id AND episode_id = :ep "
