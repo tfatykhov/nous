@@ -160,6 +160,7 @@ class _PipelineAccumulator:
     # Flags
     searched_decisions: bool = False
     searched_heart: bool = False
+    coherent_ranking_applied: bool = False  # F080: filter actually ran this call
     spreading_activation_used: bool = False
     graph_expansion_used: bool = False
     contradiction_checks_ran: bool = False
@@ -309,7 +310,7 @@ async def run_recall_pipeline(
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
-        coherent_ranking_applied=getattr(settings, "coherent_ranking_enabled", False),  # F080
+        coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
     )
     return results, stats
 
@@ -361,6 +362,7 @@ async def _run_stages(
         # search_*, not heart.recall.
         if search_all and getattr(settings, "coherent_ranking_enabled", False):
             heart_types = [t for t in heart_types if t not in ("censor", "procedure")]
+            acc.coherent_ranking_applied = True
 
         if heart_types:
             acc.searched_heart = True

@@ -293,12 +293,14 @@ class TestCoherentRanking:
         )
         settings = _make_settings(coherent_ranking_enabled=True)
 
-        await run_recall_pipeline(
+        _r, stats = await run_recall_pipeline(
             query="anything", heart=heart, brain=brain, settings=settings,
             limit=10, memory_types=["procedure"],
         )
 
         assert heart.recall.await_args.kwargs["types"] == ["procedure"]
+        # telemetry reflects that the filter did NOT run (explicit, not search_all)
+        assert stats.coherent_ranking_applied is False
 
 
 class TestRunRecallPipeline:
