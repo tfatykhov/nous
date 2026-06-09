@@ -268,6 +268,12 @@ class ResidualActivator:
                 session_id=session_id,
                 items=entries,
                 max_residual_items=top_k,
+                # codex P2: rank carried entries by their CURRENT decayed
+                # activation so stale high-activation entries can't starve
+                # fresh surfaces out of the cap. The activator owns the
+                # decay model; the manager just applies it.
+                current_turn=current_turn,
+                decay_fn=self._decay_factor,
             )
         except Exception:
             logger.warning(

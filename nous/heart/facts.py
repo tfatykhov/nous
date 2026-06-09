@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.admission import AdmissionController, AdmissionResult
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
-from nous.heart.search import hybrid_search, hybrid_search_multi
+from nous.heart.search import hybrid_search, hybrid_search_multi, set_local_ef_search
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, GraphEdge
 
@@ -1051,6 +1051,14 @@ class FactManager:
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
 
+        # codex P2 (2026-06-09): pgvector applies the agent_id/active
+        # filters AFTER the approximate candidate walk, so on a large
+        # multi-tenant table other agents' nearby vectors could exhaust the
+        # horizon. ef_search=100 (5x the LIMIT) gives ample margin for the
+        # single-agent prod shape; a true multi-tenant deployment should
+        # move to hnsw.iterative_scan (pgvector >= 0.8) or per-agent
+        # partial indexes.
+        await set_local_ef_search(session, 100)
         sql = text(f"""
             SELECT id, event_date,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
@@ -1415,6 +1423,9 @@ class FactManager:
             return []
 
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        # Same ANN-horizon margin as _find_duplicate (codex P2) — filters
+        # are post-applied to the approximate walk.
+        await set_local_ef_search(session, 100)
         sql = text("""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.facts

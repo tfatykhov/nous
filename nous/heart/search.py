@@ -32,6 +32,20 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+async def set_local_ef_search(session: AsyncSession, value: int) -> None:
+    """``SET LOCAL hnsw.ef_search`` — Postgres only, no-op elsewhere.
+
+    Widens the HNSW candidate horizon for filtered ANN queries (pgvector
+    post-applies WHERE filters to the approximate walk, so a tight horizon
+    can return fewer rows than the LIMIT). Transaction-scoped. Guarded by
+    dialect so SQLite test harnesses don't choke on the statement.
+    """
+    bind = getattr(session, "bind", None)
+    if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
+        return
+    await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(value)}"))
+
+
 @lru_cache(maxsize=8)
 def _cached_settings(_env_fingerprint: tuple) -> "object":
     """Construct Settings at most once per env-fingerprint (audit P3).

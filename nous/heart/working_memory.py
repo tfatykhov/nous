@@ -433,6 +433,8 @@ class WorkingMemoryManager:
         session_id: str,
         items: list[dict],
         max_residual_items: int | None = None,
+        current_turn: int | None = None,
+        decay_fn=None,
     ) -> None:
         """F055: merge residual-activation entries into WorkingMemory.items.
 
@@ -446,8 +448,13 @@ class WorkingMemoryManager:
           refreshed by the new entry; carried entries not in this recall's
           surfaced set are KEPT, because decay is applied read-side by
           load_activations (turn-distance decay + floor governs lifetime);
-        - residual entries are activation-descending and capped at
-          ``max_residual_items`` when provided.
+        - residual entries are ranked by turn-DECAYED activation (codex P2:
+          ranking by stored activation let stale turn-1 entries at 1.0
+          permanently starve fresh surfaces out of the cap) and capped at
+          ``max_residual_items`` when provided. The decay model is the
+          caller's (``decay_fn(turns_elapsed) -> float`` — the activator
+          owns it; duplicating it here would drift). Without
+          ``current_turn``/``decay_fn`` the stored activation ranks as-is.
 
         Uses an isolated DB session so it can be safely fired as
         ``asyncio.create_task`` from recall_deep. Creates the WorkingMemory
@@ -475,9 +482,16 @@ class WorkingMemoryManager:
                 # One corrupt JSONB value must not kill residual persistence
                 # for the whole session (review P3) — coerce defensively.
                 try:
-                    return float(d.get("activation", 0.0) or 0.0)
+                    act = float(d.get("activation", 0.0) or 0.0)
                 except (TypeError, ValueError):
                     return 0.0
+                if current_turn is not None and decay_fn is not None:
+                    try:
+                        age = max(0, int(current_turn) - int(d.get("last_surfaced_turn", current_turn)))
+                        act *= float(decay_fn(age))
+                    except (TypeError, ValueError):
+                        pass  # rank undecayed rather than drop the write
+                return act
 
             residual = sorted(merged.values(), key=_activation, reverse=True)
             if max_residual_items is not None and max_residual_items >= 0:

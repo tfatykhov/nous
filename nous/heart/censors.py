@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.embeddings import EmbeddingProvider
 from nous.heart.schemas import CensorDetail, CensorInput, CensorMatch
+from nous.heart.search import set_local_ef_search
 from nous.storage.database import Database
 from nous.storage.models import Censor, Event
 
@@ -268,17 +269,14 @@ class CensorManager:
             domain_clause = "AND (domain = :domain OR domain IS NULL)"
             params["domain"] = domain
 
-        # Audit D9 (2026-06-09): pgvector's HNSW index only serves a plain
-        # `ORDER BY embedding <=> :q LIMIT n` — the previous
-        # `ORDER BY similarity DESC` (an alias) with no LIMIT forced a full
-        # scan computing 1536-dim distance per row on every censor check.
-        # Distance-ASC == similarity-DESC, so result ordering is unchanged;
-        # LIMIT 50 is far above any realistic simultaneous-match count.
-        # HNSW is APPROXIMATE and this is a guardrail-enforcement path —
-        # raise ef_search above the LIMIT so agent_id/active post-filters
-        # can't evict true matches from the candidate horizon (default 40
-        # < LIMIT 50; review P2). SET LOCAL is transaction-scoped.
-        await session.execute(text("SET LOCAL hnsw.ef_search = 120"))
+        # DELIBERATELY EXACT (codex P1, 2026-06-09): this is the censor
+        # ENFORCEMENT path — completeness is the point. A filtered HNSW scan
+        # is approximate (pgvector applies agent_id/active/threshold AFTER
+        # the candidate walk), so a true match can be silently missing and
+        # an unenforced steer/refuse/abort has no recovery. The censor table
+        # is tiny (~50 rows/agent), so the exact scan the audit's D9 flagged
+        # as a perf concern costs microseconds here; the read-only
+        # _semantic_search below keeps the index-served form instead.
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.censors
@@ -287,8 +285,7 @@ class CensorManager:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> CAST(:embedding AS vector)) > :threshold
               {domain_clause}
-            ORDER BY embedding <=> CAST(:embedding AS vector)
-            LIMIT 50
+            ORDER BY similarity DESC
         """)
 
         result = await session.execute(sql, params)
@@ -404,10 +401,12 @@ class CensorManager:
             params["domain"] = domain
 
         # Audit D9: distance-ordered so the HNSW index serves the query
-        # (ordering identical — distance ASC == similarity DESC).
+        # (ordering identical — distance ASC == similarity DESC). This is
+        # the read-only SEARCH surface — approximate top-k is acceptable
+        # here, unlike the enforcement path above which stays exact.
         # ef_search raised above any plausible :limit so post-filters can't
         # evict true matches from the approximate candidate set (review P2).
-        await session.execute(text("SET LOCAL hnsw.ef_search = 120"))
+        await set_local_ef_search(session, 120)
         sql = text(f"""
             SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS similarity
             FROM heart.censors

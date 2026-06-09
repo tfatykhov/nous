@@ -304,6 +304,36 @@ class TestUpsertResidualItemsMerge:
         assert len(session.added) == 1
         assert len(session.added[0].items) == 1
 
+    @pytest.mark.asyncio
+    async def test_cap_ranks_by_decayed_activation(self):
+        """codex P2: a stale turn-1 entry stored at 1.0 must lose the cap
+        slot to a fresh surface at 0.9 once decay is applied — otherwise
+        new recall results stop entering working memory entirely."""
+        stale = _residual(uuid4(), 1.0)
+        stale["last_surfaced_turn"] = 1
+        existing = SimpleNamespace(items=[stale])
+        mgr, _ = _wm_manager(existing)
+
+        fresh = _residual(uuid4(), 0.9)
+        fresh["last_surfaced_turn"] = 8
+        await mgr.upsert_residual_items(
+            "test", "s1", [fresh], max_residual_items=1,
+            current_turn=8, decay_fn=lambda age: 0.5 ** age,
+        )
+        assert existing.items == [fresh]
+
+    @pytest.mark.asyncio
+    async def test_no_decay_fn_keeps_stored_ranking(self):
+        """Back-compat: without current_turn/decay_fn the stored activation
+        ranks as-is (the pre-fix behavior other callers may rely on)."""
+        stale = _residual(uuid4(), 1.0)
+        existing = SimpleNamespace(items=[stale])
+        mgr, _ = _wm_manager(existing)
+
+        fresh = _residual(uuid4(), 0.9)
+        await mgr.upsert_residual_items("test", "s1", [fresh], max_residual_items=1)
+        assert existing.items == [stale]
+
 
 class TestRecordSurfacedSnippets:
     def _activator(self):
@@ -529,13 +559,18 @@ class TestEmbeddingCache:
 
 
 class _ScriptedSession:
-    """Fake session returning queued results for successive execute calls."""
+    """Fake session returning queued results for successive execute calls.
+
+    SET LOCAL statements (ef_search tuning) don't consume the queue — they
+    return an empty result like a real session would."""
 
     def __init__(self, results):
         self._results = list(results)
         self.committed = False
 
-    async def execute(self, *_a, **_k):
+    async def execute(self, statement=None, *_a, **_k):
+        if statement is not None and "SET LOCAL" in str(statement):
+            return _RowsResult([])
         return self._results.pop(0)
 
     async def flush(self):
@@ -710,10 +745,12 @@ class TestFindSimilarFactsWiring:
         assert hits, "identical text must be found"
         top = hits[0]
         assert top.id == stored.id
-        assert top.score is not None and 0.99 <= top.score <= 1.0  # raw cosine
+        assert top.score is not None and 0.99 <= top.score <= 1.0001  # raw cosine
         scores = [h.score for h in hits if h.score is not None]
         assert scores == sorted(scores, reverse=True)
-        assert all(0.0 <= s <= 1.0001 for s in scores)
+        # raw cosine lives in [-1, 1] (mock embeddings DO produce negative
+        # cosines for unrelated text — real OpenAI vectors rarely do)
+        assert all(-1.0001 <= s <= 1.0001 for s in scores)
 
     @pytest.mark.asyncio
     async def test_inactive_facts_never_returned(self, heart, session):
