@@ -471,12 +471,30 @@ class WorkingMemoryManager:
             existing_items = list(existing.items or []) if existing is not None else []
 
             non_residual = [d for d in existing_items if not self._is_residual_item(d)]
+            # codex P2 (round 4): an item already present as a CURATED entry
+            # must not gain a residual twin — both copies rendered into the
+            # prompt. Curated wins (it carries the real load_item summary);
+            # the residual activation signal is redundant for an item that
+            # is already deliberately loaded.
+            curated_refs = {
+                str(d.get("ref_id"))
+                for d in non_residual
+                if isinstance(d, dict) and d.get("ref_id") is not None
+            }
             merged: dict[str, dict] = {}
             for d in existing_items:
-                if self._is_residual_item(d) and d.get("ref_id") is not None:
+                if (
+                    self._is_residual_item(d)
+                    and d.get("ref_id") is not None
+                    and str(d["ref_id"]) not in curated_refs
+                ):
                     merged[str(d["ref_id"])] = d
             for d in items:
-                if isinstance(d, dict) and d.get("ref_id") is not None:
+                if (
+                    isinstance(d, dict)
+                    and d.get("ref_id") is not None
+                    and str(d["ref_id"]) not in curated_refs
+                ):
                     merged[str(d["ref_id"])] = d
             def _activation(d: dict) -> float:
                 # One corrupt JSONB value must not kill residual persistence

@@ -502,6 +502,16 @@ class Heart:
         """Hybrid search over procedures."""
         return await self.procedures.search(query, limit, domain, frame_type, session)
 
+    async def find_similar_procedures(
+        self,
+        query: str,
+        limit: int = 10,
+        session: AsyncSession | None = None,
+    ) -> list[ProcedureSummary]:
+        """Raw-cosine probe for §14 selection — scores are cosine, not RRF
+        rank, so a relevance floor can be meaningfully applied (codex P2)."""
+        return await self.procedures.find_similar_for_selection(query, limit, session)
+
     async def list_procedures(
         self,
         limit: int = 50,

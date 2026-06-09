@@ -360,6 +360,19 @@ class TestUpsertResidualItemsMerge:
         assert {d["ref_id"] for d in kept} == {residuals[-1]["ref_id"], residuals[-2]["ref_id"]}
 
     @pytest.mark.asyncio
+    async def test_residual_twin_of_curated_item_dropped(self):
+        """codex P2 (round 4): an item already curated in WM must not gain
+        a residual twin — both copies rendered into the prompt."""
+        rid = uuid4()
+        curated = _curated(rid)
+        stale_twin = _residual(rid, 0.7)  # pre-fix data: twin already stored
+        existing = SimpleNamespace(items=[curated, stale_twin], max_items=20)
+        mgr, _ = _wm_manager(existing)
+
+        await mgr.upsert_residual_items("test", "s1", [_residual(rid, 0.9)])
+        assert existing.items == [curated]  # twin gone, no new duplicate
+
+    @pytest.mark.asyncio
     async def test_no_decay_fn_keeps_stored_ranking(self):
         """Back-compat: without current_turn/decay_fn the stored activation
         ranks as-is (the pre-fix behavior other callers may rely on)."""
@@ -900,7 +913,7 @@ class TestCosineLegScoreFloor:
         brain = MagicMock()
         brain.neighbors = AsyncMock(return_value=[])
         heart = MagicMock()
-        heart.search_procedures = AsyncMock(return_value=summaries)
+        heart.find_similar_procedures = AsyncMock(return_value=summaries)
         heart.get_procedure_by_name = AsyncMock()
         return ContextEngine(brain, heart, settings, identity_prompt="Test"), heart
 

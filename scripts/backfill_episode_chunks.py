@@ -56,6 +56,7 @@ class Stats:
 async def _next_batch(
     db, agent_id: str | None, limit: int,
     exclude_ids: set[str] | None = None,
+    repair: bool = False,
 ) -> list[tuple[str, str, str]]:
     """Return up to ``limit`` (episode_id, agent_id, transcript) tuples
     for episodes that have a non-null transcript and no dialogue chunks.
@@ -77,11 +78,14 @@ async def _next_batch(
     if exclude_ids:
         exclude_clause = "AND e.id::text NOT IN :excl "
         params["excl"] = list(exclude_ids)
+    # repair mode inverts the predicate: target episodes WITH dialogue
+    # chunks (possibly partial — see --repair-dialogue help).
+    exists_op = "EXISTS" if repair else "NOT EXISTS"
     stmt = sa_text(
         f"SELECT e.id::text, e.agent_id, e.transcript "
         f"FROM heart.episodes e "
         f"WHERE {where} "
-        f"  AND NOT EXISTS ("
+        f"  AND {exists_op} ("
         f"    SELECT 1 FROM heart.episode_chunks ec WHERE ec.episode_id = e.id"
         f"      AND ec.source_kind = 'dialogue'"
         f"  ) "
@@ -100,10 +104,18 @@ async def _process_episode(
     db, embedder, settings,
     episode_id: str, agent_id: str, transcript: str,
     stats: Stats,
+    repair: bool = False,
 ) -> None:
     """Chunk + embed + insert for one episode. Mirrors the failure
     semantics of ``_chunk_and_store_transcript`` — abort on embed
-    failure rather than persist NULL-embedding rows."""
+    failure rather than persist NULL-embedding rows.
+
+    ``repair=True`` (codex P1, round 4): the episode HAS dialogue chunks
+    but they may be incomplete — the pre-fix F069/F067 index collision
+    destroyed transcript chunks whose indexes overlapped a document range,
+    leaving only the suffix. The transcript is the source of truth, so
+    repair deletes the existing dialogue chunks under the advisory lock
+    and rebuilds the full set."""
     from sqlalchemy import text as sa_text
     from nous.heart.chunking import chunk_text
 
@@ -147,15 +159,24 @@ async def _process_episode(
             sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
             {"k": f"ingest_document:{episode_id}"},
         )
-        already = await s.execute(sa_text(
-            "SELECT 1 FROM heart.episode_chunks "
-            "WHERE agent_id = :agent_id AND episode_id = :ep "
-            "  AND source_kind = 'dialogue' LIMIT 1"
-        ), {"agent_id": agent_id, "ep": episode_id})
-        if already.first() is not None:
-            await s.commit()  # release the advisory lock
-            stats.episodes_processed += 1
-            return
+        if repair:
+            # Rebuild from the transcript: drop the (possibly partial)
+            # dialogue set; document/code chunks are untouched.
+            await s.execute(sa_text(
+                "DELETE FROM heart.episode_chunks "
+                "WHERE agent_id = :agent_id AND episode_id = :ep "
+                "  AND source_kind = 'dialogue'"
+            ), {"agent_id": agent_id, "ep": episode_id})
+        else:
+            already = await s.execute(sa_text(
+                "SELECT 1 FROM heart.episode_chunks "
+                "WHERE agent_id = :agent_id AND episode_id = :ep "
+                "  AND source_kind = 'dialogue' LIMIT 1"
+            ), {"agent_id": agent_id, "ep": episode_id})
+            if already.first() is not None:
+                await s.commit()  # release the advisory lock
+                stats.episodes_processed += 1
+                return
         next_idx = int((await s.execute(sa_text(
             "SELECT COALESCE(MAX(chunk_index), -1) + 1 "
             "FROM heart.episode_chunks "
@@ -194,6 +215,17 @@ async def main() -> int:
         "--limit", type=int, default=0,
         help="Cap total episodes processed (0 = all). Useful for cost-bounded smoke runs.",
     )
+    parser.add_argument(
+        "--repair-dialogue", action="store_true",
+        help=(
+            "Target episodes that HAVE dialogue chunks and rebuild them from "
+            "the transcript (delete + re-chunk under the episode advisory "
+            "lock). Use to repair episodes whose dialogue set is incomplete — "
+            "e.g. damaged by the pre-fix F069/F067 chunk-index collision, "
+            "which destroyed every transcript chunk overlapping a document "
+            "index range while leaving the suffix (codex P1, PR #495)."
+        ),
+    )
     args = parser.parse_args()
 
     from nous.brain.embeddings import EmbeddingProvider
@@ -215,9 +247,11 @@ async def main() -> int:
         # codex P1 (round 3): same source-kind predicate as _next_batch —
         # an unqualified NOT EXISTS counted doc/code-chunk-only episodes as
         # ineligible and exited before _next_batch could backfill them.
+        # Repair mode inverts the predicate to match its batch query.
+        pre_exists = "EXISTS" if args.repair_dialogue else "NOT EXISTS"
         eligible = (await s.execute(sa_text(
             f"SELECT COUNT(*) FROM heart.episodes e "
-            f"WHERE {where} AND NOT EXISTS ("
+            f"WHERE {where} AND {pre_exists} ("
             f"  SELECT 1 FROM heart.episode_chunks ec WHERE ec.episode_id = e.id"
             f"    AND ec.source_kind = 'dialogue'"
             f")"
@@ -268,7 +302,8 @@ async def main() -> int:
             )
             batch_size = min(EPISODE_BATCH, remaining_budget)
             batch = await _next_batch(
-                db, args.agent_id, batch_size, exclude_ids=attempted
+                db, args.agent_id, batch_size, exclude_ids=attempted,
+                repair=args.repair_dialogue,
             )
             if not batch:
                 if attempted:
@@ -286,6 +321,7 @@ async def main() -> int:
                     db, embedder, settings,
                     episode_id, agent_id, transcript,
                     stats,
+                    repair=args.repair_dialogue,
                 )
             logger.info(
                 "Progress: seen=%d processed=%d short=%d failures=%d chunks=%d",

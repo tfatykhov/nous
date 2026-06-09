@@ -234,7 +234,9 @@ class TestGraphPrimarySelection:
         heart = MagicMock()
         heart.get_procedure = AsyncMock(return_value=proc)
         heart.get_procedure_by_name = AsyncMock()
-        heart.search_procedures = AsyncMock(return_value=[
+        # codex P2 (round 4): the §14 cosine leg now probes raw cosine via
+        # find_similar_procedures, not RRF-scored search_procedures.
+        heart.find_similar_procedures = AsyncMock(return_value=[
             _make_procedure_summary("cosine-skill").model_copy(update={"id": proc.id})
         ])
         engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
@@ -244,7 +246,7 @@ class TestGraphPrimarySelection:
             recalled_score_map={}, session=None, query="how do I do the thing",
         )
         assert [p.id for p in selected] == [proc.id]
-        heart.search_procedures.assert_awaited()
+        heart.find_similar_procedures.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_cosine_fallback_skipped_without_query(self):
@@ -255,7 +257,7 @@ class TestGraphPrimarySelection:
         heart = MagicMock()
         heart.get_procedure = AsyncMock()
         heart.get_procedure_by_name = AsyncMock()
-        heart.search_procedures = AsyncMock(return_value=[])
+        heart.find_similar_procedures = AsyncMock(return_value=[])
         engine = ContextEngine(brain, heart, settings, identity_prompt="Test")
 
         selected = await engine._select_procedures(
@@ -263,7 +265,7 @@ class TestGraphPrimarySelection:
             recalled_score_map={}, session=None,  # query="" default
         )
         assert selected == []
-        heart.search_procedures.assert_not_called()
+        heart.find_similar_procedures.assert_not_called()
 
 
 class TestDualTrackDisabled:
