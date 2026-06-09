@@ -120,11 +120,17 @@ async def main() -> None:
                     url_fail.append((r, cur, str(e)[:40]))
                     print(f"{r['name'][:34]:34s} {'url-ERR':12s} {cur:5d} {'?':>6s}  KEEP (parse err: {str(e)[:24]})")
             else:
-                # Try the FILESYSTEM before declaring a non-HTTP source gone — a
-                # present local SKILL.md is re-importable (bootstrap records the
-                # path), and archiving it would lose its learned stats on the next
+                # Resolve relative non-HTTP sources against the configured workspace
+                # (matching learn_skill's settings.workspace_dir), then try the
+                # filesystem before declaring gone — a present local SKILL.md is
+                # re-importable; archiving it would lose learned stats on the next
                 # bootstrap re-create (codex P1).
-                fpath = Path(src) if src and src not in ("inline", "local", "") else None
+                fpath = None
+                if src and src not in ("inline", "local", ""):
+                    p = Path(src)
+                    if not p.is_absolute():
+                        p = Path(getattr(s, "workspace_dir", ".") or ".") / src
+                    fpath = p
                 if fpath is not None and fpath.is_file():
                     try:
                         manifest = parser.parse(fpath.read_text(encoding="utf-8"), source_hint=src)
@@ -135,9 +141,13 @@ async def main() -> None:
                             print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {full:6d}  RE-IMPORT (+{full-cur})")
                         else:
                             print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {full:6d}  skip (no gain)")
-                        continue
                     except Exception as e:
-                        print(f"{r['name'][:34]:34s} {'local-ERR':12s} {cur:5d} {'?':>6s}  treat as gone ({str(e)[:20]})")
+                        # Readable source but read/parse failed (transient/encoding/
+                        # mid-edit) — KEEP, don't archive a recoverable skill (codex P2).
+                        url_fail.append((r, cur, str(e)[:40]))
+                        print(f"{r['name'][:34]:34s} {'local-FAIL':12s} {cur:5d} {'?':>6s}  KEEP (read/parse err)")
+                    continue
+                # inline, or a path that resolves to a missing file -> source gone
                 kind = "inline" if src == "inline" else "path-gone"
                 if cur < args.stub_threshold:
                     gone_stub.append((r, cur, kind))
