@@ -44,9 +44,14 @@ async def set_local_ef_search(session: AsyncSession, value: int) -> None:
       AFTER filtering — this removes the missed-match failure mode on
       multi-tenant tables where other agents' nearby vectors could exhaust
       a fixed horizon. Integrity-sensitive callers (fact dedup) rely on
-      this where available. The availability probe uses
-      ``current_setting(..., true)`` (missing_ok) so older pgvector
-      versions degrade to the ef_search margin without erroring.
+      this where available. Set DIRECTLY under a savepoint (codex round
+      7): probing ``current_setting(..., true)`` returns NULL on a fresh
+      backend before pgvector's library registers its GUCs, falsely
+      reporting "unavailable" right before the first vector query. The
+      SET itself either succeeds (registered GUC or accepted placeholder)
+      or errors on pgvector < 0.8 (reserved ``hnsw.`` prefix, unknown
+      parameter) — the savepoint absorbs that error so the surrounding
+      transaction degrades cleanly to the ef_search margin.
 
     Guarded by dialect so SQLite test harnesses don't choke.
     """
@@ -54,11 +59,13 @@ async def set_local_ef_search(session: AsyncSession, value: int) -> None:
     if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
         return
     await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(value)}"))
-    has_iterative = (await session.execute(
-        text("SELECT current_setting('hnsw.iterative_scan', true)")
-    )).scalar()
-    if has_iterative is not None:
-        await session.execute(text("SET LOCAL hnsw.iterative_scan = strict_order"))
+    try:
+        async with session.begin_nested():
+            await session.execute(
+                text("SET LOCAL hnsw.iterative_scan = strict_order")
+            )
+    except Exception:
+        pass  # pgvector < 0.8 — GUC absent; ef_search margin still applies
 
 
 @lru_cache(maxsize=8)
