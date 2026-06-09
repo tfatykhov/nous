@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Audit D2/S7 (2026-06-09): bounded in-process LRU on EmbeddingProvider
     # (entries; 0 disables). Eliminates the 4-7x repeat query embeds per
     # recall and repeat content/template embeds per learn + sleep cycle.
+    # Vectors stored packed float32 (~4 B/dim): 1024 x 1536 ~ 6 MB.
     embedding_cache_size: int = Field(default=1024, ge=0)
     log_level: str = "info"
 

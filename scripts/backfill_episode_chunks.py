@@ -105,7 +105,7 @@ async def _process_episode(
     episode_id: str, agent_id: str, transcript: str,
     stats: Stats,
     repair: bool = False,
-) -> None:
+) -> bool:
     """Chunk + embed + insert for one episode. Mirrors the failure
     semantics of ``_chunk_and_store_transcript`` — abort on embed
     failure rather than persist NULL-embedding rows.
@@ -127,7 +127,7 @@ async def _process_episode(
     )
     if not chunks:
         stats.episodes_skipped_short += 1
-        return
+        return False
 
     try:
         vectors = await embedder.embed_batch(chunks)
@@ -138,14 +138,14 @@ async def _process_episode(
             episode_id, agent_id, len(chunks), exc_info=True,
         )
         stats.embed_failures += 1
-        return
+        return False
     if len(vectors) != len(chunks):
         logger.warning(
             "embedder returned %d vectors for %d chunks (episode %s); skipping",
             len(vectors), len(chunks), episode_id,
         )
         stats.embed_failures += 1
-        return
+        return False
 
     written = 0
     async with db.session() as s:
@@ -191,7 +191,7 @@ async def _process_episode(
             if already.first() is not None:
                 await s.commit()  # release the advisory lock
                 stats.episodes_processed += 1
-                return
+                return True
         next_idx = int((await s.execute(sa_text(
             "SELECT COALESCE(MAX(chunk_index), -1) + 1 "
             "FROM heart.episode_chunks "
@@ -214,6 +214,7 @@ async def _process_episode(
         await s.commit()
     stats.episodes_processed += 1
     stats.chunks_written += written
+    return True
 
 
 async def main() -> int:
@@ -330,14 +331,21 @@ async def main() -> int:
                     )
                 break
             for episode_id, agent_id, transcript in batch:
-                attempted.add(episode_id)
                 stats.episodes_seen += 1
-                await _process_episode(
+                handled = await _process_episode(
                     db, embedder, settings,
                     episode_id, agent_id, transcript,
                     stats,
                     repair=args.repair_dialogue,
                 )
+                # codex P2 (round 5): only FAILED episodes need exclusion —
+                # successes self-exclude via the NOT EXISTS predicate, so
+                # accumulating them made the expanding bind grow by 50 ids
+                # per batch (quadratic, and eventually over the driver's
+                # parameter limit). Repair mode keeps every processed id:
+                # a repaired episode still matches its EXISTS predicate.
+                if args.repair_dialogue or not handled:
+                    attempted.add(episode_id)
             logger.info(
                 "Progress: seen=%d processed=%d short=%d failures=%d chunks=%d",
                 stats.episodes_seen, stats.episodes_processed,

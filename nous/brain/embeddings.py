@@ -10,7 +10,10 @@ graph-linker templates); the densifier re-embeds the same orphan/candidate
 templates every sleep cycle. All of those are exact-text repeats, so a
 content-keyed LRU eliminates them without threading vectors through every
 call signature. Cache size via NOUS_EMBEDDING_CACHE_SIZE (entries; 0
-disables). 1024 entries x 1536 floats ~ 13 MB ceiling.
+disables). Vectors are stored PACKED (array('f'), 4 bytes/dim — codex P2:
+a list of boxed Python floats is ~50 MB at 1024x1536, not the naive 13);
+packed float32 matches pgvector's float4 storage, so no downstream
+precision is lost. 1024 entries x 1536 dims ~ 6 MB packed.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import asyncio
 import hashlib
 import logging
 import os
+from array import array
 from collections import OrderedDict
 
 import httpx
@@ -50,7 +54,7 @@ class EmbeddingProvider:
             except ValueError:
                 cache_size = _DEFAULT_CACHE_SIZE
         self._cache_size = max(0, cache_size)
-        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache: OrderedDict[str, array] = OrderedDict()
         self.cache_hits = 0
         self.cache_misses = 0
         self._client = httpx.AsyncClient(
@@ -79,14 +83,18 @@ class EmbeddingProvider:
             return None
         self._cache.move_to_end(key)
         self.cache_hits += 1
-        # Defensive copy — vectors are list-mutated nowhere today, but a
-        # poisoned cache entry would silently corrupt every later consumer.
-        return list(vec)
+        # Materializing a fresh list from the packed array is also the
+        # defensive copy — a caller mutating the result can't poison the
+        # cached entry.
+        return vec.tolist()
 
     def _cache_put(self, key: str, vec: list[float]) -> None:
         if self._cache_size == 0 or not vec:
             return
-        self._cache[key] = list(vec)
+        # Packed float32 (codex P2): ~4 bytes/dim instead of ~48 for boxed
+        # Python floats. pgvector stores float4, so f32 loses nothing the
+        # database would have kept anyway.
+        self._cache[key] = array("f", vec)
         self._cache.move_to_end(key)
         while len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
