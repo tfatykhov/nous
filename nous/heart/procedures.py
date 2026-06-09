@@ -802,6 +802,11 @@ class ProcedureManager:
             # A superseded row was archived because its capability now lives in the
             # canonical procedure; reactivate_skills must not un-archive it.
             .where(Procedure.superseded_by.is_(None))
+            # F081: never resurrect a deliberately ARCHIVED skill either (e.g. a
+            # source-gone stub archived by the re-import). archived_at is set on
+            # any intentional archival; only env-inactive skills (archived_at NULL)
+            # are eligible for requirements-based reactivation.
+            .where(Procedure.archived_at.is_(None))
         )
         return [self._to_detail(p) for p in result.scalars().all()]
 

@@ -65,6 +65,26 @@ def _content_len(description: str | None, notes: list[str] | None) -> int:
     return len(description or "") + body
 
 
+def _prepare(parser, manifest, stored_name: str, cur: int):
+    """Build a ProcedureInput from a re-fetched manifest, guarding:
+    - NAME match (a moved/reused source serving a different skill must NOT
+      overwrite this row — update_procedure_body keeps the original stats, codex P1),
+    - requirements-active (mirror learn_skill: inactive if a required env var is
+      missing, so a refreshed manifest adding an unmet requirement deactivates, P2),
+    - longer body (never overwrite a good body with a shorter/stale fetch).
+    Returns ((pi, full), None) to re-import, or (None, reason) to skip.
+    """
+    if manifest.name != stored_name:
+        return None, f"name mismatch (got {manifest.name!r})"
+    pi = parser.to_procedure_input(manifest)
+    missing = [v for v in manifest.requires if not os.environ.get(v)]
+    pi.active = len(missing) == 0
+    full = _content_len(manifest.description, pi.implementation_notes)
+    if full <= cur:
+        return None, "no gain"
+    return (pi, full), None
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true")
@@ -106,13 +126,13 @@ async def main() -> None:
                         continue
                     resp.raise_for_status()
                     manifest = parser.parse(resp.text, source_hint=src)
-                    pi = parser.to_procedure_input(manifest)
-                    full = _content_len(manifest.description, pi.implementation_notes)
-                    if full > cur:
+                    prep, why = _prepare(parser, manifest, r["name"], cur)
+                    if prep is None:
+                        print(f"{r['name'][:34]:34s} {'url':12s} {cur:5d} {'—':>6s}  skip ({why})")
+                    else:
+                        pi, full = prep
                         recover.append((r, pi, cur, full))
                         print(f"{r['name'][:34]:34s} {'url':12s} {cur:5d} {full:6d}  RE-IMPORT (+{full-cur})")
-                    else:
-                        print(f"{r['name'][:34]:34s} {'url':12s} {cur:5d} {full:6d}  skip (no gain)")
                 except (httpx.TransportError, httpx.HTTPStatusError) as e:
                     url_fail.append((r, cur, str(e)[:40]))
                     print(f"{r['name'][:34]:34s} {'url-FAIL':12s} {cur:5d} {'?':>6s}  KEEP (transient: {str(e)[:24]})")
@@ -134,13 +154,13 @@ async def main() -> None:
                 if fpath is not None and fpath.is_file():
                     try:
                         manifest = parser.parse(fpath.read_text(encoding="utf-8"), source_hint=src)
-                        pi = parser.to_procedure_input(manifest)
-                        full = _content_len(manifest.description, pi.implementation_notes)
-                        if full > cur:
+                        prep, why = _prepare(parser, manifest, r["name"], cur)
+                        if prep is None:
+                            print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {'—':>6s}  skip ({why})")
+                        else:
+                            pi, full = prep
                             recover.append((r, pi, cur, full))
                             print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {full:6d}  RE-IMPORT (+{full-cur})")
-                        else:
-                            print(f"{r['name'][:34]:34s} {'local-file':12s} {cur:5d} {full:6d}  skip (no gain)")
                     except Exception as e:
                         # Readable source but read/parse failed (transient/encoding/
                         # mid-edit) — KEEP, don't archive a recoverable skill (codex P2).
