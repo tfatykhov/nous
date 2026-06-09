@@ -30,3 +30,40 @@ class TestDAGTimeoutValidation:
         s = Settings(_env_file=None)
         assert s.dag_node_default_timeout == 600
         assert s.dag_node_max_timeout == 7200
+
+
+class TestContextBudgetOverridesParsing:
+    """Audit ST-1: empty/blank NOUS_CONTEXT_BUDGET_OVERRIDES must not crash boot.
+
+    docker-compose passes `NOUS_CONTEXT_BUDGET_OVERRIDES=${...:-}` (empty string)
+    on a fresh install with no host .env. Without NoDecode + the before-validator,
+    pydantic-settings' default complex-field decoder calls json.loads("") and
+    raises SettingsError, crash-looping the container.
+    """
+
+    def test_empty_string_yields_empty_dict(self, monkeypatch):
+        monkeypatch.setenv("NOUS_CONTEXT_BUDGET_OVERRIDES", "")
+        s = Settings(_env_file=None)
+        assert s.context_budget_overrides == {}
+
+    def test_whitespace_string_yields_empty_dict(self, monkeypatch):
+        monkeypatch.setenv("NOUS_CONTEXT_BUDGET_OVERRIDES", "   ")
+        s = Settings(_env_file=None)
+        assert s.context_budget_overrides == {}
+
+    def test_valid_json_is_parsed(self, monkeypatch):
+        monkeypatch.setenv(
+            "NOUS_CONTEXT_BUDGET_OVERRIDES", '{"total": 13000, "facts": 3000}'
+        )
+        s = Settings(_env_file=None)
+        assert s.context_budget_overrides == {"total": 13000, "facts": 3000}
+
+    def test_unset_uses_default_empty_dict(self, monkeypatch):
+        monkeypatch.delenv("NOUS_CONTEXT_BUDGET_OVERRIDES", raising=False)
+        s = Settings(_env_file=None)
+        assert s.context_budget_overrides == {}
+
+    def test_programmatic_dict_passthrough(self, monkeypatch):
+        monkeypatch.delenv("NOUS_CONTEXT_BUDGET_OVERRIDES", raising=False)
+        s = Settings(_env_file=None, context_budget_overrides={"total": 9000})
+        assert s.context_budget_overrides == {"total": 9000}

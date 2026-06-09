@@ -506,6 +506,14 @@ class EpisodeManager:
             except Exception:
                 logger.warning("Embedding generation failed for episode search")
 
+        # Audit HT-1 (2026-06-09): episode hybrid search was structurally dead.
+        # For episodes `active` is a LIFECYCLE flag — _end() sets active=False
+        # on close — not a soft-delete marker, so the default active_filter=true
+        # excluded every closed episode (the only ones worth recalling). And
+        # `outcome != 'abandoned'` is NULL (→ excluded) for ongoing/recovered
+        # episodes by SQL 3-valued logic. Together they excluded ALL episodes.
+        # Fix: active_filter=False (don't gate on lifecycle), and exclude only
+        # literal 'abandoned' via IS DISTINCT FROM so NULL-outcome rows pass.
         if variant_pairs and len(variant_pairs) > 1:
             results = await hybrid_search_multi(
                 session=session,
@@ -513,7 +521,8 @@ class EpisodeManager:
                 queries=variant_pairs,
                 agent_id=self.agent_id,
                 limit=limit,
-                extra_where="AND t.outcome != 'abandoned'",
+                active_filter=False,
+                extra_where="AND t.outcome IS DISTINCT FROM 'abandoned'",
             )
         else:
             results = await hybrid_search(
@@ -523,7 +532,8 @@ class EpisodeManager:
                 query_text=query,
                 agent_id=self.agent_id,
                 limit=limit,
-                extra_where="AND t.outcome != 'abandoned'",
+                active_filter=False,
+                extra_where="AND t.outcome IS DISTINCT FROM 'abandoned'",
             )
 
         if not results:

@@ -5,12 +5,13 @@ env vars (DB_PASSWORD, DB_PORT, etc.) that docker-compose uses, so a single
 .env file drives both the container and the Python app.
 """
 
+import json
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -192,7 +193,27 @@ class Settings(BaseSettings):
 
     # Context budget overrides — JSON dict applied on top of per-frame defaults
     # e.g. NOUS_CONTEXT_BUDGET_OVERRIDES='{"total": 12000, "decisions": 3000}'
-    context_budget_overrides: dict[str, int] = Field(default_factory=dict)
+    # Audit ST-1 (2026-06-09): NoDecode + the before-validator below tolerate an
+    # empty/whitespace env value. docker-compose passes
+    # `NOUS_CONTEXT_BUDGET_OVERRIDES=${...:-}` (empty string) on a fresh install
+    # with no host .env; pydantic-settings' default complex-field decoder calls
+    # json.loads("") and raises SettingsError, crash-looping the container at
+    # boot. NoDecode hands the raw string to our validator instead so "" -> {}.
+    context_budget_overrides: Annotated[dict[str, int], NoDecode] = Field(
+        default_factory=dict
+    )
+
+    @field_validator("context_budget_overrides", mode="before")
+    @classmethod
+    def _parse_context_budget_overrides(cls, v: object) -> object:
+        """Decode the JSON env string ourselves so an empty value is tolerated."""
+        if v is None:
+            return {}
+        if isinstance(v, str):
+            if not v.strip():
+                return {}
+            return json.loads(v)
+        return v
 
     # F017: Staleness penalty
     staleness_penalty_enabled: bool = True

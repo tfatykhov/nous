@@ -1313,10 +1313,18 @@ class Brain:
                 descriptions[d.id] = (d.description, d.created_at)
 
         # Fact: heart.facts.content
+        # Audit BR-1 (2026-06-09): only ACTIVE facts. For facts, active=false
+        # is a soft-delete / supersession marker (F027), so superseded and
+        # contradiction-resolved facts must never resurface as graph neighbors
+        # via Path A or decision 1-hop expansion — mirrors the F080 procedure
+        # fix below. (Episodes/chunks are intentionally NOT filtered here:
+        # episode active=false is the normal *closed* lifecycle state, and
+        # episode_chunks has no soft-delete column.)
         if ids_by_type.get("fact"):
             f_result = await session.execute(
                 select(Fact.id, Fact.content, Fact.created_at)
                 .where(Fact.id.in_(ids_by_type["fact"]))
+                .where(Fact.active == True)  # noqa: E712
             )
             for f in f_result.all():
                 descriptions[f.id] = (f.content, f.created_at)

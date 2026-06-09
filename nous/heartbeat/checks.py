@@ -954,7 +954,7 @@ class BehaviorDriftCheck(BaseCheck):
             self._last_snapshot = snapshot
         except Exception:
             logger.exception("BehaviorDriftCheck failed")
-        return CheckResult(findings=findings)
+        return CheckResult(has_updates=bool(findings), findings=findings)
 
     async def _capture_snapshot(self):
         from nous.observability.snapshots import BehaviorSnapshot

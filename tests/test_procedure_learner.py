@@ -288,6 +288,10 @@ def _build_learner(settings: Settings | None = None):
     embeddings = AsyncMock()
     # No spec= constraint — LLMClient protocol uses .call() which isn't on httpx.AsyncClient
     llm_client = AsyncMock()
+    # Audit HD-1: _is_duplicate now probes find_similar_procedures (raw cosine),
+    # not search_procedures (RRF rank). Default to "no duplicate found" so the
+    # creation tests aren't blocked by an AsyncMock returning a truthy MagicMock.
+    heart.find_similar_procedures.return_value = []
     s = settings or _make_settings()
     learner = ProcedureLearner(brain, heart, embeddings, s, llm_client)
     return learner, brain, heart, embeddings, llm_client
@@ -501,13 +505,50 @@ async def test_dedup_skips_similar_existing():
 
     llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
 
-    # Existing procedure with high similarity score
-    heart.search_procedures.return_value = [_make_procedure_summary(score=0.90)]
+    # Existing procedure with high raw-cosine similarity (HD-1: dedup now
+    # probes find_similar_procedures, which returns cosine in .score).
+    heart.find_similar_procedures.return_value = [_make_procedure_summary(score=0.90)]
 
     stats = await learner.run_sleep_learning()
 
     assert stats["decisions_learned"] == 0
     heart.store_procedure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dedup_uses_cosine_probe_not_rrf():
+    """Audit HD-1: _is_duplicate must use the raw-cosine probe, not the
+    RRF-ranked search_procedures whose top hit is ~0.95 for any query and so
+    suppressed every auto-procedure creation (prod K-line=0).
+
+    Regression guard: a high RRF rank score on search_procedures must NOT block
+    creation when the cosine probe reports no near-duplicate.
+    """
+    learner, brain, heart, embeddings, llm_client = _build_learner()
+
+    summaries = [_make_decision_summary() for _ in range(3)]
+    brain.list_decisions.side_effect = [(summaries, 3), ([], 0)]
+    details = [_make_decision_detail(s) for s in summaries]
+    brain.get.side_effect = details
+
+    base = _make_embedding(1.0)
+    embeddings.embed_batch.return_value = [
+        base,
+        _similar_embedding(base, 0.005),
+        _similar_embedding(base, 0.01),
+    ]
+    llm_client.call.return_value = _mock_llm_response(_llm_procedure_data())
+
+    # RRF rank score is high (it always is) but cosine probe finds no dup.
+    heart.search_procedures.return_value = [_make_procedure_summary(score=0.97)]
+    heart.find_similar_procedures.return_value = []
+
+    stats = await learner.run_sleep_learning()
+
+    # Creation must proceed; dedup must consult the cosine probe.
+    assert stats["decisions_learned"] == 1
+    heart.find_similar_procedures.assert_awaited()
+    heart.store_procedure.assert_called()
 
 
 @pytest.mark.asyncio
