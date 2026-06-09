@@ -6,9 +6,12 @@ recoverability, re-fetch URL sources, and report the fidelity gain (full body vs
 the currently-stored compressed body) — NO writes.
 
 --commit: update recoverable procedures' bodies via heart.update_procedure_body
-(preserves learned stats + re-embeds), and ARCHIVE (active=false, reversible) the
-non-recoverable STUBS (source gone AND content below --stub-threshold).
+(preserves learned stats + re-embeds) ONLY when the re-fetched body is LONGER
+than the stored one (never overwrite a good body with a shorter/stale fetch), and
+ARCHIVE (active=false, reversible) source-gone STUBS whose total instructional
+content (description + body) is below --stub-threshold.
 
+Each skill is isolated (one failure doesn't abort the run); a summary always prints.
 Targets the DB in env (DB_*); validate on the eval snapshot before prod.
 
 Run: uv run python scripts/diag/reimport_skills.py            # dry-run
@@ -26,7 +29,6 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-# env: prod flags/keys but snapshot DB unless DB_* already set by caller
 SNAP = Path(".env.prod-snapshot")
 if SNAP.exists():
     for raw in SNAP.read_text(encoding="utf-8").splitlines():
@@ -57,15 +59,17 @@ from nous.skills.parser import SkillParser  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 
 
-def _instr_len(notes: list[str]) -> int:
-    return sum(len(n) for n in (notes or []) if not n.startswith(("source:", "version:")))
+def _content_len(description: str | None, notes: list[str] | None) -> int:
+    """Total instructional content = description + body (notes minus metadata)."""
+    body = sum(len(n) for n in (notes or []) if not str(n).startswith(("source:", "version:")))
+    return len(description or "") + body
 
 
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true")
     ap.add_argument("--stub-threshold", type=int, default=300,
-                    help="source-gone procedures with instructional content below this are archived")
+                    help="source-gone procedures with total content below this are archived")
     args = ap.parse_args()
 
     s = Settings()
@@ -78,55 +82,81 @@ async def main() -> None:
 
     async with db.session() as sess:
         rows = (await sess.execute(text("""
-            SELECT id, name, domain, implementation_notes, tags
+            SELECT id, name, domain, description, implementation_notes, tags
             FROM heart.procedures
             WHERE agent_id='nous-default' AND active AND 'skill'=ANY(tags)
             ORDER BY name
         """))).mappings().all()
 
-    recover, gone_full, gone_stub = [], [], []
-    print(f"{'PROCEDURE':34s} {'source':10s} {'cur':>5s} {'full':>6s}  action")
+    recover, gone_full, gone_stub, url_fail = [], [], [], []
+    print(f"{'PROCEDURE':34s} {'source':12s} {'cur':>5s} {'full':>6s}  action")
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as http:
         for r in rows:
             notes = list(r["implementation_notes"] or [])
-            src = notes[0].replace("source:", "") if notes and notes[0].startswith("source:") else ""
-            cur = _instr_len(notes)
+            src = notes[0][len("source:"):] if notes and notes[0].startswith("source:") else ""
+            cur = _content_len(r["description"], notes)
             if src.startswith("http"):
                 try:
                     resp = await http.get(src)
+                    if resp.status_code == 404:
+                        bucket = gone_stub if cur < args.stub_threshold else gone_full
+                        bucket.append((r, cur, "url-404"))
+                        print(f"{r['name'][:34]:34s} {'url-404':12s} {cur:5d} {'—':>6s}  "
+                              f"source gone (404) -> {'ARCHIVE' if cur<args.stub_threshold else 'keep'}")
+                        continue
                     resp.raise_for_status()
                     manifest = parser.parse(resp.text, source_hint=src)
                     pi = parser.to_procedure_input(manifest)
-                    full = _instr_len(pi.implementation_notes)
-                    recover.append((r, pi, cur, full))
-                    print(f"{r['name'][:34]:34s} {'url':10s} {cur:5d} {full:6d}  RE-IMPORT (+{full-cur})")
-                except Exception as e:
-                    gone_full.append((r, cur))  # url unreachable -> treat as keep
-                    print(f"{r['name'][:34]:34s} {'url-FAIL':10s} {cur:5d} {'?':>6s}  keep (fetch failed: {str(e)[:30]})")
+                    full = _content_len(manifest.description, pi.implementation_notes)
+                    if full > cur:
+                        recover.append((r, pi, cur, full))
+                        print(f"{r['name'][:34]:34s} {'url':12s} {cur:5d} {full:6d}  RE-IMPORT (+{full-cur})")
+                    else:
+                        print(f"{r['name'][:34]:34s} {'url':12s} {cur:5d} {full:6d}  skip (no gain)")
+                except (httpx.TransportError, httpx.HTTPStatusError) as e:
+                    url_fail.append((r, cur, str(e)[:40]))
+                    print(f"{r['name'][:34]:34s} {'url-FAIL':12s} {cur:5d} {'?':>6s}  KEEP (transient: {str(e)[:24]})")
+                except Exception as e:  # parse / unexpected
+                    url_fail.append((r, cur, str(e)[:40]))
+                    print(f"{r['name'][:34]:34s} {'url-ERR':12s} {cur:5d} {'?':>6s}  KEEP (parse err: {str(e)[:24]})")
             else:
-                kind = "inline" if src == "inline" else ("local" if src in ("", "local") else "path-gone")
+                kind = "inline" if src == "inline" else "path-gone"
                 if cur < args.stub_threshold:
                     gone_stub.append((r, cur, kind))
-                    print(f"{r['name'][:34]:34s} {kind:10s} {cur:5d} {'—':>6s}  ARCHIVE (stub, source gone)")
+                    print(f"{r['name'][:34]:34s} {kind:12s} {cur:5d} {'—':>6s}  ARCHIVE (stub, source gone)")
                 else:
                     gone_full.append((r, cur))
-                    print(f"{r['name'][:34]:34s} {kind:10s} {cur:5d} {'—':>6s}  keep (source gone, but has content)")
+                    print(f"{r['name'][:34]:34s} {kind:12s} {cur:5d} {'—':>6s}  keep (source gone, has content)")
 
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 72)
     print(f"  RECOVERABLE (re-import full body): {len(recover)}")
     print(f"  source-gone, KEEP (functional):    {len(gone_full)}")
+    print(f"  url-FAIL (transient, KEEP):        {len(url_fail)}")
     print(f"  NON-RECOVERABLE STUBS (archive):   {len(gone_stub)}")
     if gone_stub:
         print("\n  --- non-recoverable stubs (would be archived) ---")
         for r, cur, kind in gone_stub:
-            print(f"    {r['name']}  [{kind}, {cur} ch]")
+            print(f"    {r['name']}  [{kind}, {cur} ch total]")
 
-    if args.commit:
-        print("\n[COMMIT] applying...")
-        n_re = n_arch = 0
+    if not args.commit:
+        print("\n  (dry-run — pass --commit to apply)")
+        return
+
+    print("\n[COMMIT] applying...")
+    n_re = n_null = n_fail = n_arch = 0
+    try:
         for r, pi, cur, full in recover:
-            await heart.update_procedure_body(r["id"], pi)
-            n_re += 1
+            try:
+                detail = await heart.update_procedure_body(r["id"], pi)
+                n_re += 1
+                if getattr(detail, "embedding", "x") is None:
+                    n_null += 1
+                    print(f"  WARN: {r['name']} re-imported but embedding is NULL "
+                          f"(body too large for embed?) — search-invisible")
+            except Exception as e:
+                n_fail += 1
+                print(f"  FAIL re-import {r['name']}: {e}")
+        # archive runs independently of re-import outcome
         async with db.session() as sess:
             for r, cur, kind in gone_stub:
                 await sess.execute(text(
@@ -134,9 +164,9 @@ async def main() -> None:
                 ), {"i": r["id"]})
             await sess.commit()
             n_arch = len(gone_stub)
-        print(f"[COMMIT] re-imported {n_re} bodies, archived {n_arch} stubs.")
-    else:
-        print("\n  (dry-run — pass --commit to apply)")
+    finally:
+        print(f"[COMMIT] re-imported {n_re} (null-embed {n_null}, failed {n_fail}), "
+              f"archived {n_arch} stubs.")
 
 
 if __name__ == "__main__":

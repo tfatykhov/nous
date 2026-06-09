@@ -666,7 +666,7 @@ class ContextEngine:
                 )
                 if selected:
                     cap = getattr(
-                        self._settings, "proc_recommended_body_max_chars", 1200,
+                        self._settings, "proc_recommended_body_max_chars", 2500,
                     )
                     blocks = self._format_procedure_bodies(selected, cap)
                     # B-cog-A: accumulate bodies under the procedure budget and keep
@@ -1475,6 +1475,17 @@ class ContextEngine:
             )
             if body:
                 parts.append(body)
+            else:
+                # K-line / non-skill procedures have no markdown body — their
+                # instructions live in core_patterns/goals. Render those only as a
+                # fallback (skills with a real body never hit this, so the trigger-
+                # keyword noise stays out of the common path).
+                patterns = getattr(p, "core_patterns", None) or []
+                goals = getattr(p, "goals", None) or []
+                if patterns:
+                    parts.append("Patterns: " + "; ".join(str(x) for x in patterns))
+                if goals:
+                    parts.append("Goals: " + "; ".join(str(x) for x in goals))
             block = "\n\n".join(parts)
             if len(block) > per_item_cap:
                 block = (
