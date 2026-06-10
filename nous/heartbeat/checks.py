@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import imaplib
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -145,6 +146,13 @@ PENDING_PROTOTYPES = [
     "Action required but not yet taken",
 ]
 
+# #369: episode summaries that open as a question or conversational filler are
+# not commitments — _promise_scan skips them before flagging.
+_QUESTION_PREFIX = re.compile(
+    r"^\s*(what|how|where|when|why|who|is|are|do|does|did|can|could|should|would|hey|ok|okay)\b",
+    re.IGNORECASE,
+)
+
 
 class SelfInitiatedCheck(BaseCheck):
     """Check for pending actions and due schedules (permanent).
@@ -173,6 +181,9 @@ class SelfInitiatedCheck(BaseCheck):
             "similarity_threshold": TunableParam("similarity_threshold", 0.75, 0.6, 0.9, 0.02),
             "lookback_days": TunableParam("lookback_days", 14, 3, 30, 1),
             "max_pending_items": TunableParam("max_pending_items", 5, 2, 15, 1),
+            # #369: upper bound on the age-based promise heuristic (hours).
+            # Episodes older than this are too old to be actionable.
+            "max_stale_age_hours": TunableParam("max_stale_age_hours", 336, 72, 720, 24),
         }
 
     async def _ensure_prototypes(self) -> list[list[float]]:
@@ -265,6 +276,7 @@ class SelfInitiatedCheck(BaseCheck):
         """Search recent episode summaries for unresolved commitments."""
         findings: list[Finding] = []
         max_items = int(self.get_param_value("max_pending_items"))
+        max_stale_hours = float(self.get_param_value("max_stale_age_hours"))
 
         promise_queries = [
             "I'll look into",
@@ -286,16 +298,23 @@ class SelfInitiatedCheck(BaseCheck):
                         continue
                     seen_episode_ids.add(eid)
 
-                    # Check if episode is ongoing or old enough to be stale
+                    # Check if episode is ongoing or old enough to be stale.
+                    # #369: the age-based heuristic is bounded above — beyond
+                    # max_stale_age_hours it's too old to be actionable.
+                    # outcome=ongoing is an explicit state and is NOT capped.
                     is_ongoing = getattr(ep, "outcome", None) == "ongoing"
                     started = getattr(ep, "started_at", None)
                     is_stale = False
                     if started:
                         age_hours = (datetime.now(UTC) - started).total_seconds() / 3600
-                        is_stale = age_hours > 48
+                        is_stale = 48 < age_hours <= max_stale_hours
 
                     if is_ongoing or is_stale:
                         summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
+                        # #369: questions / conversational openers are not
+                        # commitments — skip before flagging.
+                        if _QUESTION_PREFIX.match(summary_text):
+                            continue
                         findings.append(Finding(
                             source="episodes",
                             summary=f"Unresolved commitment: {summary_text[:100]}",
