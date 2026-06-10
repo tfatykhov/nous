@@ -610,7 +610,9 @@ class ConversationCompactor:
     # the raw tail would miss it.
     _EXIT_CODE_RE = re.compile(r"^Exit code: (-?\d+)\s*$", re.MULTILINE)
 
-    def _item_reports_failure(self, item: dict[str, Any], text: Any) -> bool:
+    def _item_reports_failure(
+        self, item: dict[str, Any], text: Any, tool_name: str | None
+    ) -> bool:
         """True if this result reports failure — via is_error, a trailing
         bash exit-code marker, a timeout message, or a previously stamped
         error hint. Must be called BEFORE the item is mutated."""
@@ -620,6 +622,12 @@ class ConversationCompactor:
             return False
         if self._BULK_ERROR_HINT in text:
             return True
+        # The exit-code and timeout markers are emitted by bash_tool only
+        # (builtin_tools.py) — applying them tool-agnostically would misread
+        # e.g. fetched page content mentioning "Exit code: 1" (codex P2,
+        # round 10).
+        if tool_name != "bash":
+            return False
         if "Command timed out after" in text[:200]:
             return True
         # Widened tail window: the exit-code line may be followed by the
@@ -758,7 +766,7 @@ class ConversationCompactor:
 
                 # Failure status must be read BEFORE any mutation below
                 # destroys the text it lives in (codex round 8).
-                failed = is_bulk and self._item_reports_failure(item, text)
+                failed = is_bulk and self._item_reports_failure(item, text, tool_name)
 
                 # Tier 4: Hard-clear (age >= clear_age)
                 if age >= clear_age:

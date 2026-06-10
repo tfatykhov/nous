@@ -508,17 +508,35 @@ class TestBulkResultPruning:
     def test_smartcompressed_bash_failure_detected(self):
         """codex round 9: SmartCompress appends its marker AFTER the
         preserved 'Exit code: N' line — the line-anchored regex must still
-        detect the failure."""
+        detect the failure (bash results only)."""
         compactor = ConversationCompactor(_bulk_settings())
         digest = (
             "sweep output\nExit code: 1\n"
             "[SmartCompressed: 5000→58 lines, 1 error/outlier preserved]"
         )
-        messages = self._sweep_conversation(digest)
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", digest, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
         compactor.prune_tool_results(messages)
         stub = messages[1]["content"][0]["content"]
         assert "FAILED" in stub
         assert "tool reported success" not in stub
+
+    def test_non_bash_exit_code_mention_not_failure(self):
+        """codex round 10: 'Exit code: 1' inside non-bash content (e.g. a
+        fetched page quoting a shell session) must NOT mark the bulk result
+        as failed — the marker is bash_tool-specific."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "x" * 600 + "\nthe build log ended with\nExit code: 1"
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED" not in stub
 
     def test_bulk_bash_nonzero_exit_marked_failed(self):
         """codex round 8: bash reports failure IN the text ('Exit code: N'
