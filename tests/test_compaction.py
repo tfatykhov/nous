@@ -421,6 +421,68 @@ class TestBulkResultPruning:
         assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
         assert any("example.com" in f for f in extracted)
 
+    def test_bulk_sibling_item_keeps_own_profile(self):
+        """codex P1 round 2: a small sibling result in the SAME message as a
+        bulk result (parallel tool calls) keeps its own tool profile — it is
+        not dragged onto bulk ages."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t0a", "name": "run_python", "input": {}},
+                    {"type": "tool_use", "id": "t0b", "name": "web_fetch", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t0a", "content": "x" * 600},
+                    {"type": "tool_result", "tool_use_id": "t0b", "content": "small fetch"},
+                ],
+            },
+        ]
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        bulk_item, sibling = messages[1]["content"]
+        assert "Bulk tool output cleared" in bulk_item["content"]
+        # web_fetch is 'conservative' (5, 10, 15): untouched at age 5.
+        assert sibling["content"] == "small fetch"
+
+    def test_bulk_error_result_not_marked_completed(self):
+        """codex P1 round 2: a failed bulk call must not get a COMPLETED /
+        do-not-re-run stub — that would suppress a legitimate retry."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation("Traceback: " + "x" * 600)
+        messages[1]["content"][0]["is_error"] = True
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "COMPLETED" not in stub
+        assert "do NOT re-run" not in stub
+
+    def test_conservative_facts_extracted_before_degrade(self):
+        """codex P1 round 2: on the incremental lifecycle (degrade first,
+        clear later), conservative facts are captured at degrade time —
+        not lost by the time clear sees only the stub."""
+        compactor = ConversationCompactor(_bulk_settings())
+        bulk_content = "see https://example.com/report plus " + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("web_fetch", bulk_content, "t0")
+        for i in range(1, 3):
+            messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
+        # Pass 1: bulk item at age 3 → degrade tier. Facts extracted NOW.
+        extracted = compactor.prune_tool_results(messages)
+        assert any("example.com" in f for f in extracted)
+        assert " | first: " in messages[1]["content"][0]["content"]
+        # Pass 2: age 4 → clear tier. Stub yields nothing new; no crash,
+        # and the anti-replay stub lands.
+        messages += _make_named_pair("web_fetch", "small_3", "t3")
+        extracted2 = compactor.prune_tool_results(messages)
+        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+        assert not any("example.com" in f for f in extracted2)
+
     def test_repetitive_ops_rule_in_both_prompts(self):
         """codex P2: the #179 compression rule must be in BOTH the checkpoint
         and the update summarization prompts — updates run on every

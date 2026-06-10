@@ -551,6 +551,9 @@ class ConversationCompactor:
         r"--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---"
     )
     _BULK_HINT = "bulk operation completed earlier — do NOT re-run it"
+    # codex P1: a failed sweep must not be stamped as completed — that would
+    # suppress a legitimate retry and corrupt later summaries.
+    _BULK_ERROR_HINT = "bulk operation FAILED earlier — fix the cause before any retry"
 
     def _original_result_size(self, text: str) -> int:
         """Original size of a result, surviving prior soft-trims.
@@ -562,22 +565,37 @@ class ConversationCompactor:
         m = self._TRIM_MARKER_RE.search(text)
         return int(m.group(1)) if m else len(text)
 
-    def _is_bulk_result(self, content: list[Any]) -> bool:
-        """True if any text item in this tool-result message is bulk-sized."""
+    def _item_is_bulk(self, item: dict[str, Any]) -> bool:
+        """True if this single tool-result item is bulk-sized (codex P1:
+        per-item, so a bulk run_python can't drag a small sibling result
+        from the same parallel-call message onto bulk decay ages)."""
         threshold = self._settings.tool_bulk_result_chars
         if threshold <= 0:
             return False
-        for item in content:
-            if not isinstance(item, dict) or self._has_image_content(item):
-                continue
-            text = item.get("content", "")
-            if not isinstance(text, str):
-                continue
-            if self._BULK_HINT in text:
-                return True
-            if self._original_result_size(text) >= threshold:
-                return True
-        return False
+        text = item.get("content", "")
+        if not isinstance(text, str):
+            return False
+        if self._BULK_HINT in text or self._BULK_ERROR_HINT in text:
+            return True
+        return self._original_result_size(text) >= threshold
+
+    def _bulk_hint_for(self, item: dict[str, Any]) -> str:
+        return self._BULK_ERROR_HINT if item.get("is_error") else self._BULK_HINT
+
+    def _bulk_clear_stub(self, tool_name: str | None, item: dict[str, Any]) -> str:
+        """#179 anti-replay hard-clear stub, error-aware (codex P1)."""
+        name = tool_name or "tool"
+        if item.get("is_error"):
+            return (
+                f"[Bulk tool output cleared — this {name} operation FAILED in "
+                f"an earlier turn and its error output was cleared. "
+                f"{self._BULK_ERROR_HINT}.]"
+            )
+        return (
+            f"[Bulk tool output cleared — this {name} operation ran and "
+            f"COMPLETED in an earlier turn; its results were already "
+            f"processed. {self._BULK_HINT}.]"
+        )
 
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
         """Extract URLs, paths, key-values before hard-clearing."""
@@ -630,80 +648,91 @@ class ConversationCompactor:
             content = msg["content"]
             age = len(tool_indices) - pos
 
-            # Get per-tool decay profile
-            tool_name = None
+            # Per-ITEM profile resolution (codex P1): one user message may
+            # carry several results from one assistant turn's parallel tool
+            # calls — a bulk run_python must not drag a small sibling
+            # web_fetch onto bulk ages, and each item keeps its own tool's
+            # decay profile + conservative fact extraction.
+            msg_cleared = False
+            msg_degraded = False
+            msg_trimmed = False
+
             for item in content:
+                if not isinstance(item, dict) or self._has_image_content(item):
+                    continue
+
                 tool_use_id = item.get("tool_use_id")
-                if tool_use_id:
-                    block = tool_use_index.get(tool_use_id)
-                    if block:
-                        tool_name = block.get("name")
-                        break
+                tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
+                tool_name = tool_use_block.get("name") if tool_use_block else None
+                base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
+                # #179: size escalation — bulk items decay on (1, 2, 4)
+                # regardless of tool; base_profile keeps driving
+                # conservative-tool fact extraction.
+                is_bulk = self._item_is_bulk(item)
+                profile_name = "bulk" if is_bulk else base_profile
+                _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
+                    profile_name, (3, 8, 12)
+                )
 
-            base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
-            # #179: size escalation — bulk results decay on (1, 2, 4)
-            # regardless of which tool produced them. base_profile keeps
-            # driving conservative-tool fact extraction (codex P1: a bulk
-            # web_fetch must still have its URLs/paths extracted at clear).
-            is_bulk = self._is_bulk_result(content)
-            profile_name = "bulk" if is_bulk else base_profile
-            _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
-                profile_name, (3, 8, 12)
-            )
+                text = item.get("content", "")
+                # Conservative-tool facts must be captured before the FIRST
+                # content-destroying tier (codex P1: on the incremental
+                # path, degrade precedes clear, so clear-time extraction
+                # only ever saw the degrade stub). Extraction fires only
+                # when this pass actually mutates the item (clear always
+                # does; degrade only when _metadata_degrade's >=200-char
+                # condition holds), and never re-fires on a stub
+                # (" | first: " / "output cleared" markers).
+                will_mutate = age >= clear_age or (
+                    age >= degrade_age
+                    and isinstance(text, str)
+                    and len(text) >= 200
+                )
+                if (
+                    will_mutate
+                    and base_profile == "conservative"
+                    and isinstance(text, str)
+                    and text
+                    and " | first: " not in text
+                    and "output cleared" not in text
+                ):
+                    extracted.extend(
+                        self._extract_facts_before_clear(tool_name or "unknown", text)
+                    )
 
-            # Tier 4: Hard-clear (age >= clear_age)
-            if age >= clear_age:
-                for item in content:
-                    if self._has_image_content(item):
-                        continue
-                    text = item.get("content", "")
-                    # Extract facts from conservative tools before clearing
-                    # (checks base_profile so bulk escalation can't skip it).
-                    if isinstance(text, str) and text and base_profile == "conservative":
-                        extracted.extend(self._extract_facts_before_clear(tool_name or "unknown", text))
+                # Tier 4: Hard-clear (age >= clear_age)
+                if age >= clear_age:
                     if is_bulk:
                         # #179: anti-replay stub — the generic cleared text
                         # leaves the model free to re-derive "I should run
-                        # the sweep"; this one states completion explicitly.
-                        item["content"] = (
-                            f"[Bulk tool output cleared — this {tool_name or 'tool'} "
-                            f"operation ran and COMPLETED in an earlier turn; its "
-                            f"results were already processed. "
-                            f"{self._BULK_HINT}.]"
-                        )
+                        # the sweep"; this one states the outcome explicitly
+                        # (completed vs failed — codex P1).
+                        item["content"] = self._bulk_clear_stub(tool_name, item)
                     else:
                         item["content"] = (
                             "[Tool output cleared - content was processed in earlier turns]"
                         )
-                hard_cleared += 1
-                continue
+                    msg_cleared = True
+                    continue
 
-            # Tier 3: Metadata degrade (age >= degrade_age)
-            if age >= degrade_age:
-                for item in content:
-                    if self._has_image_content(item):
-                        continue
-                    tool_use_id = item.get("tool_use_id")
-                    tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
+                # Tier 3: Metadata degrade (age >= degrade_age)
+                if age >= degrade_age:
                     self._metadata_degrade(item, tool_use_block)
                     # #179: stamp the bulk hint so (a) the model sees the
-                    # completion signal and (b) bulkness survives to the
+                    # outcome signal and (b) bulkness survives to the
                     # clear tier after the trim marker is gone.
-                    text = item.get("content", "")
+                    new_text = item.get("content", "")
+                    hint = self._bulk_hint_for(item)
                     if (
                         is_bulk
-                        and isinstance(text, str)
-                        and self._BULK_HINT not in text
+                        and isinstance(new_text, str)
+                        and hint not in new_text
                     ):
-                        item["content"] = f"{text} [{self._BULK_HINT}]"
-                metadata_degraded += 1
-                continue
-
-            # Tier 2: Soft-trim (oversized results)
-            for item in content:
-                if self._has_image_content(item):
+                        item["content"] = f"{new_text} [{hint}]"
+                    msg_degraded = True
                     continue
-                text = item.get("content", "")
+
+                # Tier 2: Soft-trim (oversized results)
                 if not isinstance(text, str):
                     continue
                 if len(text) > self._settings.tool_soft_trim_chars:
@@ -716,7 +745,14 @@ class ConversationCompactor:
                         f"of {original_len} chars) ---\n\n"
                         f"{text[-tail:]}"
                     )
-                    soft_trimmed += 1
+                    msg_trimmed = True
+
+            if msg_cleared:
+                hard_cleared += 1
+            elif msg_degraded:
+                metadata_degraded += 1
+            elif msg_trimmed:
+                soft_trimmed += 1
 
         if soft_trimmed or hard_cleared or metadata_degraded:
             logger.info(
