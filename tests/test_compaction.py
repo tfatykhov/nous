@@ -353,7 +353,10 @@ class TestBulkResultPruning:
         compactor.prune_tool_results(messages)
         cleared = messages[1]["content"][0]["content"]
         assert "Bulk tool output cleared" in cleared
-        assert "COMPLETED" in cleared
+        # codex round 4: facts only — "already ran" + tool-reported status,
+        # not a semantic COMPLETED claim.
+        assert "already ran" in cleared
+        assert "tool reported success" in cleared
         assert "do NOT re-run" in cleared
 
     def test_non_bulk_result_keeps_standard_ages(self):
@@ -459,7 +462,7 @@ class TestBulkResultPruning:
         compactor.prune_tool_results(messages)
         stub = messages[1]["content"][0]["content"]
         assert "FAILED" in stub
-        assert "COMPLETED" not in stub
+        assert "tool reported success" not in stub
         assert "do NOT re-run" not in stub
 
     def test_conservative_facts_extracted_before_degrade(self):

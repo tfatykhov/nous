@@ -593,10 +593,15 @@ class ConversationCompactor:
                 f"an earlier turn and its error output was cleared. "
                 f"{self._BULK_ERROR_HINT}.]"
             )
+        # codex round 4: is_error=False only means the tool exited cleanly —
+        # a sweep can swallow internal failures — so state facts (ran, tool
+        # reported success, output was processed in earlier turns), not a
+        # semantic COMPLETED claim.
         return (
-            f"[Bulk tool output cleared — this {name} operation ran and "
-            f"COMPLETED in an earlier turn; its results were already "
-            f"processed. {self._BULK_HINT}.]"
+            f"[Bulk tool output cleared — this {name} operation already ran "
+            f"in an earlier turn (tool reported success) and its output was "
+            f"processed then. {self._BULK_HINT} — work from its saved "
+            f"results or the earlier conversation instead.]"
         )
 
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
