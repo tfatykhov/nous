@@ -367,6 +367,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_TOOL_SOFT_TRIM_TAIL` | `1500` | Chars to keep from end when soft-trimming |
 | `NOUS_TOOL_METADATA_DEGRADE_AFTER` | `8` | Tool result age (in results) before metadata degradation |
 | `NOUS_TOOL_HARD_CLEAR_AFTER` | `12` | Tool result age before hard-clear replacement |
+| `NOUS_TOOL_BULK_RESULT_CHARS` | `50000` | #179: results at/above this original size (survives soft-trim + SmartCompress via markers) from operation-shaped tools (`BULK_ESCALATION_TOOLS` = bash, run_python) escalate to the `bulk` (1, 2, 4) decay profile with anti-replay stubs. `0` disables. |
 | `NOUS_KEEP_LAST_TOOL_RESULTS` | `2` | Number of most recent tool results always protected |
 | `NOUS_COMPACTION_ENABLED` | `true` | Enable LLM-powered history compaction |
 | `NOUS_COMPACTION_THRESHOLD` | auto | Token count triggering compaction (auto-scales per model context window) |

@@ -1,5 +1,7 @@
 """Tests for Spec 008.1 Phase 1: Tool Output Pruning + Token Estimation."""
 
+import pytest
+
 from nous.api.compaction import ConversationCompactor, TokenEstimator
 from nous.config import Settings
 
@@ -591,6 +593,102 @@ class TestBulkResultPruning:
         stub = messages[1]["content"][0]["content"]
         assert "FAILED" in stub
         assert "tool reported success" not in stub
+
+    @pytest.mark.asyncio
+    async def test_real_smartcompress_output_drives_bulk_detection(self):
+        """Format-lock + e2e (review 2026-06-10, top gap): the marker
+        smart_compress ACTUALLY emits must parse via _SMARTCOMPRESS_CHARS_RE
+        and carry original size + bash failure status through the pruner.
+        Hand-crafted markers in the other tests can't lock this — if either
+        side drifts, the whole #179 feature silently no-ops in prod."""
+        from nous.api.smart_compress import smart_compress
+
+        settings = _make_settings()  # real bulk threshold: 50_000
+        compactor = ConversationCompactor(settings)
+        lines = [
+            "processed batch -> ok status=200" + " pad" * (i % 3)
+            for i in range(2000)
+        ]
+        raw = "\n".join(lines) + "\nExit code: 1"  # ~74KB, crushable, FAILED
+        result = await smart_compress("bash", {"command": "sweep"}, raw, settings)
+        assert result.text != raw  # compression actually fired
+        # Format lock: the emitted marker parses and records the raw size.
+        assert compactor._original_result_size(result.text) == len(raw)
+        # End-to-end: compressed digest → bulk FAILED clear stub.
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", result.text, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" in stub
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    def test_failed_bulk_idempotent_across_repeated_prunes(self):
+        """Review 2026-06-10: the pruner runs every tool-loop iteration —
+        repeated passes at the degrade tier must not double-stamp the hint
+        or flip FAILED→success, and the clear stub is a fixed point. (The
+        exit-code line dies at first degrade; the error hint is the only
+        durable failure signal afterwards.)"""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", "x" * 600 + "\nExit code: 1", "t0")
+        for i in range(1, 3):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        for _ in range(3):  # repeated prunes at the same (degrade) age
+            compactor.prune_tool_results(messages)
+            text = messages[1]["content"][0]["content"]
+            assert text.count(compactor._BULK_ERROR_HINT) == 1
+            assert "tool reported success" not in text
+        for i in (3, 4):  # advance to clear age
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+        compactor.prune_tool_results(messages)  # clear is a fixed point
+        assert messages[1]["content"][0]["content"] == stub
+
+    def test_quoted_hint_text_does_not_classify(self):
+        """Review 2026-06-10: Nous greps its own source/transcripts — a
+        result QUOTING the hint strings (grep-style, no stub shape) must
+        not be classified bulk or failed."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (  # < 500 bulk threshold, not stub-shaped
+            'compaction.py:569: _BULK_ERROR_HINT = "'
+            + compactor._BULK_ERROR_HINT
+            + '"'
+        )
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "FAILED in" not in text
+
+    def test_run_python_content_failures_not_sniffed_pin(self):
+        """PIN (review 2026-06-10, documents a deliberate limitation):
+        run_python reports its own failures as SHORT 'Error: ...' text
+        (never bulk-sized), so a bulk run_python result with self-printed
+        failure lines gets the success stub BY DESIGN — content-level
+        failure sniffing beyond bash's structured exit line was rejected
+        (codex round 10) as too false-positive-prone. Do not 'fix' this
+        with a tool-agnostic Traceback regex."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "\n".join(
+            f"item {i}: FAILED Traceback (most recent call last)" for i in range(20)
+        ) + "\n" + "x" * 200
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED in" not in stub
 
     def test_unlisted_tool_exempt_from_bulk(self):
         """codex round 12: escalation is a positive allowlist — an unlisted

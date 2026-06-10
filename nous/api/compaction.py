@@ -584,15 +584,15 @@ class ConversationCompactor:
         The soft-trim and SmartCompress markers record the pre-mutation
         size; once a bulk result is trimmed or compressed its current
         length no longer reflects bulkness, so the markers (or, later,
-        the bulk hint itself) are the durable signal.
+        the bulk hint itself) are the durable signal. The MAX over all
+        signals wins (review 2026-06-10): a soft-trimmed SmartCompress
+        digest carries a trim marker recording only the digest length —
+        first-match precedence would shadow the real original size.
         """
-        m = self._TRIM_MARKER_RE.search(text)
-        if m:
-            return int(m.group(1))
-        m = self._SMARTCOMPRESS_CHARS_RE.search(text)
-        if m:
-            return int(m.group(1))
-        return len(text)
+        sizes = [len(text)]
+        sizes.extend(int(s) for s in self._TRIM_MARKER_RE.findall(text))
+        sizes.extend(int(s) for s in self._SMARTCOMPRESS_CHARS_RE.findall(text))
+        return max(sizes)
 
     def _item_is_bulk(self, item: dict[str, Any]) -> bool:
         """True if this single tool-result item is bulk-sized (codex P1:
@@ -612,7 +612,13 @@ class ConversationCompactor:
         text = item.get("content", "")
         if not isinstance(text, str):
             return False
-        if self._BULK_HINT in text or self._BULK_ERROR_HINT in text:
+        # Hint markers persist bulkness across degrade/clear. Honored only
+        # on stub-shaped text (leading "[" — review 2026-06-10): a bash
+        # grep over this repo or over old transcripts can quote the hint
+        # strings verbatim, and that must not classify the grep result.
+        if text.lstrip().startswith("[") and (
+            self._BULK_HINT in text or self._BULK_ERROR_HINT in text
+        ):
             return True
         # codex round 13: the SmartCompress marker alone is NOT bulk —
         # compression fires from ~500 chars, far below the bulk threshold.
@@ -638,22 +644,25 @@ class ConversationCompactor:
             return True
         if not isinstance(text, str):
             return False
-        if self._BULK_ERROR_HINT in text:
+        # Stub-shape guard mirrors _item_is_bulk (review 2026-06-10):
+        # quoted hint text in grep-style output must not flag failure.
+        if text.lstrip().startswith("[") and self._BULK_ERROR_HINT in text:
             return True
-        # The exit-code and timeout markers are emitted by bash_tool only
-        # (builtin_tools.py) — applying them tool-agnostically would misread
+        # The exit-code marker is emitted by bash_tool only
+        # (builtin_tools.py) — applying it tool-agnostically would misread
         # e.g. fetched page content mentioning "Exit code: 1" (codex P2,
-        # round 10).
+        # round 10). The bash timeout message is NOT checked (review
+        # 2026-06-10): a real timeout result is ~100 chars — never bulk —
+        # so a timeout substring in a bulk result can only be quoted
+        # content, i.e. the branch could only ever false-positive.
         if tool_name != "bash":
             return False
-        if "Command timed out after" in text[:200]:
-            return True
         # Widened tail window: the exit-code line may be followed by the
         # SmartCompress marker line (codex round 9). The LAST exit-code
         # line wins (codex round 13): bash_tool now always appends the
-        # authoritative line, so a quoted "Exit code: 1" inside a
-        # successful command's own output is overridden by the trailing
-        # "Exit code: 0".
+        # authoritative line (smart_compress re-attaches it as the final
+        # line), so a quoted "Exit code: 1" inside a successful command's
+        # own output is overridden by the trailing "Exit code: 0".
         matches = self._EXIT_CODE_RE.findall(text[-400:])
         return bool(matches and matches[-1] != "0")
 

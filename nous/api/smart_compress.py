@@ -315,20 +315,36 @@ async def smart_compress(
         return passthrough
     if len(result_text) < settings.smart_compress_min_chars:
         return passthrough
-    if not is_crushable(result_text, min_chars=settings.smart_compress_min_chars):
+
+    # #179: bash_tool appends an authoritative trailing "Exit code: N"
+    # status line to EVERY result. Detach it before crushability checks,
+    # classification, and compression — it breaks DICT_ARRAY json parsing,
+    # and line-dedup in to_text() keeps the FIRST occurrence so a quoted
+    # twin earlier in the output could displace the real status line from
+    # the tail — then deterministically re-attach it as the final line.
+    status_line: str | None = None
+    body_text = result_text
+    stripped_tail = result_text.rstrip()
+    if "\n" in stripped_tail:
+        head_part, last_line = stripped_tail.rsplit("\n", 1)
+        if last_line.startswith("Exit code: "):
+            status_line = last_line
+            body_text = head_part
+
+    if not is_crushable(body_text, min_chars=settings.smart_compress_min_chars):
         logger.info("SmartCompress skip %s: not crushable (%d chars)", tool_name, len(result_text))
         return passthrough
 
-    content_type = classify_content(result_text, min_chars=settings.smart_compress_min_chars)
+    content_type = classify_content(body_text, min_chars=settings.smart_compress_min_chars)
 
     if content_type == ContentType.SMALL:
         return passthrough
 
-    compressed_text = result_text
+    compressed_text = body_text
     item_count = None
 
     if content_type == ContentType.STRING_ARRAY:
-        lines = result_text.split("\n")
+        lines = body_text.split("\n")
         compressed = compress_string_array(
             lines,
             max_k=settings.smart_compress_max_k,
@@ -339,7 +355,7 @@ async def smart_compress(
 
     elif content_type == ContentType.DICT_ARRAY:
         try:
-            items = json.loads(result_text.strip())
+            items = json.loads(body_text.strip())
             compressed = compress_dict_array(items, max_k=settings.smart_compress_max_k)
             compressed_text = compressed.to_text()
             item_count = compressed.original_count
@@ -347,22 +363,29 @@ async def smart_compress(
             return passthrough
 
     elif content_type in (ContentType.LOG_FORMAT, ContentType.RAW_TEXT):
-        lines = result_text.split("\n")
+        lines = body_text.split("\n")
         compressed = compress_string_array(lines, max_k=settings.smart_compress_max_k)
         compressed_text = compressed.to_text()
         item_count = compressed.original_count
 
-    if compressed_text == result_text:
+    if compressed_text == body_text:
         return passthrough
 
     # codex round 13 (#179): record the original character size in the
     # marker so the compaction pruner's bulk-threshold comparison survives
     # ingestion-time compression (the marker otherwise records only
-    # line/item counts).
-    if compressed_text.endswith("]") and "[SmartCompressed:" in compressed_text[-200:]:
+    # line/item counts). The marker is always to_text()'s final line —
+    # checking exactly that line (not a substring window) prevents grafting
+    # onto content that merely QUOTES a SmartCompressed marker.
+    head, _, marker_line = compressed_text.rpartition("\n")
+    if head and marker_line.startswith("[SmartCompressed:") and marker_line.endswith("]"):
         compressed_text = (
-            compressed_text[:-1] + f", {len(result_text)} chars original]"
+            f"{head}\n{marker_line[:-1]}, {len(result_text)} chars original]"
         )
+
+    # Re-attach the authoritative status line as the final line (#179).
+    if status_line is not None:
+        compressed_text = f"{compressed_text}\n{status_line}"
 
     original_len = len(result_text)
     compressed_len = len(compressed_text)
