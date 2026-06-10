@@ -366,6 +366,25 @@ class TestClaimVerifier:
         result = cv.verify(response, [], ledger)
         assert result.verified is True
 
+    def test_blocked_ledger_action_does_not_satisfy_claim(self):
+        """Audit CL-4: a non-successful (blocked/errored) ledger action must NOT
+        ground an action claim. A censored or failed write must not let
+        'I've saved the file' verify."""
+        cv = ClaimVerifier()
+        ledger = self._ledger()
+        ledger.record("write_file", {"path": "out.txt"}, "denied", "blocked")
+        result = cv.verify("I've saved the report file.", [], ledger)
+        assert result.verified is False
+        assert any(v.expected_tool == "write_file" for v in result.violations)
+
+    def test_errored_ledger_action_does_not_satisfy_claim(self):
+        """Audit CL-4: an errored tool call is not evidence the action happened."""
+        cv = ClaimVerifier()
+        ledger = self._ledger()
+        ledger.record("write_file", {"path": "out.txt"}, "disk full", "error")
+        result = cv.verify("I've saved the report file.", [], ledger)
+        assert result.verified is False
+
     def test_multiple_violations(self):
         cv = ClaimVerifier()
         ledger = self._ledger()

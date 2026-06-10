@@ -86,8 +86,15 @@ class ClaimVerifier:
             return VerificationResult(verified=True)
 
         # Build a set of tool names seen in the last 10 ledger entries.
+        # Audit CL-4 (2026-06-09): only count SUCCESSFUL actions. A blocked /
+        # errored / timed-out tool call must not satisfy an action claim — e.g.
+        # a censored or failed `bash` should not let "I pushed the code" verify.
+        # (Arg-level matching — distinguishing `git push` from `ls` — is a
+        # deeper follow-up; this closes the status hole the audit flagged.)
         recent_ledger_tools: set[str] = {
-            action.tool_name for action in ledger.actions[-10:]
+            action.tool_name
+            for action in ledger.actions[-10:]
+            if action.status == "success"
         }
         turn_tool_set = set(tool_calls_this_turn)
 

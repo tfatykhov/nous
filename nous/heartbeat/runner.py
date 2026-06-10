@@ -31,6 +31,10 @@ from nous.heartbeat.tuner import HeartbeatTuner
 
 logger = logging.getLogger(__name__)
 
+# Audit HB-9: a single escalation step bumps urgency one level, never skipping
+# straight to "high". _should_escalate gates the timing per current urgency.
+_ESCALATION_LADDER: dict[str, str] = {"low": "normal", "normal": "high", "high": "high"}
+
 
 class HeartbeatRunner:
     """Background heartbeat loop with check execution and triage.
@@ -391,8 +395,18 @@ class HeartbeatRunner:
                     logger.debug("F034.1: Suppressed finding %s: %s", fp, f.summary[:60])
                     continue
                 elif action == FindingAction.ESCALATE:
-                    logger.info("F034.1: Escalating finding %s: %s", fp, f.summary[:60])
-                    f.urgency = "high"
+                    # Audit HB-9 (2026-06-09): bump ONE ladder step
+                    # (low->normal->high), not straight to "high". _should_escalate
+                    # already gates the timing per current urgency (low waits
+                    # low_to_normal_hours, normal waits normal_to_high_hours), so
+                    # forcing "high" made aged low findings page as urgent,
+                    # collapsing the documented ladder.
+                    new_urgency = _ESCALATION_LADDER.get(f.urgency, "high")
+                    logger.info(
+                        "F034.1: Escalating finding %s (%s -> %s): %s",
+                        fp, f.urgency, new_urgency, f.summary[:60],
+                    )
+                    f.urgency = new_urgency
                     time_escalated_checks.add(f.check_name)
                     routed_findings.append(f)
                 else:  # TRIAGE

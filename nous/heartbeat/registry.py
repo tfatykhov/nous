@@ -28,17 +28,37 @@ class BaseCheck(ABC):
         self.last_run: datetime | None = None
         self.consecutive_failures: int = 0
         self.max_failures: int = 3
+        # Audit HB-8 (2026-06-09): timestamp the breaker opening so it can
+        # auto-recover via a half-open trial instead of staying open until a
+        # manual REST reset (a transient outage would otherwise kill the check
+        # permanently — e.g. a 9-min IMAP blip disabling the 180s email check).
+        self._breaker_opened_at: datetime | None = None
         self._params: dict[str, TunableParam] = {}  # F034.3: tunable params
+
+    @property
+    def breaker_cooldown_seconds(self) -> float:
+        """How long the breaker stays open before a half-open trial run.
+
+        Proportional to the check interval (min 5 min) so fast checks recover
+        quickly and slow checks don't thrash.
+        """
+        return max(self.interval * 3, 300)
 
     def is_due(self, now: datetime | None = None) -> bool:
         """Check if this check is due to run."""
         if not self.active:
             return False
+        now = now or datetime.now(UTC)
         if self.consecutive_failures >= self.max_failures:
-            return False  # circuit breaker open
+            # Circuit breaker open — HB-8: allow a single half-open trial once
+            # the cooldown has elapsed. mark_success() closes it; mark_failure()
+            # re-arms the cooldown for another attempt later.
+            if self._breaker_opened_at is None:
+                return False
+            open_for = (now - self._breaker_opened_at).total_seconds()
+            return open_for >= self.breaker_cooldown_seconds
         if self.last_run is None:
             return True
-        now = now or datetime.now(UTC)
         elapsed = (now - self.last_run).total_seconds()
         return elapsed >= self.interval
 
@@ -46,20 +66,26 @@ class BaseCheck(ABC):
         """Record a successful run."""
         self.last_run = datetime.now(UTC)
         self.consecutive_failures = 0
+        self._breaker_opened_at = None
 
     def mark_failure(self) -> None:
         """Record a failed run."""
         self.last_run = datetime.now(UTC)
         self.consecutive_failures += 1
         if self.consecutive_failures >= self.max_failures:
+            # (Re)arm the cooldown each time we fail while open so a failed
+            # half-open trial waits another cooldown before the next attempt.
+            self._breaker_opened_at = self.last_run
             logger.warning(
-                "Check '%s' circuit breaker opened after %d consecutive failures",
-                self.name, self.consecutive_failures,
+                "Check '%s' circuit breaker opened after %d consecutive failures "
+                "(half-open retry in %.0fs)",
+                self.name, self.consecutive_failures, self.breaker_cooldown_seconds,
             )
 
     def reset_circuit_breaker(self) -> None:
         """Manually reset the circuit breaker."""
         self.consecutive_failures = 0
+        self._breaker_opened_at = None
 
     def tunable_params(self) -> dict[str, TunableParam]:
         """Return tunable parameters. Override in subclasses to define params."""

@@ -296,6 +296,34 @@ class TestDiagnosticCritics:
         results = agent.run_diagnostics(tool_history, turn_number=1)
         assert any(d.fired and d.critic_name == "confidence_drift" for d in results)
 
+    def test_confidence_drift_handles_none_confidence(self):
+        """Audit CL-5: an explicit confidence=None must not crash the
+        `None < 0.4` comparison; it's coerced to the 0.5 default."""
+        agent = CriticAgent(_settings())
+        tool_history = [
+            {"tool": "record_decision", "confidence": None},
+            {"tool": "record_decision", "confidence": None},
+            {"tool": "record_decision", "confidence": None},
+        ]
+        # Must not raise; None -> 0.5 (not low), so confidence_drift does not fire.
+        results = agent.run_diagnostics(tool_history, turn_number=1)
+        assert not any(
+            d.fired and d.critic_name == "confidence_drift" for d in results
+        )
+
+    def test_confidence_drift_mixed_none_and_low(self):
+        """None coerces to 0.5 (not low), so a mix does not all-trip the gate."""
+        agent = CriticAgent(_settings())
+        tool_history = [
+            {"tool": "record_decision", "confidence": 0.2},
+            {"tool": "record_decision", "confidence": None},
+            {"tool": "record_decision", "confidence": 0.3},
+        ]
+        results = agent.run_diagnostics(tool_history, turn_number=1)
+        assert not any(
+            d.fired and d.critic_name == "confidence_drift" for d in results
+        )
+
     def test_frame_mismatch_detector(self):
         agent = CriticAgent(_settings())
         tool_history = [

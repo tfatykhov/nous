@@ -226,10 +226,30 @@ class TestParseEveryDaily:
         assert interval is None
         assert cron == "0 12 * * *"
 
-    def test_daily_with_timezone_suffix(self) -> None:
-        """'daily at 9am EST' parses without error (tz noted, not applied to cron)."""
+    def test_daily_with_utc_suffix_no_conversion(self) -> None:
+        """'daily at 9am UTC' stays at hour 9 (no offset)."""
+        interval, cron = parse_every("daily at 9am UTC")
+        assert interval is None
+        assert cron == "0 9 * * *"
+
+    def test_daily_with_timezone_converts_to_utc(self) -> None:
+        """Audit HD-5: 'daily at 9am EST' now converts to UTC instead of being
+        discarded. 9am US/Eastern is 13:00 (EDT) or 14:00 (EST) in UTC."""
         interval, cron = parse_every("daily at 9am EST")
         assert interval is None
+        hour = int(cron.split()[1])
+        assert hour != 9  # timezone is no longer silently ignored
+        assert hour in (13, 14)  # DST-robust (EDT=UTC-4, EST=UTC-5)
+
+    def test_daily_with_iana_timezone(self) -> None:
+        """Full IANA zone names are honored too."""
+        interval, cron = parse_every("daily at 9am America/Los_Angeles")
+        hour = int(cron.split()[1])
+        assert hour in (16, 17)  # PDT=UTC-7, PST=UTC-8
+
+    def test_daily_with_unknown_timezone_falls_back_to_utc(self) -> None:
+        """An unrecognized token is treated as UTC (safe, preserves behavior)."""
+        interval, cron = parse_every("daily at 9am ZZZ")
         assert cron == "0 9 * * *"
 
 

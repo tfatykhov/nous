@@ -239,7 +239,7 @@ def _make_decision(
 
 
 class TestErrorSignal:
-    """Verify ErrorSignal catches low-confidence and error-keyword decisions."""
+    """Verify ErrorSignal auto-fails only genuinely low-confidence decisions."""
 
     @pytest.mark.asyncio
     async def test_low_confidence_returns_failure(self):
@@ -252,15 +252,15 @@ class TestErrorSignal:
         assert "0.30" in result.explanation
 
     @pytest.mark.asyncio
-    async def test_error_keyword_returns_failure(self):
-        """Decisions with error keywords in description should be auto-failed."""
+    async def test_error_keyword_in_description_does_not_fail(self):
+        """Audit HD-4: a decision *about* a bug/error (keyword in the plan text)
+        must NOT be auto-failed. The description is the intended action, not the
+        outcome — the keyword branch was removed."""
         signal = ErrorSignal()
         result = await signal.check(
-            _make_decision(confidence=0.7, description="This approach failed")
+            _make_decision(confidence=0.7, description="Fix the login error in auth.py")
         )
-        assert result is not None
-        assert result.result == "failure"
-        assert result.signal_type == "error"
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_normal_decision_returns_none(self):

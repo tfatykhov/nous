@@ -48,26 +48,23 @@ class ReviewSignal(Protocol):
 # ErrorSignal
 # ---------------------------------------------------------------------------
 
-_ERROR_KEYWORDS = re.compile(
-    r"\b(error|failed|failure|broken|crashed|bug)\b", re.IGNORECASE
-)
-
-
 class ErrorSignal:
-    """Auto-fail decisions with low confidence or error keywords."""
+    """Auto-fail decisions recorded with very low confidence.
+
+    Audit HD-4 (2026-06-09): the former error-keyword branch matched the
+    decision *description* (the plan text) — so a decision *about* a bug
+    ("fix the login error") was auto-labelled `failure`. The description is
+    the intended action, not the outcome, so that branch corrupted Brain
+    calibration and has been removed. Only the low-confidence prior remains.
+    (Caveat: deriving an outcome label from the same confidence value F058 is
+    trying to calibrate is weakly circular — flagged as a follow-up.)
+    """
 
     async def check(self, decision: DecisionSummary) -> ReviewResult | None:
-        if decision.confidence < 0.4:
+        if decision.confidence is not None and decision.confidence < 0.4:
             return ReviewResult(
                 result="failure",
                 explanation=f"Low confidence ({decision.confidence:.2f}) indicates uncertain/failed decision",
-                confidence=0.9,
-                signal_type="error",
-            )
-        if _ERROR_KEYWORDS.search(decision.description):
-            return ReviewResult(
-                result="failure",
-                explanation="Description contains error keywords",
                 confidence=0.9,
                 signal_type="error",
             )
@@ -207,10 +204,18 @@ class DecisionReviewer:
         self._settings = settings
         self._bus = bus
 
+        # Audit HD-4 (2026-06-09): EpisodeSignal and FileExistsSignal are no
+        # longer wired. EpisodeSignal mapped the (currently hardcoded
+        # "success") episode outcome onto every decision made during the
+        # session — a category error: a session ending does not mean a specific
+        # decision in it succeeded. FileExistsSignal labelled a decision
+        # `success` whenever any path it mentioned existed on disk, even if the
+        # file pre-existed and the decision never touched it. Both fed Brain
+        # calibration false labels. The classes are retained (unit-tested) but
+        # only outcome-grounded signals are wired: a low-confidence prior and
+        # GitHub PR state (the one truly external source of truth).
         self._signals: list = [
             ErrorSignal(),
-            EpisodeSignal(brain),
-            FileExistsSignal(),
         ]
         if getattr(settings, "github_token", ""):
             self._signals.append(

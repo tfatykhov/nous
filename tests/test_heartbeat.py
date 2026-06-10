@@ -275,6 +275,35 @@ class TestBaseCheck:
         check.last_run = None
         assert check.is_due() is True
 
+    def test_circuit_breaker_auto_recovers_after_cooldown(self):
+        """Audit HB-8: an open breaker enters half-open and allows a trial run
+        once the cooldown elapses, instead of staying open until a manual reset."""
+        check = DummyCheck()
+        for _ in range(check.max_failures):
+            check.mark_failure()
+        assert check.is_due() is False  # open, still within cooldown
+        # Simulate the cooldown having elapsed.
+        check._breaker_opened_at = datetime.now(UTC) - timedelta(
+            seconds=check.breaker_cooldown_seconds + 1
+        )
+        assert check.is_due() is True  # half-open trial permitted
+        # A successful trial closes the breaker.
+        check.mark_success()
+        assert check.consecutive_failures == 0
+        assert check._breaker_opened_at is None
+
+    def test_circuit_breaker_reopens_on_failed_trial(self):
+        """Audit HB-8: a failed half-open trial re-arms the cooldown."""
+        check = DummyCheck()
+        for _ in range(check.max_failures):
+            check.mark_failure()
+        check._breaker_opened_at = datetime.now(UTC) - timedelta(
+            seconds=check.breaker_cooldown_seconds + 1
+        )
+        assert check.is_due() is True
+        check.mark_failure()  # trial fails again
+        assert check.is_due() is False  # cooldown re-armed, not due immediately
+
 
 # ===========================================================================
 # TestCheckRegistry — 8 tests
