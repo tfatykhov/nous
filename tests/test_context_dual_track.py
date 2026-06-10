@@ -125,16 +125,37 @@ class TestGraphPrimarySelection:
         )
         assert [p.id for p in selected] == [crit.id]
 
-    @pytest.mark.asyncio
-    async def test_body_format_respects_per_item_cap(self):
+    def test_body_over_cap_emits_stub_not_slice(self):
+        """Over-cap body emits a stub with mandatory-fetch pointer — not a tail-slice.
+
+        Progressive disclosure: a partial body is the anti-pattern (model rationalises
+        it as sufficient and never calls get_procedure). The stub is non-actionable.
+        """
         engine = self._engine(neighbors=[])
         long_proc = _make_procedure_detail("x").model_copy(
-            update={"description": "Z" * 5000}
+            update={"implementation_notes": ["Step: " + "A" * 2000, "Step: " + "B" * 2000]}
         )
         blocks = engine._format_procedure_bodies([long_proc], 200)
         assert len(blocks) == 1
-        assert blocks[0].count("Z") <= 200  # body truncated to the per-item cap
-        assert "get_procedure('x')" in blocks[0]  # pointer to the untruncated full skill
+        stub = blocks[0]
+        # Mandatory-fetch pointer present
+        assert "get_procedure('x')" in stub
+        # No body/step text in stub — stub is non-actionable
+        assert "AAAA" not in stub
+        assert "BBBB" not in stub
+        # Stub is short (no tail-slice of the 4000-char body)
+        assert len(stub) < 400
+
+    def test_body_under_cap_renders_fully(self):
+        """Body that fits the cap renders exactly as before — regression guard."""
+        engine = self._engine(neighbors=[])
+        proc = _make_procedure_detail("deploy-step")
+        blocks = engine._format_procedure_bodies([proc], 2500)
+        assert len(blocks) == 1
+        block = blocks[0]
+        assert "Step 1: investigate the cause" in block
+        assert "Step 2: apply the fix" in block
+        assert "get_procedure" not in block  # no stub pointer when body fits
 
     def test_non_skill_procedure_keeps_core_patterns_as_steps(self):
         # Auto-learned (K-line, no 'skill' tag) procedures store the executable

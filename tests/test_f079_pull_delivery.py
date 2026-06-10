@@ -272,6 +272,64 @@ class TestBuildSurfaces:
         assert "more not shown" in content  # omitted note present
 
     @pytest.mark.asyncio
+    async def test_catalog_two_pass_names_survive_description_strip(self):
+        """Two-pass degradation: descriptions are stripped before names are dropped.
+
+        When the char budget is tight but names still fit, ALL names must appear
+        (some as name-only rows without descriptions). A name disappearing from the
+        catalog means the model cannot call get_procedure for it — the anti-pattern.
+        """
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+        # 10 procedures with 200-char descriptions, tight 700-char budget.
+        # Full rows would overflow; name-only rows (≈15 chars each) should fit.
+        procs = [
+            ProcedureSummary(id=uuid4(), name=f"skill-{i}", domain="ops",
+                             description="D" * 200, activation_count=1,
+                             effectiveness=None, score=0.9)
+            for i in range(10)
+        ]
+        engine = self._engine(catalog_procs=procs, catalog_total=10,
+                              proc_catalog_enabled=True, proc_catalog_max_chars=700,
+                              proc_catalog_desc_chars=200)
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        # All 10 names must appear — descriptions degrade first
+        for i in range(10):
+            assert f"skill-{i}" in content, f"skill-{i} missing from catalog"
+        # Some descriptions were stripped (not all 200-char blobs can fit in 700 chars)
+        assert "D" * 200 not in content
+
+    @pytest.mark.asyncio
+    async def test_catalog_drops_rows_only_when_names_do_not_fit(self):
+        """Rows are dropped (with 'more not shown') only when name-only rows still overflow.
+
+        With an extremely tight budget that cannot even fit all name-only rows, some
+        rows are dropped — but the drop count is correct and the note is present.
+        """
+        from nous.heart.schemas import ProcedureSummary
+        from uuid import uuid4
+        # 20 procedures, budget so tight only ~3-4 name-only rows fit.
+        procs = [
+            ProcedureSummary(id=uuid4(), name=f"proc-longname-{i:02d}", domain="d",
+                             description="desc", activation_count=1,
+                             effectiveness=None, score=0.9)
+            for i in range(20)
+        ]
+        engine = self._engine(catalog_procs=procs, catalog_total=20,
+                              proc_catalog_enabled=True, proc_catalog_max_chars=500)
+        r = await self._build(engine)
+        content = next(s.content for s in r.sections if s.label == "Procedure Catalog")
+        rows = [ln for ln in content.splitlines() if ln.startswith("- ")]
+        # At least 1 row kept, fewer than 20 (budget too tight for all)
+        assert 1 <= len(rows) < 20
+        # The "more not shown" note must be present when rows are dropped
+        assert "more not shown" in content
+        # All shown rows are name-only (descriptions were stripped first)
+        for row in rows:
+            assert "desc" not in row
+
+    @pytest.mark.asyncio
     async def test_option_c_catalog_plus_critic_emits_slim_pointer(self):
         """Option C: with the catalog on, Critic's picks are a slim DYNAMIC pointer (names
         only) into the catalog — NOT a full Known Procedures re-listing (no content dup)."""
