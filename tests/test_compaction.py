@@ -650,6 +650,25 @@ class TestBulkResultPruning:
         compactor.prune_tool_results(messages)  # clear is a fixed point
         assert messages[1]["content"][0]["content"] == stub
 
+    def test_bash_timeout_with_echoed_command_marked_failed(self):
+        """codex post-review P2: the timeout message echoes the command, so
+        a timed-out inline script can be bulk-sized — it must get the
+        FAILED stub, not 'tool reported success'."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (
+            "Command timed out after 120s.\nCommand: python - <<'EOF'\n"
+            + "x = 1\n" * 120  # inline script body pushes it over threshold
+            + "EOF"
+        )
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
     def test_quoted_hint_text_does_not_classify(self):
         """Review 2026-06-10: Nous greps its own source/transcripts — a
         result QUOTING the hint strings (grep-style, no stub shape) must

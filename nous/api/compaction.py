@@ -648,15 +648,18 @@ class ConversationCompactor:
         # quoted hint text in grep-style output must not flag failure.
         if text.lstrip().startswith("[") and self._BULK_ERROR_HINT in text:
             return True
-        # The exit-code marker is emitted by bash_tool only
-        # (builtin_tools.py) — applying it tool-agnostically would misread
-        # e.g. fetched page content mentioning "Exit code: 1" (codex P2,
-        # round 10). The bash timeout message is NOT checked (review
-        # 2026-06-10): a real timeout result is ~100 chars — never bulk —
-        # so a timeout substring in a bulk result can only be quoted
-        # content, i.e. the branch could only ever false-positive.
+        # The exit-code and timeout markers are emitted by bash_tool only
+        # (builtin_tools.py) — applying them tool-agnostically would
+        # misread e.g. fetched page content mentioning "Exit code: 1"
+        # (codex P2, round 10).
         if tool_name != "bash":
             return False
+        # The timeout message echoes the command, so a timed-out INLINE
+        # script can be bulk-sized (codex post-review P2). startswith —
+        # the wrapper emits this as the very first characters — keeps
+        # quoted mentions in command output inert.
+        if text.startswith("Command timed out after"):
+            return True
         # Widened tail window: the exit-code line may be followed by the
         # SmartCompress marker line (codex round 9). The LAST exit-code
         # line wins (codex round 13): bash_tool now always appends the
