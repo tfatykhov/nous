@@ -51,11 +51,12 @@ list it explicitly. Brevity is NOT an excuse to drop a value.
 
 REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls or
 one bulk operation (a sweep, a batch of queries, a mass update) MUST be
-compressed to a single line stating the operation, its scale, and that
-it COMPLETED (e.g. "Ran 350 search queries across 7 weight ratios —
-COMPLETED; results saved to docs/results.json"). Never enumerate the
-individual operations, and never describe a completed bulk operation in
-a way that reads as a pending plan.
+compressed to a single line stating the operation, its scale, and its
+OUTCOME — COMPLETED or FAILED, as the tool results show (e.g. "Ran 350
+search queries across 7 weight ratios — COMPLETED; results saved to
+docs/results.json"). Never enumerate the individual operations, never
+describe a completed bulk operation in a way that reads as a pending
+plan, and never describe a failed one as completed.
 
 ## Format
 
@@ -109,9 +110,10 @@ RULES:
 6. Use SAME format as existing summary
 7. REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls
    or one bulk operation MUST be compressed to a single line stating
-   the operation, its scale, and that it COMPLETED. Never enumerate
-   the individual operations, and never describe a completed bulk
-   operation in a way that reads as a pending plan.
+   the operation, its scale, and its OUTCOME — COMPLETED or FAILED, as
+   the tool results show. Never enumerate the individual operations,
+   never describe a completed bulk operation in a way that reads as a
+   pending plan, and never describe a failed one as completed.
 
 Output ONLY the updated summary."""
 
