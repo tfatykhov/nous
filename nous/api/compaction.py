@@ -576,9 +576,13 @@ class ConversationCompactor:
     # not semantic success — a clean exit can hide internal partial failures.
     # "(tool reported success)" (codex round 7) keeps the reported outcome
     # visible at the degrade stage so checkpoint summaries can mirror it.
+    # "to redo completed work" (codex final P1): bash/run_python also serve
+    # retrieval (cat/grep of large files) — the anti-replay instruction must
+    # forbid REDOING the operation, not legitimate re-fetching of output
+    # that is needed again.
     _BULK_HINT = (
         "bulk operation already ran earlier (tool reported success) — "
-        "do NOT re-run it"
+        "do NOT re-run it to redo completed work"
     )
     # codex P1: a failed sweep must not be stamped as completed — that would
     # suppress a legitimate retry and corrupt later summaries.
@@ -702,8 +706,9 @@ class ConversationCompactor:
         return (
             f"[Bulk tool output cleared — this {name} operation already ran "
             f"in an earlier turn and its output was processed then. "
-            f"{self._BULK_HINT} — work from its saved results or the earlier "
-            f"conversation instead.]"
+            f"{self._BULK_HINT}; re-run it only if you genuinely need its "
+            f"output again — otherwise work from its saved results or the "
+            f"earlier conversation.]"
         )
 
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
