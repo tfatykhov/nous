@@ -914,11 +914,21 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             lines = [f"Recent episodes (last {hours}h):"]
             for e in episodes:
-                title = e.title or (e.summary[:60] if e.summary else "Untitled")
+                # Prefer the summarizer's output over the legacy columns —
+                # mirrors recall_deep's COALESCE(structured_summary->>'summary',
+                # summary). For un-summarized episodes the legacy `summary` is
+                # the raw creation-time echo (often the first user message);
+                # the title-line marker keeps it from masquerading as a
+                # produced summary (short echoes BECOME the title, so a
+                # body-line suffix would not always be visible).
+                structured = e.structured_summary or {}
+                body = structured.get("summary") or e.summary
+                title = structured.get("title") or e.title or (body[:60] if body else "Untitled")
+                marker = "" if structured.get("summary") else " (unsummarized)"
                 time_str = e.started_at.strftime("%b %d %H:%M")
-                lines.append(f"- [{time_str}] {title}")
-                if e.summary and e.summary != e.title:
-                    lines.append(f"  {e.summary[:150]}")
+                lines.append(f"- [{time_str}] {title}{marker}")
+                if body and body != title:
+                    lines.append(f"  {body[:150]}")
 
             return {"content": [{"type": "text", "text": "\n".join(lines)}]}
 
