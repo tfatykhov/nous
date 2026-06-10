@@ -688,6 +688,39 @@ class TestBulkResultPruning:
         assert "Bulk tool output cleared" not in text
         assert "FAILED in" not in text
 
+    def test_run_python_direct_error_marked_failed(self):
+        """codex post-review P1: run_python's handler returns
+        'Error: <Type>: <msg>' as the ENTIRE result with is_error=False —
+        a long exception message can be bulk-sized and must get the
+        FAILED stub."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "Error: RuntimeError: " + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    def test_quoted_smartcompress_marker_not_trusted(self):
+        """codex post-review P2: a grep-style result QUOTING a SmartCompress
+        marker (file:line prefix breaks the line anchor) must not be
+        classified bulk off the quoted size."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (
+            "logs/old.txt:3: [SmartCompressed: 5→2 lines, "
+            "999999 chars original]"
+        )  # < 500 chars, marker quoted with prefix
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+
     def test_run_python_content_failures_not_sniffed_pin(self):
         """PIN (review 2026-06-10, documents a deliberate limitation):
         run_python reports its own failures as SHORT 'Error: ...' text

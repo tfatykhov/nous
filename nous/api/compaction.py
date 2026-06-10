@@ -557,13 +557,20 @@ class ConversationCompactor:
     # per-tool profiles it dominates context for many turns and the model
     # replays the completed operation. Bulk results escalate to the 'bulk'
     # profile and their degrade/clear stubs carry explicit anti-replay text.
+    # Both size markers are LINE-anchored (codex post-review P2): in real
+    # pruner input each marker occupies its own line, while QUOTED markers
+    # in grep-style output carry a file:line prefix — an unanchored match
+    # would trust a quoted "999999 chars original]" and misclassify a short
+    # result as bulk.
     _TRIM_MARKER_RE = re.compile(
-        r"--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---"
+        r"^--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---\s*$",
+        re.MULTILINE,
     )
     # codex round 13: SmartCompress records the pre-compression size in its
     # marker (smart_compress.py) so the bulk threshold still applies.
     _SMARTCOMPRESS_CHARS_RE = re.compile(
-        r"\[SmartCompressed:[^\]]*?(\d+) chars original\]"
+        r"^\[SmartCompressed:[^\]\n]*?(\d+) chars original\]\s*$",
+        re.MULTILINE,
     )
     # Outcome-neutral (codex round 5): "already ran" asserts only execution,
     # not semantic success — a clean exit can hide internal partial failures.
@@ -648,6 +655,13 @@ class ConversationCompactor:
         # quoted hint text in grep-style output must not flag failure.
         if text.lstrip().startswith("[") and self._BULK_ERROR_HINT in text:
             return True
+        # run_python reports direct execution failures as its ENTIRE
+        # result — "Error: <Type>: <msg>" (tools.py run_python handler)
+        # with is_error=False, and a long exception message can be
+        # bulk-sized (codex post-review P1). startswith on the full result
+        # keeps "Error:" lines printed mid-output inert.
+        if tool_name == "run_python":
+            return text.startswith("Error: ")
         # The exit-code and timeout markers are emitted by bash_tool only
         # (builtin_tools.py) — applying them tool-agnostically would
         # misread e.g. fetched page content mentioning "Exit code: 1"
