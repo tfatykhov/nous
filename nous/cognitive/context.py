@@ -1538,12 +1538,31 @@ class ContextEngine:
                 # A non-actionable stub forces the model to call get_procedure before acting.
                 # (A tail-sliced partial body is the anti-pattern — the model rationalizes it
                 # as sufficient and never fetches the rest.)
-                stub_parts: list[str] = [f"### {name} ({domain})"]
-                if desc:
-                    stub_parts.append(desc)
-                stub_parts.append(
-                    f"[Full skill body exceeds preview budget — call get_procedure('{name}') to load the steps before acting.]"
+                heading = f"### {name} ({domain})"
+                pointer = (
+                    f"[Full skill body exceeds preview budget — "
+                    f"call get_procedure('{name}') to load the steps before acting.]"
                 )
+                stub_parts: list[str] = [heading]
+                if desc:
+                    # Bound the description so the stub itself stays within
+                    # per_item_cap (Codex P1 on #500: an over-cap description
+                    # would otherwise defeat the very cap the stub enforces and,
+                    # since the budget loop always admits the first block, could
+                    # swallow the whole procedure budget). Reserve room for the
+                    # heading, the fetch pointer, and the "\n\n" separators.
+                    sep = len("\n\n") * 2
+                    desc_budget = per_item_cap - len(heading) - len(pointer) - sep
+                    if desc_budget <= 0:
+                        # Pointer alone already fills the cap — drop the
+                        # description entirely; the fetch pointer is non-negotiable.
+                        desc = ""
+                    elif len(desc) > desc_budget:
+                        # reserve 1 char for the ellipsis so the stub stays within cap
+                        desc = desc[:desc_budget - 1].rstrip() + "…"
+                    if desc:
+                        stub_parts.append(desc)
+                stub_parts.append(pointer)
                 block = "\n\n".join(stub_parts)
             blocks.append(block)
         return blocks

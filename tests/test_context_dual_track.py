@@ -146,6 +146,26 @@ class TestGraphPrimarySelection:
         # Stub is short (no tail-slice of the 4000-char body)
         assert len(stub) < 400
 
+    def test_stub_bounds_oversized_description(self):
+        """Codex P1 (#500): an over-cap *description* must not let the stub itself
+        exceed per_item_cap. The description is truncated; the fetch pointer survives."""
+        engine = self._engine(neighbors=[])
+        cap = 200
+        long_desc = "D" * 5000  # description alone far exceeds the cap
+        proc = _make_procedure_detail("bigdesc").model_copy(
+            update={"description": long_desc,
+                    "implementation_notes": ["Step: " + "A" * 2000]}
+        )
+        blocks = engine._format_procedure_bodies([proc], cap)
+        assert len(blocks) == 1
+        stub = blocks[0]
+        # The stub stays within the cap it is meant to enforce
+        assert len(stub) <= cap
+        # The mandatory-fetch pointer is never sacrificed
+        assert "get_procedure('bigdesc')" in stub
+        # No body/step text leaked
+        assert "AAAA" not in stub
+
     def test_body_under_cap_renders_fully(self):
         """Body that fits the cap renders exactly as before — regression guard."""
         engine = self._engine(neighbors=[])
