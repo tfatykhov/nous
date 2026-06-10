@@ -377,6 +377,23 @@ def test_html_body_entity_encoded_secret_rejected(no_real_send):
     assert len(no_real_send) == 0
 
 
+def test_html_body_entity_encoded_attribute_secret_rejected(no_real_send):
+    """#484 codex P1: an entity-encoded secret INSIDE a tag attribute must be
+    caught — raw view sees it encoded, tag-stripping removes it before
+    decoding, so a decode-without-strip view is required."""
+    tool = create_send_email_tool(_make_settings())
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="newsletter",
+            body="plain text is clean",
+            html_body='<a href="https://x.example?key=sk-&#97;bcdEFGH1234567890zz">report</a>',
+        )
+    )
+    assert "secret" in _text(resp).lower()
+    assert len(no_real_send) == 0
+
+
 def test_html_body_attribute_secret_still_rejected(no_real_send):
     """#484 regression guard: a secret inside a tag attribute (stripped from
     the rendered text) must still be caught via the raw-HTML scan."""

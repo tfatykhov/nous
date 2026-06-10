@@ -265,12 +265,17 @@ def create_send_email_tool(settings: Settings):
                     "(operator action)."
                 )
 
-        # 3. Secret scan (secondary guard). html_body is scanned twice: raw
-        # source (catches secrets inside tag attributes, which tag-stripping
-        # would remove) AND entity-decoded text (#484 — catches secrets a
-        # mail client would render from entity-encoded source).
-        html_text = _html_to_text(html_body) if html_body else ""
-        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}\n{html_text}"):
+        # 3. Secret scan (secondary guard). html_body is scanned in three
+        # views (#484): raw source (secrets in tag attributes), entity-decoded
+        # source (codex P1 — encoded secrets *inside* attributes, which
+        # tag-stripping would remove before decoding), and tag-stripped +
+        # decoded text (secrets a mail client renders from encoded content).
+        html_views = (
+            f"\n{html.unescape(html_body)}\n{_html_to_text(html_body)}"
+            if html_body
+            else ""
+        )
+        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}{html_views}"):
             return _error(
                 "email appears to contain a secret (API key, password, or token); "
                 "refusing to send."
