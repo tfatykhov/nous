@@ -140,10 +140,16 @@ class HeartbeatTuner:
         max_step = param_range * 0.1
         step = min(step, max_step)
 
+        # Direction semantics: relax = fewer findings, tighten = more.
+        # For sensitivity thresholds that is +step / -step; for volume
+        # params (increases_findings=True: lookback windows, item caps)
+        # the sign inverts — raising them produces MORE findings.
+        if param.increases_findings:
+            step = -step
         if direction == "relax":
-            new_val = old_val + step  # relax = increase threshold
+            new_val = old_val + step
         elif direction == "tighten":
-            new_val = old_val - step  # tighten = decrease threshold
+            new_val = old_val - step
         else:
             return (old_val, old_val)
 
