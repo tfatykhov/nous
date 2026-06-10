@@ -24,6 +24,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class DynamicCheckLimitReached(ValueError):
+    """Raised when the max-concurrent dynamic-check count is reached.
+
+    Audit DG-4 (review follow-up): a dedicated type (ValueError subclass for
+    backward-compat) so the DAG orchestrator can DEFER a check node on this
+    transient condition instead of failing it permanently — mirrors
+    heart.subtasks.SubtaskQueueFull on the subtask path.
+    """
+
 # Tools allowed for dynamic checks.
 # Note: bash is included per spec but could execute arbitrary commands;
 # check creation is restricted to admin/conversation so risk is accepted.
@@ -360,7 +370,9 @@ class DynamicCheckLoader:
         # Check max count
         current_count = len(self._loaded_ids)
         if current_count >= self._max_checks:
-            raise ValueError(f"Maximum of {self._max_checks} dynamic checks reached")
+            raise DynamicCheckLimitReached(
+                f"Maximum of {self._max_checks} dynamic checks reached"
+            )
 
         # Validate cron expression
         if cron_expr:

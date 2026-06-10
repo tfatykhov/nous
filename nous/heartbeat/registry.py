@@ -53,9 +53,19 @@ class BaseCheck(ABC):
             # Circuit breaker open — HB-8: allow a single half-open trial once
             # the cooldown has elapsed. mark_success() closes it; mark_failure()
             # re-arms the cooldown for another attempt later.
-            if self._breaker_opened_at is None:
+            #
+            # Review follow-up: derive the open time lazily from last_run when
+            # _breaker_opened_at is unset. _breaker_opened_at is in-memory only,
+            # so a DynamicCheckLoader re-sync (which copies consecutive_failures
+            # + last_run onto a fresh object but not _breaker_opened_at) would
+            # otherwise leave the breaker open with no timestamp -> permanently
+            # not-due, re-introducing the exact bug HB-8 fixed for dynamic
+            # checks. Falling back to last_run also covers any future
+            # restore-from-persistence path.
+            opened_at = self._breaker_opened_at or self.last_run
+            if opened_at is None:
                 return False
-            open_for = (now - self._breaker_opened_at).total_seconds()
+            open_for = (now - opened_at).total_seconds()
             return open_for >= self.breaker_cooldown_seconds
         if self.last_run is None:
             return True

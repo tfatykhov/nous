@@ -346,13 +346,57 @@ class WorkQueueCheck(BaseCheck):
                 check_name=self.name,
             ))
             return False
-        findings.append(Finding(
-            source=self._adapter.source_name,
-            summary=f"Dispatched work-queue item {item.external_id} as DAG {dag.id}",
-            urgency="low",
-            check_name=self.name,
-        ))
+        # Audit DG-6 (2026-06-09): actually START the DAG. create() only
+        # persists it as `pending`; without start_dag the DAG idled until the
+        # orchestrator's stale-pending sweep rescued it (~300s+). The item is
+        # already linked via mark_dispatched, so a start failure degrades to
+        # the recovery sweep — but we surface that via the Finding rather than
+        # emitting a green "Dispatched" that would mask a systemic all-start-
+        # failing incident as healthy (review P2).
+        started = await self._safe_start_dag(dag.id)
+        findings.append(self._dispatch_finding(item, dag.id, started))
         return True
+
+    def _dispatch_finding(self, item: WorkItem, dag_id, started: bool) -> Finding:
+        if started:
+            return Finding(
+                source=self._adapter.source_name,
+                summary=f"Dispatched work-queue item {item.external_id} as DAG {dag_id}",
+                urgency="low",
+                check_name=self.name,
+            )
+        return Finding(
+            source=self._adapter.source_name,
+            summary=(
+                f"Work-queue item {item.external_id}: DAG {dag_id} created but "
+                f"failed to start; awaiting orchestrator recovery sweep"
+            ),
+            urgency="normal",
+            check_name=self.name,
+        )
+
+    async def _safe_start_dag(self, dag_id) -> bool:
+        """Start a freshly-created DAG. Returns True on success (DG-6).
+
+        The item is already linked to the DAG, so a start failure is non-fatal:
+        the orchestrator's recovery sweep promotes the still-`pending` DAG on a
+        later tick. We return the outcome so the caller can surface a real
+        failure instead of reporting a green dispatch.
+        """
+        try:
+            await self._orchestrator.start_dag(dag_id)
+            return True
+        except ValueError as e:
+            # Expected benign race: the recovery sweep (or a concurrent tick)
+            # already moved this DAG out of 'pending'. Not an error.
+            logger.debug("start_dag(%s) no-op (already started): %s", dag_id, e)
+            return True
+        except Exception:
+            logger.exception(
+                "F064.6/DG-6: start_dag failed for %s; recovery sweep will promote it",
+                dag_id,
+            )
+            return False
 
     async def _reconcile_orphan(
         self, row_id, item: WorkItem, findings: list[Finding]
@@ -394,12 +438,25 @@ class WorkQueueCheck(BaseCheck):
                 check_name=self.name,
             ))
             return False
-        findings.append(Finding(
-            source=self._adapter.source_name,
-            summary=f"Reconciler dispatched orphan {item.external_id} as DAG {dag.id}",
-            urgency="low",
-            check_name=self.name,
-        ))
+        # DG-6: start the recovered DAG (see _claim_and_dispatch).
+        started = await self._safe_start_dag(dag.id)
+        if started:
+            findings.append(Finding(
+                source=self._adapter.source_name,
+                summary=f"Reconciler dispatched orphan {item.external_id} as DAG {dag.id}",
+                urgency="low",
+                check_name=self.name,
+            ))
+        else:
+            findings.append(Finding(
+                source=self._adapter.source_name,
+                summary=(
+                    f"Reconciler: orphan {item.external_id} DAG {dag.id} created "
+                    f"but failed to start; awaiting recovery sweep"
+                ),
+                urgency="normal",
+                check_name=self.name,
+            ))
         return True
 
     async def _handle_terminal(

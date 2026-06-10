@@ -87,10 +87,12 @@ _DAILY_RE = re.compile(
     r"daily\s+at\s+(\d{1,2})\s*(am|pm)(?:\s+([\w/]+))?", re.IGNORECASE
 )
 
-# "every monday at 10am", "every friday at 3pm"
+# "every monday at 10am", "every friday at 3pm EST"
+# Audit HD-5 (review follow-up): weekly schedules accept an optional timezone
+# token too (group 4), routed through _local_hour_to_utc like the daily path.
 _WEEKLY_RE = re.compile(
     r"every\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
-    r"\s+at\s+(\d{1,2})\s*(am|pm)",
+    r"\s+at\s+(\d{1,2})\s*(am|pm)(?:\s+([\w/]+))?",
     re.IGNORECASE,
 )
 
@@ -189,7 +191,12 @@ def parse_every(every: str) -> tuple[int | None, str | None]:
         day_name = m.group(1).lower()
         hour = int(m.group(2))
         ampm = m.group(3)
-        h24 = _to_24h(hour, ampm)
+        tz_token = m.group(4)
+        # HD-5 (review follow-up): convert the wall-clock hour in the named tz
+        # to UTC, same as the daily path. The day-of-week is NOT shifted across
+        # midnight here — a tz offset that pushes the time past midnight would
+        # also move the weekday; this is an accepted v1 limitation (documented).
+        h24 = _local_hour_to_utc(_to_24h(hour, ampm), tz_token)
         dow = _DOW_MAP[day_name]
         cron = f"0 {h24} * * {dow}"
         if not croniter.is_valid(cron):

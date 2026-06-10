@@ -17,6 +17,16 @@ _PRIORITY_MAP = {"urgent": 50, "normal": 100, "low": 200}
 _MAX_PENDING = 5
 
 
+class SubtaskQueueFull(ValueError):
+    """Raised when the pending-subtask limit is reached.
+
+    Audit DG-4 (2026-06-09): a dedicated type (subclass of ValueError for
+    backward-compat with callers that ``except ValueError``) so the DAG
+    orchestrator can distinguish transient queue congestion — which should
+    DEFER a node — from a genuine launch failure, which fails it.
+    """
+
+
 class SubtaskManager:
     """Manages the subtask queue in heart.subtasks."""
 
@@ -53,7 +63,7 @@ class SubtaskManager:
                 .where(Subtask.status == "pending")
             )
             if count >= _MAX_PENDING:
-                raise ValueError(
+                raise SubtaskQueueFull(
                     f"pending subtask limit ({_MAX_PENDING}) reached"
                 )
 
@@ -141,12 +151,24 @@ class SubtaskManager:
             values["payload_schema_valid"] = payload_schema_valid
 
         async with self._db.session() as session:
-            await session.execute(
+            # Audit DG-2/HT-4: do not resurrect an already-terminal row. A
+            # subtask cancelled mid-flight (or already completed/failed by
+            # another path) must stay terminal — a stale worker finishing its
+            # in-flight execution must not overwrite 'cancelled' with
+            # 'completed'. Guard the UPDATE on a non-terminal current status.
+            result = await session.execute(
                 update(Subtask)
                 .where(Subtask.id == subtask_id)
+                .where(Subtask.status.notin_(("cancelled", "completed", "failed")))
                 .values(**values)
             )
             await session.commit()
+            if result.rowcount == 0:
+                logger.info(
+                    "Skipped completing subtask %s — already terminal (e.g. cancelled)",
+                    subtask_id.hex[:8],
+                )
+                return
             # F061: include outcome in log so operators can grep for the new
             # 5-state enum (completed / incomplete_blocked / ...). Falls back
             # to the legacy message when no outcome was supplied.
@@ -195,12 +217,22 @@ class SubtaskManager:
             values["payload_schema_valid"] = payload_schema_valid
 
         async with self._db.session() as session:
-            await session.execute(
+            # Audit DG-2/HT-4: same terminal-state guard as complete() — a
+            # cancelled (or otherwise terminal) subtask must not be overwritten
+            # with 'failed' by a stale worker finishing its in-flight run.
+            result = await session.execute(
                 update(Subtask)
                 .where(Subtask.id == subtask_id)
+                .where(Subtask.status.notin_(("cancelled", "completed", "failed")))
                 .values(**values)
             )
             await session.commit()
+            if result.rowcount == 0:
+                logger.info(
+                    "Skipped failing subtask %s — already terminal (e.g. cancelled)",
+                    subtask_id.hex[:8],
+                )
+                return
             if final_outcome is not None:
                 logger.warning(
                     "Failed subtask %s outcome=%s: %s",
@@ -210,18 +242,27 @@ class SubtaskManager:
                 logger.warning("Failed subtask %s: %s", subtask_id.hex[:8], error)
 
     async def cancel(self, subtask_id: UUID) -> bool:
-        """Cancel a pending subtask. Returns False if not pending.
+        """Cancel a pending OR running subtask. Returns False if already terminal.
+
+        Audit DG-2 (2026-06-09): previously only ``status == 'pending'`` rows
+        could be cancelled, so cancelling a DAG / stall-teardown / budget
+        teardown left a RUNNING subtask executing — leaking a worker and tokens
+        with no way to stop it. Cancellation now flips a running row to
+        'cancelled' immediately, making it terminal for DAG accounting; the
+        in-flight worker is bounded by the subtask timeout and its eventual
+        complete()/fail() is a no-op thanks to the terminal-state guard there.
+        (The worker is not asyncio-cancelled mid-call — true preemption is a
+        deeper enhancement; this bounds the leak rather than eliminating it.)
 
         F061 round 4 P2-E: also sets ``final_outcome='cancelled'`` so the
         dashboard's outcome card distinguishes user-cancelled rows from
-        legacy pre-flag NULL rows (which bucket as 'unknown'). Without
-        this, both classes blended together as 'unknown'.
+        legacy pre-flag NULL rows (which bucket as 'unknown').
         """
         async with self._db.session() as session:
             result = await session.execute(
                 update(Subtask)
                 .where(Subtask.id == subtask_id)
-                .where(Subtask.status == "pending")
+                .where(Subtask.status.in_(("pending", "running")))
                 .values(
                     status="cancelled",
                     final_outcome="cancelled",

@@ -1673,3 +1673,113 @@ class TestDAGCompletionStatus:
         await orch._check_dag_completion(dag)
         args, _ = store.update_dag_status.await_args
         assert args[1] == "failed"
+
+
+class TestSubtaskNodeDeferral:
+    """Audit DG-4: a full subtask queue must DEFER a node, not fail it."""
+
+    def _node(self):
+        return SimpleNamespace(
+            id=uuid.uuid4(), name="work", status="ready", node_type="subtask",
+            subtask_id=None, frame_type="task", model=None, timeout_seconds=600,
+            instructions="do the thing", tools=None, last_activity_at=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_queue_full_defers_node_to_pending(self):
+        from nous.heart.subtasks import SubtaskQueueFull
+
+        store = AsyncMock()
+        subtask_mgr = AsyncMock()
+        subtask_mgr.create.side_effect = SubtaskQueueFull("pending subtask limit (5) reached")
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=AsyncMock(), settings=Settings(),
+        )
+        node = self._node()
+        dag = SimpleNamespace(id=uuid.uuid4(), nodes=[node], edges=[])
+
+        await orch._launch_subtask_node(node, dag)
+
+        # Deferred, NOT failed.
+        assert node.status == "pending"
+        statuses = [
+            kw.get("status") for (_a, kw) in store.update_node.await_args_list
+        ]
+        assert "pending" in statuses
+        assert "failed" not in statuses
+
+    @pytest.mark.asyncio
+    async def test_real_launch_error_still_fails_node(self):
+        store = AsyncMock()
+        subtask_mgr = AsyncMock()
+        subtask_mgr.create.side_effect = RuntimeError("boom")
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=AsyncMock(), settings=Settings(),
+        )
+        node = self._node()
+        dag = SimpleNamespace(id=uuid.uuid4(), nodes=[node], edges=[])
+
+        await orch._launch_subtask_node(node, dag)
+
+        assert node.status == "failed"
+        statuses = [
+            kw.get("status") for (_a, kw) in store.update_node.await_args_list
+        ]
+        assert "failed" in statuses
+
+    @pytest.mark.asyncio
+    async def test_check_pool_full_defers_node(self):
+        """Audit DG-4 (review follow-up): a full dynamic-check pool defers the
+        check node, it does not permanently fail it."""
+        from nous.heartbeat.dynamic import DynamicCheckLimitReached
+
+        store = AsyncMock()
+        loader = AsyncMock()
+        loader.create_check.side_effect = DynamicCheckLimitReached("Maximum reached")
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=AsyncMock(),
+            dynamic_loader=loader, settings=Settings(),
+        )
+        node = SimpleNamespace(
+            id=uuid.uuid4(), name="chk", status="ready", node_type="check",
+            description="d", instructions="run the check", tools=None,
+            timeout_seconds=300,
+        )
+        dag = SimpleNamespace(id=uuid.uuid4(), nodes=[node], edges=[])
+
+        await orch._launch_check_node(node, dag)
+
+        assert node.status == "pending"
+        statuses = [kw.get("status") for (_a, kw) in store.update_node.await_args_list]
+        assert "pending" in statuses
+        assert "failed" not in statuses
+
+    @pytest.mark.asyncio
+    async def test_deferral_cap_eventually_fails_node(self):
+        """Audit review P2: a node that keeps hitting a saturated queue is
+        failed (with a clear error) after the backstop cap, not bounced forever."""
+        from nous.heart.subtasks import SubtaskQueueFull
+
+        store = AsyncMock()
+        subtask_mgr = AsyncMock()
+        subtask_mgr.create.side_effect = SubtaskQueueFull("full")
+        orch = DAGOrchestrator(
+            store=store, subtask_mgr=subtask_mgr,
+            dynamic_loader=AsyncMock(), settings=Settings(),
+        )
+        node = SimpleNamespace(
+            id=uuid.uuid4(), name="work", status="ready", node_type="subtask",
+            subtask_id=None, frame_type="task", model=None, timeout_seconds=600,
+            instructions="x", tools=None, last_activity_at=None,
+        )
+        dag = SimpleNamespace(id=uuid.uuid4(), nodes=[node], edges=[])
+
+        for _ in range(orch._MAX_DEFERRALS):
+            await orch._launch_subtask_node(node, dag)
+
+        assert node.status == "failed"
+        # final update carries an explanatory error mentioning saturation
+        errors = [kw.get("error") for (_a, kw) in store.update_node.await_args_list]
+        assert any(e and "saturated" in e for e in errors)

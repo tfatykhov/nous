@@ -2282,7 +2282,11 @@ Rules:
         can't unsend yielded text. Both paths use inject-correction-for-next-turn.
         Accepted limitation from plan review.
         """
-        turn_tool_names = [tr.tool_name for tr in tool_results]
+        # Audit CL-4 (2026-06-09, review follow-up): only SUCCESSFUL tool calls
+        # this turn can ground an action claim. A blocked/errored bash or
+        # web_fetch must not let "I pushed the code" verify — mirrors the
+        # ledger-side status filter in ClaimVerifier.verify.
+        turn_tool_names = [tr.tool_name for tr in tool_results if tr.error is None]
 
         # Claim verification
         if self._claim_verifier:

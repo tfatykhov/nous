@@ -14,6 +14,8 @@ from uuid import UUID
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.store import DAGStore
+from nous.heart.subtasks import SubtaskQueueFull
+from nous.heartbeat.dynamic import DynamicCheckLimitReached
 from nous.storage.models import DAGNode, ExecutionDAG
 
 if TYPE_CHECKING:
@@ -82,6 +84,44 @@ class DAGOrchestrator:
         # Phase 1 behavior).
         self._llm_client = llm_client
         self._lock = asyncio.Lock()
+        # Audit DG-4 (review P2): in-memory per-node deferral counter so a node
+        # that keeps hitting a saturated subtask/check pool can't bounce
+        # ready<->pending forever invisibly (a perpetually-pending node never
+        # enters 'running', so stall detection never fires). After the cap it
+        # fails with a clear error. Counts reset on a successful launch and on
+        # process restart (a benign backstop reset).
+        self._defer_counts: dict = {}
+
+    # Backstop: ~this many consecutive deferrals (ticks) of a saturated pool
+    # before a node is failed rather than deferred again.
+    _MAX_DEFERRALS = 30
+
+    async def _defer_node(self, node: DAGNode, dag: ExecutionDAG, reason: str) -> None:
+        """Demote a node to 'pending' on transient resource saturation, with a
+        backstop cap (DG-4 / review P2) so a never-draining pool surfaces as a
+        failure instead of an invisible infinite ready<->pending bounce."""
+        count = self._defer_counts.get(node.id, 0) + 1
+        self._defer_counts[node.id] = count
+        if count >= self._MAX_DEFERRALS:
+            self._defer_counts.pop(node.id, None)
+            await self._store.update_node(
+                node.id,
+                status="failed",
+                error=f"{reason} — still saturated after {count} deferrals",
+            )
+            node.status = "failed"
+            logger.warning(
+                "DAG %s node %s FAILED after %d deferrals: %s",
+                dag.id, node.name, count, reason,
+            )
+            return
+        await self._store.update_node(node.id, status="pending")
+        node.status = "pending"
+        log = logger.warning if count >= 10 else logger.info
+        log(
+            "Deferring node %s in DAG %s (attempt %d) — %s; retry next tick",
+            node.name, dag.id, count, reason,
+        )
 
     async def tick(self) -> int:
         """Advance all active DAGs. Returns number of DAGs processed.
@@ -1240,10 +1280,20 @@ class DAGOrchestrator:
             )
             node.status = "running"
             node.last_activity_at = now
+            self._defer_counts.pop(node.id, None)  # launched — clear backstop
             logger.info(
                 "Launched subtask %s for node %s in DAG %s",
                 subtask.id, node.name, dag.id,
             )
+        except SubtaskQueueFull:
+            # Audit DG-4 (2026-06-09): transient subtask-queue congestion must
+            # DEFER the node, not fail it (mirrors the F064.2 frame-cap
+            # deferral). Previously the pending-limit ValueError fell into the
+            # generic handler below and permanently failed the node — and
+            # cascaded failure to all its dependents — on a momentarily full
+            # queue that would have drained as workers completed. The backstop
+            # cap in _defer_node converts an endless bounce into a clear failure.
+            await self._defer_node(node, dag, "subtask queue full")
         except Exception as e:
             await self._store.update_node(
                 node.id, status="failed", error=str(e)
@@ -1283,10 +1333,16 @@ class DAGOrchestrator:
                 started_at=datetime.now(UTC),
             )
             node.status = "running"
+            self._defer_counts.pop(node.id, None)  # launched — clear backstop
             logger.info(
                 "Launched check '%s' for node %s in DAG %s",
                 check_name, node.name, dag.id,
             )
+        except DynamicCheckLimitReached:
+            # Audit DG-4 (review follow-up): the dynamic-check pool being full
+            # is transient, exactly like SubtaskQueueFull on the subtask path.
+            # Defer the node instead of permanently failing it + its dependents.
+            await self._defer_node(node, dag, "dynamic check pool full")
         except Exception as e:
             await self._store.update_node(
                 node.id, status="failed", error=str(e)

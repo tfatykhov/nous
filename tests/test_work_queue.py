@@ -305,6 +305,25 @@ class TestWorkQueueCheckRun:
         assert second_dispatch == 0
 
     @pytest.mark.asyncio
+    async def test_dispatch_starts_the_dag(
+        self, tmp_path, settings_wq_on, db
+    ):
+        """Audit DG-6: a dispatched work-queue DAG is actually started
+        (start_dag), not left 'pending' until the orchestrator recovery sweep."""
+        path = tmp_path / "queue.jsonl"
+        path.write_text(json.dumps({"external_id": "s1", "body": "task"}))
+        agent = f"test-wq-start-{uuid.uuid4().hex[:8]}"
+        items_mgr = WorkQueueItemManager(db, agent)
+        store = DAGStore(db, agent, settings_wq_on)
+        mock_orch = AsyncMock()  # capture start_dag without running real nodes
+        check = _make_check(
+            FileJsonlAdapter(str(path)), items_mgr, store, mock_orch, settings_wq_on,
+        )
+        result = await check.run()
+        assert any("Dispatched" in f.summary for f in result.findings)
+        mock_orch.start_dag.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_admission_cap_defers_excess(
         self, tmp_path, settings_wq_on, db
     ):
