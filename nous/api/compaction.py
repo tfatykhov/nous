@@ -107,6 +107,11 @@ RULES:
 4. UPDATE Conversation Dynamics with new signals
 5. PRESERVE exact file paths, function names, error messages
 6. Use SAME format as existing summary
+7. REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls
+   or one bulk operation MUST be compressed to a single line stating
+   the operation, its scale, and that it COMPLETED. Never enumerate
+   the individual operations, and never describe a completed bulk
+   operation in a way that reads as a pending plan.
 
 Output ONLY the updated summary."""
 
@@ -635,12 +640,13 @@ class ConversationCompactor:
                         tool_name = block.get("name")
                         break
 
-            profile_name = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
+            base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
             # #179: size escalation — bulk results decay on (1, 2, 4)
-            # regardless of which tool produced them.
+            # regardless of which tool produced them. base_profile keeps
+            # driving conservative-tool fact extraction (codex P1: a bulk
+            # web_fetch must still have its URLs/paths extracted at clear).
             is_bulk = self._is_bulk_result(content)
-            if is_bulk:
-                profile_name = "bulk"
+            profile_name = "bulk" if is_bulk else base_profile
             _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
                 profile_name, (3, 8, 12)
             )
@@ -652,7 +658,8 @@ class ConversationCompactor:
                         continue
                     text = item.get("content", "")
                     # Extract facts from conservative tools before clearing
-                    if isinstance(text, str) and text and profile_name == "conservative":
+                    # (checks base_profile so bulk escalation can't skip it).
+                    if isinstance(text, str) and text and base_profile == "conservative":
                         extracted.extend(self._extract_facts_before_clear(tool_name or "unknown", text))
                     if is_bulk:
                         # #179: anti-replay stub — the generic cleared text

@@ -407,6 +407,30 @@ class TestBulkResultPruning:
         assert "Bulk tool output cleared" not in text
         assert "--- trimmed" in text  # plain soft-trim only
 
+    def test_bulk_conservative_tool_still_extracts_facts(self):
+        """codex P1: a bulk web_fetch result still gets its facts extracted
+        at hard-clear — bulk escalation changes the ages, not the
+        conservative-tool extraction."""
+        compactor = ConversationCompactor(_bulk_settings())
+        bulk_content = "see https://example.com/report plus " + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("web_fetch", bulk_content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
+        extracted = compactor.prune_tool_results(messages)
+        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+        assert any("example.com" in f for f in extracted)
+
+    def test_repetitive_ops_rule_in_both_prompts(self):
+        """codex P2: the #179 compression rule must be in BOTH the checkpoint
+        and the update summarization prompts — updates run on every
+        compaction after the first."""
+        from nous.api.compaction import CHECKPOINT_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT
+
+        for prompt in (CHECKPOINT_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT):
+            assert "REPETITIVE OPERATIONS RULE" in prompt
+            assert "COMPLETED" in prompt
+
 
 # ------------------------------------------------------------------
 # Extract Text Tests
