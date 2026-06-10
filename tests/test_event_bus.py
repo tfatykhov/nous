@@ -61,6 +61,10 @@ def _mock_settings(**overrides) -> MagicMock:
     s.sleep_enabled = True
     s.transcript_max_chars = 16000
     s.fact_dedup_threshold = 0.92
+    # Bare-MagicMock footgun: episode_chunks_enabled would return a truthy
+    # Mock, sending the summarizer into the F067 chunking path with Mock
+    # numeric settings (TypeError in chunk_text).
+    s.episode_chunks_enabled = False
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -435,12 +439,25 @@ class TestEpisodeSummarizer:
 
         # Long transcript gets chunked — at least one LLM call should have been made
         assert len(captured_payloads) >= 1
-        # Each chunk's transcript portion in the prompt should be within budget
+        # Each chunk's TRANSCRIPT slice must be within the 8000-char budget.
+        # Measured by extracting the slice between the prompt's template
+        # anchors ("Transcript:" .. the faithfulness rule) and asserting its
+        # FULL length (labels + separators included — codex P2 on PR #509),
+        # rather than total prompt length: the old
+        # `len(prompt) < len(transcript)` bound coupled the assertion to the
+        # template size and broke whenever the summary prompt grew (#506).
         for payload in captured_payloads:
             user_msg = payload["messages"][0]["content"]
             if isinstance(user_msg, list):
                 user_msg = user_msg[0]["text"]
-            assert len(user_msg) < len(long_transcript)
+            assert "Transcript:" in user_msg
+            transcript_slice = user_msg.split("Transcript:", 1)[1].split(
+                "CRITICAL FAITHFULNESS RULE", 1
+            )[0]
+            # strip() removes the fixed surrounding template newlines, so
+            # the budget can be asserted EXACTLY (codex round 3) — any
+            # over-budget chunk fails.
+            assert len(transcript_slice.strip()) <= 8000
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
