@@ -16,6 +16,7 @@ return only a generic ``email send failed: <ExceptionType>`` to the model.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -103,6 +104,41 @@ def _read_allowlist_file(path: str, cache: dict[str, Any]) -> set[str]:
 def _scan_secrets(text: str) -> bool:
     """Return True if the text matches any known secret pattern."""
     return any(p.search(text) for p in _SECRET_PATTERNS)
+
+
+def _strip_tags(s: str) -> str:
+    """Single-pass, linear-time tag removal (codex P2 on #484).
+
+    The naive ``<[^>]+>`` regex rescans to end-of-string from every
+    unclosed ``<``, going quadratic on malformed HTML — and this runs
+    synchronously inside the async handler on an unbounded body. Tags
+    become a space. Text after an unclosed trailing ``<`` is dropped from
+    THIS view only; the raw and unescape-only views still scan it.
+    """
+    out: list[str] = []
+    in_tag = False
+    for ch in s:
+        if in_tag:
+            if ch == ">":
+                in_tag = False
+        elif ch == "<":
+            in_tag = True
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def _html_to_text(s: str) -> str:
+    """Strip HTML tags and decode entities for secret scanning (#484).
+
+    Mail clients render entity-encoded content (``sk-&#97;bcd...`` displays
+    as ``sk-abcd...``), so the scan must also see the decoded text. Tags are
+    replaced with a space; entities are decoded after tag-stripping so a
+    decoded ``&lt;`` cannot fabricate a tag. The raw HTML is still scanned
+    separately — this is an additional view, not a replacement.
+    """
+    return html.unescape(_strip_tags(s))
 
 
 def _normalize_paths(value: Any) -> list[str]:
@@ -252,8 +288,17 @@ def create_send_email_tool(settings: Settings):
                     "(operator action)."
                 )
 
-        # 3. Secret scan (secondary guard).
-        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}"):
+        # 3. Secret scan (secondary guard). html_body is scanned in three
+        # views (#484): raw source (secrets in tag attributes), entity-decoded
+        # source (codex P1 — encoded secrets *inside* attributes, which
+        # tag-stripping would remove before decoding), and tag-stripped +
+        # decoded text (secrets a mail client renders from encoded content).
+        html_views = (
+            f"\n{html.unescape(html_body)}\n{_html_to_text(html_body)}"
+            if html_body
+            else ""
+        )
+        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}{html_views}"):
             return _error(
                 "email appears to contain a secret (API key, password, or token); "
                 "refusing to send."
