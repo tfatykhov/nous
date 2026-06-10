@@ -353,12 +353,16 @@ class TestOrchestratorLLMDispatch:
         llm_client = MagicMock()
         llm_client.call = AsyncMock(return_value=_llm_response("skip_and_continue"))
 
-        # Default settings: flag is False.
+        # Flag explicitly OFF: the repo .env sets
+        # NOUS_DAG_FIX_LLM_DISPATCH_ENABLED=true (and a process-level
+        # export would survive _env_file=None — codex P2), which would
+        # turn this flag-OFF test into a flag-ON run (the mock's
+        # skip_and_continue then marks the parent 'skipped').
         orch = DAGOrchestrator(
             store=store,
             subtask_mgr=subtask_mgr,
             dynamic_loader=dynamic_loader,
-            settings=Settings(),
+            settings=Settings(_env_file=None, dag_fix_llm_dispatch_enabled=False),
             llm_client=llm_client,
         )
 

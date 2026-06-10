@@ -208,7 +208,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
         )
 
@@ -229,7 +229,7 @@ class TestCompact:
         conv = _make_conversation(2)
         messages = _make_messages(conv)
         try:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 compactor.compact(conv, messages, call_api=AsyncMock(), cut_point=0)
             )
             assert False, "Should have raised"
@@ -242,7 +242,7 @@ class TestCompact:
         messages = _make_messages(conv)
         messages.append({"role": "user", "content": "extra"})  # Misalign
         try:
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 compactor.compact(conv, messages, call_api=AsyncMock(), cut_point=2)
             )
             assert False, "Should have raised"
@@ -256,7 +256,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = AsyncMock(side_effect=RuntimeError("API down"))
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
         )
 
@@ -273,7 +273,7 @@ class TestCompact:
         # structured path return None and fall through.
         mock_api = _mock_call_api(summary_text="too short", with_tool_use=False)
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
         )
 
@@ -291,7 +291,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=12)
         )
 
@@ -316,7 +316,7 @@ class TestCompact:
         mock_api = _mock_call_api()
 
         # Cut at index 4 (only assistant message remains)
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=4)
         )
 
@@ -331,7 +331,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
         )
         assert conv.compaction_count == 1
@@ -356,7 +356,7 @@ class TestCompact:
         messages = _make_messages(conv)
         mock_api = _mock_call_api()
 
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             compactor.compact(conv, messages, call_api=mock_api, cut_point=10)
         )
 
