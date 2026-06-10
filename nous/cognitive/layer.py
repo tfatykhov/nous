@@ -1833,6 +1833,19 @@ class CognitiveLayer:
             "reflection": reflection[:200] if reflection else None,
             "had_reflection": reflection is not None,
             "facts_extracted": facts_extracted,
+            # Audit HD-9 (2026-06-09): carry a structured `summary` so the rubric
+            # outcome detector (handlers/outcome_detector.py) has real input
+            # instead of falling back to {"transcript_length": N} — which left
+            # the heuristic (LLM-off) leg dead and gave the LLM leg no context.
+            # NOTE: `scores` is intentionally absent here — populating
+            # self_improvement_scores needs a session-level rubric scorer that
+            # does not exist yet (the remaining RA-R1 link; deferred).
+            "summary": {
+                "transcript_length": len(transcript_text or ""),
+                "had_reflection": reflection is not None,
+                "reflection": reflection[:1000] if reflection else None,
+                "facts_extracted": facts_extracted,
+            },
         }
         try:
             if self._bus:

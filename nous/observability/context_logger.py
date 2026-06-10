@@ -321,8 +321,15 @@ class ContextLogger:
         full_payload_enabled: bool = False,
         ring_size: int = 10,
         max_total: int = 50,
+        db_updater=None,
     ):
         self._db_writer = db_writer
+        # Audit OB-3 (2026-06-09): optional persister for the response-side
+        # columns (tokens/cache/duration/stop_reason). The INSERT at log() time
+        # runs before the response is known, so without this the migration-026
+        # response columns stayed NULL forever — update_response was in-memory
+        # only.
+        self._db_updater = db_updater
         self._entries: deque[ContextLogEntry] = deque(maxlen=200)
         self._entries_by_id: dict[str, ContextLogEntry] = {}
         self._payload_store: FullPayloadStore | None = (
@@ -400,6 +407,15 @@ class ContextLogger:
             entry.cache_read_tokens = cache_read
             entry.duration_ms = duration_ms
             entry.stop_reason = stop_reason
+            # OB-3: persist the response columns (fire-and-forget, mirrors log()).
+            if self._db_updater is not None:
+                import asyncio
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._db_updater(entry))
+                except RuntimeError:
+                    pass
 
     def get_recent(self, session_id: str | None = None, limit: int = 20) -> list[ContextLogEntry]:
         entries = list(reversed(self._entries))

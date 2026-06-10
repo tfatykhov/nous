@@ -9,6 +9,7 @@ event loop as uvicorn (F2/F3 fix from 3-agent review).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -534,6 +535,7 @@ async def create_components(settings: Settings) -> dict:
 
     # F035.4: Context Logger
     context_logger = None
+    context_log_retention_task = None
     if settings.context_log_enabled:
         from nous.observability.context_logger import ContextLogger
 
@@ -568,14 +570,71 @@ async def create_components(settings: Settings) -> dict:
             except Exception:
                 logger.debug("F035.4: context log write failed", exc_info=True)
 
+        async def _update_context_log(entry):
+            # Audit OB-3: persist the response-side columns set by
+            # update_response (the INSERT at log() time predates the response).
+            try:
+                async with database.session() as s:
+                    from sqlalchemy import text
+                    await s.execute(text(
+                        "UPDATE nous_system.context_log SET "
+                        "input_tokens_actual = :in_tok, output_tokens = :out_tok, "
+                        "cache_creation = :cc, cache_read = :cr, "
+                        "duration_ms = :dur, stop_reason = :stop "
+                        "WHERE id = :id"
+                    ), {
+                        "in_tok": entry.input_tokens_actual,
+                        "out_tok": entry.output_tokens,
+                        "cc": entry.cache_creation_tokens,
+                        "cr": entry.cache_read_tokens,
+                        "dur": entry.duration_ms,
+                        "stop": entry.stop_reason,
+                        "id": entry.id,
+                    })
+                    await s.commit()
+            except Exception:
+                logger.debug("OB-3: context log response update failed", exc_info=True)
+
         context_logger = ContextLogger(
             db_writer=_write_context_log,
             full_payload_enabled=settings.context_log_full_payload,
             ring_size=settings.context_log_ring_size,
             max_total=settings.context_log_max_total,
+            db_updater=_update_context_log,
         )
         runner.set_context_logger(context_logger)
         logger.info("F035.4: ContextLogger wired (full_payload=%s)", settings.context_log_full_payload)
+
+        # Audit OB-1: periodic retention sweep so nous_system.context_log and
+        # behavior_snapshots don't grow unbounded (one row per API call). The
+        # documented context_log_retention_days had zero consumers before this.
+        context_log_retention_task = None
+        if getattr(settings, "context_log_retention_days", 0) > 0:
+            async def _context_log_retention_loop():
+                while True:
+                    try:
+                        await asyncio.sleep(86400)  # daily
+                        days = settings.context_log_retention_days
+                        async with database.session() as s:
+                            from sqlalchemy import text
+                            await s.execute(text(
+                                "DELETE FROM nous_system.context_log "
+                                "WHERE timestamp < now() - make_interval(days => :d)"
+                            ), {"d": days})
+                            await s.execute(text(
+                                "DELETE FROM nous_system.behavior_snapshots "
+                                "WHERE timestamp < now() - make_interval(days => :d)"
+                            ), {"d": days})
+                            await s.commit()
+                        logger.info("OB-1: context_log/behavior_snapshots retention sweep (>%dd) done", days)
+                    except asyncio.CancelledError:
+                        break
+                    except Exception:
+                        logger.debug("OB-1: retention sweep failed", exc_info=True)
+
+            context_log_retention_task = asyncio.create_task(
+                _context_log_retention_loop(), name="context-log-retention"
+            )
 
     # 011.1 + 012.2: Register subtask/schedule tools (after runner for inline execution)
     # F061 PR-3: pass bus so inline hardened subtasks emit subtask_outcome telemetry.
@@ -639,8 +698,11 @@ async def create_components(settings: Settings) -> dict:
                 permanent=True,
             )
 
-            if settings.heartbeat_email_enabled and settings.email_user:
-                registry.register(EmailCheck(settings))
+            # Audit HB-4: EmailCheck registration moved below, after the
+            # heartbeat API client exists, so the F034.2 LLM classification tier
+            # is actually wired (previously EmailCheck(settings) was built with
+            # no llm_callable → the tier was dead and every email fell back to
+            # 4-keyword matching).
 
             if settings.heartbeat_drive_enabled and settings.google_service_account_json:
                 registry.register(DriveCheck(settings, heart=heart))
@@ -670,6 +732,28 @@ async def create_components(settings: Settings) -> dict:
             heartbeat_api_client = create_client(settings)
             await heartbeat_api_client.start()
             logger.info("F034: Heartbeat API client created (isolated from main runner)")
+
+            # Audit HB-4: register EmailCheck WITH an llm_callable so the F034.2
+            # LLM classification tier is reachable (uses the isolated heartbeat
+            # client + the configured background model). Falls back to keyword
+            # classification automatically if the call returns empty/raises.
+            if settings.heartbeat_email_enabled and settings.email_user:
+                from nous.handlers import call_background_llm
+
+                _email_model = settings.heartbeat_model or settings.background_model
+
+                async def _email_llm_classify(prompt: str) -> str:
+                    resp = await call_background_llm(
+                        heartbeat_api_client,
+                        _email_model,
+                        "You are an email triage classifier.",
+                        prompt,
+                        max_tokens=16,
+                    )
+                    return resp or ""
+
+                registry.register(EmailCheck(settings, llm_callable=_email_llm_classify))
+                logger.info("F034.2: EmailCheck registered with LLM classification tier")
 
             heartbeat_runner = HeartbeatRunner(
                 settings=settings, registry=registry, runner=runner,
@@ -701,6 +785,11 @@ async def create_components(settings: Settings) -> dict:
                 dynamic_loader=dynamic_loader,
                 bus=bus,
                 settings=settings,
+                # Audit DG-5: pass the LLM client so F066.1 free-form fix
+                # dispatch actually runs when dag_fix_llm_dispatch_enabled=true
+                # (prod). Previously llm_client defaulted to None → the flag was
+                # inert and every fix node used rule-based dispatch only.
+                llm_client=api_client,
             )
 
             if heartbeat_runner is not None:
@@ -773,6 +862,7 @@ async def create_components(settings: Settings) -> dict:
         "heartbeat_runner": heartbeat_runner,
         "dag_orchestrator": dag_orchestrator,
         "context_logger": context_logger,
+        "context_log_retention_task": context_log_retention_task,
     }
 
 
@@ -784,6 +874,15 @@ async def shutdown_components(components: dict) -> None:
     heartbeat_runner = components.get("heartbeat_runner")
     if heartbeat_runner:
         await heartbeat_runner.stop()
+
+    # OB-1: stop the context-log retention sweep
+    retention_task = components.get("context_log_retention_task")
+    if retention_task:
+        retention_task.cancel()
+        try:
+            await retention_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
     # 011.1: Stop subtask pool and task scheduler first
     subtask_pool = components.get("subtask_pool")

@@ -187,6 +187,24 @@ async def test_for_frame_overrides_none():
     assert budget.total == 3000
 
 
+async def test_operator_overrides_win_over_plan_overrides():
+    """Audit CL-6: operator env overrides must take precedence over the intent
+    plan's frame-based overrides. ContextEngine.build applies env first (via
+    for_frame), then the plan's apply_overrides, then re-applies env LAST so a
+    pinned facts=3000 is not reverted to the conversation-frame 500. This pins
+    the last-wins composition the fix relies on."""
+    env_overrides = {"facts": 3000, "decisions": 2500}
+    budget = ContextBudget.for_frame("conversation", overrides=env_overrides)
+    # Intent plan shrinks for the conversation frame...
+    budget.apply_overrides({"facts": 500, "decisions": 500, "procedures": 0})
+    assert budget.facts == 500  # plan won transiently
+    # ...then build() re-applies the operator overrides last.
+    budget.apply_overrides(env_overrides)
+    assert budget.facts == 3000
+    assert budget.decisions == 2500
+    assert budget.procedures == 0  # not pinned by operator -> plan value stays
+
+
 # ---------------------------------------------------------------------------
 # 2b. test_build_includes_datetime (Tier 0)
 # ---------------------------------------------------------------------------
