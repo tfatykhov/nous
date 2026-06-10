@@ -49,6 +49,14 @@ Examples of values that MUST be preserved verbatim:
 If a specific value appears in the conversation and is not pure noise,
 list it explicitly. Brevity is NOT an excuse to drop a value.
 
+REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls or
+one bulk operation (a sweep, a batch of queries, a mass update) MUST be
+compressed to a single line stating the operation, its scale, and that
+it COMPLETED (e.g. "Ran 350 search queries across 7 weight ratios —
+COMPLETED; results saved to docs/results.json"). Never enumerate the
+individual operations, and never describe a completed bulk operation in
+a way that reads as a pending plan.
+
 ## Format
 
 ## Goal
@@ -529,6 +537,43 @@ class ConversationCompactor:
             f"{len(text)} chars | first: {first_line}{refetch_hint}]"
         )
 
+    # #179: bulk-result handling. A single oversized tool result (one
+    # run_python holding a 350-call sweep) ages as ONE block, so under
+    # per-tool profiles it dominates context for many turns and the model
+    # replays the completed operation. Bulk results escalate to the 'bulk'
+    # profile and their degrade/clear stubs carry explicit anti-replay text.
+    _TRIM_MARKER_RE = re.compile(
+        r"--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---"
+    )
+    _BULK_HINT = "bulk operation completed earlier — do NOT re-run it"
+
+    def _original_result_size(self, text: str) -> int:
+        """Original size of a result, surviving prior soft-trims.
+
+        The soft-trim marker records the pre-trim size; once a bulk result
+        is trimmed its current length no longer reflects bulkness, so the
+        marker (or, later, the bulk hint itself) is the durable signal.
+        """
+        m = self._TRIM_MARKER_RE.search(text)
+        return int(m.group(1)) if m else len(text)
+
+    def _is_bulk_result(self, content: list[Any]) -> bool:
+        """True if any text item in this tool-result message is bulk-sized."""
+        threshold = self._settings.tool_bulk_result_chars
+        if threshold <= 0:
+            return False
+        for item in content:
+            if not isinstance(item, dict) or self._has_image_content(item):
+                continue
+            text = item.get("content", "")
+            if not isinstance(text, str):
+                continue
+            if self._BULK_HINT in text:
+                return True
+            if self._original_result_size(text) >= threshold:
+                return True
+        return False
+
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
         """Extract URLs, paths, key-values before hard-clearing."""
         facts: list[str] = []
@@ -591,6 +636,11 @@ class ConversationCompactor:
                         break
 
             profile_name = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
+            # #179: size escalation — bulk results decay on (1, 2, 4)
+            # regardless of which tool produced them.
+            is_bulk = self._is_bulk_result(content)
+            if is_bulk:
+                profile_name = "bulk"
             _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
                 profile_name, (3, 8, 12)
             )
@@ -604,9 +654,20 @@ class ConversationCompactor:
                     # Extract facts from conservative tools before clearing
                     if isinstance(text, str) and text and profile_name == "conservative":
                         extracted.extend(self._extract_facts_before_clear(tool_name or "unknown", text))
-                    item["content"] = (
-                        "[Tool output cleared - content was processed in earlier turns]"
-                    )
+                    if is_bulk:
+                        # #179: anti-replay stub — the generic cleared text
+                        # leaves the model free to re-derive "I should run
+                        # the sweep"; this one states completion explicitly.
+                        item["content"] = (
+                            f"[Bulk tool output cleared — this {tool_name or 'tool'} "
+                            f"operation ran and COMPLETED in an earlier turn; its "
+                            f"results were already processed. "
+                            f"{self._BULK_HINT}.]"
+                        )
+                    else:
+                        item["content"] = (
+                            "[Tool output cleared - content was processed in earlier turns]"
+                        )
                 hard_cleared += 1
                 continue
 
@@ -618,6 +679,16 @@ class ConversationCompactor:
                     tool_use_id = item.get("tool_use_id")
                     tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
                     self._metadata_degrade(item, tool_use_block)
+                    # #179: stamp the bulk hint so (a) the model sees the
+                    # completion signal and (b) bulkness survives to the
+                    # clear tier after the trim marker is gone.
+                    text = item.get("content", "")
+                    if (
+                        is_bulk
+                        and isinstance(text, str)
+                        and self._BULK_HINT not in text
+                    ):
+                        item["content"] = f"{text} [{self._BULK_HINT}]"
                 metadata_degraded += 1
                 continue
 

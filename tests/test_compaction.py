@@ -309,6 +309,106 @@ class TestPruneToolResults:
 
 
 # ------------------------------------------------------------------
+# #179: Bulk-result pruning tests
+# ------------------------------------------------------------------
+
+
+def _make_named_pair(name: str, content: str, tid: str) -> list[dict]:
+    """assistant tool_use + matching tool_result message pair."""
+    return [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": tid, "name": name, "input": {"code": "sweep()"}}],
+        },
+        _make_tool_result(content, tid),
+    ]
+
+
+def _bulk_settings(**overrides) -> Settings:
+    """Settings with a small bulk threshold (500) above soft-trim (100)."""
+    defaults = {"NOUS_TOOL_BULK_RESULT_CHARS": "500"}
+    defaults.update(overrides)
+    return _make_settings(**defaults)
+
+
+class TestBulkResultPruning:
+    """#179: oversized results escalate to the (1, 2, 4) bulk profile with
+    anti-replay stub text, so a completed sweep can't dominate context and
+    trigger a replay loop."""
+
+    def _sweep_conversation(self, bulk_content: str) -> list[dict]:
+        """run_python bulk result at age 5, then 4 small results after it
+        (keep_last=2 → ages 5,4,3 unprotected; the bulk result is oldest)."""
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", bulk_content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        return messages
+
+    def test_bulk_result_hard_cleared_at_bulk_age(self):
+        """A bulk run_python result at age 5 is hard-cleared (bulk clear=4)
+        even though run_python's standard profile wouldn't clear until 12."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation("x" * 600)
+        compactor.prune_tool_results(messages)
+        cleared = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" in cleared
+        assert "COMPLETED" in cleared
+        assert "do NOT re-run" in cleared
+
+    def test_non_bulk_result_keeps_standard_ages(self):
+        """The same conversation with a sub-threshold result is NOT cleared —
+        run_python's standard profile (3,8,12) applies."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation("x" * 400)  # < 500 bulk threshold
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "cleared" not in text
+        # age 5 >= soft-trim only (oversized vs 100): trimmed, not stubbed
+        assert "--- trimmed" in text
+
+    def test_bulk_detection_survives_soft_trim(self):
+        """A previously soft-trimmed bulk result still counts as bulk via the
+        original-size marker, and is cleared with the anti-replay stub."""
+        trimmed = (
+            "xxxx\n\n--- trimmed (kept 20 head + 20 tail of 99999 chars) ---\n\nyyyy"
+        )
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation(trimmed)
+        compactor.prune_tool_results(messages)
+        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+
+    def test_bulk_degrade_carries_hint(self):
+        """At degrade age (bulk: 2-3) the metadata stub carries the
+        anti-replay hint so bulkness persists to the clear tier."""
+        compactor = ConversationCompactor(_bulk_settings())
+        # bulk result at age 3: 3 pairs total, keep_last=2 → only the first
+        # is unprotected at age 3 → degrade tier (>=2, <4).
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", "x" * 600, "t0")
+        for i in range(1, 3):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        degraded = messages[1]["content"][0]["content"]
+        assert "do NOT re-run" in degraded
+        # And a second pass at clear age still recognizes it as bulk.
+        messages += _make_named_pair("run_python", "small_3", "t3")
+        compactor.prune_tool_results(messages)
+        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+
+    def test_bulk_disabled_when_zero(self):
+        """NOUS_TOOL_BULK_RESULT_CHARS=0 disables bulk escalation."""
+        compactor = ConversationCompactor(
+            _bulk_settings(NOUS_TOOL_BULK_RESULT_CHARS="0")
+        )
+        messages = self._sweep_conversation("x" * 600)
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "--- trimmed" in text  # plain soft-trim only
+
+
+# ------------------------------------------------------------------
 # Extract Text Tests
 # ------------------------------------------------------------------
 

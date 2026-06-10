@@ -42,6 +42,10 @@ DECAY_PROFILE_AGES: dict[str, tuple[int, int, int]] = {
     "aggressive": (2, 4, 8),
     "standard": (3, 8, 12),       # Default
     "conservative": (5, 10, 15),
+    # #179: assigned dynamically by size, not by tool — a single oversized
+    # result (e.g. one run_python holding a 350-call sweep) is one
+    # un-prunable block under per-tool ages and triggers replay loops.
+    "bulk": (1, 2, 4),
 }
 
 FRAME_TOOL_WINDOWS: dict[str, int] = {
