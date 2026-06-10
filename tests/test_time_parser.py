@@ -273,6 +273,21 @@ class TestParseEveryWeekly:
         assert interval is None
         assert cron == "0 15 * * 5"
 
+    def test_every_monday_with_timezone_converts_to_utc(self) -> None:
+        """Audit HD-5 (review follow-up): weekly schedules honor the tz too,
+        instead of silently firing in UTC. 10am US/Eastern = 14:00/15:00 UTC."""
+        interval, cron = parse_every("every monday at 10am EST")
+        parts = cron.split()
+        hour = int(parts[1])
+        assert hour in (14, 15)  # DST-robust
+        assert hour != 10
+        assert parts[4] == "1"  # still Monday
+
+    def test_every_monday_no_tz_unchanged(self) -> None:
+        """No tz token -> unchanged (UTC)."""
+        interval, cron = parse_every("every monday at 10am")
+        assert cron == "0 10 * * 1"
+
     def test_every_sunday_at_6am(self) -> None:
         """'every sunday at 6am' -> sunday = 0."""
         interval, cron = parse_every("every sunday at 6am")

@@ -304,6 +304,28 @@ class TestBaseCheck:
         check.mark_failure()  # trial fails again
         assert check.is_due() is False  # cooldown re-armed, not due immediately
 
+    def test_circuit_breaker_recovers_when_opened_at_lost(self):
+        """Audit HB-8 (review follow-up): an open breaker whose _breaker_opened_at
+        was lost (e.g. a DynamicCheckLoader re-sync copies consecutive_failures +
+        last_run but not the in-memory timestamp) must still auto-recover by
+        deriving the open time from last_run — not stay permanently not-due."""
+        check = DummyCheck()
+        # Simulate a re-synced object: breaker open, no opened_at, old last_run.
+        check.consecutive_failures = check.max_failures
+        check._breaker_opened_at = None
+        check.last_run = datetime.now(UTC) - timedelta(
+            seconds=check.breaker_cooldown_seconds + 1
+        )
+        assert check.is_due() is True  # would be False before the lazy fallback
+
+    def test_breaker_open_no_timestamps_is_not_due(self):
+        """With neither opened_at nor last_run, stay closed (no spurious run)."""
+        check = DummyCheck()
+        check.consecutive_failures = check.max_failures
+        check._breaker_opened_at = None
+        check.last_run = None
+        assert check.is_due() is False
+
 
 # ===========================================================================
 # TestCheckRegistry — 8 tests
