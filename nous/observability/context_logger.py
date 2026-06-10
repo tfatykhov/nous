@@ -337,6 +337,24 @@ class ContextLogger:
             if full_payload_enabled
             else None
         )
+        # Audit OB-3/OB-5 (review P1): hold strong refs to fire-and-forget DB
+        # tasks. asyncio's loop keeps only a WEAK reference, so a task created
+        # and immediately discarded can be GC'd mid-flight — silently dropping
+        # the INSERT/UPDATE. Track + auto-discard on completion.
+        self._pending_tasks: set = set()
+
+    def _schedule_bg(self, coro) -> None:
+        """Run a DB coroutine fire-and-forget while retaining a strong ref."""
+        import asyncio
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            coro.close()  # no loop (sync context) — avoid "never awaited" warning
+            return
+        task = loop.create_task(coro)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
 
     def _sync_entries_index(self) -> None:
         """REVIEW FIX P1-8: Sync _entries_by_id with deque to prevent memory leak."""
@@ -380,13 +398,7 @@ class ContextLogger:
         if self._payload_store and payload:
             self._payload_store.capture(session_id, entry.id, payload)
         if self._db_writer:
-            import asyncio
-
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._db_writer(entry))
-            except RuntimeError:
-                pass
+            self._schedule_bg(self._db_writer(entry))
         return entry
 
     def update_response(
@@ -409,13 +421,7 @@ class ContextLogger:
             entry.stop_reason = stop_reason
             # OB-3: persist the response columns (fire-and-forget, mirrors log()).
             if self._db_updater is not None:
-                import asyncio
-
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._db_updater(entry))
-                except RuntimeError:
-                    pass
+                self._schedule_bg(self._db_updater(entry))
 
     def get_recent(self, session_id: str | None = None, limit: int = 20) -> list[ContextLogEntry]:
         entries = list(reversed(self._entries))

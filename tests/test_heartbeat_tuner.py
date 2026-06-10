@@ -435,6 +435,28 @@ class TestMinSamples:
 
         assert "tunable_dummy" not in report.skipped_checks
 
+    @pytest.mark.asyncio
+    async def test_constructor_min_samples_override_is_honored(self):
+        """Audit HB-3 review: the heartbeat_tuning_min_samples setting (threaded
+        through the constructor) gates sampling instead of the hardcoded 10."""
+        outcomes = [OutcomeSignal.NEGATIVE] * 5
+        store = _make_store_with_outcomes("tunable_dummy", outcomes)
+        registry = CheckRegistry()
+        registry.register(TunableDummyCheck(param_value=5.0))
+
+        # With a higher threshold (20), 5 samples is skipped.
+        tuner_strict = HeartbeatTuner(min_samples=20)
+        report_strict = await tuner_strict.tune(store, registry)
+        assert "tunable_dummy" in report_strict.skipped_checks
+
+        # With a lower threshold (3), 5 samples now proceeds.
+        registry2 = CheckRegistry()
+        registry2.register(TunableDummyCheck(param_value=5.0))
+        store2 = _make_store_with_outcomes("tunable_dummy", outcomes)
+        tuner_loose = HeartbeatTuner(min_samples=3)
+        report_loose = await tuner_loose.tune(store2, registry2)
+        assert "tunable_dummy" not in report_loose.skipped_checks
+
 
 # ===========================================================================
 # TestTunerIntegration — 3 tests

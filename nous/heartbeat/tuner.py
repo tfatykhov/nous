@@ -37,14 +37,18 @@ class HeartbeatTuner:
     """
 
     LEARNING_RATE = 0.1
-    MIN_SAMPLES = 10
+    MIN_SAMPLES = 10  # default; overridable via constructor (HB-3 review follow-up)
     MAX_PARAMS_PER_CHECK = 1  # Only adjust 1 param per check per cycle
 
-    def __init__(self) -> None:
+    def __init__(self, min_samples: int | None = None) -> None:
         # Cross-cycle snapshots: check_name -> {param_name: value}
         self._snapshots: dict[str, dict[str, float]] = {}
         self._last_tune: datetime | None = None
         self._last_report: TuningReport | None = None
+        # Audit (HB-3 review): honor the documented
+        # NOUS_HEARTBEAT_TUNING_MIN_SAMPLES setting. Previously the class
+        # constant was used unconditionally, so the env var was inert.
+        self.min_samples = min_samples if min_samples is not None else self.MIN_SAMPLES
 
     async def tune(self, finding_store: object, registry: object) -> TuningReport:
         """Run tuning pass over all checks.
@@ -65,7 +69,7 @@ class HeartbeatTuner:
 
             outcomes = finding_store.get_outcomes_for_check(check.name)  # type: ignore[union-attr]
 
-            if len(outcomes) < self.MIN_SAMPLES:
+            if len(outcomes) < self.min_samples:
                 report.skipped_checks.append(check.name)
                 continue
 

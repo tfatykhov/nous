@@ -79,7 +79,9 @@ class HeartbeatRunner:
         self._last_tick: datetime | None = None
         self._last_digest_date: date | None = None
         self._last_prune: datetime | None = None
-        self._tuner: HeartbeatTuner = HeartbeatTuner()
+        self._tuner: HeartbeatTuner = HeartbeatTuner(
+            min_samples=getattr(settings, "heartbeat_tuning_min_samples", None),
+        )
         self._last_tune: datetime | None = None
 
     # ------------------------------------------------------------------

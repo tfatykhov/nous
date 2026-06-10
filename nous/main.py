@@ -608,7 +608,7 @@ async def create_components(settings: Settings) -> dict:
         # Audit OB-1: periodic retention sweep so nous_system.context_log and
         # behavior_snapshots don't grow unbounded (one row per API call). The
         # documented context_log_retention_days had zero consumers before this.
-        context_log_retention_task = None
+        # (context_log_retention_task initialized to None above the conditional.)
         if getattr(settings, "context_log_retention_days", 0) > 0:
             async def _context_log_retention_loop():
                 while True:
@@ -752,9 +752,6 @@ async def create_components(settings: Settings) -> dict:
                     )
                     return resp or ""
 
-                registry.register(EmailCheck(settings, llm_callable=_email_llm_classify))
-                logger.info("F034.2: EmailCheck registered with LLM classification tier")
-
             heartbeat_runner = HeartbeatRunner(
                 settings=settings, registry=registry, runner=runner,
                 brain=brain, heart=heart, bus=bus, http_client=handler_http,
@@ -762,6 +759,23 @@ async def create_components(settings: Settings) -> dict:
                 api_client=heartbeat_api_client,
                 dynamic_loader=dynamic_loader,
             )
+
+            # Audit HB-4 (review P2): register EmailCheck AFTER the runner exists
+            # so the LLM classification tier is gated by the same heartbeat daily
+            # token budget as every other LLM call (budget_check). Without this
+            # the email LLM ran unbudgeted — a first-deploy backlog of unseen
+            # mail could burst Haiku calls with no accounting. The registry is
+            # read live by the tick loop, so registering before start() is fine.
+            if settings.heartbeat_email_enabled and settings.email_user:
+                registry.register(EmailCheck(
+                    settings,
+                    llm_callable=_email_llm_classify,
+                    budget_check=heartbeat_runner._has_budget,
+                ))
+                logger.info(
+                    "F034.2: EmailCheck registered with LLM tier (budget-gated)"
+                )
+
             await heartbeat_runner.start()
         except ImportError:
             logger.debug("Heartbeat not available yet")
