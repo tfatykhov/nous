@@ -50,10 +50,21 @@ class HealthCheck(BaseCheck):
         self._brain = brain
         self.interval = settings.heartbeat_health_interval
         self._params = {
-            "stale_decision_days": TunableParam("stale_decision_days", 7, 3, 30, 1),
+            # increases_findings: raising stale_decision_days WIDENS the
+            # created_at >= cutoff window in Brain.get_unreviewed → more
+            # findings. stale_fact_days is the opposite (older_than filter).
+            "stale_decision_days": TunableParam(
+                "stale_decision_days", 7, 3, 30, 1, increases_findings=True
+            ),
             "stale_fact_days": TunableParam("stale_fact_days", 30, 7, 90, 5),
-            "low_effectiveness_threshold": TunableParam("low_effectiveness_threshold", 0.5, 0.3, 0.8, 0.05),
-            "max_findings_per_run": TunableParam("max_findings_per_run", 10, 3, 25, 1),
+            # Raising the threshold flags MORE procedures (effectiveness < t).
+            "low_effectiveness_threshold": TunableParam(
+                "low_effectiveness_threshold", 0.5, 0.3, 0.8, 0.05,
+                increases_findings=True,
+            ),
+            "max_findings_per_run": TunableParam(
+                "max_findings_per_run", 10, 3, 25, 1, increases_findings=True
+            ),
         }
 
     async def run(self) -> CheckResult:
@@ -194,16 +205,23 @@ class SelfInitiatedCheck(BaseCheck):
         self._prototype_cache: list[list[float]] | None = None
         self._params = {
             "similarity_threshold": TunableParam("similarity_threshold", 0.75, 0.6, 0.9, 0.02),
-            "lookback_days": TunableParam("lookback_days", 14, 3, 30, 1),
-            "max_pending_items": TunableParam("max_pending_items", 5, 2, 15, 1),
+            # Volume params: raising them produces MORE findings (wider
+            # windows / higher caps), so the tuner must move them with
+            # inverted sign — increases_findings=True.
+            "lookback_days": TunableParam(
+                "lookback_days", 14, 3, 30, 1, increases_findings=True
+            ),
+            "max_pending_items": TunableParam(
+                "max_pending_items", 5, 2, 15, 1, increases_findings=True
+            ),
             # #369: upper bound on the age-based promise heuristic (hours).
             # Episodes older than this are too old to be actionable.
-            # pinned=True (codex P2): the generic tuner's relax=+step would
-            # WIDEN this window on noisy feedback — inverted for an upper
-            # bound. Operator-adjustable via the params API; excluded from
-            # auto-tuning until TunableParam grows direction metadata.
+            # Was pinned=True until TunableParam grew direction metadata
+            # (the codex-P2 inversion concern); now tunable with the
+            # correct sign.
             "max_stale_age_hours": TunableParam(
-                "max_stale_age_hours", 336, 72, 720, 24, pinned=True
+                "max_stale_age_hours", 336, 72, 720, 24,
+                increases_findings=True,
             ),
         }
 
@@ -818,7 +836,11 @@ class DriveCheck(BaseCheck):
 
         self._params = {
             "significance_threshold": TunableParam("significance_threshold", 1.0, 0.0, 2.0, 0.5),
-            "cross_reference_lookback_hours": TunableParam("cross_reference_lookback_hours", 48, 6, 168, 6),
+            # Wider lookback → more cross-reference matches → more findings.
+            "cross_reference_lookback_hours": TunableParam(
+                "cross_reference_lookback_hours", 48, 6, 168, 6,
+                increases_findings=True,
+            ),
         }
 
     def _ensure_gdrive(self) -> None:

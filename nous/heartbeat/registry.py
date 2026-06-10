@@ -122,6 +122,9 @@ class BaseCheck(ABC):
             name=p.name, value=clamped,
             min_val=p.min_val, max_val=p.max_val,
             step=p.step, pinned=p.pinned,
+            # Must thread through — set_param reconstructs the dataclass,
+            # and dropping the flag would silently reset tuner direction.
+            increases_findings=p.increases_findings,
         )
         return True
 

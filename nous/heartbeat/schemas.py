@@ -108,6 +108,12 @@ class TunableParam:
     max_val: float
     step: float
     pinned: bool = False  # manual override, skip auto-tuning
+    # Direction metadata (2026-06-10): the tuner's "relax" means "produce
+    # FEWER findings". For sensitivity thresholds (similarity_threshold)
+    # that is +step; for volume params (lookback windows, item caps) a
+    # HIGHER value produces MORE findings, so relax must be -step. Without
+    # this flag the tuner moved volume params in the wrong direction.
+    increases_findings: bool = False
 
 
 @dataclass

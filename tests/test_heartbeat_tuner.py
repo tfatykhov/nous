@@ -76,6 +76,30 @@ class MultiParamCheck(BaseCheck):
         return CheckResult()
 
 
+class VolumeDummyCheck(BaseCheck):
+    """Check whose single param is volume-type (increases_findings=True) —
+    e.g. a lookback window: raising it produces MORE findings."""
+
+    name = "volume_dummy"
+    interval = 60
+
+    def __init__(self, param_value: float = 5.0) -> None:
+        super().__init__()
+        self._params = {
+            "lookback": TunableParam(
+                name="lookback",
+                value=param_value,
+                min_val=1.0,
+                max_val=10.0,
+                step=1.0,
+                increases_findings=True,
+            ),
+        }
+
+    async def run(self) -> CheckResult:
+        return CheckResult()
+
+
 def _make_store_with_outcomes(
     check_name: str,
     outcomes: list[OutcomeSignal],
@@ -157,6 +181,51 @@ class TestTuningEngine:
         adj = report.adjustments[0]
         assert adj.direction == "tighten"
         assert adj.new_value < adj.old_value  # tighten = decrease
+
+    @pytest.mark.asyncio
+    async def test_relax_decreases_volume_param(self):
+        """Direction metadata (2026-06-10): for increases_findings=True
+        params (lookback windows, item caps), 'relax' (fewer findings)
+        must DECREASE the value — the generic +step was inverted."""
+        outcomes = [OutcomeSignal.NEGATIVE] * 7 + [OutcomeSignal.POSITIVE] * 3
+        store = _make_store_with_outcomes("volume_dummy", outcomes)
+        registry = CheckRegistry()
+        registry.register(VolumeDummyCheck(param_value=5.0))
+
+        tuner = HeartbeatTuner()
+        report = await tuner.tune(store, registry)
+
+        assert len(report.adjustments) >= 1
+        adj = report.adjustments[0]
+        assert adj.direction == "relax"
+        assert adj.new_value < adj.old_value  # relax = narrower window
+
+    @pytest.mark.asyncio
+    async def test_tighten_increases_volume_param(self):
+        """Mirror: 'tighten' (catch more) must INCREASE a volume param."""
+        outcomes = [OutcomeSignal.POSITIVE] * 9 + [OutcomeSignal.NEGATIVE] * 1
+        store = _make_store_with_outcomes("volume_dummy", outcomes)
+        registry = CheckRegistry()
+        registry.register(VolumeDummyCheck(param_value=5.0))
+
+        tuner = HeartbeatTuner()
+        report = await tuner.tune(store, registry)
+
+        assert len(report.adjustments) >= 1
+        adj = report.adjustments[0]
+        assert adj.direction == "tighten"
+        assert adj.new_value > adj.old_value  # tighten = wider window
+
+    def test_set_param_preserves_direction_flag(self):
+        """set_param reconstructs TunableParam — the direction flag must
+        survive or the tuner silently reverts to the inverted behavior
+        after the first adjustment."""
+        check = VolumeDummyCheck(param_value=5.0)
+        assert check.set_param("lookback", 6.0) is True
+        p = check.get_param("lookback")
+        assert p is not None
+        assert p.value == 6.0
+        assert p.increases_findings is True
 
     @pytest.mark.asyncio
     async def test_no_change_on_balanced(self):
