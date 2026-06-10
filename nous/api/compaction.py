@@ -728,11 +728,15 @@ class ConversationCompactor:
                 base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
                 # #179: size escalation — bulk items decay on (1, 2, 4);
                 # base_profile keeps driving conservative-tool fact
-                # extraction. 'preserve' tools are exempt (codex round 7):
-                # a large read_file is deliberate reference content, not a
-                # sweep — re-reading is cheap and legitimate, so neither
-                # bulk ages nor do-NOT-re-run stubs apply.
-                is_bulk = base_profile != "preserve" and self._item_is_bulk(item)
+                # extraction. Only 'standard'-profile tools (bash,
+                # run_python, unknown) escalate (codex rounds 7+11): the
+                # replay harm class is OPERATIONS — for pure-retrieval
+                # tools (read_file=preserve, web_fetch/web_search=
+                # conservative, list_files/recall_deep=aggressive)
+                # re-running is cheap and benign, so a do-NOT-re-run stub
+                # would be wrong, and their profiles already encode the
+                # right retention.
+                is_bulk = base_profile == "standard" and self._item_is_bulk(item)
                 profile_name = "bulk" if is_bulk else base_profile
                 _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
                     profile_name, (3, 8, 12)

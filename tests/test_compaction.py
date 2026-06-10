@@ -413,19 +413,23 @@ class TestBulkResultPruning:
         assert "Bulk tool output cleared" not in text
         assert "--- trimmed" in text  # plain soft-trim only
 
-    def test_bulk_conservative_tool_still_extracts_facts(self):
-        """codex P1: a bulk web_fetch result still gets its facts extracted
-        at hard-clear — bulk escalation changes the ages, not the
-        conservative-tool extraction."""
+    def test_conservative_tool_exempt_from_bulk(self):
+        """codex round 11: web_fetch/web_search (conservative) are
+        pure-retrieval — re-fetching is cheap and benign, so a large
+        result keeps conservative ages and never gets a do-NOT-re-run
+        stub."""
         compactor = ConversationCompactor(_bulk_settings())
         bulk_content = "see https://example.com/report plus " + "x" * 600
         messages: list[dict] = []
         messages += _make_named_pair("web_fetch", bulk_content, "t0")
         for i in range(1, 5):
             messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
-        extracted = compactor.prune_tool_results(messages)
-        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
-        assert any("example.com" in f for f in extracted)
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        # age 5 < conservative degrade(10)/clear(15): soft-trim only.
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+        assert "--- trimmed" in text
 
     def test_bulk_sibling_item_keeps_own_profile(self):
         """codex P1 round 2: a small sibling result in the SAME message as a
@@ -473,20 +477,21 @@ class TestBulkResultPruning:
         clear later), conservative facts are captured at degrade time —
         not lost by the time clear sees only the stub."""
         compactor = ConversationCompactor(_bulk_settings())
-        bulk_content = "see https://example.com/report plus " + "x" * 600
+        content = "see https://example.com/report plus " + "x" * 300
         messages: list[dict] = []
-        messages += _make_named_pair("web_fetch", bulk_content, "t0")
-        for i in range(1, 3):
+        messages += _make_named_pair("web_fetch", content, "t0")
+        for i in range(1, 10):
             messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
-        # Pass 1: bulk item at age 3 → degrade tier. Facts extracted NOW.
+        # Pass 1: item at age 10 → conservative degrade tier (5, 10, 15).
+        # Facts extracted NOW, before the metadata stub destroys them.
         extracted = compactor.prune_tool_results(messages)
         assert any("example.com" in f for f in extracted)
         assert " | first: " in messages[1]["content"][0]["content"]
-        # Pass 2: age 4 → clear tier. Stub yields nothing new; no crash,
-        # and the anti-replay stub lands.
-        messages += _make_named_pair("web_fetch", "small_3", "t3")
+        # Pass 2: age 15 → clear tier. Stub yields nothing new; no crash.
+        for i in range(10, 15):
+            messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
         extracted2 = compactor.prune_tool_results(messages)
-        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+        assert "cleared" in messages[1]["content"][0]["content"]
         assert not any("example.com" in f for f in extracted2)
 
     def test_smartcompressed_result_is_bulk(self):
