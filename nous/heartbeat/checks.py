@@ -198,7 +198,13 @@ class SelfInitiatedCheck(BaseCheck):
             "max_pending_items": TunableParam("max_pending_items", 5, 2, 15, 1),
             # #369: upper bound on the age-based promise heuristic (hours).
             # Episodes older than this are too old to be actionable.
-            "max_stale_age_hours": TunableParam("max_stale_age_hours", 336, 72, 720, 24),
+            # pinned=True (codex P2): the generic tuner's relax=+step would
+            # WIDEN this window on noisy feedback — inverted for an upper
+            # bound. Operator-adjustable via the params API; excluded from
+            # auto-tuning until TunableParam grows direction metadata.
+            "max_stale_age_hours": TunableParam(
+                "max_stale_age_hours", 336, 72, 720, 24, pinned=True
+            ),
         }
 
     async def _ensure_prototypes(self) -> list[list[float]]:
