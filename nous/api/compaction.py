@@ -552,7 +552,9 @@ class ConversationCompactor:
     _TRIM_MARKER_RE = re.compile(
         r"--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---"
     )
-    _BULK_HINT = "bulk operation completed earlier — do NOT re-run it"
+    # Outcome-neutral (codex round 5): "already ran" asserts only execution,
+    # not semantic success — a clean exit can hide internal partial failures.
+    _BULK_HINT = "bulk operation already ran earlier — do NOT re-run it"
     # codex P1: a failed sweep must not be stamped as completed — that would
     # suppress a legitimate retry and corrupt later summaries.
     _BULK_ERROR_HINT = "bulk operation FAILED earlier — fix the cause before any retry"
