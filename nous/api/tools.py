@@ -88,8 +88,10 @@ class ToolDispatcher:
                 # it — fail-open contract.
                 args = {**args, "_session_id": session_id}
             result = await handler(**args)  # P0-6: **kwargs unpacking
-            # P1-1: Extract text from MCP-format response
-            return result["content"][0]["text"], False
+            # P1-1: Extract text from MCP-format response. is_error honors
+            # the MCP field when a handler sets it (#179: run_python error
+            # returns) — absent means success, as before.
+            return result["content"][0]["text"], bool(result.get("is_error"))
         except Exception as e:
             logger.exception("Tool dispatch error for %s", name)
             return f"Tool error: {e}", True
@@ -3014,9 +3016,19 @@ def create_programmatic_tools(
             # scheduled via run_coroutine_threadsafe can actually execute.
             await asyncio.wait_for(loop.run_in_executor(executor, _run), timeout=timeout)
         except asyncio.TimeoutError:
-            return {"content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}]}
+            # is_error per MCP (#179): lets downstream consumers (runner
+            # tool_result block, compaction bulk-failure detection)
+            # distinguish a real execution failure from a successful run
+            # whose OUTPUT merely begins with "Error: ".
+            return {
+                "content": [{"type": "text", "text": f"Error: execution timed out ({timeout}s)"}],
+                "is_error": True,
+            }
         except Exception as e:
-            return {"content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}]}
+            return {
+                "content": [{"type": "text", "text": f"Error: {type(e).__name__}: {e}"}],
+                "is_error": True,
+            }
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
 

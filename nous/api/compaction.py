@@ -659,13 +659,10 @@ class ConversationCompactor:
         # quoted hint text in grep-style output must not flag failure.
         if text.lstrip().startswith("[") and self._BULK_ERROR_HINT in text:
             return True
-        # run_python reports direct execution failures as its ENTIRE
-        # result — "Error: <Type>: <msg>" (tools.py run_python handler)
-        # with is_error=False, and a long exception message can be
-        # bulk-sized (codex post-review P1). startswith on the full result
-        # keeps "Error:" lines printed mid-output inert.
-        if tool_name == "run_python":
-            return text.startswith("Error: ")
+        # run_python execution failures arrive via is_error (the handler
+        # sets the MCP field and the dispatcher honors it — #179): no
+        # content sniffing, so a successful run whose OUTPUT begins with
+        # "Error: " is never misread as a failure.
         # The exit-code and timeout markers are emitted by bash_tool only
         # (builtin_tools.py) — applying them tool-agnostically would
         # misread e.g. fetched page content mentioning "Exit code: 1"

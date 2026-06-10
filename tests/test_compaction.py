@@ -689,20 +689,35 @@ class TestBulkResultPruning:
         assert "FAILED in" not in text
 
     def test_run_python_direct_error_marked_failed(self):
-        """codex post-review P1: run_python's handler returns
-        'Error: <Type>: <msg>' as the ENTIRE result with is_error=False —
-        a long exception message can be bulk-sized and must get the
-        FAILED stub."""
+        """codex post-review P1: run_python execution failures now carry
+        is_error=True (handler sets the MCP field, dispatcher honors it) —
+        a bulk-sized exception message gets the FAILED stub."""
         compactor = ConversationCompactor(_bulk_settings())
         content = "Error: RuntimeError: " + "x" * 600
         messages: list[dict] = []
         messages += _make_named_pair("run_python", content, "t0")
+        messages[1]["content"][0]["is_error"] = True  # as the runner records it
         for i in range(1, 5):
             messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
         compactor.prune_tool_results(messages)
         stub = messages[1]["content"][0]["content"]
         assert "FAILED" in stub
         assert "tool reported success" not in stub
+
+    def test_run_python_output_starting_with_error_not_failed(self):
+        """codex final P2: a SUCCESSFUL run_python whose printed output
+        begins with 'Error: ' (e.g. an error-analysis report) must NOT be
+        classified failed — failure rides on is_error, not content."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "Error: summary of 35 failures found in logs\n" + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED in" not in stub
 
     def test_quoted_smartcompress_marker_not_trusted(self):
         """codex post-review P2: a grep-style result QUOTING a SmartCompress
