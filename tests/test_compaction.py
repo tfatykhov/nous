@@ -557,6 +557,20 @@ class TestBulkResultPruning:
         assert "FAILED" in stub
         assert "tool reported success" not in stub
 
+    def test_unlisted_tool_exempt_from_bulk(self):
+        """codex round 12: escalation is a positive allowlist — an unlisted
+        (retrieval-ish or future) tool never bulk-escalates, even with a
+        huge result."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("recall_recent", "x" * 600, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("recall_recent", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+
     def test_preserve_profile_exempt_from_bulk(self):
         """codex round 7: a large read_file result keeps its 'preserve'
         profile — deliberate reference content is not a sweep, and

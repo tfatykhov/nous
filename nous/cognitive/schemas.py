@@ -36,6 +36,13 @@ TOOL_DECAY_PROFILES: dict[str, str] = {
     "web_fetch": "conservative",
 }
 
+# #179: tools whose oversized results may escalate to the 'bulk' decay
+# profile. POSITIVE allowlist (codex round 12): only operation-shaped tools
+# qualify — for retrieval tools (registered or future) re-running is cheap
+# and benign, so the bulk do-NOT-re-run stub would be wrong; defaulting
+# unknown tools to escalation mislabeled cache_retrieve/recall_recent/etc.
+BULK_ESCALATION_TOOLS: frozenset[str] = frozenset({"bash", "run_python"})
+
 # Profile -> (soft_trim_age, metadata_degrade_age, hard_clear_age)
 DECAY_PROFILE_AGES: dict[str, tuple[int, int, int]] = {
     "preserve": (8, 999, 20),     # Skip metadata degradation

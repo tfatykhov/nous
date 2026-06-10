@@ -16,7 +16,11 @@ import time
 from typing import Any, Protocol
 
 from nous.api.models import ApiResponse, Conversation, Message
-from nous.cognitive.schemas import DECAY_PROFILE_AGES, TOOL_DECAY_PROFILES
+from nous.cognitive.schemas import (
+    BULK_ESCALATION_TOOLS,
+    DECAY_PROFILE_AGES,
+    TOOL_DECAY_PROFILES,
+)
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -728,15 +732,17 @@ class ConversationCompactor:
                 base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
                 # #179: size escalation — bulk items decay on (1, 2, 4);
                 # base_profile keeps driving conservative-tool fact
-                # extraction. Only 'standard'-profile tools (bash,
-                # run_python, unknown) escalate (codex rounds 7+11): the
-                # replay harm class is OPERATIONS — for pure-retrieval
-                # tools (read_file=preserve, web_fetch/web_search=
-                # conservative, list_files/recall_deep=aggressive)
+                # extraction. Escalation is a POSITIVE allowlist of
+                # operation-shaped tools (codex rounds 7/11/12): the replay
+                # harm class is OPERATIONS — for retrieval tools
+                # (registered or future, hence allowlist-not-default)
                 # re-running is cheap and benign, so a do-NOT-re-run stub
                 # would be wrong, and their profiles already encode the
                 # right retention.
-                is_bulk = base_profile == "standard" and self._item_is_bulk(item)
+                is_bulk = (
+                    tool_name in BULK_ESCALATION_TOOLS
+                    and self._item_is_bulk(item)
+                )
                 profile_name = "bulk" if is_bulk else base_profile
                 _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
                     profile_name, (3, 8, 12)
