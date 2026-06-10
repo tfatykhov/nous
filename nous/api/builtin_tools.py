@@ -107,8 +107,11 @@ async def bash_tool(
             parts.append(stdout_text)
         if stderr_text:
             parts.append(f"STDERR:\n{stderr_text}")
-        if proc.returncode != 0:
-            parts.append(f"Exit code: {proc.returncode}")
+        # Always appended (#179 codex round 13): the trailing line is the
+        # AUTHORITATIVE wrapper status, so downstream consumers (compaction
+        # bulk-failure detection) can disambiguate a quoted "Exit code: N"
+        # inside the command's own output from the real return code.
+        parts.append(f"Exit code: {proc.returncode}")
 
         output = "\n".join(parts) if parts else "(no output)"
         return _mcp_response(output)

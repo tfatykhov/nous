@@ -560,6 +560,11 @@ class ConversationCompactor:
     _TRIM_MARKER_RE = re.compile(
         r"--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---"
     )
+    # codex round 13: SmartCompress records the pre-compression size in its
+    # marker (smart_compress.py) so the bulk threshold still applies.
+    _SMARTCOMPRESS_CHARS_RE = re.compile(
+        r"\[SmartCompressed:[^\]]*?(\d+) chars original\]"
+    )
     # Outcome-neutral (codex round 5): "already ran" asserts only execution,
     # not semantic success — a clean exit can hide internal partial failures.
     # "(tool reported success)" (codex round 7) keeps the reported outcome
@@ -573,14 +578,21 @@ class ConversationCompactor:
     _BULK_ERROR_HINT = "bulk operation FAILED earlier — fix the cause before any retry"
 
     def _original_result_size(self, text: str) -> int:
-        """Original size of a result, surviving prior soft-trims.
+        """Original size of a result, surviving prior soft-trims and
+        SmartCompress (codex round 13).
 
-        The soft-trim marker records the pre-trim size; once a bulk result
-        is trimmed its current length no longer reflects bulkness, so the
-        marker (or, later, the bulk hint itself) is the durable signal.
+        The soft-trim and SmartCompress markers record the pre-mutation
+        size; once a bulk result is trimmed or compressed its current
+        length no longer reflects bulkness, so the markers (or, later,
+        the bulk hint itself) are the durable signal.
         """
         m = self._TRIM_MARKER_RE.search(text)
-        return int(m.group(1)) if m else len(text)
+        if m:
+            return int(m.group(1))
+        m = self._SMARTCOMPRESS_CHARS_RE.search(text)
+        if m:
+            return int(m.group(1))
+        return len(text)
 
     def _item_is_bulk(self, item: dict[str, Any]) -> bool:
         """True if this single tool-result item is bulk-sized (codex P1:
@@ -602,8 +614,10 @@ class ConversationCompactor:
             return False
         if self._BULK_HINT in text or self._BULK_ERROR_HINT in text:
             return True
-        if "[SmartCompressed:" in text:
-            return True
+        # codex round 13: the SmartCompress marker alone is NOT bulk —
+        # compression fires from ~500 chars, far below the bulk threshold.
+        # _original_result_size reads the recorded pre-compression size, so
+        # the configured threshold governs compressed results too.
         return self._original_result_size(text) >= threshold
 
     # codex round 8: bash_tool reports failure IN the text ("Exit code: N"
@@ -635,9 +649,13 @@ class ConversationCompactor:
         if "Command timed out after" in text[:200]:
             return True
         # Widened tail window: the exit-code line may be followed by the
-        # SmartCompress marker line (codex round 9).
-        m = self._EXIT_CODE_RE.search(text[-400:])
-        return bool(m and m.group(1) != "0")
+        # SmartCompress marker line (codex round 9). The LAST exit-code
+        # line wins (codex round 13): bash_tool now always appends the
+        # authoritative line, so a quoted "Exit code: 1" inside a
+        # successful command's own output is overridden by the trailing
+        # "Exit code: 0".
+        matches = self._EXIT_CODE_RE.findall(text[-400:])
+        return bool(matches and matches[-1] != "0")
 
     def _bulk_hint_for(self, failed: bool) -> str:
         return self._BULK_ERROR_HINT if failed else self._BULK_HINT

@@ -355,6 +355,15 @@ async def smart_compress(
     if compressed_text == result_text:
         return passthrough
 
+    # codex round 13 (#179): record the original character size in the
+    # marker so the compaction pruner's bulk-threshold comparison survives
+    # ingestion-time compression (the marker otherwise records only
+    # line/item counts).
+    if compressed_text.endswith("]") and "[SmartCompressed:" in compressed_text[-200:]:
+        compressed_text = (
+            compressed_text[:-1] + f", {len(result_text)} chars original]"
+        )
+
     original_len = len(result_text)
     compressed_len = len(compressed_text)
     ratio = (1 - compressed_len / original_len) * 100 if original_len else 0

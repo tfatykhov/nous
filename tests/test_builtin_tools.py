@@ -86,6 +86,18 @@ class TestBashTool:
         assert "Exit code: 42" in text
 
     @pytest.mark.asyncio
+    async def test_bash_tool_zero_exit_reported(self, tmp_path):
+        """#179 codex round 13: the exit-code line is ALWAYS appended (last
+        line = authoritative wrapper status), so quoted 'Exit code: N' in a
+        command's own output can be disambiguated downstream."""
+        result = await bash_tool(
+            command=f'{sys.executable} -c "print(\'hello\')"',
+            _workspace_dir=str(tmp_path),
+        )
+        text = _extract_text(result)
+        assert text.rstrip().endswith("Exit code: 0")
+
+    @pytest.mark.asyncio
     async def test_bash_tool_creates_workspace(self, tmp_path):
         """Workspace directory auto-created if it doesn't exist."""
         workspace = tmp_path / "deep" / "nested" / "workspace"
