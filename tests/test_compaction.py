@@ -489,6 +489,37 @@ class TestBulkResultPruning:
         assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
         assert not any("example.com" in f for f in extracted2)
 
+    def test_smartcompressed_result_is_bulk(self):
+        """codex round 9: SmartCompress (F020) shrinks a sweep at ingestion,
+        so the pruner may never see a 50KB+ result — the [SmartCompressed:]
+        marker itself means 'sweep-shaped repetitive output' and must
+        trigger bulk handling (original is preserved in tool_cache)."""
+        compactor = ConversationCompactor(_bulk_settings())
+        digest = (
+            "result line 1\nresult line 2\n"
+            "[SmartCompressed: 5000→58 lines, 3 error/outlier preserved]"
+        )
+        messages = self._sweep_conversation(digest)
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" in stub
+        assert "do NOT re-run" in stub
+
+    def test_smartcompressed_bash_failure_detected(self):
+        """codex round 9: SmartCompress appends its marker AFTER the
+        preserved 'Exit code: N' line — the line-anchored regex must still
+        detect the failure."""
+        compactor = ConversationCompactor(_bulk_settings())
+        digest = (
+            "sweep output\nExit code: 1\n"
+            "[SmartCompressed: 5000→58 lines, 1 error/outlier preserved]"
+        )
+        messages = self._sweep_conversation(digest)
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
     def test_bulk_bash_nonzero_exit_marked_failed(self):
         """codex round 8: bash reports failure IN the text ('Exit code: N'
         appended last) and never sets is_error — the FAILED stub must fire

@@ -581,7 +581,15 @@ class ConversationCompactor:
     def _item_is_bulk(self, item: dict[str, Any]) -> bool:
         """True if this single tool-result item is bulk-sized (codex P1:
         per-item, so a bulk run_python can't drag a small sibling result
-        from the same parallel-call message onto bulk decay ages)."""
+        from the same parallel-call message onto bulk decay ages).
+
+        A "[SmartCompressed: N→M ...]" marker also means bulk (codex
+        round 9): F020 compresses repetitive output at INGESTION
+        (runner.py), so a 50KB+ sweep can reach the pruner as a short
+        digest with no trim marker — but SmartCompress only fires on
+        sweep-shaped repetitive content, which is precisely the #179
+        class, and the original is preserved in tool_cache.
+        """
         threshold = self._settings.tool_bulk_result_chars
         if threshold <= 0:
             return False
@@ -590,12 +598,17 @@ class ConversationCompactor:
             return False
         if self._BULK_HINT in text or self._BULK_ERROR_HINT in text:
             return True
+        if "[SmartCompressed:" in text:
+            return True
         return self._original_result_size(text) >= threshold
 
     # codex round 8: bash_tool reports failure IN the text ("Exit code: N"
     # appended last, builtin_tools.py:110-114; timeout message likewise) and
     # never sets is_error — so failure detection must also read the content.
-    _EXIT_CODE_RE = re.compile(r"Exit code: (-?\d+)\s*$")
+    # Line-anchored multiline (codex round 9): SmartCompress appends its
+    # marker AFTER the preserved exit-code line, so a $-anchored match on
+    # the raw tail would miss it.
+    _EXIT_CODE_RE = re.compile(r"^Exit code: (-?\d+)\s*$", re.MULTILINE)
 
     def _item_reports_failure(self, item: dict[str, Any], text: Any) -> bool:
         """True if this result reports failure — via is_error, a trailing
@@ -609,7 +622,9 @@ class ConversationCompactor:
             return True
         if "Command timed out after" in text[:200]:
             return True
-        m = self._EXIT_CODE_RE.search(text[-200:].rstrip())
+        # Widened tail window: the exit-code line may be followed by the
+        # SmartCompress marker line (codex round 9).
+        m = self._EXIT_CODE_RE.search(text[-400:])
         return bool(m and m.group(1) != "0")
 
     def _bulk_hint_for(self, failed: bool) -> str:
