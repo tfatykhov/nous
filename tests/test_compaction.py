@@ -494,10 +494,12 @@ class TestBulkResultPruning:
 
         for prompt in (CHECKPOINT_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT):
             assert "REPETITIVE OPERATIONS RULE" in prompt
-            # codex round 3: the rule must be outcome-aware, not mandate
-            # COMPLETED for failed bulk operations.
-            assert "COMPLETED or FAILED" in prompt
-            assert "never describe a failed one as completed" in prompt
+            # codex rounds 3+6: the rule must mirror the surviving tool
+            # results' wording — never mandate COMPLETED, never upgrade
+            # "tool reported success" into a completion claim.
+            assert "exactly as the surviving" in prompt
+            assert "do not upgrade" in prompt.lower()
+            assert "never describe a failed one as successful" in prompt
 
 
 # ------------------------------------------------------------------

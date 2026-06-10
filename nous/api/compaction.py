@@ -52,11 +52,13 @@ list it explicitly. Brevity is NOT an excuse to drop a value.
 REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls or
 one bulk operation (a sweep, a batch of queries, a mass update) MUST be
 compressed to a single line stating the operation, its scale, and its
-OUTCOME — COMPLETED or FAILED, as the tool results show (e.g. "Ran 350
-search queries across 7 weight ratios — COMPLETED; results saved to
-docs/results.json"). Never enumerate the individual operations, never
-describe a completed bulk operation in a way that reads as a pending
-plan, and never describe a failed one as completed.
+outcome exactly as the surviving tool results state it — e.g. "Ran 350
+search queries across 7 weight ratios — completed; results saved to
+docs/results.json", or "ran (tool reported success)", or "FAILED".
+Do not upgrade "tool reported success" into a stronger completion
+claim. Never enumerate the individual operations, never describe an
+already-run bulk operation in a way that reads as a pending plan, and
+never describe a failed one as successful.
 
 ## Format
 
@@ -110,10 +112,12 @@ RULES:
 6. Use SAME format as existing summary
 7. REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls
    or one bulk operation MUST be compressed to a single line stating
-   the operation, its scale, and its OUTCOME — COMPLETED or FAILED, as
-   the tool results show. Never enumerate the individual operations,
-   never describe a completed bulk operation in a way that reads as a
-   pending plan, and never describe a failed one as completed.
+   the operation, its scale, and its outcome exactly as the surviving
+   tool results state it (e.g. "ran (tool reported success)" or
+   "FAILED") — do not upgrade "tool reported success" into a stronger
+   completion claim. Never enumerate the individual operations, never
+   describe an already-run bulk operation in a way that reads as a
+   pending plan, and never describe a failed one as successful.
 
 Output ONLY the updated summary."""
 
