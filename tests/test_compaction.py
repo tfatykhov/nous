@@ -489,6 +489,20 @@ class TestBulkResultPruning:
         assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
         assert not any("example.com" in f for f in extracted2)
 
+    def test_bulk_bash_nonzero_exit_marked_failed(self):
+        """codex round 8: bash reports failure IN the text ('Exit code: N'
+        appended last) and never sets is_error — the FAILED stub must fire
+        from the content marker."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", "x" * 600 + "\nExit code: 1", "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
     def test_preserve_profile_exempt_from_bulk(self):
         """codex round 7: a large read_file result keeps its 'preserve'
         profile — deliberate reference content is not a sweep, and

@@ -592,13 +592,33 @@ class ConversationCompactor:
             return True
         return self._original_result_size(text) >= threshold
 
-    def _bulk_hint_for(self, item: dict[str, Any]) -> str:
-        return self._BULK_ERROR_HINT if item.get("is_error") else self._BULK_HINT
+    # codex round 8: bash_tool reports failure IN the text ("Exit code: N"
+    # appended last, builtin_tools.py:110-114; timeout message likewise) and
+    # never sets is_error — so failure detection must also read the content.
+    _EXIT_CODE_RE = re.compile(r"Exit code: (-?\d+)\s*$")
 
-    def _bulk_clear_stub(self, tool_name: str | None, item: dict[str, Any]) -> str:
+    def _item_reports_failure(self, item: dict[str, Any], text: Any) -> bool:
+        """True if this result reports failure — via is_error, a trailing
+        bash exit-code marker, a timeout message, or a previously stamped
+        error hint. Must be called BEFORE the item is mutated."""
+        if item.get("is_error"):
+            return True
+        if not isinstance(text, str):
+            return False
+        if self._BULK_ERROR_HINT in text:
+            return True
+        if "Command timed out after" in text[:200]:
+            return True
+        m = self._EXIT_CODE_RE.search(text[-200:].rstrip())
+        return bool(m and m.group(1) != "0")
+
+    def _bulk_hint_for(self, failed: bool) -> str:
+        return self._BULK_ERROR_HINT if failed else self._BULK_HINT
+
+    def _bulk_clear_stub(self, tool_name: str | None, failed: bool) -> str:
         """#179 anti-replay hard-clear stub, error-aware (codex P1)."""
         name = tool_name or "tool"
-        if item.get("is_error"):
+        if failed:
             return (
                 f"[Bulk tool output cleared — this {name} operation FAILED in "
                 f"an earlier turn and its error output was cleared. "
@@ -721,14 +741,18 @@ class ConversationCompactor:
                         self._extract_facts_before_clear(tool_name or "unknown", text)
                     )
 
+                # Failure status must be read BEFORE any mutation below
+                # destroys the text it lives in (codex round 8).
+                failed = is_bulk and self._item_reports_failure(item, text)
+
                 # Tier 4: Hard-clear (age >= clear_age)
                 if age >= clear_age:
                     if is_bulk:
                         # #179: anti-replay stub — the generic cleared text
                         # leaves the model free to re-derive "I should run
-                        # the sweep"; this one states the outcome explicitly
-                        # (completed vs failed — codex P1).
-                        item["content"] = self._bulk_clear_stub(tool_name, item)
+                        # the sweep"; this one states the reported outcome
+                        # (success vs failed — codex P1).
+                        item["content"] = self._bulk_clear_stub(tool_name, failed)
                     else:
                         item["content"] = (
                             "[Tool output cleared - content was processed in earlier turns]"
@@ -743,7 +767,7 @@ class ConversationCompactor:
                     # outcome signal and (b) bulkness survives to the
                     # clear tier after the trim marker is gone.
                     new_text = item.get("content", "")
-                    hint = self._bulk_hint_for(item)
+                    hint = self._bulk_hint_for(failed)
                     if (
                         is_bulk
                         and isinstance(new_text, str)
