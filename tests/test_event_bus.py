@@ -454,9 +454,10 @@ class TestEpisodeSummarizer:
             transcript_slice = user_msg.split("Transcript:", 1)[1].split(
                 "CRITICAL FAITHFULNESS RULE", 1
             )[0]
-            # small slack for surrounding template whitespace / an empty
-            # decision-context block between the anchors
-            assert len(transcript_slice) <= 8000 + 100
+            # strip() removes the fixed surrounding template newlines, so
+            # the budget can be asserted EXACTLY (codex round 3) — any
+            # over-budget chunk fails.
+            assert len(transcript_slice.strip()) <= 8000
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
