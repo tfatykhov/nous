@@ -473,6 +473,12 @@ class Settings(BaseSettings):
     tool_hard_clear_after: int = Field(
         default=12, validation_alias="NOUS_TOOL_HARD_CLEAR_AFTER"
     )
+    # #179: results at/above this size (original size, pre-trim) are treated
+    # as bulk operations — escalated to the aggressive 'bulk' decay profile
+    # with anti-replay stub text. 0 disables bulk detection.
+    tool_bulk_result_chars: int = Field(
+        default=50_000, validation_alias="NOUS_TOOL_BULK_RESULT_CHARS"
+    )
     keep_last_tool_results: int = Field(
         default=2, validation_alias="NOUS_KEEP_LAST_TOOL_RESULTS"
     )

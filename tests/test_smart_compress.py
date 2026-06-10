@@ -234,6 +234,60 @@ class TestSmartCompressEntryPoint:
         assert result.original_text == text  # web_search is non-re-fetchable
 
     @pytest.mark.asyncio
+    async def test_bash_json_with_exit_line_keeps_dict_array_path(self):
+        """#179 review: bash_tool now appends 'Exit code: N' to every result.
+        The status line must be detached before classification so bash JSON
+        output still takes the DICT_ARRAY path (valid JSON out), and
+        re-attached as the final line."""
+        settings = Settings(
+            smart_compress_enabled=True,
+            smart_compress_min_chars=100,
+            smart_compress_max_k=5,
+        )
+        items = [{"id": i, "score": 1.0 - i * 0.02, "data": f"item_{i}"} for i in range(50)]
+        text = json.dumps(items) + "\nExit code: 0"
+        result = await smart_compress("bash", {}, text, settings)
+        assert result.was_compressed is True
+        lines = result.text.split("\n")
+        assert lines[-1] == "Exit code: 0"          # re-attached, authoritative tail
+        assert lines[-2].startswith("[SmartCompressed:")
+        parsed = json.loads(lines[0])               # DICT_ARRAY path → valid JSON
+        assert isinstance(parsed, list) and len(parsed) >= 5
+
+    @pytest.mark.asyncio
+    async def test_dedup_does_not_displace_trailing_exit_line(self):
+        """#179 review: to_text() dedups identical lines keeping the FIRST
+        occurrence — a quoted 'Exit code: 1' early in the output must not
+        displace the authoritative trailing status line from the tail."""
+        settings = Settings(
+            smart_compress_enabled=True,
+            smart_compress_min_chars=100,
+            smart_compress_max_k=10,
+        )
+        lines = ["replaying saved log:", "Exit code: 1"]
+        lines += ["src/module.py:10: match"] * 80
+        lines += [f"src/file_{i}.py:10: match" for i in range(120)]
+        text = "\n".join(lines) + "\nExit code: 1"
+        result = await smart_compress("bash", {}, text, settings)
+        assert result.was_compressed is True
+        assert result.text.rstrip().split("\n")[-1] == "Exit code: 1"
+
+    @pytest.mark.asyncio
+    async def test_marker_records_original_chars(self):
+        """#179: the marker must record the pre-compression size so the
+        compaction pruner's bulk threshold survives ingestion compression."""
+        settings = Settings(
+            smart_compress_enabled=True,
+            smart_compress_min_chars=100,
+            smart_compress_max_k=10,
+        )
+        lines = ["src/module.py:10: match"] * 200
+        text = "\n".join(lines)
+        result = await smart_compress("bash", {}, text, settings)
+        assert result.was_compressed is True
+        assert f"{len(text)} chars original]" in result.text
+
+    @pytest.mark.asyncio
     async def test_non_refetchable_preserves_original(self):
         settings = Settings(
             smart_compress_enabled=True,

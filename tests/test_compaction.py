@@ -1,5 +1,7 @@
 """Tests for Spec 008.1 Phase 1: Tool Output Pruning + Token Estimation."""
 
+import pytest
+
 from nous.api.compaction import ConversationCompactor, TokenEstimator
 from nous.config import Settings
 
@@ -306,6 +308,499 @@ class TestPruneToolResults:
         ]
         compactor.prune_tool_results(messages)
         assert messages[1]["content"][0]["content"] == large
+
+
+# ------------------------------------------------------------------
+# #179: Bulk-result pruning tests
+# ------------------------------------------------------------------
+
+
+def _make_named_pair(name: str, content: str, tid: str) -> list[dict]:
+    """assistant tool_use + matching tool_result message pair."""
+    return [
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": tid, "name": name, "input": {"code": "sweep()"}}],
+        },
+        _make_tool_result(content, tid),
+    ]
+
+
+def _bulk_settings(**overrides) -> Settings:
+    """Settings with a small bulk threshold (500) above soft-trim (100)."""
+    defaults = {"NOUS_TOOL_BULK_RESULT_CHARS": "500"}
+    defaults.update(overrides)
+    return _make_settings(**defaults)
+
+
+class TestBulkResultPruning:
+    """#179: oversized results escalate to the (1, 2, 4) bulk profile with
+    anti-replay stub text, so a completed sweep can't dominate context and
+    trigger a replay loop."""
+
+    def _sweep_conversation(self, bulk_content: str) -> list[dict]:
+        """run_python bulk result at age 5, then 4 small results after it
+        (keep_last=2 → ages 5,4,3 unprotected; the bulk result is oldest)."""
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", bulk_content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        return messages
+
+    def test_bulk_result_hard_cleared_at_bulk_age(self):
+        """A bulk run_python result at age 5 is hard-cleared (bulk clear=4)
+        even though run_python's standard profile wouldn't clear until 12."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation("x" * 600)
+        compactor.prune_tool_results(messages)
+        cleared = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" in cleared
+        # codex round 4: facts only — "already ran" + tool-reported status,
+        # not a semantic COMPLETED claim.
+        assert "already ran" in cleared
+        assert "tool reported success" in cleared
+        assert "do NOT re-run" in cleared
+
+    def test_non_bulk_result_keeps_standard_ages(self):
+        """The same conversation with a sub-threshold result is NOT cleared —
+        run_python's standard profile (3,8,12) applies."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation("x" * 400)  # < 500 bulk threshold
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "cleared" not in text
+        # age 5 >= soft-trim only (oversized vs 100): trimmed, not stubbed
+        assert "--- trimmed" in text
+
+    def test_bulk_detection_survives_soft_trim(self):
+        """A previously soft-trimmed bulk result still counts as bulk via the
+        original-size marker, and is cleared with the anti-replay stub."""
+        trimmed = (
+            "xxxx\n\n--- trimmed (kept 20 head + 20 tail of 99999 chars) ---\n\nyyyy"
+        )
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation(trimmed)
+        compactor.prune_tool_results(messages)
+        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+
+    def test_bulk_degrade_carries_hint(self):
+        """At degrade age (bulk: 2-3) the metadata stub carries the
+        anti-replay hint so bulkness persists to the clear tier."""
+        compactor = ConversationCompactor(_bulk_settings())
+        # bulk result at age 3: 3 pairs total, keep_last=2 → only the first
+        # is unprotected at age 3 → degrade tier (>=2, <4).
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", "x" * 600, "t0")
+        for i in range(1, 3):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        degraded = messages[1]["content"][0]["content"]
+        assert "do NOT re-run" in degraded
+        # codex round 7: the reported outcome must survive at the degrade
+        # stage so checkpoint summaries can mirror it.
+        assert "tool reported success" in degraded
+        # And a second pass at clear age still recognizes it as bulk.
+        messages += _make_named_pair("run_python", "small_3", "t3")
+        compactor.prune_tool_results(messages)
+        assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
+
+    def test_bulk_disabled_when_zero(self):
+        """NOUS_TOOL_BULK_RESULT_CHARS=0 disables bulk escalation."""
+        compactor = ConversationCompactor(
+            _bulk_settings(NOUS_TOOL_BULK_RESULT_CHARS="0")
+        )
+        messages = self._sweep_conversation("x" * 600)
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "--- trimmed" in text  # plain soft-trim only
+
+    def test_conservative_tool_exempt_from_bulk(self):
+        """codex round 11: web_fetch/web_search (conservative) are
+        pure-retrieval — re-fetching is cheap and benign, so a large
+        result keeps conservative ages and never gets a do-NOT-re-run
+        stub."""
+        compactor = ConversationCompactor(_bulk_settings())
+        bulk_content = "see https://example.com/report plus " + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("web_fetch", bulk_content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        # age 5 < conservative degrade(10)/clear(15): soft-trim only.
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+        assert "--- trimmed" in text
+
+    def test_bulk_sibling_item_keeps_own_profile(self):
+        """codex P1 round 2: a small sibling result in the SAME message as a
+        bulk result (parallel tool calls) keeps its own tool profile — it is
+        not dragged onto bulk ages."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t0a", "name": "run_python", "input": {}},
+                    {"type": "tool_use", "id": "t0b", "name": "web_fetch", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t0a", "content": "x" * 600},
+                    {"type": "tool_result", "tool_use_id": "t0b", "content": "small fetch"},
+                ],
+            },
+        ]
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        bulk_item, sibling = messages[1]["content"]
+        assert "Bulk tool output cleared" in bulk_item["content"]
+        # web_fetch is 'conservative' (5, 10, 15): untouched at age 5.
+        assert sibling["content"] == "small fetch"
+
+    def test_bulk_error_result_not_marked_completed(self):
+        """codex P1 round 2: a failed bulk call must not get a COMPLETED /
+        do-not-re-run stub — that would suppress a legitimate retry."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages = self._sweep_conversation("Traceback: " + "x" * 600)
+        messages[1]["content"][0]["is_error"] = True
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+        assert "do NOT re-run" not in stub
+
+    def test_conservative_facts_extracted_before_degrade(self):
+        """codex P1 round 2: on the incremental lifecycle (degrade first,
+        clear later), conservative facts are captured at degrade time —
+        not lost by the time clear sees only the stub."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "see https://example.com/report plus " + "x" * 300
+        messages: list[dict] = []
+        messages += _make_named_pair("web_fetch", content, "t0")
+        for i in range(1, 10):
+            messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
+        # Pass 1: item at age 10 → conservative degrade tier (5, 10, 15).
+        # Facts extracted NOW, before the metadata stub destroys them.
+        extracted = compactor.prune_tool_results(messages)
+        assert any("example.com" in f for f in extracted)
+        assert " | first: " in messages[1]["content"][0]["content"]
+        # Pass 2: age 15 → clear tier. Stub yields nothing new; no crash.
+        for i in range(10, 15):
+            messages += _make_named_pair("web_fetch", f"small_{i}", f"t{i}")
+        extracted2 = compactor.prune_tool_results(messages)
+        assert "cleared" in messages[1]["content"][0]["content"]
+        assert not any("example.com" in f for f in extracted2)
+
+    def test_smartcompressed_result_is_bulk(self):
+        """codex rounds 9+13: SmartCompress (F020) shrinks a sweep at
+        ingestion, so the pruner may never see a 50KB+ result — the marker
+        records the original size, and the bulk threshold applies to THAT
+        (original is preserved in tool_cache)."""
+        compactor = ConversationCompactor(_bulk_settings())
+        digest = (
+            "result line 1\nresult line 2\n"
+            "[SmartCompressed: 5000→58 lines, 3 error/outlier preserved, "
+            "99999 chars original]"
+        )
+        messages = self._sweep_conversation(digest)
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" in stub
+        assert "do NOT re-run" in stub
+
+    def test_smartcompressed_small_original_not_bulk(self):
+        """codex round 13: SmartCompress fires from ~500 chars — far below
+        the bulk threshold — so the marker alone must NOT imply bulk; the
+        recorded original size governs."""
+        compactor = ConversationCompactor(_bulk_settings())
+        digest = (
+            "ok\n[SmartCompressed: 60→20 lines, 0 error/outlier preserved, "
+            "300 chars original]"
+        )
+        messages = self._sweep_conversation(digest)
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+
+    def test_smartcompressed_bash_failure_detected(self):
+        """codex round 9: SmartCompress appends its marker AFTER the
+        preserved 'Exit code: N' line — the line-anchored regex must still
+        detect the failure (bash results only)."""
+        compactor = ConversationCompactor(_bulk_settings())
+        digest = (
+            "sweep output\nExit code: 1\n"
+            "[SmartCompressed: 5000→58 lines, 1 error/outlier preserved, "
+            "99999 chars original]"
+        )
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", digest, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    def test_bash_quoted_failure_overridden_by_trailing_exit_zero(self):
+        """codex round 13: bash_tool now always appends the authoritative
+        exit-code line — a quoted 'Exit code: 1' inside a successful
+        command's own output (e.g. a displayed build log) must not mark
+        the result FAILED."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (
+            "x" * 600 + "\nnested build log said:\nExit code: 1\nExit code: 0"
+        )
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED" not in stub
+
+    def test_non_bash_exit_code_mention_not_failure(self):
+        """codex round 10: 'Exit code: 1' inside non-bash content (e.g. a
+        fetched page quoting a shell session) must NOT mark the bulk result
+        as failed — the marker is bash_tool-specific."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "x" * 600 + "\nthe build log ended with\nExit code: 1"
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED" not in stub
+
+    def test_bulk_bash_nonzero_exit_marked_failed(self):
+        """codex round 8: bash reports failure IN the text ('Exit code: N'
+        appended last) and never sets is_error — the FAILED stub must fire
+        from the content marker."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", "x" * 600 + "\nExit code: 1", "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    @pytest.mark.asyncio
+    async def test_real_smartcompress_output_drives_bulk_detection(self):
+        """Format-lock + e2e (review 2026-06-10, top gap): the marker
+        smart_compress ACTUALLY emits must parse via _SMARTCOMPRESS_CHARS_RE
+        and carry original size + bash failure status through the pruner.
+        Hand-crafted markers in the other tests can't lock this — if either
+        side drifts, the whole #179 feature silently no-ops in prod."""
+        from nous.api.smart_compress import smart_compress
+
+        settings = _make_settings()  # real bulk threshold: 50_000
+        compactor = ConversationCompactor(settings)
+        lines = [
+            "processed batch -> ok status=200" + " pad" * (i % 3)
+            for i in range(2000)
+        ]
+        raw = "\n".join(lines) + "\nExit code: 1"  # ~74KB, crushable, FAILED
+        result = await smart_compress("bash", {"command": "sweep"}, raw, settings)
+        assert result.text != raw  # compression actually fired
+        # Format lock: the emitted marker parses and records the raw size.
+        assert compactor._original_result_size(result.text) == len(raw)
+        # End-to-end: compressed digest → bulk FAILED clear stub.
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", result.text, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" in stub
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    def test_failed_bulk_idempotent_across_repeated_prunes(self):
+        """Review 2026-06-10: the pruner runs every tool-loop iteration —
+        repeated passes at the degrade tier must not double-stamp the hint
+        or flip FAILED→success, and the clear stub is a fixed point. (The
+        exit-code line dies at first degrade; the error hint is the only
+        durable failure signal afterwards.)"""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", "x" * 600 + "\nExit code: 1", "t0")
+        for i in range(1, 3):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        for _ in range(3):  # repeated prunes at the same (degrade) age
+            compactor.prune_tool_results(messages)
+            text = messages[1]["content"][0]["content"]
+            assert text.count(compactor._BULK_ERROR_HINT) == 1
+            assert "tool reported success" not in text
+        for i in (3, 4):  # advance to clear age
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+        compactor.prune_tool_results(messages)  # clear is a fixed point
+        assert messages[1]["content"][0]["content"] == stub
+
+    def test_bash_timeout_with_echoed_command_marked_failed(self):
+        """codex post-review P2: the timeout message echoes the command, so
+        a timed-out inline script can be bulk-sized — it must get the
+        FAILED stub, not 'tool reported success'."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (
+            "Command timed out after 120s.\nCommand: python - <<'EOF'\n"
+            + "x = 1\n" * 120  # inline script body pushes it over threshold
+            + "EOF"
+        )
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    def test_quoted_hint_text_does_not_classify(self):
+        """Review 2026-06-10: Nous greps its own source/transcripts — a
+        result QUOTING the hint strings (grep-style, no stub shape) must
+        not be classified bulk or failed."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (  # < 500 bulk threshold, not stub-shaped
+            'compaction.py:569: _BULK_ERROR_HINT = "'
+            + compactor._BULK_ERROR_HINT
+            + '"'
+        )
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "FAILED in" not in text
+
+    def test_run_python_direct_error_marked_failed(self):
+        """codex post-review P1: run_python execution failures now carry
+        is_error=True (handler sets the MCP field, dispatcher honors it) —
+        a bulk-sized exception message gets the FAILED stub."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "Error: RuntimeError: " + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        messages[1]["content"][0]["is_error"] = True  # as the runner records it
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "FAILED" in stub
+        assert "tool reported success" not in stub
+
+    def test_run_python_output_starting_with_error_not_failed(self):
+        """codex final P2: a SUCCESSFUL run_python whose printed output
+        begins with 'Error: ' (e.g. an error-analysis report) must NOT be
+        classified failed — failure rides on is_error, not content."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "Error: summary of 35 failures found in logs\n" + "x" * 600
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED in" not in stub
+
+    def test_quoted_smartcompress_marker_not_trusted(self):
+        """codex post-review P2: a grep-style result QUOTING a SmartCompress
+        marker (file:line prefix breaks the line anchor) must not be
+        classified bulk off the quoted size."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = (
+            "logs/old.txt:3: [SmartCompressed: 5→2 lines, "
+            "999999 chars original]"
+        )  # < 500 chars, marker quoted with prefix
+        messages: list[dict] = []
+        messages += _make_named_pair("bash", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("bash", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+
+    def test_run_python_content_failures_not_sniffed_pin(self):
+        """PIN (review 2026-06-10, documents a deliberate limitation):
+        run_python reports its own failures as SHORT 'Error: ...' text
+        (never bulk-sized), so a bulk run_python result with self-printed
+        failure lines gets the success stub BY DESIGN — content-level
+        failure sniffing beyond bash's structured exit line was rejected
+        (codex round 10) as too false-positive-prone. Do not 'fix' this
+        with a tool-agnostic Traceback regex."""
+        compactor = ConversationCompactor(_bulk_settings())
+        content = "\n".join(
+            f"item {i}: FAILED Traceback (most recent call last)" for i in range(20)
+        ) + "\n" + "x" * 200
+        messages: list[dict] = []
+        messages += _make_named_pair("run_python", content, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("run_python", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        stub = messages[1]["content"][0]["content"]
+        assert "tool reported success" in stub
+        assert "FAILED in" not in stub
+
+    def test_unlisted_tool_exempt_from_bulk(self):
+        """codex round 12: escalation is a positive allowlist — an unlisted
+        (retrieval-ish or future) tool never bulk-escalates, even with a
+        huge result."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("recall_recent", "x" * 600, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("recall_recent", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+
+    def test_preserve_profile_exempt_from_bulk(self):
+        """codex round 7: a large read_file result keeps its 'preserve'
+        profile — deliberate reference content is not a sweep, and
+        re-reading a file is cheap and legitimate."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("read_file", "x" * 600, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("read_file", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+        # preserve (8, 999, 20): at age 5 only the ageless soft-trim applies.
+        assert "--- trimmed" in text
+
+    def test_repetitive_ops_rule_in_both_prompts(self):
+        """codex P2: the #179 compression rule must be in BOTH the checkpoint
+        and the update summarization prompts — updates run on every
+        compaction after the first."""
+        from nous.api.compaction import CHECKPOINT_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT
+
+        for prompt in (CHECKPOINT_SYSTEM_PROMPT, UPDATE_SYSTEM_PROMPT):
+            assert "REPETITIVE OPERATIONS RULE" in prompt
+            # codex rounds 3+6: the rule must mirror the surviving tool
+            # results' wording — never mandate COMPLETED, never upgrade
+            # "tool reported success" into a completion claim.
+            assert "exactly as the surviving" in prompt
+            assert "do not upgrade" in prompt.lower()
+            assert "never describe a failed one as successful" in prompt
 
 
 # ------------------------------------------------------------------

@@ -16,7 +16,11 @@ import time
 from typing import Any, Protocol
 
 from nous.api.models import ApiResponse, Conversation, Message
-from nous.cognitive.schemas import DECAY_PROFILE_AGES, TOOL_DECAY_PROFILES
+from nous.cognitive.schemas import (
+    BULK_ESCALATION_TOOLS,
+    DECAY_PROFILE_AGES,
+    TOOL_DECAY_PROFILES,
+)
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -48,6 +52,17 @@ Examples of values that MUST be preserved verbatim:
 
 If a specific value appears in the conversation and is not pure noise,
 list it explicitly. Brevity is NOT an excuse to drop a value.
+
+REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls or
+one bulk operation (a sweep, a batch of queries, a mass update) MUST be
+compressed to a single line stating the operation, its scale, and its
+outcome exactly as the surviving tool results state it — e.g. "Ran 350
+search queries across 7 weight ratios — completed; results saved to
+docs/results.json", or "ran (tool reported success)", or "FAILED".
+Do not upgrade "tool reported success" into a stronger completion
+claim. Never enumerate the individual operations, never describe an
+already-run bulk operation in a way that reads as a pending plan, and
+never describe a failed one as successful.
 
 ## Format
 
@@ -99,6 +114,14 @@ RULES:
 4. UPDATE Conversation Dynamics with new signals
 5. PRESERVE exact file paths, function names, error messages
 6. Use SAME format as existing summary
+7. REPETITIVE OPERATIONS RULE (#179): a sequence of similar tool calls
+   or one bulk operation MUST be compressed to a single line stating
+   the operation, its scale, and its outcome exactly as the surviving
+   tool results state it (e.g. "ran (tool reported success)" or
+   "FAILED") — do not upgrade "tool reported success" into a stronger
+   completion claim. Never enumerate the individual operations, never
+   describe an already-run bulk operation in a way that reads as a
+   pending plan, and never describe a failed one as successful.
 
 Output ONLY the updated summary."""
 
@@ -529,6 +552,162 @@ class ConversationCompactor:
             f"{len(text)} chars | first: {first_line}{refetch_hint}]"
         )
 
+    # #179: bulk-result handling. A single oversized tool result (one
+    # run_python holding a 350-call sweep) ages as ONE block, so under
+    # per-tool profiles it dominates context for many turns and the model
+    # replays the completed operation. Bulk results escalate to the 'bulk'
+    # profile and their degrade/clear stubs carry explicit anti-replay text.
+    # Both size markers are LINE-anchored (codex post-review P2): in real
+    # pruner input each marker occupies its own line, while QUOTED markers
+    # in grep-style output carry a file:line prefix — an unanchored match
+    # would trust a quoted "999999 chars original]" and misclassify a short
+    # result as bulk.
+    _TRIM_MARKER_RE = re.compile(
+        r"^--- trimmed \(kept \d+ head \+ \d+ tail of (\d+) chars\) ---\s*$",
+        re.MULTILINE,
+    )
+    # codex round 13: SmartCompress records the pre-compression size in its
+    # marker (smart_compress.py) so the bulk threshold still applies.
+    _SMARTCOMPRESS_CHARS_RE = re.compile(
+        r"^\[SmartCompressed:[^\]\n]*?(\d+) chars original\]\s*$",
+        re.MULTILINE,
+    )
+    # Outcome-neutral (codex round 5): "already ran" asserts only execution,
+    # not semantic success — a clean exit can hide internal partial failures.
+    # "(tool reported success)" (codex round 7) keeps the reported outcome
+    # visible at the degrade stage so checkpoint summaries can mirror it.
+    # "to redo completed work" (codex final P1): bash/run_python also serve
+    # retrieval (cat/grep of large files) — the anti-replay instruction must
+    # forbid REDOING the operation, not legitimate re-fetching of output
+    # that is needed again.
+    _BULK_HINT = (
+        "bulk operation already ran earlier (tool reported success) — "
+        "do NOT re-run it to redo completed work"
+    )
+    # codex P1: a failed sweep must not be stamped as completed — that would
+    # suppress a legitimate retry and corrupt later summaries.
+    _BULK_ERROR_HINT = "bulk operation FAILED earlier — fix the cause before any retry"
+
+    def _original_result_size(self, text: str) -> int:
+        """Original size of a result, surviving prior soft-trims and
+        SmartCompress (codex round 13).
+
+        The soft-trim and SmartCompress markers record the pre-mutation
+        size; once a bulk result is trimmed or compressed its current
+        length no longer reflects bulkness, so the markers (or, later,
+        the bulk hint itself) are the durable signal. The MAX over all
+        signals wins (review 2026-06-10): a soft-trimmed SmartCompress
+        digest carries a trim marker recording only the digest length —
+        first-match precedence would shadow the real original size.
+        """
+        sizes = [len(text)]
+        sizes.extend(int(s) for s in self._TRIM_MARKER_RE.findall(text))
+        sizes.extend(int(s) for s in self._SMARTCOMPRESS_CHARS_RE.findall(text))
+        return max(sizes)
+
+    def _item_is_bulk(self, item: dict[str, Any]) -> bool:
+        """True if this single tool-result item is bulk-sized (codex P1:
+        per-item, so a bulk run_python can't drag a small sibling result
+        from the same parallel-call message onto bulk decay ages).
+
+        A "[SmartCompressed: N→M ...]" marker also means bulk (codex
+        round 9): F020 compresses repetitive output at INGESTION
+        (runner.py), so a 50KB+ sweep can reach the pruner as a short
+        digest with no trim marker — but SmartCompress only fires on
+        sweep-shaped repetitive content, which is precisely the #179
+        class, and the original is preserved in tool_cache.
+        """
+        threshold = self._settings.tool_bulk_result_chars
+        if threshold <= 0:
+            return False
+        text = item.get("content", "")
+        if not isinstance(text, str):
+            return False
+        # Hint markers persist bulkness across degrade/clear. Honored only
+        # on stub-shaped text (leading "[" — review 2026-06-10): a bash
+        # grep over this repo or over old transcripts can quote the hint
+        # strings verbatim, and that must not classify the grep result.
+        if text.lstrip().startswith("[") and (
+            self._BULK_HINT in text or self._BULK_ERROR_HINT in text
+        ):
+            return True
+        # codex round 13: the SmartCompress marker alone is NOT bulk —
+        # compression fires from ~500 chars, far below the bulk threshold.
+        # _original_result_size reads the recorded pre-compression size, so
+        # the configured threshold governs compressed results too.
+        return self._original_result_size(text) >= threshold
+
+    # codex round 8: bash_tool reports failure IN the text ("Exit code: N"
+    # appended last, builtin_tools.py:110-114; timeout message likewise) and
+    # never sets is_error — so failure detection must also read the content.
+    # Line-anchored multiline (codex round 9): SmartCompress appends its
+    # marker AFTER the preserved exit-code line, so a $-anchored match on
+    # the raw tail would miss it.
+    _EXIT_CODE_RE = re.compile(r"^Exit code: (-?\d+)\s*$", re.MULTILINE)
+
+    def _item_reports_failure(
+        self, item: dict[str, Any], text: Any, tool_name: str | None
+    ) -> bool:
+        """True if this result reports failure — via is_error, a trailing
+        bash exit-code marker, a timeout message, or a previously stamped
+        error hint. Must be called BEFORE the item is mutated."""
+        if item.get("is_error"):
+            return True
+        if not isinstance(text, str):
+            return False
+        # Stub-shape guard mirrors _item_is_bulk (review 2026-06-10):
+        # quoted hint text in grep-style output must not flag failure.
+        if text.lstrip().startswith("[") and self._BULK_ERROR_HINT in text:
+            return True
+        # run_python execution failures arrive via is_error (the handler
+        # sets the MCP field and the dispatcher honors it — #179): no
+        # content sniffing, so a successful run whose OUTPUT begins with
+        # "Error: " is never misread as a failure.
+        # The exit-code and timeout markers are emitted by bash_tool only
+        # (builtin_tools.py) — applying them tool-agnostically would
+        # misread e.g. fetched page content mentioning "Exit code: 1"
+        # (codex P2, round 10).
+        if tool_name != "bash":
+            return False
+        # The timeout message echoes the command, so a timed-out INLINE
+        # script can be bulk-sized (codex post-review P2). startswith —
+        # the wrapper emits this as the very first characters — keeps
+        # quoted mentions in command output inert.
+        if text.startswith("Command timed out after"):
+            return True
+        # Widened tail window: the exit-code line may be followed by the
+        # SmartCompress marker line (codex round 9). The LAST exit-code
+        # line wins (codex round 13): bash_tool now always appends the
+        # authoritative line (smart_compress re-attaches it as the final
+        # line), so a quoted "Exit code: 1" inside a successful command's
+        # own output is overridden by the trailing "Exit code: 0".
+        matches = self._EXIT_CODE_RE.findall(text[-400:])
+        return bool(matches and matches[-1] != "0")
+
+    def _bulk_hint_for(self, failed: bool) -> str:
+        return self._BULK_ERROR_HINT if failed else self._BULK_HINT
+
+    def _bulk_clear_stub(self, tool_name: str | None, failed: bool) -> str:
+        """#179 anti-replay hard-clear stub, error-aware (codex P1)."""
+        name = tool_name or "tool"
+        if failed:
+            return (
+                f"[Bulk tool output cleared — this {name} operation FAILED in "
+                f"an earlier turn and its error output was cleared. "
+                f"{self._BULK_ERROR_HINT}.]"
+            )
+        # codex round 4: is_error=False only means the tool exited cleanly —
+        # a sweep can swallow internal failures — so state facts (ran, tool
+        # reported success, output was processed in earlier turns), not a
+        # semantic COMPLETED claim. The reported outcome lives in _BULK_HINT.
+        return (
+            f"[Bulk tool output cleared — this {name} operation already ran "
+            f"in an earlier turn and its output was processed then. "
+            f"{self._BULK_HINT}; re-run it only if you genuinely need its "
+            f"output again — otherwise work from its saved results or the "
+            f"earlier conversation.]"
+        )
+
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
         """Extract URLs, paths, key-values before hard-clearing."""
         facts: list[str] = []
@@ -580,52 +759,104 @@ class ConversationCompactor:
             content = msg["content"]
             age = len(tool_indices) - pos
 
-            # Get per-tool decay profile
-            tool_name = None
+            # Per-ITEM profile resolution (codex P1): one user message may
+            # carry several results from one assistant turn's parallel tool
+            # calls — a bulk run_python must not drag a small sibling
+            # web_fetch onto bulk ages, and each item keeps its own tool's
+            # decay profile + conservative fact extraction.
+            msg_cleared = False
+            msg_degraded = False
+            msg_trimmed = False
+
             for item in content:
-                tool_use_id = item.get("tool_use_id")
-                if tool_use_id:
-                    block = tool_use_index.get(tool_use_id)
-                    if block:
-                        tool_name = block.get("name")
-                        break
-
-            profile_name = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
-            _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
-                profile_name, (3, 8, 12)
-            )
-
-            # Tier 4: Hard-clear (age >= clear_age)
-            if age >= clear_age:
-                for item in content:
-                    if self._has_image_content(item):
-                        continue
-                    text = item.get("content", "")
-                    # Extract facts from conservative tools before clearing
-                    if isinstance(text, str) and text and profile_name == "conservative":
-                        extracted.extend(self._extract_facts_before_clear(tool_name or "unknown", text))
-                    item["content"] = (
-                        "[Tool output cleared - content was processed in earlier turns]"
-                    )
-                hard_cleared += 1
-                continue
-
-            # Tier 3: Metadata degrade (age >= degrade_age)
-            if age >= degrade_age:
-                for item in content:
-                    if self._has_image_content(item):
-                        continue
-                    tool_use_id = item.get("tool_use_id")
-                    tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
-                    self._metadata_degrade(item, tool_use_block)
-                metadata_degraded += 1
-                continue
-
-            # Tier 2: Soft-trim (oversized results)
-            for item in content:
-                if self._has_image_content(item):
+                if not isinstance(item, dict) or self._has_image_content(item):
                     continue
+
+                tool_use_id = item.get("tool_use_id")
+                tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
+                tool_name = tool_use_block.get("name") if tool_use_block else None
+                base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
+                # #179: size escalation — bulk items decay on (1, 2, 4);
+                # base_profile keeps driving conservative-tool fact
+                # extraction. Escalation is a POSITIVE allowlist of
+                # operation-shaped tools (codex rounds 7/11/12): the replay
+                # harm class is OPERATIONS — for retrieval tools
+                # (registered or future, hence allowlist-not-default)
+                # re-running is cheap and benign, so a do-NOT-re-run stub
+                # would be wrong, and their profiles already encode the
+                # right retention.
+                is_bulk = (
+                    tool_name in BULK_ESCALATION_TOOLS
+                    and self._item_is_bulk(item)
+                )
+                profile_name = "bulk" if is_bulk else base_profile
+                _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
+                    profile_name, (3, 8, 12)
+                )
+
                 text = item.get("content", "")
+                # Conservative-tool facts must be captured before the FIRST
+                # content-destroying tier (codex P1: on the incremental
+                # path, degrade precedes clear, so clear-time extraction
+                # only ever saw the degrade stub). Extraction fires only
+                # when this pass actually mutates the item (clear always
+                # does; degrade only when _metadata_degrade's >=200-char
+                # condition holds), and never re-fires on a stub
+                # (" | first: " / "output cleared" markers).
+                will_mutate = age >= clear_age or (
+                    age >= degrade_age
+                    and isinstance(text, str)
+                    and len(text) >= 200
+                )
+                if (
+                    will_mutate
+                    and base_profile == "conservative"
+                    and isinstance(text, str)
+                    and text
+                    and " | first: " not in text
+                    and "output cleared" not in text
+                ):
+                    extracted.extend(
+                        self._extract_facts_before_clear(tool_name or "unknown", text)
+                    )
+
+                # Failure status must be read BEFORE any mutation below
+                # destroys the text it lives in (codex round 8).
+                failed = is_bulk and self._item_reports_failure(item, text, tool_name)
+
+                # Tier 4: Hard-clear (age >= clear_age)
+                if age >= clear_age:
+                    if is_bulk:
+                        # #179: anti-replay stub — the generic cleared text
+                        # leaves the model free to re-derive "I should run
+                        # the sweep"; this one states the reported outcome
+                        # (success vs failed — codex P1).
+                        item["content"] = self._bulk_clear_stub(tool_name, failed)
+                    else:
+                        item["content"] = (
+                            "[Tool output cleared - content was processed in earlier turns]"
+                        )
+                    msg_cleared = True
+                    continue
+
+                # Tier 3: Metadata degrade (age >= degrade_age)
+                if age >= degrade_age:
+                    self._metadata_degrade(item, tool_use_block)
+                    # #179: stamp the bulk hint so (a) the model sees the
+                    # outcome signal and (b) bulkness survives to the
+                    # clear tier after the trim marker is gone.
+                    new_text = item.get("content", "")
+                    hint = self._bulk_hint_for(failed)
+                    if (
+                        is_bulk
+                        and isinstance(new_text, str)
+                        and hint not in new_text
+                    ):
+                        item["content"] = f"{new_text} [{hint}]"
+                    msg_degraded = True
+                    continue
+
+                # Tier 2: Soft-trim (oversized results)
                 if not isinstance(text, str):
                     continue
                 if len(text) > self._settings.tool_soft_trim_chars:
@@ -638,7 +869,14 @@ class ConversationCompactor:
                         f"of {original_len} chars) ---\n\n"
                         f"{text[-tail:]}"
                     )
-                    soft_trimmed += 1
+                    msg_trimmed = True
+
+            if msg_cleared:
+                hard_cleared += 1
+            elif msg_degraded:
+                metadata_degraded += 1
+            elif msg_trimmed:
+                soft_trimmed += 1
 
         if soft_trimmed or hard_cleared or metadata_degraded:
             logger.info(
