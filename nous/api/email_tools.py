@@ -16,6 +16,7 @@ return only a generic ``email send failed: <ExceptionType>`` to the model.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import os
 import re
@@ -103,6 +104,18 @@ def _read_allowlist_file(path: str, cache: dict[str, Any]) -> set[str]:
 def _scan_secrets(text: str) -> bool:
     """Return True if the text matches any known secret pattern."""
     return any(p.search(text) for p in _SECRET_PATTERNS)
+
+
+def _html_to_text(s: str) -> str:
+    """Strip HTML tags and decode entities for secret scanning (#484).
+
+    Mail clients render entity-encoded content (``sk-&#97;bcd...`` displays
+    as ``sk-abcd...``), so the scan must also see the decoded text. Tags are
+    replaced with a space; entities are decoded after tag-stripping so a
+    decoded ``&lt;`` cannot fabricate a tag. The raw HTML is still scanned
+    separately — this is an additional view, not a replacement.
+    """
+    return html.unescape(re.sub(r"<[^>]+>", " ", s))
 
 
 def _normalize_paths(value: Any) -> list[str]:
@@ -252,8 +265,12 @@ def create_send_email_tool(settings: Settings):
                     "(operator action)."
                 )
 
-        # 3. Secret scan (secondary guard).
-        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}"):
+        # 3. Secret scan (secondary guard). html_body is scanned twice: raw
+        # source (catches secrets inside tag attributes, which tag-stripping
+        # would remove) AND entity-decoded text (#484 — catches secrets a
+        # mail client would render from entity-encoded source).
+        html_text = _html_to_text(html_body) if html_body else ""
+        if _scan_secrets(f"{subject}\n{body}\n{html_body or ''}\n{html_text}"):
             return _error(
                 "email appears to contain a secret (API key, password, or token); "
                 "refusing to send."
