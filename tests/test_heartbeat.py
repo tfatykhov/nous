@@ -1100,3 +1100,54 @@ class TestF048HeartbeatBackgroundStreaming:
         shared_runner.run_turn.assert_awaited_once()
         call_kwargs = shared_runner.run_turn.call_args.kwargs
         assert call_kwargs.get("is_background") is True
+
+
+class TestScheduledTuning:
+    """Audit HB-3: tuner.tune runs on a schedule from the tick loop, not only
+    via the manual REST endpoint."""
+
+    def _runner(self):
+        from types import SimpleNamespace
+        from nous.heartbeat.runner import HeartbeatRunner
+
+        r = HeartbeatRunner.__new__(HeartbeatRunner)
+        r._settings = MagicMock(
+            heartbeat_tuning_enabled=True, heartbeat_tuning_interval_hours=168,
+        )
+        r._finding_store = MagicMock()
+        r._registry = MagicMock()
+        r._tuner = MagicMock()
+        r._tuner.tune = AsyncMock(
+            return_value=SimpleNamespace(adjustments=[], skipped_checks=[])
+        )
+        r._last_tune = None
+        return r
+
+    @pytest.mark.asyncio
+    async def test_first_call_anchors_without_tuning(self):
+        r = self._runner()
+        await r._maybe_tune()
+        r._tuner.tune.assert_not_awaited()
+        assert r._last_tune is not None  # anchored for next interval
+
+    @pytest.mark.asyncio
+    async def test_tunes_after_interval(self):
+        r = self._runner()
+        r._last_tune = datetime.now(UTC) - timedelta(hours=200)
+        await r._maybe_tune()
+        r._tuner.tune.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_disabled_never_tunes(self):
+        r = self._runner()
+        r._settings.heartbeat_tuning_enabled = False
+        r._last_tune = datetime.now(UTC) - timedelta(hours=200)
+        await r._maybe_tune()
+        r._tuner.tune.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_within_interval_skips(self):
+        r = self._runner()
+        r._last_tune = datetime.now(UTC) - timedelta(hours=1)
+        await r._maybe_tune()
+        r._tuner.tune.assert_not_awaited()

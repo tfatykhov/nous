@@ -1,5 +1,7 @@
 """Tests for F035.4: Context visibility — ContextLogger, section parser, payload store."""
 
+import pytest
+
 from nous.observability.context_logger import (
     ContextLogEntry,
     ContextLogger,
@@ -327,6 +329,46 @@ class TestContextLogger:
         assert updated.output_tokens == 200
         assert updated.duration_ms == 1234.5
         assert updated.stop_reason == "end_turn"
+
+    @pytest.mark.asyncio
+    async def test_update_response_persists_via_db_updater(self):
+        """Audit OB-3: update_response fires the db_updater so the response
+        columns (tokens/cache/duration/stop_reason) actually reach the DB."""
+        import asyncio
+
+        seen = {}
+
+        async def _updater(entry):
+            seen["id"] = entry.id
+            seen["output_tokens"] = entry.output_tokens
+            seen["stop_reason"] = entry.stop_reason
+
+        ctx_logger = ContextLogger(db_updater=_updater)
+        entry = ctx_logger.log(
+            session_id="s1", turn_number=1, call_type="chat",
+            model="test", system_prompt="test", messages=[],
+            tools=None, frame_id="conv", context_window=200000,
+        )
+        ctx_logger.update_response(
+            entry.id, input_tokens=500, output_tokens=200,
+            cache_creation=100, cache_read=50, duration_ms=12.0,
+            stop_reason="end_turn",
+        )
+        await asyncio.sleep(0)  # let the fire-and-forget task run
+        assert seen.get("id") == entry.id
+        assert seen.get("output_tokens") == 200
+        assert seen.get("stop_reason") == "end_turn"
+
+    def test_update_response_no_updater_is_safe(self):
+        """No db_updater wired -> update_response stays in-memory, no crash."""
+        ctx_logger = ContextLogger()
+        entry = ctx_logger.log(
+            session_id="s1", turn_number=1, call_type="chat",
+            model="test", system_prompt="test", messages=[],
+            tools=None, frame_id="conv", context_window=200000,
+        )
+        ctx_logger.update_response(entry.id, output_tokens=10)
+        assert ctx_logger.get_entry(entry.id).output_tokens == 10
 
     def test_payload_store_disabled_by_default(self):
         ctx_logger = ContextLogger()

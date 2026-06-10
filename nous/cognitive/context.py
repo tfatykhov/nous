@@ -183,6 +183,16 @@ class ContextEngine:
                 budget.apply_overrides(retrieval_plan.budget_overrides)
             skip_types = retrieval_plan.skip_types
 
+        # Audit CL-6 (2026-06-09): operator env overrides
+        # (NOUS_CONTEXT_BUDGET_OVERRIDES) must take precedence over the intent
+        # plan's frame-based overrides. for_frame() applied them first, but the
+        # plan's apply_overrides above REPLACES them — silently reverting e.g. a
+        # pinned facts=3000 back to the conversation-frame default of 500 on
+        # every conversation turn. Re-apply env overrides LAST so explicit
+        # operator policy wins; keys the operator did NOT pin stay frame-adaptive.
+        if self._settings.context_budget_overrides:
+            budget.apply_overrides(self._settings.context_budget_overrides)
+
         # Determine per-type query text and limits from plan
         _query_texts: dict[str, str] = {}
         _limits: dict[str, int] = {}

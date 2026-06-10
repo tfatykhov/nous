@@ -79,7 +79,9 @@ class HeartbeatRunner:
         self._last_tick: datetime | None = None
         self._last_digest_date: date | None = None
         self._last_prune: datetime | None = None
-        self._tuner: HeartbeatTuner = HeartbeatTuner()
+        self._tuner: HeartbeatTuner = HeartbeatTuner(
+            min_samples=getattr(settings, "heartbeat_tuning_min_samples", None),
+        )
         self._last_tune: datetime | None = None
 
     # ------------------------------------------------------------------
@@ -184,6 +186,9 @@ class HeartbeatRunner:
 
                 # F034.1: Periodic prune + sweep (every 24h)
                 await self._maybe_prune_and_sweep()
+
+                # F034.3 / Audit HB-3: scheduled self-tuning pass
+                await self._maybe_tune()
 
             except asyncio.CancelledError:
                 break
@@ -819,6 +824,36 @@ class HeartbeatRunner:
     @property
     def finding_store(self) -> FindingStore | None:
         return self._finding_store
+
+    async def _maybe_tune(self) -> None:
+        """Audit HB-3 (2026-06-09): run the self-tuning pass on a schedule.
+
+        Previously `tuner.tune` was reachable only via the manual REST endpoint,
+        so the four `NOUS_HEARTBEAT_TUNING_*` settings were inert even with
+        `NOUS_HEARTBEAT_TUNING_ENABLED=true` in prod. The tuner internally
+        enforces MIN_SAMPLES per check and snapshots/rolls back, so a pass with
+        no outcome data is a safe no-op. First pass is delayed one full interval
+        after startup to avoid tuning on every restart.
+        """
+        if not self._settings.heartbeat_tuning_enabled or self._finding_store is None:
+            return
+        now = datetime.now(UTC)
+        if self._last_tune is None:
+            # Anchor the interval at startup; don't tune immediately on boot.
+            self._last_tune = now
+            return
+        interval_hours = getattr(self._settings, "heartbeat_tuning_interval_hours", 168)
+        if (now - self._last_tune).total_seconds() / 3600 < interval_hours:
+            return
+        self._last_tune = now
+        try:
+            report = await self._tuner.tune(self._finding_store, self._registry)
+            logger.info(
+                "F034.3/HB-3: scheduled tuning pass — %d adjustment(s), %d skipped",
+                len(report.adjustments), len(report.skipped_checks),
+            )
+        except Exception:
+            logger.exception("F034.3/HB-3: scheduled tuning pass failed")
 
     @property
     def tuner(self) -> HeartbeatTuner:
