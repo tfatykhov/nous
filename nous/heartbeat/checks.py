@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import imaplib
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -145,6 +146,28 @@ PENDING_PROTOTYPES = [
     "Action required but not yet taken",
 ]
 
+# #369: episode summaries that are questions / conversational filler are not
+# commitments — _promise_scan skips them before flagging. A bare first-word
+# check over-suppresses ("Okay, I'll follow up with Tim", "Should update the
+# docs" are commitments — codex P2 on PR #503), so: strip leading filler,
+# then treat as a question only on an interrogative wh-start or a trailing
+# question mark. Modal/aux starts alone do NOT suppress.
+_FILLER_PREFIX = re.compile(r"^\s*(?:(?:hey|ok|okay)[\s,!.:-]+)+", re.IGNORECASE)
+_INTERROGATIVE_PREFIX = re.compile(
+    r"^\s*(what|how|where|when|why|who|whom|whose|which)\b", re.IGNORECASE
+)
+
+
+def _is_question_form(text: str) -> bool:
+    """True if an episode summary reads as a question / conversational filler
+    rather than a commitment (#369)."""
+    stripped = _FILLER_PREFIX.sub("", text).strip()
+    if not stripped:
+        return True  # pure filler ("ok", "hey") — nothing to commit to
+    if stripped.endswith("?"):
+        return True
+    return bool(_INTERROGATIVE_PREFIX.match(stripped))
+
 
 class SelfInitiatedCheck(BaseCheck):
     """Check for pending actions and due schedules (permanent).
@@ -173,6 +196,15 @@ class SelfInitiatedCheck(BaseCheck):
             "similarity_threshold": TunableParam("similarity_threshold", 0.75, 0.6, 0.9, 0.02),
             "lookback_days": TunableParam("lookback_days", 14, 3, 30, 1),
             "max_pending_items": TunableParam("max_pending_items", 5, 2, 15, 1),
+            # #369: upper bound on the age-based promise heuristic (hours).
+            # Episodes older than this are too old to be actionable.
+            # pinned=True (codex P2): the generic tuner's relax=+step would
+            # WIDEN this window on noisy feedback — inverted for an upper
+            # bound. Operator-adjustable via the params API; excluded from
+            # auto-tuning until TunableParam grows direction metadata.
+            "max_stale_age_hours": TunableParam(
+                "max_stale_age_hours", 336, 72, 720, 24, pinned=True
+            ),
         }
 
     async def _ensure_prototypes(self) -> list[list[float]]:
@@ -265,6 +297,7 @@ class SelfInitiatedCheck(BaseCheck):
         """Search recent episode summaries for unresolved commitments."""
         findings: list[Finding] = []
         max_items = int(self.get_param_value("max_pending_items"))
+        max_stale_hours = float(self.get_param_value("max_stale_age_hours"))
 
         promise_queries = [
             "I'll look into",
@@ -286,16 +319,23 @@ class SelfInitiatedCheck(BaseCheck):
                         continue
                     seen_episode_ids.add(eid)
 
-                    # Check if episode is ongoing or old enough to be stale
+                    # Check if episode is ongoing or old enough to be stale.
+                    # #369: the age-based heuristic is bounded above — beyond
+                    # max_stale_age_hours it's too old to be actionable.
+                    # outcome=ongoing is an explicit state and is NOT capped.
                     is_ongoing = getattr(ep, "outcome", None) == "ongoing"
                     started = getattr(ep, "started_at", None)
                     is_stale = False
                     if started:
                         age_hours = (datetime.now(UTC) - started).total_seconds() / 3600
-                        is_stale = age_hours > 48
+                        is_stale = 48 < age_hours <= max_stale_hours
 
                     if is_ongoing or is_stale:
                         summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
+                        # #369: questions / conversational openers are not
+                        # commitments — skip before flagging.
+                        if _is_question_form(summary_text):
+                            continue
                         findings.append(Finding(
                             source="episodes",
                             summary=f"Unresolved commitment: {summary_text[:100]}",

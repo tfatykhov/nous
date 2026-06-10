@@ -280,6 +280,143 @@ class TestSelfInitiatedPromiseTracking:
         ]
         assert len(promise_findings) == 0
 
+    @pytest.mark.asyncio
+    async def test_question_form_summary_not_flagged(self):
+        """#369: a question/conversational opener is not a commitment, even on
+        an otherwise-flaggable (ongoing) episode."""
+        heart = MagicMock()
+        brain = MagicMock()
+        settings = _mock_settings()
+
+        mock_episode = MagicMock()
+        mock_episode.id = "ep-q"
+        mock_episode.outcome = "ongoing"
+        mock_episode.started_at = datetime.now(UTC) - timedelta(hours=72)
+        mock_episode.summary = "ok what outstanding items we do have?"
+
+        heart.facts.search = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[mock_episode])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        check = SelfInitiatedCheck(heart, brain, settings, embeddings=None)
+        result = await check.run()
+
+        promise_findings = [
+            f for f in result.findings if f.raw_data.get("detection") == "promise_scan"
+        ]
+        assert len(promise_findings) == 0
+
+    @pytest.mark.asyncio
+    async def test_commitment_with_filler_or_modal_start_still_flagged(self):
+        """#369 codex P2 regression: filler/modal openers on COMMITMENTS must
+        not be suppressed — only real questions are."""
+        heart = MagicMock()
+        brain = MagicMock()
+        settings = _mock_settings()
+
+        episodes = []
+        for i, summary in enumerate([
+            "Okay, I'll follow up with Tim",
+            "Should update the deployment docs",
+            "Can finish the migration tomorrow",
+        ]):
+            ep = MagicMock()
+            ep.id = f"ep-c{i}"
+            ep.outcome = "ongoing"
+            ep.started_at = datetime.now(UTC) - timedelta(hours=72)
+            ep.summary = summary
+            episodes.append(ep)
+
+        heart.facts.search = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=episodes)
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        check = SelfInitiatedCheck(heart, brain, settings, embeddings=None)
+        result = await check.run()
+
+        promise_findings = [
+            f for f in result.findings if f.raw_data.get("detection") == "promise_scan"
+        ]
+        assert len(promise_findings) == 3
+
+    @pytest.mark.asyncio
+    async def test_stale_episode_beyond_age_cap_not_flagged(self):
+        """#369: the age-based heuristic has an upper bound — an episode older
+        than max_stale_age_hours (default 14 days) is too old to be actionable."""
+        heart = MagicMock()
+        brain = MagicMock()
+        settings = _mock_settings()
+
+        mock_episode = MagicMock()
+        mock_episode.id = "ep-old"
+        mock_episode.outcome = "partial"  # not ongoing — age path only
+        mock_episode.started_at = datetime.now(UTC) - timedelta(days=20)
+        mock_episode.summary = "I'll draft the migration plan"
+
+        heart.facts.search = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[mock_episode])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        check = SelfInitiatedCheck(heart, brain, settings, embeddings=None)
+        result = await check.run()
+
+        promise_findings = [
+            f for f in result.findings if f.raw_data.get("detection") == "promise_scan"
+        ]
+        assert len(promise_findings) == 0
+
+    @pytest.mark.asyncio
+    async def test_stale_episode_within_age_cap_flagged(self):
+        """#369 regression guard: a statement-form episode in the 48h..14d
+        window is still flagged by the age-based path."""
+        heart = MagicMock()
+        brain = MagicMock()
+        settings = _mock_settings()
+
+        mock_episode = MagicMock()
+        mock_episode.id = "ep-mid"
+        mock_episode.outcome = "partial"  # not ongoing — age path only
+        mock_episode.started_at = datetime.now(UTC) - timedelta(hours=72)
+        mock_episode.summary = "I'll draft the migration plan"
+
+        heart.facts.search = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[mock_episode])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        check = SelfInitiatedCheck(heart, brain, settings, embeddings=None)
+        result = await check.run()
+
+        promise_findings = [
+            f for f in result.findings if f.raw_data.get("detection") == "promise_scan"
+        ]
+        assert len(promise_findings) >= 1
+
+    @pytest.mark.asyncio
+    async def test_old_ongoing_episode_still_flagged(self):
+        """#369: outcome=ongoing is an explicit state, not a heuristic — the
+        age cap does NOT suppress it."""
+        heart = MagicMock()
+        brain = MagicMock()
+        settings = _mock_settings()
+
+        mock_episode = MagicMock()
+        mock_episode.id = "ep-old-ongoing"
+        mock_episode.outcome = "ongoing"
+        mock_episode.started_at = datetime.now(UTC) - timedelta(days=30)
+        mock_episode.summary = "Researching the embedding migration"
+
+        heart.facts.search = AsyncMock(return_value=[])
+        heart.search_episodes = AsyncMock(return_value=[mock_episode])
+        heart.schedules.get_due = AsyncMock(return_value=[])
+
+        check = SelfInitiatedCheck(heart, brain, settings, embeddings=None)
+        result = await check.run()
+
+        promise_findings = [
+            f for f in result.findings if f.raw_data.get("detection") == "promise_scan"
+        ]
+        assert len(promise_findings) >= 1
+
 
 # ===========================================================================
 # TestObservationPatternSuppression — coverage for the 10 patterns added in
