@@ -346,6 +346,12 @@ class WorkQueueCheck(BaseCheck):
                 check_name=self.name,
             ))
             return False
+        # Audit DG-6 (2026-06-09): actually START the DAG. create() only
+        # persists it as `pending`; without start_dag the DAG idled until the
+        # orchestrator's stale-pending sweep rescued it (~300s+). Best-effort —
+        # the item is already linked via mark_dispatched, so if start_dag fails
+        # the recovery sweep still promotes the pending DAG (prior behavior).
+        await self._safe_start_dag(dag.id)
         findings.append(Finding(
             source=self._adapter.source_name,
             summary=f"Dispatched work-queue item {item.external_id} as DAG {dag.id}",
@@ -353,6 +359,21 @@ class WorkQueueCheck(BaseCheck):
             check_name=self.name,
         ))
         return True
+
+    async def _safe_start_dag(self, dag_id) -> None:
+        """Start a freshly-created DAG, swallowing errors (DG-6).
+
+        The item is already linked to the DAG, so a start failure degrades to
+        the pre-DG-6 behavior: the orchestrator's recovery sweep promotes the
+        still-`pending` DAG on a later tick.
+        """
+        try:
+            await self._orchestrator.start_dag(dag_id)
+        except Exception:
+            logger.exception(
+                "F064.6/DG-6: start_dag failed for %s; recovery sweep will promote it",
+                dag_id,
+            )
 
     async def _reconcile_orphan(
         self, row_id, item: WorkItem, findings: list[Finding]
@@ -394,6 +415,8 @@ class WorkQueueCheck(BaseCheck):
                 check_name=self.name,
             ))
             return False
+        # DG-6: start the recovered DAG (see _claim_and_dispatch).
+        await self._safe_start_dag(dag.id)
         findings.append(Finding(
             source=self._adapter.source_name,
             summary=f"Reconciler dispatched orphan {item.external_id} as DAG {dag.id}",

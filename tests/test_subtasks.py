@@ -513,11 +513,45 @@ class TestSubtaskManager:
         updated = await subtask_mgr.get(subtask.id)
         assert updated.status == "cancelled"
 
-    async def test_cancel_running_subtask_fails(self, subtask_mgr: SubtaskManager):
+    async def test_cancel_running_subtask_succeeds(self, subtask_mgr: SubtaskManager):
+        """Audit DG-2: a RUNNING subtask can now be cancelled (was pending-only),
+        so cancelling a DAG / stall teardown no longer leaks live work."""
         subtask = await subtask_mgr.create(task="Running task")
         await subtask_mgr.dequeue("worker-0")
         cancelled = await subtask_mgr.cancel(subtask.id)
+        assert cancelled is True
+        updated = await subtask_mgr.get(subtask.id)
+        assert updated.status == "cancelled"
+        assert updated.final_outcome == "cancelled"
+
+    async def test_cancel_already_terminal_returns_false(self, subtask_mgr: SubtaskManager):
+        """A completed subtask cannot be cancelled."""
+        subtask = await subtask_mgr.create(task="Done task")
+        await subtask_mgr.dequeue("worker-0")
+        await subtask_mgr.complete(subtask.id, "done")
+        cancelled = await subtask_mgr.cancel(subtask.id)
         assert cancelled is False
+
+    async def test_complete_does_not_resurrect_cancelled(self, subtask_mgr: SubtaskManager):
+        """Audit DG-2/HT-4: a stale worker finishing its in-flight run must not
+        overwrite a row cancelled mid-flight."""
+        subtask = await subtask_mgr.create(task="Cancelled mid-run")
+        await subtask_mgr.dequeue("worker-0")
+        assert await subtask_mgr.cancel(subtask.id) is True
+        # Worker finishes late and tries to write a result.
+        await subtask_mgr.complete(subtask.id, "late result")
+        updated = await subtask_mgr.get(subtask.id)
+        assert updated.status == "cancelled"  # NOT "completed"
+        assert updated.result != "late result"
+
+    async def test_fail_does_not_resurrect_cancelled(self, subtask_mgr: SubtaskManager):
+        """Same guard on the fail() path."""
+        subtask = await subtask_mgr.create(task="Cancelled then errors")
+        await subtask_mgr.dequeue("worker-0")
+        assert await subtask_mgr.cancel(subtask.id) is True
+        await subtask_mgr.fail(subtask.id, "late error")
+        updated = await subtask_mgr.get(subtask.id)
+        assert updated.status == "cancelled"
 
     async def test_list_subtasks(self, subtask_mgr: SubtaskManager):
         await subtask_mgr.create(task="Task A")

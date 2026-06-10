@@ -14,6 +14,7 @@ from uuid import UUID
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
 from nous.dag.store import DAGStore
+from nous.heart.subtasks import SubtaskQueueFull
 from nous.storage.models import DAGNode, ExecutionDAG
 
 if TYPE_CHECKING:
@@ -1243,6 +1244,20 @@ class DAGOrchestrator:
             logger.info(
                 "Launched subtask %s for node %s in DAG %s",
                 subtask.id, node.name, dag.id,
+            )
+        except SubtaskQueueFull:
+            # Audit DG-4 (2026-06-09): transient subtask-queue congestion must
+            # DEFER the node, not fail it. Demote 'ready' -> 'pending' so
+            # _find_ready_nodes re-picks it next tick (mirrors the F064.2
+            # frame-cap deferral). Previously the pending-limit ValueError fell
+            # into the generic handler below and permanently failed the node —
+            # and cascaded failure to all its dependents — on a momentarily
+            # full queue that would have drained as workers completed.
+            await self._store.update_node(node.id, status="pending")
+            node.status = "pending"
+            logger.info(
+                "Deferring node %s in DAG %s — subtask queue full, retry next tick",
+                node.name, dag.id,
             )
         except Exception as e:
             await self._store.update_node(
