@@ -558,7 +558,12 @@ class ConversationCompactor:
     )
     # Outcome-neutral (codex round 5): "already ran" asserts only execution,
     # not semantic success — a clean exit can hide internal partial failures.
-    _BULK_HINT = "bulk operation already ran earlier — do NOT re-run it"
+    # "(tool reported success)" (codex round 7) keeps the reported outcome
+    # visible at the degrade stage so checkpoint summaries can mirror it.
+    _BULK_HINT = (
+        "bulk operation already ran earlier (tool reported success) — "
+        "do NOT re-run it"
+    )
     # codex P1: a failed sweep must not be stamped as completed — that would
     # suppress a legitimate retry and corrupt later summaries.
     _BULK_ERROR_HINT = "bulk operation FAILED earlier — fix the cause before any retry"
@@ -602,12 +607,12 @@ class ConversationCompactor:
         # codex round 4: is_error=False only means the tool exited cleanly —
         # a sweep can swallow internal failures — so state facts (ran, tool
         # reported success, output was processed in earlier turns), not a
-        # semantic COMPLETED claim.
+        # semantic COMPLETED claim. The reported outcome lives in _BULK_HINT.
         return (
             f"[Bulk tool output cleared — this {name} operation already ran "
-            f"in an earlier turn (tool reported success) and its output was "
-            f"processed then. {self._BULK_HINT} — work from its saved "
-            f"results or the earlier conversation instead.]"
+            f"in an earlier turn and its output was processed then. "
+            f"{self._BULK_HINT} — work from its saved results or the earlier "
+            f"conversation instead.]"
         )
 
     def _extract_facts_before_clear(self, tool_name: str, content: str) -> list[str]:
@@ -678,10 +683,13 @@ class ConversationCompactor:
                 tool_use_block = tool_use_index.get(tool_use_id) if tool_use_id else None
                 tool_name = tool_use_block.get("name") if tool_use_block else None
                 base_profile = TOOL_DECAY_PROFILES.get(tool_name or "", "standard")
-                # #179: size escalation — bulk items decay on (1, 2, 4)
-                # regardless of tool; base_profile keeps driving
-                # conservative-tool fact extraction.
-                is_bulk = self._item_is_bulk(item)
+                # #179: size escalation — bulk items decay on (1, 2, 4);
+                # base_profile keeps driving conservative-tool fact
+                # extraction. 'preserve' tools are exempt (codex round 7):
+                # a large read_file is deliberate reference content, not a
+                # sweep — re-reading is cheap and legitimate, so neither
+                # bulk ages nor do-NOT-re-run stubs apply.
+                is_bulk = base_profile != "preserve" and self._item_is_bulk(item)
                 profile_name = "bulk" if is_bulk else base_profile
                 _soft_age, degrade_age, clear_age = DECAY_PROFILE_AGES.get(
                     profile_name, (3, 8, 12)

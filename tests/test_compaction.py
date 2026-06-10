@@ -394,6 +394,9 @@ class TestBulkResultPruning:
         compactor.prune_tool_results(messages)
         degraded = messages[1]["content"][0]["content"]
         assert "do NOT re-run" in degraded
+        # codex round 7: the reported outcome must survive at the degrade
+        # stage so checkpoint summaries can mirror it.
+        assert "tool reported success" in degraded
         # And a second pass at clear age still recognizes it as bulk.
         messages += _make_named_pair("run_python", "small_3", "t3")
         compactor.prune_tool_results(messages)
@@ -485,6 +488,22 @@ class TestBulkResultPruning:
         extracted2 = compactor.prune_tool_results(messages)
         assert "Bulk tool output cleared" in messages[1]["content"][0]["content"]
         assert not any("example.com" in f for f in extracted2)
+
+    def test_preserve_profile_exempt_from_bulk(self):
+        """codex round 7: a large read_file result keeps its 'preserve'
+        profile — deliberate reference content is not a sweep, and
+        re-reading a file is cheap and legitimate."""
+        compactor = ConversationCompactor(_bulk_settings())
+        messages: list[dict] = []
+        messages += _make_named_pair("read_file", "x" * 600, "t0")
+        for i in range(1, 5):
+            messages += _make_named_pair("read_file", f"small_{i}", f"t{i}")
+        compactor.prune_tool_results(messages)
+        text = messages[1]["content"][0]["content"]
+        assert "Bulk tool output cleared" not in text
+        assert "do NOT re-run" not in text
+        # preserve (8, 999, 20): at age 5 only the ageless soft-trim applies.
+        assert "--- trimmed" in text
 
     def test_repetitive_ops_rule_in_both_prompts(self):
         """codex P2: the #179 compression rule must be in BOTH the checkpoint
