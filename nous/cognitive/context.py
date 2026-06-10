@@ -326,8 +326,12 @@ class ContextEngine:
                 # Reserve room for the trailing "…N+ more" note so the size backstop never
                 # has to drop IT (the note must survive truncation).
                 _NOTE_RESERVE = 140
-                row_lines: list[str] = []
-                used = len(header) + 1
+
+                # Two-pass progressive degradation — names are never sacrificed before
+                # descriptions (progressive disclosure: complete index is always-on).
+                # Pass 1: build full "name (domain): desc" rows and name-only fallbacks.
+                full_rows: list[str] = []
+                name_rows: list[str] = []
                 for p in deduped:
                     # name: keep exact (it's the get_procedure key) but kill line breaks;
                     # domain/desc: full whitespace-collapse (not lookup keys).
@@ -336,15 +340,28 @@ class ContextEngine:
                     desc = _one_line(getattr(p, "description", None))
                     if len(desc) > desc_cap:
                         desc = desc[:desc_cap].rstrip() + "…"
-                    row = f"- {name} ({domain}): {desc}" if desc else f"- {name} ({domain})"
-                    if used + len(row) + 1 > max_chars - _NOTE_RESERVE and row_lines:
-                        break
-                    row_lines.append(row)
-                    used += len(row) + 1
-                # Size backstop: drop WHOLE trailing rows (never cut a name/row mid-string)
-                # until header + rows + a note fit. header + 1 row fits in the 500 floor.
-                while row_lines and len(header) + 1 + sum(len(r) + 1 for r in row_lines) > max_chars - _NOTE_RESERVE and len(row_lines) > 1:
+                    full_rows.append(f"- {name} ({domain}): {desc}" if desc else f"- {name} ({domain})")
+                    name_rows.append(f"- {name} ({domain})")
+
+                def _catalog_size(rows: list[str]) -> int:
+                    return len("\n".join([header, ""] + rows))
+
+                char_budget = max_chars - _NOTE_RESERVE
+                row_lines = list(full_rows)
+
+                # Pass 2: if over budget, strip descriptions from lowest-priority rows first
+                # (last in list = oldest/lowest priority). Names are never dropped here.
+                if _catalog_size(row_lines) > char_budget:
+                    for i in range(len(row_lines) - 1, -1, -1):
+                        if row_lines[i] != name_rows[i]:
+                            row_lines[i] = name_rows[i]
+                            if _catalog_size(row_lines) <= char_budget:
+                                break
+
+                # Pass 3: if still over budget, drop whole rows from the end (keep ≥1).
+                while len(row_lines) > 1 and _catalog_size(row_lines) > char_budget:
                     row_lines.pop()
+
                 shown = len(row_lines)
                 # Omitted lower bound: distinct names dropped by the caps PLUS rows not even
                 # fetched (active rows beyond the fetch window). "+" because dups make it a
@@ -1517,10 +1534,17 @@ class ContextEngine:
                     parts.append("Goals: " + "; ".join(str(x) for x in goals))
             block = "\n\n".join(parts)
             if len(block) > per_item_cap:
-                block = (
-                    block[:per_item_cap].rstrip()
-                    + f"\n…(truncated — call get_procedure('{name}') for the full skill)"
+                # Emit a stub: heading + description only, NO body/steps.
+                # A non-actionable stub forces the model to call get_procedure before acting.
+                # (A tail-sliced partial body is the anti-pattern — the model rationalizes it
+                # as sufficient and never fetches the rest.)
+                stub_parts: list[str] = [f"### {name} ({domain})"]
+                if desc:
+                    stub_parts.append(desc)
+                stub_parts.append(
+                    f"[Full skill body exceeds preview budget — call get_procedure('{name}') to load the steps before acting.]"
                 )
+                block = "\n\n".join(stub_parts)
             blocks.append(block)
         return blocks
 
