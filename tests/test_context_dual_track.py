@@ -146,6 +146,66 @@ class TestGraphPrimarySelection:
         # Stub is short (no tail-slice of the 4000-char body)
         assert len(stub) < 400
 
+    def test_stub_bounds_oversized_description(self):
+        """Codex P1 (#500): an over-cap *description* must not let the stub itself
+        exceed per_item_cap. The description is truncated; the fetch pointer survives."""
+        engine = self._engine(neighbors=[])
+        cap = 200
+        long_desc = "D" * 5000  # description alone far exceeds the cap
+        proc = _make_procedure_detail("bigdesc").model_copy(
+            update={"description": long_desc,
+                    "implementation_notes": ["Step: " + "A" * 2000]}
+        )
+        blocks = engine._format_procedure_bodies([proc], cap)
+        assert len(blocks) == 1
+        stub = blocks[0]
+        # The stub stays within the cap it is meant to enforce
+        assert len(stub) <= cap
+        # The mandatory-fetch pointer is never sacrificed
+        assert "get_procedure('bigdesc')" in stub
+        # No body/step text leaked
+        assert "AAAA" not in stub
+
+    def test_stub_bounded_when_cap_below_heading_and_pointer(self):
+        """Codex P2 (#501): when per_item_cap is below heading+pointer length, the
+        stub drops the heading (and description) and falls back toward the pointer —
+        the irreducible floor — so len(block) <= max(cap, len(pointer))."""
+        engine = self._engine(neighbors=[])
+        cap = 40  # far below heading + pointer
+        proc = _make_procedure_detail("tiny").model_copy(
+            update={"description": "D" * 500,
+                    "implementation_notes": ["Step: " + "A" * 2000]}
+        )
+        blocks = engine._format_procedure_bodies([proc], cap)
+        stub = blocks[0]
+        pointer_floor = len("[Full skill body exceeds preview budget — "
+                            "call get_procedure('tiny') to load the steps before acting.]")
+        # Guarantee holds: never exceeds the max of the cap and the irreducible pointer
+        assert len(stub) <= max(cap, pointer_floor)
+        # Fetchability preserved — name-bearing pointer survives
+        assert "get_procedure('tiny')" in stub
+        # No body/step text leaked
+        assert "AAAA" not in stub
+
+    def test_stub_pointer_floor_with_long_name(self):
+        """Codex P2 (#501): a long (up-to-500-char) procedure name makes the pointer
+        itself exceed a moderate cap; the bounded fallback emits the pointer alone so
+        the name is never truncated (get_procedure would otherwise break)."""
+        engine = self._engine(neighbors=[])
+        long_name = "p" * 300
+        cap = 100  # below the pointer length once the 300-char name is embedded
+        proc = _make_procedure_detail(long_name).model_copy(
+            update={"description": "D" * 500,
+                    "implementation_notes": ["Step: " + "A" * 2000]}
+        )
+        blocks = engine._format_procedure_bodies([proc], cap)
+        stub = blocks[0]
+        # The full name survives intact inside the fetch pointer
+        assert f"get_procedure('{long_name}')" in stub
+        # Stub is the pointer-alone fallback (no heading prefix, no body)
+        assert not stub.startswith("###")
+        assert "AAAA" not in stub
+
     def test_body_under_cap_renders_fully(self):
         """Body that fits the cap renders exactly as before — regression guard."""
         engine = self._engine(neighbors=[])
