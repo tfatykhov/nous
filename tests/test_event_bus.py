@@ -61,6 +61,10 @@ def _mock_settings(**overrides) -> MagicMock:
     s.sleep_enabled = True
     s.transcript_max_chars = 16000
     s.fact_dedup_threshold = 0.92
+    # Bare-MagicMock footgun: episode_chunks_enabled would return a truthy
+    # Mock, sending the summarizer into the F067 chunking path with Mock
+    # numeric settings (TypeError in chunk_text).
+    s.episode_chunks_enabled = False
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -435,12 +439,17 @@ class TestEpisodeSummarizer:
 
         # Long transcript gets chunked — at least one LLM call should have been made
         assert len(captured_payloads) >= 1
-        # Each chunk's transcript portion in the prompt should be within budget
+        # Each chunk's TRANSCRIPT portion must be within the 8000-char budget.
+        # Asserted via the transcript's 'x' filler (12000 x's total) rather
+        # than total prompt length — the old `len(prompt) < len(transcript)`
+        # bound coupled the assertion to the template size and broke
+        # whenever the summary prompt grew (PR #506 NO PADDING RULE).
         for payload in captured_payloads:
             user_msg = payload["messages"][0]["content"]
             if isinstance(user_msg, list):
                 user_msg = user_msg[0]["text"]
-            assert len(user_msg) < len(long_transcript)
+            # small slack for incidental x's in the prompt template
+            assert user_msg.count("x") <= 8000 + 200
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
