@@ -376,7 +376,15 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             return self._not_fired(name)
         decisions = [tc for tc in tool_history if tc.get("tool") == "record_decision"]
         if len(decisions) >= 3:
-            confidences = [d.get("confidence", 0.5) for d in decisions[-3:]]
+            # Audit CL-5 (2026-06-09): `.get(k, default)` only applies the
+            # default when the key is ABSENT. record_decision may store an
+            # explicit confidence=None, which returns None here and crashes the
+            # `None < 0.4` comparison below (TypeError) on the non-streaming
+            # post_turn path. Coerce None -> 0.5 while preserving a real 0.0.
+            confidences = [
+                c if (c := d.get("confidence")) is not None else 0.5
+                for d in decisions[-3:]
+            ]
             if all(c < 0.4 for c in confidences):
                 return self._fire(
                     name,

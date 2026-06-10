@@ -7,11 +7,59 @@ Provides two functions:
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from croniter import croniter
 from dateutil import parser as dateutil_parser
+
+logger = logging.getLogger(__name__)
+
+# Common US timezone abbreviations → IANA zones. Abbreviations are inherently
+# ambiguous (EST vs EDT), so we resolve to the IANA zone and let ZoneInfo pick
+# the correct offset for the current date (DST-aware at parse time).
+_TZ_ABBREV: dict[str, str] = {
+    "UTC": "UTC", "GMT": "UTC", "Z": "UTC",
+    "ET": "America/New_York", "EST": "America/New_York", "EDT": "America/New_York",
+    "CT": "America/Chicago", "CST": "America/Chicago", "CDT": "America/Chicago",
+    "MT": "America/Denver", "MST": "America/Denver", "MDT": "America/Denver",
+    "PT": "America/Los_Angeles", "PST": "America/Los_Angeles", "PDT": "America/Los_Angeles",
+}
+
+
+def _local_hour_to_utc(hour24: int, tz_token: str | None) -> int:
+    """Convert a wall-clock hour in ``tz_token`` to the UTC hour for a cron.
+
+    Audit HD-5 (2026-06-09): the daily pattern captured a timezone token then
+    discarded it, so "daily at 9am EST" generated ``0 9 * * *`` and fired at
+    09:00 UTC. The scheduler evaluates crons in UTC, so we bake the conversion
+    here. Returns ``hour24`` unchanged when the token is absent, UTC, or
+    unrecognized (safe — preserves prior behavior).
+
+    Limitation: a fixed-hour cron baked from the current offset drifts by one
+    hour across a DST transition until the schedule is re-created. True
+    DST-stable firing requires a timezone-aware scheduler (deferred).
+    """
+    if not tz_token:
+        return hour24
+    zone_name = _TZ_ABBREV.get(tz_token.strip().upper())
+    if zone_name is None:
+        zone_name = tz_token  # maybe a full IANA name, e.g. "America/New_York"
+    if zone_name == "UTC":
+        return hour24
+    try:
+        tz = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
+        logger.warning(
+            "Unrecognized timezone %r in schedule; treating hour as UTC", tz_token
+        )
+        return hour24
+    local_dt = datetime.now(tz).replace(
+        hour=hour24, minute=0, second=0, microsecond=0
+    )
+    return local_dt.astimezone(UTC).hour
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -153,9 +201,11 @@ def parse_every(every: str) -> tuple[int | None, str | None]:
     if m:
         hour = int(m.group(1))
         ampm = m.group(2)
-        # timezone info in group 3 is noted but cron is tz-unaware;
-        # the scheduler layer handles tz conversion
-        h24 = _to_24h(hour, ampm)
+        tz_token = m.group(3)
+        # Audit HD-5: convert the wall-clock hour in the named timezone to UTC
+        # (the scheduler evaluates crons in UTC). Previously the tz token was
+        # discarded, so "daily at 9am EST" fired at 09:00 UTC.
+        h24 = _local_hour_to_utc(_to_24h(hour, ampm), tz_token)
         cron = f"0 {h24} * * *"
         if not croniter.is_valid(cron):
             raise ValueError(f"Generated invalid cron: {cron!r}")
