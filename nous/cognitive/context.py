@@ -1538,32 +1538,45 @@ class ContextEngine:
                 # A non-actionable stub forces the model to call get_procedure before acting.
                 # (A tail-sliced partial body is the anti-pattern — the model rationalizes it
                 # as sufficient and never fetches the rest.)
+                #
+                # The fetch POINTER is the irreducible floor of the stub: it carries the
+                # procedure name and the load instruction, so the stub is useless without it
+                # and the name cannot be truncated without breaking get_procedure fetchability.
+                # Therefore the cap guarantee is: len(block) <= max(per_item_cap, len(pointer)).
+                # (Codex P2 on #501: with a tiny cap and an up-to-500-char name, heading+pointer
+                #  alone can exceed per_item_cap — so we build up from the pointer and drop the
+                #  heading/description as needed rather than emitting an over-cap stub.)
+                sep = len("\n\n")
                 heading = f"### {name} ({domain})"
                 pointer = (
                     f"[Full skill body exceeds preview budget — "
                     f"call get_procedure('{name}') to load the steps before acting.]"
                 )
-                stub_parts: list[str] = [heading]
-                if desc:
-                    # Bound the description so the stub itself stays within
-                    # per_item_cap (Codex P1 on #500: an over-cap description
-                    # would otherwise defeat the very cap the stub enforces and,
-                    # since the budget loop always admits the first block, could
-                    # swallow the whole procedure budget). Reserve room for the
-                    # heading, the fetch pointer, and the "\n\n" separators.
-                    sep = len("\n\n") * 2
-                    desc_budget = per_item_cap - len(heading) - len(pointer) - sep
-                    if desc_budget <= 0:
-                        # Pointer alone already fills the cap — drop the
-                        # description entirely; the fetch pointer is non-negotiable.
-                        desc = ""
-                    elif len(desc) > desc_budget:
-                        # reserve 1 char for the ellipsis so the stub stays within cap
-                        desc = desc[:desc_budget - 1].rstrip() + "…"
-                    if desc:
-                        stub_parts.append(desc)
-                stub_parts.append(pointer)
-                block = "\n\n".join(stub_parts)
+                if len(pointer) >= per_item_cap:
+                    # Cap is below the irreducible floor — emit the pointer alone.
+                    # This is the bounded fallback: we cannot honor a cap smaller
+                    # than the mandatory fetch instruction without losing the name.
+                    block = pointer
+                else:
+                    stub_parts: list[str] = []
+                    remaining = per_item_cap - len(pointer)
+                    # Add the heading only if it (plus its separator) fits.
+                    if len(heading) + sep <= remaining:
+                        stub_parts.append(heading)
+                        remaining -= len(heading) + sep
+                    # Bound the description into whatever space is left (Codex P1 on
+                    # #500: an unbounded description would defeat the cap and, since
+                    # the budget loop always admits the first block, swallow the whole
+                    # procedure budget). Need room for the description + its separator
+                    # + 1 ellipsis char.
+                    if desc and remaining > sep + 1:
+                        desc_budget = remaining - sep
+                        if len(desc) > desc_budget:
+                            desc = desc[:desc_budget - 1].rstrip() + "…"
+                        if desc:
+                            stub_parts.append(desc)
+                    stub_parts.append(pointer)
+                    block = "\n\n".join(stub_parts)
             blocks.append(block)
         return blocks
 
