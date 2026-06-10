@@ -46,6 +46,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
+from nous.brain._entity_config import _ENTITY_CONFIG
 from nous.config import Settings
 from nous.storage.database import Database
 from nous_eval.config import EvalSettings
@@ -54,15 +55,17 @@ from nous_eval.retrieval_runner import _settings_for_eval_db
 
 logger = logging.getLogger(__name__)
 
-# Per-type content fetch is structural — facts.content, decisions.context,
-# episodes.summary, procedures.steps_text. Mirrors fetch_candidate_content
-# in nous/brain/backfill_rerank.py but inline here to keep the audit tool
-# free of brain-internal imports.
+# #354: single source of truth — derive the per-type content mapping from the
+# densifier's _ENTITY_CONFIG so the judge sees EXACTLY what the densifier
+# embeds/links on. The previous hand-rolled mapping had drifted on every
+# non-fact type (decision read `context`, NULL for ~34% of prod decisions,
+# while the densifier reads `description`; episode missed the F058 COALESCE;
+# procedure used a different expr; chunk was absent entirely, so chunk edges
+# were silently skipped). Exprs use the `t.` alias — the hydration query
+# below aliases the table accordingly.
 _CONTENT_BY_TYPE: dict[str, tuple[str, str]] = {
-    "fact": ("heart.facts", "content"),
-    "decision": ("brain.decisions", "context"),
-    "episode": ("heart.episodes", "summary"),
-    "procedure": ("heart.procedures", "name || ': ' || description"),
+    etype: (table, content_expr)
+    for etype, (table, _type_name, content_expr, _extra) in _ENTITY_CONFIG.items()
 }
 
 
@@ -129,9 +132,9 @@ async def _sample_edges_per_type(
             id_list = list(ids)
             params2 = {f"id_{i}": cid for i, cid in enumerate(id_list)}
             rows = await session.execute(text(f"""
-                SELECT id, {content_expr} AS content
-                FROM {table}
-                WHERE id IN ({placeholders})
+                SELECT t.id, {content_expr} AS content
+                FROM {table} t
+                WHERE t.id IN ({placeholders})
             """), params2)
             for row in rows:
                 content_map[(entity_type, str(row.id))] = row.content or ""

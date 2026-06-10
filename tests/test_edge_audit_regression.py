@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from nous.brain._entity_config import _ENTITY_CONFIG
 from nous_eval.run_edge_audit import (
+    _CONTENT_BY_TYPE,
     _autodetect_prior_baseline,
     _check_regressions,
     _load_prior_precisions,
@@ -26,6 +28,30 @@ from nous_eval.run_edge_audit import (
 def tmpreports():
     with tempfile.TemporaryDirectory() as d:
         yield Path(d)
+
+
+class TestContentMappingSharedWithDensifier:
+    """#354: the audit must read EXACTLY what the densifier reads — the two
+    mappings drifted once (audit read decisions.context, densifier reads
+    description) and F054 was tuned on the resulting noise."""
+
+    def test_mapping_derived_from_entity_config(self):
+        assert set(_CONTENT_BY_TYPE) == set(_ENTITY_CONFIG)
+        for etype, (table, _tn, content_expr, _extra) in _ENTITY_CONFIG.items():
+            assert _CONTENT_BY_TYPE[etype] == (table, content_expr), (
+                f"audit content mapping for '{etype}' drifted from _ENTITY_CONFIG"
+            )
+
+    def test_decision_reads_description_not_context(self):
+        table, expr = _CONTENT_BY_TYPE["decision"]
+        assert table == "brain.decisions"
+        assert "description" in expr
+        assert "context" not in expr
+
+    def test_chunk_type_present(self):
+        # The old hand-rolled mapping lacked chunk — chunk edges were
+        # silently dropped from every audit.
+        assert "chunk" in _CONTENT_BY_TYPE
 
 
 def _make_baseline(path: Path, precisions: dict[str, float], n: int = 30) -> None:
