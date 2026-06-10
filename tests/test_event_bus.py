@@ -439,17 +439,24 @@ class TestEpisodeSummarizer:
 
         # Long transcript gets chunked — at least one LLM call should have been made
         assert len(captured_payloads) >= 1
-        # Each chunk's TRANSCRIPT portion must be within the 8000-char budget.
-        # Asserted via the transcript's 'x' filler (12000 x's total) rather
-        # than total prompt length — the old `len(prompt) < len(transcript)`
-        # bound coupled the assertion to the template size and broke
-        # whenever the summary prompt grew (PR #506 NO PADDING RULE).
+        # Each chunk's TRANSCRIPT slice must be within the 8000-char budget.
+        # Measured by extracting the slice between the prompt's template
+        # anchors ("Transcript:" .. the faithfulness rule) and asserting its
+        # FULL length (labels + separators included — codex P2 on PR #509),
+        # rather than total prompt length: the old
+        # `len(prompt) < len(transcript)` bound coupled the assertion to the
+        # template size and broke whenever the summary prompt grew (#506).
         for payload in captured_payloads:
             user_msg = payload["messages"][0]["content"]
             if isinstance(user_msg, list):
                 user_msg = user_msg[0]["text"]
-            # small slack for incidental x's in the prompt template
-            assert user_msg.count("x") <= 8000 + 200
+            assert "Transcript:" in user_msg
+            transcript_slice = user_msg.split("Transcript:", 1)[1].split(
+                "CRITICAL FAITHFULNESS RULE", 1
+            )[0]
+            # small slack for surrounding template whitespace / an empty
+            # decision-context block between the anchors
+            assert len(transcript_slice) <= 8000 + 100
 
     @pytest.mark.asyncio
     async def test_summary_includes_new_fields(self):
