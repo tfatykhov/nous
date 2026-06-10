@@ -146,12 +146,27 @@ PENDING_PROTOTYPES = [
     "Action required but not yet taken",
 ]
 
-# #369: episode summaries that open as a question or conversational filler are
-# not commitments — _promise_scan skips them before flagging.
-_QUESTION_PREFIX = re.compile(
-    r"^\s*(what|how|where|when|why|who|is|are|do|does|did|can|could|should|would|hey|ok|okay)\b",
-    re.IGNORECASE,
+# #369: episode summaries that are questions / conversational filler are not
+# commitments — _promise_scan skips them before flagging. A bare first-word
+# check over-suppresses ("Okay, I'll follow up with Tim", "Should update the
+# docs" are commitments — codex P2 on PR #503), so: strip leading filler,
+# then treat as a question only on an interrogative wh-start or a trailing
+# question mark. Modal/aux starts alone do NOT suppress.
+_FILLER_PREFIX = re.compile(r"^\s*(?:(?:hey|ok|okay)[\s,!.:-]+)+", re.IGNORECASE)
+_INTERROGATIVE_PREFIX = re.compile(
+    r"^\s*(what|how|where|when|why|who|whom|whose|which)\b", re.IGNORECASE
 )
+
+
+def _is_question_form(text: str) -> bool:
+    """True if an episode summary reads as a question / conversational filler
+    rather than a commitment (#369)."""
+    stripped = _FILLER_PREFIX.sub("", text).strip()
+    if not stripped:
+        return True  # pure filler ("ok", "hey") — nothing to commit to
+    if stripped.endswith("?"):
+        return True
+    return bool(_INTERROGATIVE_PREFIX.match(stripped))
 
 
 class SelfInitiatedCheck(BaseCheck):
@@ -313,7 +328,7 @@ class SelfInitiatedCheck(BaseCheck):
                         summary_text = getattr(ep, "summary", None) or getattr(ep, "title", "")
                         # #369: questions / conversational openers are not
                         # commitments — skip before flagging.
-                        if _QUESTION_PREFIX.match(summary_text):
+                        if _is_question_form(summary_text):
                             continue
                         findings.append(Finding(
                             source="episodes",
