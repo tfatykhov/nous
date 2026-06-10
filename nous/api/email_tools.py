@@ -106,6 +106,29 @@ def _scan_secrets(text: str) -> bool:
     return any(p.search(text) for p in _SECRET_PATTERNS)
 
 
+def _strip_tags(s: str) -> str:
+    """Single-pass, linear-time tag removal (codex P2 on #484).
+
+    The naive ``<[^>]+>`` regex rescans to end-of-string from every
+    unclosed ``<``, going quadratic on malformed HTML — and this runs
+    synchronously inside the async handler on an unbounded body. Tags
+    become a space. Text after an unclosed trailing ``<`` is dropped from
+    THIS view only; the raw and unescape-only views still scan it.
+    """
+    out: list[str] = []
+    in_tag = False
+    for ch in s:
+        if in_tag:
+            if ch == ">":
+                in_tag = False
+        elif ch == "<":
+            in_tag = True
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _html_to_text(s: str) -> str:
     """Strip HTML tags and decode entities for secret scanning (#484).
 
@@ -115,7 +138,7 @@ def _html_to_text(s: str) -> str:
     decoded ``&lt;`` cannot fabricate a tag. The raw HTML is still scanned
     separately — this is an additional view, not a replacement.
     """
-    return html.unescape(re.sub(r"<[^>]+>", " ", s))
+    return html.unescape(_strip_tags(s))
 
 
 def _normalize_paths(value: Any) -> list[str]:

@@ -7,6 +7,7 @@ Nothing is ever sent for real: we monkeypatch the blocking SMTP send
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -392,6 +393,26 @@ def test_html_body_entity_encoded_attribute_secret_rejected(no_real_send):
     )
     assert "secret" in _text(resp).lower()
     assert len(no_real_send) == 0
+
+
+def test_html_body_malformed_html_fast_and_scanned(no_real_send):
+    """#484 codex P2: a flood of '<' without '>' must not go quadratic, and
+    a secret after an unclosed '<' is still caught via the raw view."""
+    tool = create_send_email_tool(_make_settings())
+    flood = "<" * 80_000
+    start = time.monotonic()
+    resp = asyncio.run(
+        tool(
+            to="tim@example.com",
+            subject="newsletter",
+            body="plain text is clean",
+            html_body=f"{flood}\nunclosed sk-abcdEFGH1234567890zz",
+        )
+    )
+    elapsed = time.monotonic() - start
+    assert "secret" in _text(resp).lower()
+    assert len(no_real_send) == 0
+    assert elapsed < 2.0  # linear scan; the old regex took seconds at 80 KB
 
 
 def test_html_body_attribute_secret_still_rejected(no_real_send):
