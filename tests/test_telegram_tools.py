@@ -143,15 +143,46 @@ async def test_send_with_caption(tmp_png, mock_settings, mock_http):
 
 
 @pytest.mark.asyncio
-async def test_send_custom_chat_id(tmp_png, mock_settings, mock_http):
+async def test_send_explicit_matching_chat_id(tmp_png, mock_settings, mock_http):
+    # AS-3: an explicit chat_id equal to the configured chat is allowed.
+    from nous.api.telegram_tools import create_send_file_tool
+    mock_http.post = AsyncMock(return_value=_ok_response())
+
+    send_file = create_send_file_tool(mock_settings, mock_http)
+    result = await send_file(file_path=tmp_png, chat_id="12345")
+
+    call_args = mock_http.post.call_args
+    assert call_args.kwargs["data"]["chat_id"] == "12345"
+    assert "sent successfully" in result["content"][0]["text"].lower()
+
+
+@pytest.mark.asyncio
+async def test_send_mismatched_chat_id_rejected(tmp_png, mock_settings, mock_http):
+    # AS-3: a chat_id that differs from the configured chat is rejected
+    # (exfiltration guard); no HTTP call is made.
     from nous.api.telegram_tools import create_send_file_tool
     mock_http.post = AsyncMock(return_value=_ok_response())
 
     send_file = create_send_file_tool(mock_settings, mock_http)
     result = await send_file(file_path=tmp_png, chat_id="99999")
 
-    call_args = mock_http.post.call_args
-    assert call_args.kwargs["data"]["chat_id"] == "99999"
+    assert "not permitted" in result["content"][0]["text"].lower()
+    mock_http.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_send_uploads_file_bytes(tmp_png, mock_settings, mock_http):
+    # AS-6: the file is read (off-loop) and its bytes are uploaded.
+    from nous.api.telegram_tools import create_send_file_tool
+    mock_http.post = AsyncMock(return_value=_ok_response())
+
+    send_file = create_send_file_tool(mock_settings, mock_http)
+    await send_file(file_path=tmp_png)
+
+    files = mock_http.post.call_args.kwargs["files"]
+    _name, content = files["photo"]
+    assert isinstance(content, bytes)
+    assert content == open(tmp_png, "rb").read()
 
 
 @pytest.mark.asyncio

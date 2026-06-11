@@ -18,9 +18,10 @@ class TestHashKey:
         h2 = compute_hash_key(content)
         assert h1 == h2
 
-    def test_16_chars(self):
+    def test_32_chars(self):
+        # CR-7: widened 16 -> 32 hex chars (128-bit) to make collisions negligible.
         h = compute_hash_key("test content")
-        assert len(h) == 16
+        assert len(h) == 32
 
     def test_different_content_different_hash(self):
         h1 = compute_hash_key("content A")

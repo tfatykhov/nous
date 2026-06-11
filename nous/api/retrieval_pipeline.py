@@ -787,7 +787,10 @@ async def _apply_graph_adjacency_boost(
                 "  AND target_id = ANY(CAST(:ids AS uuid[]))"
             ), {"a": brain.agent_id, "ids": candidate_ids})).all()
     except Exception:
-        return results  # fail-open — adjacency boost is a refinement
+        # R-11: fail-open (boost is a refinement) but log — previously silent,
+        # so a broken graph table degraded ranking with no operator signal.
+        logger.warning("Adjacency boost failed; returning unboosted results", exc_info=True)
+        return results
 
     degree: dict[str, float] = {}
     for src, tgt, w in rows:

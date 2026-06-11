@@ -6,6 +6,7 @@ via sendPhoto (images) and sendDocument (everything else).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
@@ -15,6 +16,12 @@ import httpx
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def _read_bytes(path: str) -> bytes:
+    """Read a file's bytes (run off-loop via asyncio.to_thread — AS-6)."""
+    with open(path, "rb") as f:
+        return f.read()
 
 # Telegram Bot API base URL
 _TG_API = "https://api.telegram.org/bot{token}/{method}"
@@ -89,6 +96,14 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
         target_chat = chat_id or settings.telegram_chat_id
         if not target_chat:
             return _error("No chat_id provided and NOUS_TELEGRAM_CHAT_ID not configured.")
+        # AS-3: outbound recipient allowlist. When a default chat is configured,
+        # an explicit chat_id must match it — prevents file exfiltration to an
+        # arbitrary chat if the tool call is manipulated.
+        if (
+            settings.telegram_chat_id
+            and str(target_chat) != str(settings.telegram_chat_id)
+        ):
+            return _error("chat_id not permitted; files may only be sent to the configured chat.")
 
         # Validate file exists
         if not os.path.isfile(file_path):
@@ -110,13 +125,14 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
         url = _TG_API.format(token=token, method=method)
 
         try:
-            with open(file_path, "rb") as f:
-                files = {file_key: (os.path.basename(file_path), f)}
-                data: dict[str, str] = {"chat_id": target_chat}
-                if caption:
-                    data["caption"] = caption
+            # AS-6: read off the event loop so a large/slow file doesn't block it.
+            content = await asyncio.to_thread(_read_bytes, file_path)
+            files = {file_key: (os.path.basename(file_path), content)}
+            data: dict[str, str] = {"chat_id": target_chat}
+            if caption:
+                data["caption"] = caption
 
-                response = await http_client.post(url, files=files, data=data)
+            response = await http_client.post(url, files=files, data=data)
 
             result = response.json()
             if not result.get("ok"):
