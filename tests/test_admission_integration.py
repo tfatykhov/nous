@@ -4,9 +4,33 @@ Tests the full flow through FactManager._learn() with real Postgres.
 Uses shadow mode and active mode to verify admission gate behavior.
 """
 
+import asyncio
+from datetime import date
+
 import pytest
+from sqlalchemy import delete, func, select
 
 from nous.heart.schemas import FactDetail, FactInput, FactRejected
+from nous.storage.models import Fact
+
+
+async def _active_count(heart, content: str) -> int:
+    async with heart.db.session() as s:
+        return await s.scalar(
+            select(func.count())
+            .select_from(Fact)
+            .where(
+                Fact.agent_id == heart.facts.agent_id,
+                Fact.content == content,
+                Fact.active.is_(True),
+            )
+        )
+
+
+async def _cleanup(heart, content: str) -> None:
+    async with heart.db.session() as s:
+        await s.execute(delete(Fact).where(Fact.content == content))
+        await s.commit()
 
 
 def _fact(**overrides) -> FactInput:
@@ -116,3 +140,39 @@ async def test_supersede_bypasses_gate(heart_with_strict_admission, session):
         session=session,
     )
     assert isinstance(new_result, FactDetail)
+
+
+# ---------------------------------------------------------------------------
+# W-8: concurrent-learn advisory lock (Postgres-only — the lock is a no-op on
+# the SQLite test backend, which is serial). These use own sessions (commit)
+# so the advisory lock actually contends across two pooled connections.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_w8_concurrent_identical_learn_single_active_row(heart):
+    """Two concurrent identical learns must yield exactly one active fact."""
+    content = "Tim migrated the billing database to the new replica cluster overnight"
+    try:
+        await asyncio.gather(
+            heart.learn(_fact(content=content, source="fact_extractor")),
+            heart.learn(_fact(content=content, source="fact_extractor")),
+        )
+        assert await _active_count(heart, content) == 1
+    finally:
+        await _cleanup(heart, content)
+
+
+@pytest.mark.asyncio
+async def test_w8_concurrent_distinct_event_dates_two_rows(heart):
+    """F075 is preserved under the lock: same content on distinct event_dates
+    are distinct events and both persist."""
+    content = "The staging API token was rotated during the security review window"
+    try:
+        await asyncio.gather(
+            heart.learn(_fact(content=content, source="fact_extractor", event_date=date(2026, 3, 10))),
+            heart.learn(_fact(content=content, source="fact_extractor", event_date=date(2026, 3, 12))),
+        )
+        assert await _active_count(heart, content) == 2
+    finally:
+        await _cleanup(heart, content)
