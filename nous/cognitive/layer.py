@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -261,12 +262,53 @@ class CognitiveLayer:
         self._active_episodes: dict[str, str] = {}  # session_id -> episode_id
 
         # 005.5: Session metadata for significance filtering
-        # P1-8: Known memory leak on abandoned sessions (same as _active_episodes)
+        # P1-8 / CR-4: in-process per-session dicts are popped by end_session,
+        # but a session that crashes or is abandoned never calls it. The
+        # last-activity stamp + periodic sweep below evict orphaned state.
         self._session_metadata: dict[str, SessionMetadata] = {}  # session_id -> metadata
+        self._session_last_activity: dict[str, float] = {}  # session_id -> monotonic ts
+        self._last_session_sweep: float = 0.0
 
     def set_epistemic_classifier(self, classifier: "EpistemicClassifier | None") -> None:
         """Wire the §2 Haiku epistemic classifier (called from main.py when flag on)."""
         self._epistemic_classifier = classifier
+
+    def _purge_session_state(self, session_id: str) -> None:
+        """Remove all in-process per-session state for one session (CR-4).
+
+        Shared by end_session and the stale-session sweep so the two cannot
+        drift on which dicts hold per-session state.
+        """
+        self._active_episodes.pop(session_id, None)
+        self._session_metadata.pop(session_id, None)
+        self._session_tool_history.pop(session_id, None)
+        self._session_response_lengths.pop(session_id, None)
+        self._session_user_messages.pop(session_id, None)
+        self._pending_nudges.pop(session_id, None)
+        self._session_last_activity.pop(session_id, None)
+        self._monitor._session_censor_counts.pop(session_id, None)
+
+    def _sweep_stale_sessions(self) -> None:
+        """CR-4: evict in-process state for sessions idle past 2x the session
+        timeout — the safety net for sessions that never call end_session
+        (crash/orphan). Rate-limited to one sweep per session-timeout window.
+        The current turn's session is refreshed in pre_turn *before* this runs,
+        so an active session is never swept mid-conversation.
+        """
+        timeout = float(getattr(self._settings, "session_timeout", 1800) or 1800)
+        now = time.monotonic()
+        if now - self._last_session_sweep < max(timeout, 60.0):
+            return
+        self._last_session_sweep = now
+        ttl = timeout * 2
+        stale = [
+            sid for sid, last in self._session_last_activity.items()
+            if now - last > ttl
+        ]
+        for sid in stale:
+            self._purge_session_state(sid)
+        if stale:
+            logger.info("CR-4: swept %d stale in-process session(s)", len(stale))
 
     async def list_frames(self, agent_id: str, session: AsyncSession | None = None) -> list:
         """Public delegation to FrameEngine.list_frames()."""
@@ -379,6 +421,11 @@ class CognitiveLayer:
             user_id: Optional user identifier for episode tracking.
             user_display_name: Optional user display name for episode tracking.
         """
+        # CR-4: refresh this session's activity stamp BEFORE sweeping, so an
+        # active session is never evicted, then sweep orphaned sessions.
+        self._session_last_activity[session_id] = time.monotonic()
+        self._sweep_stale_sessions()
+
         # 1b. Track user input for significance (005.5 Phase A)
         meta = self._session_metadata.setdefault(session_id, SessionMetadata())
         meta.total_user_chars += len(user_input)
@@ -1815,14 +1862,10 @@ class CognitiveLayer:
         except Exception:
             logger.warning("Failed to clear working memory for session %s", session_id)
 
-        # 3b. Clean up monitor session censor counts
-        self._monitor._session_censor_counts.pop(session_id, None)
-
-        # F024: Clean up critic session state
-        self._session_tool_history.pop(session_id, None)
-        self._pending_nudges.pop(session_id, None)
-        self._session_response_lengths.pop(session_id, None)
-        self._session_user_messages.pop(session_id, None)
+        # 3b. CR-4: drop all in-process per-session state (monitor censor
+        # counts, critic tool history/nudges/response lengths/user messages,
+        # active episode, metadata, activity stamp) via the shared helper.
+        self._purge_session_state(session_id)
 
         # 4. Emit session_ended event — 006: bus.emit with backward compat
         # transcript_text already computed above for end_episode (F025 P3-C)

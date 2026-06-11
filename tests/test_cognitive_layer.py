@@ -866,3 +866,49 @@ async def test_task_synthesis_existing_task_preserved(cognitive, heart, session)
     assert wm_after is not None
     # Task should remain the same (not overwritten)
     assert wm_after.current_task == original_task
+
+
+# ---------------------------------------------------------------------------
+# CR-4: stale in-process session-state sweep (orphaned-session leak guard)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cr4_sweep_evicts_stale_sessions(cognitive):
+    import time as _time
+
+    from nous.cognitive.schemas import SessionMetadata
+
+    timeout = float(getattr(cognitive._settings, "session_timeout", 1800) or 1800)
+    now = _time.monotonic()
+    cognitive._session_metadata["old"] = SessionMetadata()
+    cognitive._session_user_messages["old"] = ["x"]
+    cognitive._session_metadata["live"] = SessionMetadata()
+    cognitive._session_last_activity["old"] = now - (timeout * 2 + 10)
+    cognitive._session_last_activity["live"] = now
+    cognitive._last_session_sweep = 0.0  # force a sweep
+
+    cognitive._sweep_stale_sessions()
+
+    assert "old" not in cognitive._session_metadata
+    assert "old" not in cognitive._session_user_messages
+    assert "old" not in cognitive._session_last_activity
+    assert "live" in cognitive._session_metadata
+    assert "live" in cognitive._session_last_activity
+
+
+@pytest.mark.asyncio
+async def test_cr4_sweep_is_rate_limited(cognitive):
+    import time as _time
+
+    from nous.cognitive.schemas import SessionMetadata
+
+    timeout = float(getattr(cognitive._settings, "session_timeout", 1800) or 1800)
+    now = _time.monotonic()
+    cognitive._session_metadata["old"] = SessionMetadata()
+    cognitive._session_last_activity["old"] = now - (timeout * 2 + 10)
+    cognitive._last_session_sweep = now  # swept just now -> next call is a no-op
+
+    cognitive._sweep_stale_sessions()
+
+    assert "old" in cognitive._session_metadata  # rate-limited, not yet swept

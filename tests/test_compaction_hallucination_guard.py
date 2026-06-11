@@ -421,3 +421,12 @@ async def test_guard_disabled_no_check(caplog) -> None:
         "hallucination guard" in r.message.lower() for r in caplog.records
     )
     assert conv.summary is not None
+
+
+def test_cr10_port_value_substitution_flagged() -> None:
+    # CR-10: a value substitution must NOT be excused by the multi-word
+    # partial-match rule just because a non-numeric word ("port") matches.
+    input_text = "Redis listens on port 6380 in staging"
+    summary = "Redis port 6379 configured for cache"
+    suspects = detect_hallucinated_entities(input_text, summary)
+    assert "port 6379" in suspects
