@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from sqlalchemy import select as sa_select
@@ -18,6 +19,9 @@ from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.schemas import FrameSelection
 from nous.storage.models import Decision as DecisionModel
+
+if TYPE_CHECKING:
+    from nous.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +75,9 @@ class DeliberationEngine:
     a clean start -> think -> finalize flow.
     """
 
-    def __init__(self, brain: Brain) -> None:
+    def __init__(self, brain: Brain, settings: Settings | None = None) -> None:
         self._brain = brain
+        self._settings = settings
 
     async def start(
         self,
@@ -177,6 +182,39 @@ class DeliberationEngine:
             tags=tags,
             session=session,
         )
+
+        # BR-4/6: wire the CEL guardrail engine, which previously had no runtime
+        # caller. ADVISORY only — Brain.check() evaluates active guardrails,
+        # emits guardrail_blocked/warned events and increments activation
+        # counts; we log matches but never abort the turn. (The seed guardrails
+        # are block-severity and unvalidated — one blocks ALL critical decisions
+        # — so enforcement is deferred until those CEL expressions are fixed.)
+        if getattr(self._settings, "guardrail_check_enabled", False):
+            try:
+                gr = await self._brain.check(
+                    description=description,
+                    stakes=stakes,
+                    confidence=confidence,
+                    category=detail.category,
+                    tags=tags,
+                    reasons=[{"type": r.type, "text": r.text} for r in (detail.reasons or [])],
+                    pattern=pattern,
+                    quality_score=detail.quality_score,
+                    session=session,
+                )
+                if not gr.allowed:
+                    logger.warning(
+                        "Guardrails flagged decision %s — blocked_by=%s warnings=%s (advisory)",
+                        decision_id, gr.blocked_by, gr.warnings,
+                    )
+                elif gr.warnings:
+                    logger.info(
+                        "Guardrail warnings on decision %s: %s", decision_id, gr.warnings,
+                    )
+            except Exception:
+                logger.warning(
+                    "Guardrail check failed for decision %s", decision_id, exc_info=True
+                )
         return decision_id
 
     async def delete(
