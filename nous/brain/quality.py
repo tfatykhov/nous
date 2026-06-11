@@ -19,7 +19,9 @@ def compute_quality_score(
     - Reason diversity (>=2 types): +0.10
 
     Total possible: 1.0
-    Block threshold: < 0.55 (enforced by guardrail, not here)
+
+    NOTE: this score is advisory (surfaced for human review on the decision
+    detail / dashboard). Nothing gates on it — there is no block threshold.
     """
     score = 0.0
 
