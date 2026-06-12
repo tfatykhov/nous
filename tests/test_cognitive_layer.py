@@ -886,7 +886,12 @@ async def test_cr4_sweep_evicts_stale_sessions(cognitive):
     cognitive._session_metadata["live"] = SessionMetadata()
     cognitive._session_last_activity["old"] = now - (timeout * 2 + 10)
     cognitive._session_last_activity["live"] = now
-    cognitive._last_session_sweep = 0.0  # force a sweep
+    # Force a sweep regardless of the absolute monotonic clock: the rate-limit
+    # guard compares (now - last_sweep) against max(timeout, 60), so 0.0 only
+    # forces a sweep when monotonic() already exceeds the timeout (true on a
+    # long-running host, false in a fresh CI container — that gap is what failed
+    # CI). Subtract the interval explicitly instead.
+    cognitive._last_session_sweep = now - max(timeout, 60.0) - 1.0
 
     cognitive._sweep_stale_sessions()
 
