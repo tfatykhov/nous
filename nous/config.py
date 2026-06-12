@@ -51,7 +51,9 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", validation_alias="OPENAI_API_KEY")
     auto_link_threshold: float = 0.85
     auto_link_max: int = 3
-    quality_block_threshold: float = 0.5
+    # BR-1: removed `quality_block_threshold` — it had zero readers (decision
+    # quality_score is advisory for human review; nothing gates on it). A stale
+    # NOUS_QUALITY_BLOCK_THRESHOLD in an operator .env is harmless (extra=ignore).
 
     # F058: Confidence calibration scaling. Agent-recorded confidence is
     # systemically ~20% overconfident on Nous prod data (Brier 0.252,
