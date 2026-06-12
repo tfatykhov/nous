@@ -234,7 +234,9 @@ def create_mcp_server(
     async def _handle_recall(args: dict) -> list[TextContent]:
         query = args["query"]
         memory_type = args.get("memory_type", "all")
-        limit = args.get("limit", 5)
+        # AS-10: cap caller-supplied limit so a hostile/buggy client can't
+        # request an unbounded expensive recall.
+        limit = min(int(args.get("limit", 5)), 100)
 
         results: list[dict] = []
 

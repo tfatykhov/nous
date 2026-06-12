@@ -215,6 +215,20 @@ class Settings(BaseSettings):
             return json.loads(v)
         return v
 
+    @field_validator("context_budget_overrides", mode="after")
+    @classmethod
+    def _reject_negative_budget_overrides(
+        cls, v: dict[str, int]
+    ) -> dict[str, int]:
+        """AS-7: reject negative budget values — they silently underflow the
+        context budget rather than failing loudly."""
+        for key, val in v.items():
+            if val < 0:
+                raise ValueError(
+                    f"context_budget_overrides[{key!r}]={val} must be >= 0"
+                )
+        return v
+
     # F017: Staleness penalty
     staleness_penalty_enabled: bool = True
     staleness_half_life_days: int = 30

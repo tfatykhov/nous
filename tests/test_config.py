@@ -67,3 +67,9 @@ class TestContextBudgetOverridesParsing:
         monkeypatch.delenv("NOUS_CONTEXT_BUDGET_OVERRIDES", raising=False)
         s = Settings(_env_file=None, context_budget_overrides={"total": 9000})
         assert s.context_budget_overrides == {"total": 9000}
+
+    def test_negative_value_rejected(self, monkeypatch):
+        # AS-7: negative budgets silently underflow context — reject at load.
+        monkeypatch.setenv("NOUS_CONTEXT_BUDGET_OVERRIDES", '{"total": -1}')
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)

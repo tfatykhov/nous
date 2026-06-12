@@ -25,8 +25,12 @@ NON_REFETCHABLE_TOOLS = frozenset({"web_search", "web_fetch"})
 
 
 def compute_hash_key(content: str) -> str:
-    """SHA256 of content, truncated to 16 hex chars."""
-    return hashlib.sha256(content.encode()).hexdigest()[:16]
+    """SHA256 of content, truncated to 32 hex chars (128-bit).
+
+    CR-7: widened from 16 (64-bit) to make same-session collisions — which
+    would return the wrong cached content via cache_retrieve — negligible.
+    """
+    return hashlib.sha256(content.encode()).hexdigest()[:32]
 
 
 async def cache_compressed_result(
