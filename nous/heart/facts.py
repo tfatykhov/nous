@@ -434,6 +434,22 @@ class FactManager:
                 explanation="Content too short (< 30 chars)",
             )
 
+        # W-8: serialize concurrent learns of identical content for this agent so
+        # two racing callers (e.g. the fact_extractor tiebreaker runs its
+        # LLM check outside any transaction) can't both pass dedup and
+        # double-insert. The transaction-scoped advisory lock releases on
+        # commit/rollback and is keyed per (agent, content), so distinct content
+        # never serializes. The existing event_date-aware dedup below then runs
+        # under the lock and decides correctly (F075 distinct-date facts still
+        # coexist — the lock only orders the racers, it doesn't dedup).
+        # Postgres-only (pg_advisory_xact_lock); the SQLite test backend is
+        # serial, so there is no cross-connection race to protect there.
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+                {"k": f"fact_learn:{self.agent_id}:{input.content}"},
+            )
+
         # Generate embedding
         embedding = None
         if self.embeddings:

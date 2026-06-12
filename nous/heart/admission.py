@@ -48,6 +48,11 @@ DEFAULT_WEIGHTS = {
 
 DEFAULT_THRESHOLD = 0.55
 
+# W-7: bypass sources split into authoritative (fully trusted) vs derived
+# (machine-generated supersede/contradict/consolidation — bypass scoring but
+# must still carry an embedding). Any bypass source NOT listed here is derived.
+_AUTHORITATIVE_SOURCES = frozenset({"user_stated", "identity", "censor"})
+
 # Exponential decay: λ = 0.01/hour → half-life ≈ 69 hours (~3 days)
 RECENCY_DECAY_LAMBDA = 0.01
 
@@ -383,13 +388,27 @@ Respond with ONLY a number between 0.0 and 1.0."""
     ) -> AdmissionResult:
         """Score a candidate fact for admission."""
         # Check bypass first
-        if fact_input.source in self.config.bypass_sources:
+        source = fact_input.source
+        if source in self.config.bypass_sources:
+            # W-7: bypass behavior is unchanged (the <30-char content floor
+            # already runs upstream in Heart._learn, and a deliberate fix
+            # added consolidation bypass after admission wrongly rejected
+            # valid merges — see bypass_sources note). The only change is an
+            # audit trail distinguishing fully-trusted AUTHORITATIVE sources
+            # from machine-DERIVED ones, so the derived-bypass false-positive
+            # rate is measurable before any stricter gate is considered.
+            is_authoritative = source in _AUTHORITATIVE_SOURCES
+            if not is_authoritative:
+                logger.info(
+                    "Admission bypass (derived) source=%s content=%.80s",
+                    source, fact_input.content,
+                )
             return AdmissionResult(
                 admitted=True,
                 composite_score=1.0,
                 threshold=self.config.threshold,
                 scores={},
-                explanation=f"Bypassed: source '{fact_input.source}' is in bypass list",
+                explanation=f"Bypassed: source '{source}' is in bypass list",
                 bypassed=True,
             )
 
