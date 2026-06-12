@@ -241,7 +241,7 @@ class CognitiveLayer:
         self._context = ContextEngine(
             brain, heart, settings, identity_prompt, deduplicator=_deduplicator
         )
-        self._deliberation = DeliberationEngine(brain)
+        self._deliberation = DeliberationEngine(brain, settings)
         self._monitor = MonitorEngine(brain, heart, settings)
 
         # F024: Critic Agent

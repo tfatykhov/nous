@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # BR-1: removed `quality_block_threshold` — it had zero readers (decision
     # quality_score is advisory for human review; nothing gates on it). A stale
     # NOUS_QUALITY_BLOCK_THRESHOLD in an operator .env is harmless (extra=ignore).
+    # BR-4/6: evaluate the CEL guardrail engine at decision finalize. ADVISORY
+    # only (logs + emits guardrail_blocked/warned events + increments activation
+    # counts) — the seed guardrails are block-severity and not yet validated
+    # (one blocks ALL critical decisions), so enforcement stays a follow-up.
+    guardrail_check_enabled: bool = True
 
     # F058: Confidence calibration scaling. Agent-recorded confidence is
     # systemically ~20% overconfident on Nous prod data (Brier 0.252,
