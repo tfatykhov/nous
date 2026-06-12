@@ -203,8 +203,18 @@ def detect_hallucinated_entities(input_text: str, summary: str) -> list[str]:
         if ent in input_lc:
             continue
         words = ent.split()
-        if len(words) > 1 and any(
-            len(w) >= 4 and w in input_lc for w in words
+        # Rule 2 rescues a multi-word entity when one of its words appears in
+        # the input — meant for names unpacked from an email (`marcus webb`
+        # from `marcus.webb@acme.com`). CR-10: it must NOT rescue a VALUE
+        # substitution. `port 6379` (summary) vs `port 6380` (input) was
+        # passing because the word `port` matched while the number changed.
+        # So skip rule 2 when any word carries a digit (port/IP/version
+        # values) — require the value itself to match (rule 1).
+        has_value_word = any(any(c.isdigit() for c in w) for w in words)
+        if (
+            len(words) > 1
+            and not has_value_word
+            and any(len(w) >= 4 and w in input_lc for w in words)
         ):
             continue
         suspects.append(ent)
