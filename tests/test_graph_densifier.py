@@ -338,6 +338,37 @@ async def test_find_orphans_ignores_supersedes_edges(db, settings, mock_embeddin
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
+async def test_find_orphans_ignores_co_occurred_and_contradicts(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """2b: co_occurred / contradicts / happened_before are not associative
+    connectivity for densification — a fact whose only edge is one of them must
+    still be an orphan (else F040 never densifies it)."""
+    agent_id = f"test-orphan-2b-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("co")
+        f_cooc = await _insert_fact(session, agent_id, "co-occurred only fact here", emb)
+        f_other = await _insert_fact(session, agent_id, "co-occurred partner fact here", emb)
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (agent_id, source_id, target_id, source_type, "
+            "target_type, relation, weight, auto_linked, extraction_method) "
+            "VALUES (:a, :s, :t, 'fact', 'fact', 'co_occurred', 1.0, true, 'co_occurrence')"
+        ), {"a": agent_id, "s": f_cooc, "t": f_other})
+        # control
+        cos_a = await _insert_fact(session, agent_id, "cosine masked fact A3", emb)
+        cos_b = await _insert_fact(session, agent_id, "cosine masked fact B3", emb)
+        await _insert_edge(session, agent_id, cos_a, cos_b, "fact", "fact")
+        await session.commit()
+
+    async with db.session() as session:
+        orphan_ids = [oid for oid, _ in await densifier.find_orphans("fact", 100, session)]
+    assert f_cooc in orphan_ids   # co_occurred does NOT mask
+    assert cos_a not in orphan_ids  # control still masks
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
 async def test_comention_skips_pair_with_contradicts_edge(db, settings, mock_embeddings, _fix_stale_relation_constraint):
     """F076 (codex P2-D): build_comention_edges must NOT add a related_to edge over a
     pair that already has a contradicts edge — adjacency-boost/spreading filter only

@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain._entity_config import _ENTITY_CONFIG
+from nous.brain.graph_constants import autobehavior_exclusion_sql
 from nous.brain.backfill_rerank import (
     ce_rerank_backfill_candidates,
     fetch_candidate_content,
@@ -147,6 +148,7 @@ class GraphDensifier:
 
         table, type_name, content_col, extra_where = config
         embedding_clause = "AND t.embedding IS NOT NULL" if require_embedding else ""
+        orphan_excl = autobehavior_exclusion_sql("e.")  # 2b
 
         sql = text(f"""
             SELECT t.id, {content_col} AS content
@@ -157,20 +159,12 @@ class GraphDensifier:
               AND NOT EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :agent_id
-                    -- F076: a co_mention edge must NOT make a fact look non-orphan.
-                    -- It only links fact<->fact on a shared entity; it does NOT give
-                    -- the cross-type (fact->decision/episode) connectivity the F040
-                    -- backfill provides. Counting it here would permanently skip such
-                    -- facts from later backfill cycles (find_orphans consumes the
-                    -- orphan signal). IS DISTINCT FROM keeps NULL/legacy rows counting.
-                    AND e.extraction_method IS DISTINCT FROM 'co_mention'
-                    -- 2026-06-13 audit: a supersedes edge is lineage, not usable
-                    -- connectivity — _neighbors and spreading both refuse to
-                    -- traverse it. If it counted here, a replacement fact whose
-                    -- only edge is supersedes would look non-orphan and the F040
-                    -- backfill would never densify it, leaving it graph-isolated.
-                    -- Exclude it from the orphan signal, same as co_mention.
-                    AND e.relation <> 'supersedes'
+                    -- 2b: a non-associative edge (co_mention/co_occurred builder,
+                    -- supersedes lineage, contradicts negative, happened_before
+                    -- temporal) must NOT make a fact look non-orphan, or the F040
+                    -- backfill permanently skips it and leaves it graph-isolated.
+                    -- Single source of truth: graph_constants.
+                    AND {orphan_excl}
                     AND (
                         (e.source_id = t.id AND e.source_type = :type_name)
                         OR (e.target_id = t.id AND e.target_type = :type_name)
@@ -1485,7 +1479,9 @@ class GraphDensifier:
             result = await session.execute(text(
                 "SELECT source_id, target_id, source_type, target_type "
                 "FROM brain.graph_edges WHERE agent_id = :agent_id "
-                "AND relation <> 'supersedes'"
+                # 2b: exclude non-associative edges so cluster discovery doesn't
+                # union a replacement with its lineage/co-occurrence partner.
+                f"AND {autobehavior_exclusion_sql()}"
             ), {"agent_id": self._agent_id})
             edges = result.all()
 
