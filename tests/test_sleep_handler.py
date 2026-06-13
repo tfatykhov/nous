@@ -1103,3 +1103,18 @@ class TestStructuredContradictionResolution:
             "F031 MERGE must write the supersedes edge (link_facts(..., "
             "'supersedes', ...)) alongside superseded_by — 2026-06-13 audit"
         )
+
+    def test_f027_cluster_consolidation_persists_supersedes_edge(self):
+        """2026-06-13 audit (codex re-review): F027 cluster consolidation is a
+        third supersession path that sets superseded_by without the supersedes
+        edge — future cluster merges would recreate the mismatch the backfill
+        repairs. Pin the edge write via source inspection."""
+        import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
+        src = inspect.getsource(SleepHandler._phase_cluster_consolidation)
+        assert 'link_facts(' in src and '"supersedes"' in src, (
+            "F027 cluster consolidation must write the supersedes edge "
+            "(link_facts(..., 'supersedes', ...)) alongside superseded_by"
+        )

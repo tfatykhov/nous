@@ -43,13 +43,18 @@ async def main() -> None:
             print(f"  {r['relation']:<20} {str(r['source_type']):<10}->{str(r['target_type']):<10} {r['n']:>7}")
 
         print("\n=== node totals ===")
-        for tbl in ("heart.facts", "heart.episodes", "brain.decisions",
-                    "heart.procedures", "heart.episode_chunks"):
+        # (table, has_active_column) — decisions/episode_chunks have no `active`.
+        for tbl, has_active in (("heart.facts", True), ("heart.episodes", True),
+                                ("brain.decisions", False), ("heart.procedures", True),
+                                ("heart.episode_chunks", False)):
             try:
                 n = await conn.fetchval(f"SELECT count(*) FROM {tbl} WHERE agent_id=$1", AGENT)
-                act = await conn.fetchval(
-                    f"SELECT count(*) FROM {tbl} WHERE agent_id=$1 AND active=true", AGENT)
-                print(f"  {tbl:<24} total={n:>7}  active={act:>7}")
+                if has_active:
+                    act = await conn.fetchval(
+                        f"SELECT count(*) FROM {tbl} WHERE agent_id=$1 AND active=true", AGENT)
+                    print(f"  {tbl:<24} total={n:>7}  active={act:>7}")
+                else:
+                    print(f"  {tbl:<24} total={n:>7}")
             except Exception as e:  # noqa: BLE001
                 print(f"  {tbl:<24} ERR {type(e).__name__}: {str(e)[:60]}")
 

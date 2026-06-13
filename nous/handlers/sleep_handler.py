@@ -1338,6 +1338,12 @@ class SleepHandler:
                             continue
                         orm_fact.superseded_by = merged_detail.id
                         orm_fact.active = False
+                        # Mirror the supersedes edge (same fix as the F031
+                        # MERGE path) so cluster merges don't recreate the
+                        # column/graph mismatch the backfill repairs.
+                        await self._heart.link_facts(
+                            merged_detail.id, fact.id, "supersedes", 1.0, session,
+                        )
                     await session.commit()
 
                 merged_fact_id = str(merged_detail.id)
