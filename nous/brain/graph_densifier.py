@@ -164,6 +164,13 @@ class GraphDensifier:
                     -- facts from later backfill cycles (find_orphans consumes the
                     -- orphan signal). IS DISTINCT FROM keeps NULL/legacy rows counting.
                     AND e.extraction_method IS DISTINCT FROM 'co_mention'
+                    -- 2026-06-13 audit: a supersedes edge is lineage, not usable
+                    -- connectivity — _neighbors and spreading both refuse to
+                    -- traverse it. If it counted here, a replacement fact whose
+                    -- only edge is supersedes would look non-orphan and the F040
+                    -- backfill would never densify it, leaving it graph-isolated.
+                    -- Exclude it from the orphan signal, same as co_mention.
+                    AND e.relation <> 'supersedes'
                     AND (
                         (e.source_id = t.id AND e.source_type = :type_name)
                         OR (e.target_id = t.id AND e.target_type = :type_name)
