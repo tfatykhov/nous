@@ -163,6 +163,42 @@ async def test_density_excludes_supersedes_edges(brain, session):
     assert density == pytest.approx(1.0, abs=0.1)
 
 
+async def test_density_excludes_co_occurred_contradicts_happened_before(brain, session):
+    """1e (2026-06-13 audit): contradicts / co_occurred / happened_before are not
+    associative connectivity and must not inflate the density gate that flips
+    auto-mode spreading on."""
+    from sqlalchemy import text
+
+    from nous.brain.schemas import RecordInput
+
+    def _input(desc):
+        return RecordInput(description=desc, confidence=0.8, category="architecture",
+                           stakes="low", reasons=_reasons())
+
+    d1 = await brain.record(_input("Density excl test node one here"), session=session)
+    d2 = await brain.record(_input("Density excl test node two here"), session=session)
+    d3 = await brain.record(_input("Density excl test node three here"), session=session)
+    await brain.link(d1.id, d2.id, "supports", session=session)
+    await brain.link(d2.id, d3.id, "related_to", session=session)
+    await brain.link(d1.id, d3.id, "caused_by", session=session)
+
+    async def _edge(rel, method):
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+            "agent_id,relation,weight,auto_linked,extraction_method) "
+            "VALUES (:s,:t,'decision','decision',:a,:r,1.0,true,:m)"),
+            {"s": str(d1.id), "t": str(d3.id), "a": brain.agent_id, "r": rel, "m": method})
+
+    await _edge("contradicts", "inferred")
+    await _edge("co_occurred", "co_occurrence")
+    await _edge("happened_before", "deterministic")
+    await session.flush()
+
+    density = await compute_graph_density(session, brain.agent_id)
+    # all three excluded => still 3 associative edges / 3 nodes = 1.0
+    assert density == pytest.approx(1.0, abs=0.1)
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_spreading_activation_empty_seeds(session):

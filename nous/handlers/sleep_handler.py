@@ -939,7 +939,12 @@ class SleepHandler:
                                         source="contradiction_resolution",
                                         confidence=0.8,
                                         category=pair.get("category", None),
-                                    )
+                                    ),
+                                    # 1c: exclude the still-active sources so
+                                    # Leg-2 dedup can't confirm the merged
+                                    # restatement AS a source and discard the
+                                    # merged content (MERGE-collapse).
+                                    exclude_ids=[fact1_id, fact2_id],
                                 )
                                 # PR #411 follow-up (Codex P1): F031
                                 # MERGE used to discard the learn()
@@ -1283,14 +1288,19 @@ class SleepHandler:
                     )
                     continue
 
-                # Create merged fact
-                merged_detail = await self._heart.learn(FactInput(
-                    subject=subject,
-                    content=merge_result["merged_content"],
-                    source="cluster_consolidation",
-                    confidence=float(merge_result.get("confidence", 0.8)),
-                    category=facts[0].category,
-                ))
+                # Create merged fact. 1c: exclude the still-active cluster
+                # members so Leg-2 dedup can't confirm the merged restatement
+                # AS one of them and discard the merged content.
+                merged_detail = await self._heart.learn(
+                    FactInput(
+                        subject=subject,
+                        content=merge_result["merged_content"],
+                        source="cluster_consolidation",
+                        confidence=float(merge_result.get("confidence", 0.8)),
+                        category=facts[0].category,
+                    ),
+                    exclude_ids=[f.id for f in facts],
+                )
 
                 if isinstance(merged_detail, FactRejected):
                     merge_outcome = "rejected_by_admission"

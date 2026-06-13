@@ -449,8 +449,9 @@ async def _run_stages(
                             acc.heart_graph_decisions.append(n)
                             seen_graph_ids.add(n.id)
                 except Exception:
-                    # Matches pre-refactor: swallow silently (see tools.py:380-381).
-                    # Surface count to PipelineStats.n_stage_errors for eval visibility.
+                    # 3a: log (was silent) so a graph-expansion outage is
+                    # diagnosable, not just counted. Still non-fatal.
+                    logger.warning("Stage 2 heart-graph neighbor expansion failed", exc_info=True)
                     acc.stage_errors["heart_graph_neighbors"] = (
                         acc.stage_errors.get("heart_graph_neighbors", 0) + 1
                     )
@@ -700,8 +701,9 @@ async def _run_stages(
                             (c.source_id, c.source_type, c.target_id, c.target_type)
                         )
         except Exception:
-            # Matches pre-refactor: non-critical, suppressed (see tools.py:508-509).
-            # Counted so eval reports surface silent contradiction-query failures.
+            # 3a: log (was silent) so a contradiction-query outage is
+            # diagnosable, not just counted. Still non-fatal.
+            logger.warning("Stage 5 contradiction detection failed", exc_info=True)
             acc.stage_errors["contradiction_query"] = (
                 acc.stage_errors.get("contradiction_query", 0) + 1
             )

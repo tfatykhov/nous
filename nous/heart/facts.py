@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -164,6 +165,25 @@ class FactManager:
         # fact_native_cosine_threshold (was hardcoded 0.95). Optional
         # for backwards-compat; defaults to 0.95 when settings is None.
         self._settings = settings
+        # 1a: advisory per-hour cap on in-band classifier (Haiku) calls.
+        self._band_bucket: int = -1
+        self._band_calls: int = 0
+
+    def _band_budget_ok(self) -> bool:
+        """Advisory in-process per-hour cap on the in-band classifier. Returns
+        False once the hourly budget is spent (band then falls open to confirm).
+        Races are harmless for a cost cap, so no lock. 0/None disables."""
+        cap = getattr(self._settings, "fact_band_classification_max_per_hour", 1000) if self._settings else 1000
+        if not cap or cap <= 0:
+            return True
+        bucket = int(time.monotonic() // 3600)
+        if bucket != self._band_bucket:
+            self._band_bucket = bucket
+            self._band_calls = 0
+        if self._band_calls >= cap:
+            return False
+        self._band_calls += 1
+        return True
 
     # ------------------------------------------------------------------
     # Event helper
@@ -440,6 +460,36 @@ class FactManager:
             utility_override=utility_override,
         )
 
+    async def _embed_with_retry(self, embed_text: str, *, attempts: int = 2) -> list[float] | None:
+        """Embed with one retry; on final failure log ERROR (not a quiet warning).
+
+        Mirrors ``ProcedureManager._embed_with_retry``. A transient embedding
+        outage would otherwise insert a burst of facts with NULL embeddings —
+        invisible to vector search AND the dedup cosine gate, i.e. permanently
+        undedupable duplicates. The retry absorbs the common transient blip; on
+        persistent failure we still persist the fact (never hard-delete memory)
+        but with a LOUD error so a NULL row is recoverable, not silent.
+
+        Returns ``None`` when no provider is configured (intentional — the row is
+        stored without dedup) OR after all attempts fail (distinguished only by
+        the log level: no-provider is silent, failure is ERROR).
+        """
+        if not self.embeddings:
+            return None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self.embeddings.embed(embed_text)
+            except Exception:
+                if attempt >= attempts:
+                    logger.error(
+                        "Embedding generation failed after %d attempts; storing fact with "
+                        "NULL embedding (invisible to vector search/dedup until re-embedded)",
+                        attempts,
+                    )
+                    return None
+                logger.warning("Embedding attempt %d/%d failed for fact learn, retrying", attempt, attempts)
+        return None
+
     async def _learn(
         self,
         input: FactInput,
@@ -477,13 +527,9 @@ class FactManager:
                 {"k": f"fact_learn:{self.agent_id}:{input.content}"},
             )
 
-        # Generate embedding
-        embedding = None
-        if self.embeddings:
-            try:
-                embedding = await self.embeddings.embed(input.content)
-            except Exception:
-                logger.warning("Embedding generation failed for fact learn")
+        # Generate embedding (retry once; persistent failure logs ERROR and
+        # stores a NULL-embed row rather than dropping the fact — 1b).
+        embedding = await self._embed_with_retry(input.content)
 
         # Near-duplicate detection: cosine similarity > threshold.
         # F075: pass candidate's event_date so _find_duplicate prefers same-date
@@ -967,15 +1013,22 @@ class FactManager:
         low-confidence verdict, no LLM, or classifier failure — fail-open to
         dedup, mirroring the F377 tiebreaker contract).
         """
+        # 1a (2026-06-13 audit): the caller (_find_duplicate) only returns hits
+        # >= fact_native_cosine_threshold, so the lower bound is already
+        # guaranteed — gating on CONTRADICTION_SIMILARITY_MIN (0.85) excluded the
+        # [threshold, 0.85) range and blind-confirmed it (swallowing contradictions
+        # at the prod 0.80 threshold). Classify every dedup hit below MAX; true
+        # duplicates (>= MAX) still confirm. At the 0.95 default this is a no-op
+        # (the caller only returns >= 0.95 hits → similarity < MAX is False).
         if (
             not check_contradictions
             or self._llm is None
-            or not (
-                self.CONTRADICTION_SIMILARITY_MIN
-                <= similarity
-                < self.CONTRADICTION_SIMILARITY_MAX
-            )
+            or not (similarity < self.CONTRADICTION_SIMILARITY_MAX)
         ):
+            return None
+        # Cost cap: skip classification (fall open to confirm) when the hourly
+        # Haiku budget is spent.
+        if not self._band_budget_ok():
             return None
         classification = await self._classify_fact_pair(dupe.content, input.content)
         if not classification:

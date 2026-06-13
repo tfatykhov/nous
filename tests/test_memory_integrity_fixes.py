@@ -64,10 +64,22 @@ class TestClassifyDupeInBand:
         fm._classify_fact_pair.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_below_band_paraphrase_confirms(self):
-        """similarity < 0.85 (reachable when the operator threshold is lower,
-        e.g. prod 0.80) is the paraphrase zone the operator opted into."""
-        fm = _fm_with_llm({"relation": "CONTRADICTION"})
+    async def test_below_old_band_now_classifies(self):
+        """1a (2026-06-13 audit): a hit in [threshold, 0.85) reaches the
+        classifier here only because the caller (_find_duplicate) returned it
+        (similarity >= the operator threshold, e.g. prod 0.80). The old 0.85
+        lower bound blind-confirmed this range, swallowing contradictions. Now a
+        0.82 CONTRADICTION is classified+routed, not confirmed."""
+        fm = _fm_with_llm({"relation": "CONTRADICTION", "confidence": 0.9})
+        assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) == "contradiction"
+        fm._classify_fact_pair.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_band_budget_exhaustion_falls_open(self):
+        """1a: when the hourly classifier budget is spent, the band falls open
+        to confirm (returns None) rather than making the Haiku call."""
+        fm = _fm_with_llm({"relation": "CONTRADICTION", "confidence": 0.9})
+        fm._band_budget_ok = lambda: False
         assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) is None
         fm._classify_fact_pair.assert_not_called()
 
@@ -101,6 +113,60 @@ class TestClassifyDupeInBand:
         fm = _fm_with_llm(classification)
         result = await fm._classify_dupe_in_band(_dupe(), 0.90, _input(), True)
         assert result == expected
+
+
+class TestEmbedWithRetry:
+    """1b (2026-06-13 audit): embedding failure retries once then persists a
+    NULL-embed row (never hard-reject); no provider is a silent None."""
+
+    @pytest.mark.asyncio
+    async def test_success_returns_embedding(self):
+        fm = FactManager(db=MagicMock(), embeddings=MagicMock(), agent_id="test")
+        fm.embeddings.embed = AsyncMock(return_value=[0.1, 0.2])
+        assert await fm._embed_with_retry("x") == [0.1, 0.2]
+        fm.embeddings.embed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_retries_then_persists_null(self):
+        fm = FactManager(db=MagicMock(), embeddings=MagicMock(), agent_id="test")
+        fm.embeddings.embed = AsyncMock(side_effect=RuntimeError("embed outage"))
+        assert await fm._embed_with_retry("x", attempts=2) is None  # NULL, not raised
+        assert fm.embeddings.embed.await_count == 2  # retried
+
+    @pytest.mark.asyncio
+    async def test_no_provider_is_silent_none(self):
+        fm = FactManager(db=MagicMock(), embeddings=None, agent_id="test")
+        assert await fm._embed_with_retry("x") is None
+
+
+class TestConsolidationExcludeIds:
+    """1c: consolidation MERGE/cluster learn() must pass exclude_ids so dedup
+    can't confirm the merged restatement AS a still-active source."""
+
+    def test_merge_and_cluster_pass_exclude_ids(self):
+        import inspect
+        from nous.handlers.sleep_handler import SleepHandler
+        src = inspect.getsource(SleepHandler)
+        # F031 MERGE
+        merge = src[src.index('source="contradiction_resolution"'):]
+        merge = merge[:merge.index("exclude_ids=") + 200]
+        assert "exclude_ids=[fact1_id, fact2_id]" in merge
+        # F027 cluster
+        cluster = src[src.index('source="cluster_consolidation"'):]
+        cluster = cluster[:cluster.index("exclude_ids=") + 200]
+        assert "exclude_ids=[f.id for f in facts]" in cluster
+
+
+class TestKnowledgeExtractorNoPrefilter:
+    """1d: the redundant find_similar_facts pre-filter is removed so learn()
+    owns dedup (and its band classifier can catch semantic opposites)."""
+
+    def test_prefilter_removed(self):
+        import inspect
+        from nous.handlers.knowledge_extractor import KnowledgeExtractor
+        src = inspect.getsource(KnowledgeExtractor)
+        assert "find_similar_facts" not in src
+        assert "Skipping duplicate fact" not in src
 
 
 class TestApplyBandAction:

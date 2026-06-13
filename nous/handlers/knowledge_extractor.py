@@ -114,22 +114,13 @@ class KnowledgeExtractor:
                 if not content:
                     continue
 
-                # Dedup against existing facts.
-                # Audit S2 (2026-06-09): probe via raw cosine, not
-                # search_facts — RRF scores encode rank (~0.98 for the
-                # nearest fact regardless of similarity), so the old
-                # `score > 0.85` skipped virtually every candidate once
-                # any embedded fact existed. Cosine 0.85 is a real
-                # paraphrase threshold.
-                existing = await self._heart.find_similar_facts(content, limit=1)
-                if (
-                    existing
-                    and existing[0].score is not None
-                    and existing[0].score > 0.85
-                ):
-                    logger.debug("Skipping duplicate fact: %s", content[:50])
-                    continue
-
+                # 1d (2026-06-13 audit): no pre-filter here. The old blunt
+                # raw-cosine > 0.85 pre-check ran BEFORE learn() and pre-empted
+                # its dedup — dropping semantic opposites (high cosine, opposite
+                # meaning) that learn()'s band classifier (1a) now correctly
+                # classifies and inserts. learn() owns dedup (Leg-2 cosine + the
+                # in-band F027 classifier + F377 tiebreaker); a redundant looser
+                # pre-gate only re-introduced the swallow.
                 fact_input = FactInput(
                     subject=fact.get("subject", "unknown"),
                     content=content,
