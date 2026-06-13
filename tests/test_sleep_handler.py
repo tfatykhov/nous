@@ -810,6 +810,18 @@ class TestStructuredContradictionResolution:
             }
         ])
         heart.deactivate_fact = AsyncMock()
+        # 2a: SUPERSEDE now preserves the chain via _apply_supersede, which opens
+        # a session and writes the supersedes edge. Mock the session CM + link.
+        _orm = MagicMock()
+        _orm.superseded_by = None
+        _sess = AsyncMock()
+        _sess.__aenter__ = AsyncMock(return_value=_sess)
+        _sess.__aexit__ = AsyncMock(return_value=False)
+        _sess.get = AsyncMock(return_value=_orm)
+        _sess.commit = AsyncMock()
+        heart.db = MagicMock()
+        heart.db.session = MagicMock(return_value=_sess)
+        heart.link_facts = AsyncMock()
 
         resolution = {"action": "SUPERSEDE_A", "confidence": 0.9, "reason": "Newer info"}
         response = MagicMock()
@@ -823,7 +835,11 @@ class TestStructuredContradictionResolution:
 
         assert result is True
         assert sleep_stats["contradictions_resolved"] == 1
-        heart.deactivate_fact.assert_called_once_with("f1")
+        # 2a: SUPERSEDE_A preserves the chain instead of a bare deactivate —
+        # loser=f1 superseded_by winner=f2, active=False, + supersedes edge.
+        assert _orm.superseded_by == "f2"
+        assert _orm.active is False
+        heart.link_facts.assert_awaited_once_with("f2", "f1", "supersedes", 1.0, _sess)
 
         # Verify tool_choice in payload
         payload = llm_client.call.call_args[0][0]

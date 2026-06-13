@@ -12,6 +12,10 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.brain.graph_constants import (
+    AUTOBEHAVIOR_EXCLUDED_RELATIONS,
+    autobehavior_exclusion_sql,
+)
 from nous.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -34,21 +38,20 @@ async def compute_graph_density(session: AsyncSession, agent_id: str) -> float:
     ``auto`` mode into spreading activation unintentionally. (1e — folded into
     PR-1 so the new in-band contradiction edges can't inflate density.)
     """
-    sql = text("""
+    # 2b: single source of truth for the auto-behavior exclusion (graph_constants).
+    excl = autobehavior_exclusion_sql()
+    sql = text(f"""
         WITH node_counts AS (
             SELECT COUNT(*) AS edge_count,
                    (SELECT COUNT(DISTINCT node_id) FROM (
                        SELECT source_id AS node_id FROM brain.graph_edges
-                       WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
-                       AND relation NOT IN ('supersedes', 'contradicts', 'happened_before', 'co_occurred')
+                       WHERE agent_id = :agent_id AND {excl}
                        UNION
                        SELECT target_id AS node_id FROM brain.graph_edges
-                       WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
-                       AND relation NOT IN ('supersedes', 'contradicts', 'happened_before', 'co_occurred')
+                       WHERE agent_id = :agent_id AND {excl}
                    ) nodes) AS unique_nodes
             FROM brain.graph_edges
-            WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
-                       AND relation NOT IN ('supersedes', 'contradicts', 'happened_before', 'co_occurred')
+            WHERE agent_id = :agent_id AND {excl}
         )
         SELECT CASE WHEN unique_nodes = 0 THEN 0.0
                     ELSE edge_count::float / unique_nodes
@@ -103,6 +106,8 @@ async def spreading_activation_search(
         params[f"score_{i}"] = float(score)
 
     values_clause = ", ".join(values_parts)
+    # 2b: same auto-behavior exclusion as the density gate (graph_constants).
+    excl_e = autobehavior_exclusion_sql("e.")
 
     sql = text(f"""
         WITH RECURSIVE activation AS (
@@ -120,18 +125,11 @@ async def spreading_activation_search(
             JOIN brain.graph_edges e
                 ON (e.source_id = a.id OR e.target_id = a.id)
             WHERE a.depth < :max_depth
-                -- Exclude contradicts (negative) and supersedes (lineage to an
-                -- inactive/obsolete fact). The 2026-06-13 supersedes-edge
-                -- backfill makes active->inactive fact bridges traversable;
-                -- spreading must not resurface the superseded fact.
-                AND e.relation NOT IN ('contradicts', 'supersedes')
-                -- F076: co_mention edges are NOT a spreading-activation consumer.
-                -- Spreading is decision-seeded and auto-enabled by non-co_mention
-                -- density; without this filter, once spreading is on for an agent the
-                -- default-on co_mention builder would change decision retrieval before
-                -- any documented co_mention consumer flag (Path A / adjacency / seed-
-                -- score) is rolled out. IS DISTINCT FROM keeps NULL/legacy rows.
-                AND e.extraction_method IS DISTINCT FROM 'co_mention'
+                -- 2b: exclude non-associative edges (lineage supersedes,
+                -- negative contradicts, temporal happened_before, builder
+                -- co_occurred/co_mention) so spreading never traverses them.
+                -- Single source of truth: graph_constants.autobehavior_exclusion_sql.
+                AND {excl_e}
                 AND e.agent_id = :agent_id
         )
         SELECT id, node_type, SUM(activation) AS total_activation

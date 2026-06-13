@@ -813,6 +813,24 @@ class SleepHandler:
             logger.warning("UPDATES prefix handling failed", exc_info=True)
             return False
 
+    async def _apply_supersede(self, winner_id, loser_id) -> None:
+        """2a (2026-06-13 audit): deactivate the loser AND preserve the supersede
+        chain — set ``loser.superseded_by = winner`` and write the supersedes
+        edge — all in one session+commit, mirroring the F031 MERGE atomicity and
+        clobber guard. The SUPERSEDE_A/B branches previously called
+        ``deactivate_fact`` alone, severing lineage (no column, no edge)."""
+        async with self._heart.db.session() as session:
+            orm = await session.get(Fact, loser_id)
+            if orm is None:
+                return
+            # Don't clobber an existing chain (a concurrent supersede may have
+            # linked this fact between candidate selection and now).
+            if orm.superseded_by is None:
+                orm.superseded_by = winner_id
+            orm.active = False
+            await self._heart.link_facts(winner_id, loser_id, "supersedes", 1.0, session)
+            await session.commit()
+
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""
         if not self._llm:
@@ -912,18 +930,20 @@ class SleepHandler:
 
                 try:
                     if action == "SUPERSEDE_A":
-                        # Deactivate the loser — winner (fact2) already exists and is active
-                        await self._heart.deactivate_fact(fact1_id)
+                        # loser=fact1, winner=fact2 (already active). 2a: preserve
+                        # the chain (superseded_by + edge), not a bare deactivate.
+                        await self._apply_supersede(winner_id=fact2_id, loser_id=fact1_id)
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info(
-                            "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
+                            "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
                             action, fact1_id, fact2_id, confidence,
                         )
                     elif action == "SUPERSEDE_B":
-                        await self._heart.deactivate_fact(fact2_id)
+                        # loser=fact2, winner=fact1 (inverted from SUPERSEDE_A).
+                        await self._apply_supersede(winner_id=fact1_id, loser_id=fact2_id)
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info(
-                            "F031 resolve: %s — deactivated %s, kept %s (%.2f confidence)",
+                            "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
                             action, fact2_id, fact1_id, confidence,
                         )
                     elif action == "MERGE":
