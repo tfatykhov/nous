@@ -399,9 +399,20 @@ class FactManager:
         # same <30-char floor _learn applies, and skipped for bypass sources
         # inside precompute_utility — so the only wasted call is for a fact that
         # later turns out to be a Leg-2 dupe (rare; Leg-1 filters most upstream).
+        #
+        # Only precompute when learn() owns the session (`session is None`).
+        # With an injected session the caller's transaction is already open
+        # (e.g. CognitiveLayer.end_session updates the episode on its session
+        # before calling heart.learn(..., session=session)), so running the
+        # Haiku call here would still pin the caller's connection — no better
+        # than the inline score() call. For injected sessions we pass
+        # utility_override=None and score() computes utility inline, exactly as
+        # before W-1. Moving the call ahead of an injected caller's transaction
+        # is that caller's responsibility.
         utility_override: float | None = None
         if (
-            self._admission_controller is not None
+            session is None
+            and self._admission_controller is not None
             and len(input.content.strip()) >= 30
         ):
             utility_override = await self._admission_controller.precompute_utility(input)
