@@ -373,6 +373,76 @@ class TestUtilityLLM:
 
 
 # ---------------------------------------------------------------------------
+# W-1: Utility precompute (move the LLM call off the open write transaction)
+# ---------------------------------------------------------------------------
+
+
+class TestUtilityPrecompute:
+    @pytest.mark.asyncio
+    async def test_precompute_returns_score_for_non_bypass(self):
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(return_value="0.85")
+        ctrl = AdmissionController(
+            config=AdmissionConfig(utility_llm_enabled=True),
+            llm_client=mock_client,
+        )
+        score = await ctrl.precompute_utility(_fact(source="fact_extractor"))
+        assert score == pytest.approx(0.85, abs=0.01)
+        mock_client.complete.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_precompute_skips_bypass_source(self):
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(return_value="0.85")
+        ctrl = AdmissionController(
+            config=AdmissionConfig(utility_llm_enabled=True),
+            llm_client=mock_client,
+        )
+        score = await ctrl.precompute_utility(_fact(source="user_stated"))
+        assert score is None
+        mock_client.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_score_uses_override_without_llm_call(self):
+        """When utility_override is passed, score() must NOT make the LLM
+        utility call — the caller already computed it off the write txn."""
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(return_value="0.10")
+        ctrl = AdmissionController(
+            config=AdmissionConfig(utility_llm_enabled=True, shadow_mode=False),
+            llm_client=mock_client,
+        )
+        result = await ctrl.score(
+            fact_input=_fact(source="fact_extractor"),
+            embedding=None,
+            max_existing_similarity=0.3,
+            source_text="Tim mentioned he prefers dark mode for coding",
+            session=None,
+            utility_override=0.95,
+        )
+        assert result.scores["utility"] == 0.95
+        mock_client.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_score_computes_utility_when_no_override(self):
+        mock_client = AsyncMock()
+        mock_client.complete = AsyncMock(return_value="0.42")
+        ctrl = AdmissionController(
+            config=AdmissionConfig(utility_llm_enabled=True, shadow_mode=False),
+            llm_client=mock_client,
+        )
+        result = await ctrl.score(
+            fact_input=_fact(source="fact_extractor"),
+            embedding=None,
+            max_existing_similarity=0.3,
+            source_text="Tim mentioned he prefers dark mode for coding",
+            session=None,
+        )
+        assert result.scores["utility"] == pytest.approx(0.42, abs=0.01)
+        mock_client.complete.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Composite Scoring
 # ---------------------------------------------------------------------------
 

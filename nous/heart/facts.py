@@ -393,6 +393,19 @@ class FactManager:
             encoded_frame: Frame active when this fact was learned (003.2).
             encoded_censors: Censors active when this fact was learned (003.2).
         """
+        # W-1: precompute the admission LLM utility BEFORE opening the write
+        # session, so the Haiku call doesn't hold a pooled connection through
+        # the dedup/insert transaction (+ the W-8 advisory lock). Gated on the
+        # same <30-char floor _learn applies, and skipped for bypass sources
+        # inside precompute_utility — so the only wasted call is for a fact that
+        # later turns out to be a Leg-2 dupe (rare; Leg-1 filters most upstream).
+        utility_override: float | None = None
+        if (
+            self._admission_controller is not None
+            and len(input.content.strip()) >= 30
+        ):
+            utility_override = await self._admission_controller.precompute_utility(input)
+
         if session is None:
             async with self.db.session() as session:
                 result = await self._learn(
@@ -402,6 +415,7 @@ class FactManager:
                     session,
                     encoded_frame=encoded_frame,
                     encoded_censors=encoded_censors,
+                    utility_override=utility_override,
                 )
                 await session.commit()
                 return result
@@ -412,6 +426,7 @@ class FactManager:
             session,
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
+            utility_override=utility_override,
         )
 
     async def _learn(
@@ -423,6 +438,7 @@ class FactManager:
         *,
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
+        utility_override: float | None = None,
     ) -> FactDetail | FactRejected:
         # F038-1.2: Reject facts with content < 30 characters
         if len(input.content.strip()) < 30:
@@ -513,7 +529,8 @@ class FactManager:
             source_text = await self._get_source_text(input, session)
 
             admission_result = await self._admission_controller.score(
-                input, embedding, max_sim, source_text, session
+                input, embedding, max_sim, source_text, session,
+                utility_override=utility_override,
             )
             if not admission_result.admitted:
                 logger.info(
