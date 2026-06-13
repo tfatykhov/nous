@@ -668,6 +668,36 @@ async def test_neighbors_excludes_inactive_fact(brain, session):
     assert inactive_id not in ids  # superseded/inactive fact filtered out
 
 
+async def test_neighbors_excludes_lineage_and_negative_relations(brain, session):
+    """2b: the unfiltered neighbor fan-out must never surface supersedes (lineage)
+    or contradicts (negative) edges as connectivity; co_occurred IS legitimate
+    associative connectivity for retrieval and is kept. An explicit relation=
+    request is still honoured verbatim (not exercised here)."""
+    from uuid import uuid4
+
+    from nous.storage.models import Fact, GraphEdge
+
+    seed, related, cooc, contra = uuid4(), uuid4(), uuid4(), uuid4()
+    for fid, name in [(seed, "seed"), (related, "related nb"), (cooc, "cooc nb"), (contra, "contra nb")]:
+        session.add(Fact(id=fid, agent_id=brain.agent_id, content=f"{name} fact", active=True))
+    def _edge(t, rel, method):
+        session.add(GraphEdge(
+            source_id=seed, target_id=t, source_type="fact", target_type="fact",
+            agent_id=brain.agent_id, relation=rel, weight=1.0, auto_linked=True,
+            extraction_method=method,
+        ))
+    _edge(related, "related_to", "heuristic")
+    _edge(cooc, "co_occurred", "co_occurrence")
+    _edge(contra, "contradicts", "inferred")
+    await session.flush()
+
+    ids = [n.id for n in await brain.neighbors(
+        seed, node_type="fact", limit=10, session=session, neighbor_type="fact")]
+    assert related in ids
+    assert cooc in ids               # co_occurred kept (associative for retrieval)
+    assert contra not in ids         # contradicts excluded
+
+
 # ---------------------------------------------------------------------------
 # 18a-Path-A. test_neighbors_resolves_content_for_all_node_types
 # ---------------------------------------------------------------------------

@@ -368,69 +368,71 @@ class TestContradictionResolution:
     """Phase 4.5: resolve accumulated contradictions during sleep."""
 
     @pytest.mark.asyncio
-    async def test_supersede_a_deactivates_loser(self):
-        """SUPERSEDE_A should deactivate fact1, leaving fact2 untouched."""
-        fact1_id = uuid4()
-        fact2_id = uuid4()
-
+    @staticmethod
+    def _heart_with_session(loser_id, winner_id, candidate):
+        """2a (PR #520): SUPERSEDE now preserves the chain in-session, so mock a
+        real session CM + link_facts. orm.superseded_by=None so the race guard
+        proceeds."""
         heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": fact2_id,
-            "content1": "Tim's timezone is EST",
-            "content2": "Tim's timezone is PST",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.88,
-        }])
+        heart.find_contradiction_candidates = AsyncMock(return_value=[candidate])
         heart.deactivate_fact = AsyncMock()
         heart.search_facts = AsyncMock(return_value=[])
+        heart.link_facts = AsyncMock()
+        orm = MagicMock()
+        orm.superseded_by = None
+        mock_session = MagicMock()
+        mock_session.get = AsyncMock(return_value=orm)
+        mock_session.commit = AsyncMock()
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_session)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        heart.db = MagicMock()
+        heart.db.session = MagicMock(return_value=cm)
+        return heart, orm
 
-        llm_response = json.dumps({
-            "action": "SUPERSEDE_A",
-            "confidence": 0.9,
-            "reason": "Fact B is newer",
+    async def test_supersede_a_preserves_chain(self):
+        """SUPERSEDE_A: loser=fact1 superseded_by winner=fact2, + supersedes edge."""
+        fact1_id, fact2_id = uuid4(), uuid4()
+        heart, orm = self._heart_with_session(fact1_id, fact2_id, {
+            "fact1_id": fact1_id, "fact2_id": fact2_id,
+            "content1": "Tim's timezone is EST", "content2": "Tim's timezone is PST",
+            "date1": "2026-03-01", "date2": "2026-03-15", "similarity": 0.88,
         })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        handler, *_ = _make_sleep_handler(
+            heart=heart,
+            llm_client=_mock_llm_client(json.dumps(
+                {"action": "SUPERSEDE_A", "confidence": 0.9, "reason": "B newer"})),
         )
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         result = await handler._phase_resolve_contradictions(sleep_stats)
         assert result is True
-        heart.deactivate_fact.assert_called_once_with(fact1_id)
-        assert sleep_stats["contradictions_found"] == 1
+        assert orm.superseded_by == fact2_id and orm.active is False
+        heart.link_facts.assert_awaited_once()
+        args = heart.link_facts.await_args.args
+        assert args[0] == fact2_id and args[1] == fact1_id and args[2] == "supersedes"
+        heart.deactivate_fact.assert_not_called()
         assert sleep_stats["contradictions_resolved"] == 1
 
     @pytest.mark.asyncio
-    async def test_supersede_b_deactivates_loser(self):
-        """SUPERSEDE_B should deactivate fact2."""
-        fact1_id = uuid4()
-        fact2_id = uuid4()
-
-        heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": fact2_id,
-            "content1": "Correct info",
-            "content2": "Outdated info",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.85,
-        }])
-        heart.deactivate_fact = AsyncMock()
-        heart.search_facts = AsyncMock(return_value=[])
-
-        llm_response = json.dumps({
-            "action": "SUPERSEDE_B",
-            "confidence": 0.85,
-            "reason": "Fact A is correct",
+    async def test_supersede_b_preserves_chain(self):
+        """SUPERSEDE_B inverts: loser=fact2, winner=fact1."""
+        fact1_id, fact2_id = uuid4(), uuid4()
+        heart, orm = self._heart_with_session(fact2_id, fact1_id, {
+            "fact1_id": fact1_id, "fact2_id": fact2_id,
+            "content1": "Correct info", "content2": "Outdated info",
+            "date1": "2026-03-01", "date2": "2026-03-15", "similarity": 0.85,
         })
-        handler, _, _, bus, _ = _make_sleep_handler(
-            heart=heart, llm_client=_mock_llm_client(llm_response)
+        handler, *_ = _make_sleep_handler(
+            heart=heart,
+            llm_client=_mock_llm_client(json.dumps(
+                {"action": "SUPERSEDE_B", "confidence": 0.85, "reason": "A correct"})),
         )
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
-        heart.deactivate_fact.assert_called_once_with(fact2_id)
+        assert orm.superseded_by == fact1_id
+        args = heart.link_facts.await_args.args
+        assert args[0] == fact1_id and args[1] == fact2_id and args[2] == "supersedes"
+        heart.deactivate_fact.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_merge_supersedes_both_originals(self):
@@ -723,19 +725,13 @@ class TestContradictionResolution:
     @pytest.mark.asyncio
     async def test_action_normalization(self):
         """Action string should be normalized (uppercase, stripped)."""
-        fact1_id = uuid4()
-        heart = AsyncMock()
-        heart.find_contradiction_candidates = AsyncMock(return_value=[{
-            "fact1_id": fact1_id,
-            "fact2_id": uuid4(),
-            "content1": "A",
-            "content2": "B",
-            "date1": "2026-03-01",
-            "date2": "2026-03-15",
-            "similarity": 0.85,
-        }])
-        heart.deactivate_fact = AsyncMock()
-        heart.search_facts = AsyncMock(return_value=[])
+        fact1_id, fact2_id = uuid4(), uuid4()
+        # SUPERSEDE_A → loser=fact1, winner=fact2.
+        heart, orm = self._heart_with_session(fact1_id, fact2_id, {
+            "fact1_id": fact1_id, "fact2_id": fact2_id,
+            "content1": "A", "content2": "B",
+            "date1": "2026-03-01", "date2": "2026-03-15", "similarity": 0.85,
+        })
 
         # Lowercase action with whitespace
         llm_response = json.dumps({
@@ -748,7 +744,9 @@ class TestContradictionResolution:
         )
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
         await handler._phase_resolve_contradictions(sleep_stats)
-        heart.deactivate_fact.assert_called_once_with(fact1_id)
+        # Normalized to SUPERSEDE_A → chain preserved (not a bare deactivate).
+        assert orm.superseded_by == fact2_id
+        heart.link_facts.assert_awaited_once()
 
 
 # ===========================================================================

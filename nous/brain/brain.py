@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 
 from nous.brain.bridge import BridgeExtractor
 from nous.brain.calibration import CalibrationEngine
+from nous.brain.graph_constants import RETRIEVAL_EXCLUDED_RELATIONS
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.guardrails import GuardrailEngine
 from nous.brain.quality import QualityScorer
@@ -1218,6 +1219,15 @@ class Brain:
         if relation:
             source_q = source_q.where(GraphEdge.relation == relation)
             target_q = target_q.where(GraphEdge.relation == relation)
+        else:
+            # 2b: never surface lineage (supersedes) or negative (contradicts)
+            # edges as retrieval connectivity. (co_occurred / co_mention ARE
+            # legitimate associative connectivity for retrieval, so they are NOT
+            # excluded here — graph_constants.RETRIEVAL_EXCLUDED_RELATIONS.) Only
+            # applied to the unfiltered fan-out; an explicit `relation=` request
+            # is honoured verbatim.
+            source_q = source_q.where(GraphEdge.relation.notin_(RETRIEVAL_EXCLUDED_RELATIONS))
+            target_q = target_q.where(GraphEdge.relation.notin_(RETRIEVAL_EXCLUDED_RELATIONS))
 
         # F070 fix: push the neighbor-type filter into SQL so LIMIT N
         # returns N rows of the requested type, not N rows that may all
