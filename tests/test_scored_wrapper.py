@@ -39,12 +39,14 @@ class TestScoredWrapper:
 class TestFrameBoostWriteback:
     def test_boost_writes_score(self):
         items = [
-            FakeItem(score=0.5, encoded_frame="task"),
-            FakeItem(score=0.7, encoded_frame="debug"),
+            FakeItem(score=0.5, encoded_frame="task", name="task_item"),
+            FakeItem(score=0.7, encoded_frame="debug", name="debug_item"),
         ]
         result = apply_frame_boost(items, current_frame="task")
-        # First item (task frame) gets 1.3x boost: 0.5 * 1.3 = 0.65
-        boosted_item = [r for r in result if r.name == "item"][0]  # the task one
+        # The task-frame item gets the 1.3x boost: 0.5 * 1.3 = 0.65 written to its
+        # .score. (3a: order is now by boosted score — 0.65 < 0.7, so the
+        # unboosted debug item ranks first; find the boosted one by name.)
+        boosted_item = [r for r in result if r.name == "task_item"][0]
         assert abs(boosted_item.score - 0.65) < 0.01
 
     def test_no_frame_no_change(self):

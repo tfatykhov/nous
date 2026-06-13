@@ -1067,7 +1067,10 @@ class ContextEngine:
             wrapped = _wrap_with_score(item, (getattr(item, "score", 0) or 0) * boost)
             boosted.append((wrapped, boost))
 
-        boosted.sort(key=lambda x: x[1], reverse=True)
+        # 3a: sort by the boosted score, not the usage multiplier (same fix as
+        # apply_frame_boost — this is the LAST sort before the gap-cut, so a
+        # multiplier-order here re-corrupts the relevance order the gap-cut reads).
+        boosted.sort(key=lambda x: x[0].score, reverse=True)
         return [item for item, _ in boosted]
 
     def _apply_relevance_filter(self, results: list, memory_type: str) -> list:
