@@ -823,10 +823,18 @@ class SleepHandler:
             orm = await session.get(Fact, loser_id)
             if orm is None:
                 return
-            # Don't clobber an existing chain (a concurrent supersede may have
-            # linked this fact between candidate selection and now).
-            if orm.superseded_by is None:
-                orm.superseded_by = winner_id
+            # codex P1 (PR #520): if a concurrent path already superseded this
+            # fact, skip EVERYTHING — writing a winner->loser edge now would
+            # record a second, conflicting winner while the column still names
+            # the original. Mirror the MERGE path: leave the existing chain
+            # intact (the active flip is paired — already-superseded is inactive).
+            if orm.superseded_by is not None:
+                logger.debug(
+                    "F031 supersede: skip %s — already superseded by %s",
+                    loser_id, orm.superseded_by,
+                )
+                return
+            orm.superseded_by = winner_id
             orm.active = False
             await self._heart.link_facts(winner_id, loser_id, "supersedes", 1.0, session)
             await session.commit()
