@@ -1002,6 +1002,16 @@ class SleepHandler:
                                                 merged_detail.id
                                             )
                                             orm_fact.active = False
+                                            # A: persist the supersedes graph
+                                            # edge alongside the column so the
+                                            # MERGE reaches the graph layer
+                                            # (2026-06-13 audit: column-only
+                                            # writes left 259 supersessions
+                                            # invisible to densifier/dashboards).
+                                            await self._heart.link_facts(
+                                                merged_detail.id, orig_id,
+                                                "supersedes", 1.0, session,
+                                            )
                                         await session.commit()
                                     sleep_stats["contradictions_resolved"] += 1
                                     sleep_stats["facts_created"] += 1
@@ -1025,6 +1035,23 @@ class SleepHandler:
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info("F031 resolve: REMOVE_B — deactivated %s (%.2f confidence)", fact2_id, confidence)
                     elif action == "KEEP_BOTH":
+                        # B: KEEP_BOTH leaves two ACTIVE contradictory facts.
+                        # The resolving branches above (SUPERSEDE/MERGE/REMOVE)
+                        # deactivate a fact, so they genuinely resolve and need
+                        # no edge; KEEP_BOTH is the only branch where the
+                        # contradiction stays live — and it was writing nothing
+                        # (2026-06-13 audit: 782 resolutions, 0 contradicts
+                        # edges). Persist the contradicts edge so the live
+                        # tension is recorded in the graph (dashboards/density),
+                        # correctly excluded from spreading activation, and
+                        # available to the recall-time contradiction warning.
+                        # NOTE: the recall consumer (retrieval_pipeline Stage 5)
+                        # is currently decision-scoped — surfacing fact↔fact
+                        # contradictions at recall is deferred to the eval-gated
+                        # detection-broadening work (item C).
+                        await self._heart.link_facts(
+                            fact1_id, fact2_id, "contradicts", 1.0,
+                        )
                         logger.info(
                             "F031 resolve: KEEP_BOTH — %s and %s: %s",
                             fact1_id, fact2_id, resolution.get("reason", ""),

@@ -23,7 +23,7 @@ from nous.heart import (
     RecallResult,
     WorkingMemoryItem,
 )
-from nous.storage.models import Event
+from nous.storage.models import Event, GraphEdge
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -213,6 +213,42 @@ async def test_contradict_fact(heart, session):
     updated_original = await heart.get_fact(original.id, session=session)
     assert updated_original.confidence == pytest.approx(0.7, abs=0.01)
     assert contradicting.contradiction_of == original.id
+
+
+# ---------------------------------------------------------------------------
+# 5b. test_link_facts (2026-06-13 audit: edge persistence)
+# ---------------------------------------------------------------------------
+
+
+async def test_link_facts_creates_idempotent_edge(heart, session):
+    """Heart.link_facts persists a fact↔fact edge and is idempotent — the
+    public wrapper the sleep F031 resolver uses to record supersedes/contradicts
+    edges that column-only writes were dropping."""
+    a = await heart.learn(
+        _fact_input(content="link_facts test: the deployment region is us-east-1 (side A)"),
+        session=session,
+    )
+    b = await heart.learn(
+        _fact_input(content="link_facts test: the cache layer uses Redis with a 24h TTL (side B)"),
+        session=session,
+    )
+
+    async def _count() -> int:
+        rows = await session.execute(
+            select(GraphEdge).where(
+                GraphEdge.source_id == a.id,
+                GraphEdge.target_id == b.id,
+                GraphEdge.relation == "contradicts",
+            )
+        )
+        return len(rows.scalars().all())
+
+    await heart.link_facts(a.id, b.id, "contradicts", 1.0, session=session)
+    assert await _count() == 1
+
+    # Re-link the same pair — ON CONFLICT DO NOTHING keeps it at one row.
+    await heart.link_facts(a.id, b.id, "contradicts", 1.0, session=session)
+    assert await _count() == 1
 
 
 # ---------------------------------------------------------------------------

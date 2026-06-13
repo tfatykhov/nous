@@ -1047,3 +1047,56 @@ class TestStructuredContradictionResolution:
         heart.learn.assert_not_called()
         # Counter does NOT increment for KEEP_BOTH (correct prod behavior)
         assert sleep_stats.get("contradictions_resolved", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_keep_both_persists_contradicts_edge(self):
+        """2026-06-13 audit: KEEP_BOTH leaves two ACTIVE contradictory facts but
+        wrote nothing (782 resolutions → 0 contradicts edges). It must now
+        persist a contradicts edge so the live tension is recorded."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        heart.find_contradiction_candidates = AsyncMock(return_value=[
+            {
+                "fact1_id": "f1", "fact2_id": "f2",
+                "content1": "Python is fast", "content2": "Python is slow",
+                "date1": "2026-01-01", "date2": "2026-02-01",
+                "subject": "python", "category": "technical",
+            }
+        ])
+        heart.link_facts = AsyncMock()
+
+        resolution = {
+            "action": "KEEP_BOTH", "confidence": 0.9,
+            "reason": "Both true in different contexts",
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_x", "name": "resolve_contradiction",
+             "input": resolution}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+
+        assert result is True
+        heart.link_facts.assert_awaited_once_with("f1", "f2", "contradicts", 1.0)
+
+    def test_f031_merge_persists_supersedes_edge(self):
+        """2026-06-13 audit: the MERGE path set superseded_by on the originals
+        but never wrote the supersedes graph edge (261 superseded_by vs 2
+        edges). Pin the edge write via source inspection — the success path
+        juggles a live session that the mocked harness can't exercise."""
+        import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
+        src = inspect.getsource(SleepHandler._phase_resolve_contradictions)
+        merge_start = src.index('elif action == "MERGE":')
+        merge_end = src.index('elif action == "REMOVE_A":', merge_start)
+        merge_branch = src[merge_start:merge_end]
+
+        assert 'link_facts(' in merge_branch and '"supersedes"' in merge_branch, (
+            "F031 MERGE must write the supersedes edge (link_facts(..., "
+            "'supersedes', ...)) alongside superseded_by — 2026-06-13 audit"
+        )
