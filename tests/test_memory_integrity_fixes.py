@@ -75,6 +75,26 @@ class TestClassifyDupeInBand:
         fm._classify_fact_pair.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("relation, expected", [
+        ("CONTRADICTION", "contradiction"),  # the swallow this fix targets — routes
+        ("UNRELATED", None),                 # paraphrase below band — confirm (dedup)
+        ("REFINEMENT", None),
+        ("UPDATE", None),
+    ])
+    async def test_extended_range_routes_only_contradiction(self, relation, expected):
+        """codex P1 (PR #519): in [threshold, 0.85) the classifier has no
+        DUPLICATE verdict, so only CONTRADICTION may insert; everything else
+        confirms (dedup), preserving aggressive low-threshold dedup."""
+        fm = _fm_with_llm({"relation": relation, "current_fact": "new", "confidence": 0.9})
+        assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) == expected
+
+    @pytest.mark.asyncio
+    async def test_true_band_still_full_routes(self):
+        """Inside [0.85, 0.95) full routing is unchanged — a REFINEMENT routes."""
+        fm = _fm_with_llm({"relation": "REFINEMENT", "confidence": 0.9})
+        assert await fm._classify_dupe_in_band(_dupe(), 0.90, _input(), True) == "refines"
+
+    @pytest.mark.asyncio
     async def test_band_budget_exhaustion_falls_open(self):
         """1a: when the hourly classifier budget is spent, the band falls open
         to confirm (returns None) rather than making the Haiku call."""
@@ -157,16 +177,18 @@ class TestConsolidationExcludeIds:
         assert "exclude_ids=[f.id for f in facts]" in cluster
 
 
-class TestKnowledgeExtractorNoPrefilter:
-    """1d: the redundant find_similar_facts pre-filter is removed so learn()
-    owns dedup (and its band classifier can catch semantic opposites)."""
+class TestKnowledgeExtractorTiebreaker:
+    """1d (revised after codex PR #519): the paraphrase pre-check stays (learn()
+    dedups only at the 0.95 default) but is gated by the F377 distinct-vs-dup
+    tiebreaker so semantic opposites are stored, not collapsed."""
 
-    def test_prefilter_removed(self):
+    def test_prefilter_gated_by_tiebreaker(self):
         import inspect
         from nous.handlers.knowledge_extractor import KnowledgeExtractor
         src = inspect.getsource(KnowledgeExtractor)
-        assert "find_similar_facts" not in src
-        assert "Skipping duplicate fact" not in src
+        assert "find_similar_facts" in src              # pre-check retained
+        assert "is_distinct_fact" in src                # gated by tiebreaker
+        assert "fact_dedup_tiebreaker_enabled" in src
 
 
 class TestApplyBandAction:

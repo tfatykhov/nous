@@ -114,13 +114,25 @@ class KnowledgeExtractor:
                 if not content:
                     continue
 
-                # 1d (2026-06-13 audit): no pre-filter here. The old blunt
-                # raw-cosine > 0.85 pre-check ran BEFORE learn() and pre-empted
-                # its dedup — dropping semantic opposites (high cosine, opposite
-                # meaning) that learn()'s band classifier (1a) now correctly
-                # classifies and inserts. learn() owns dedup (Leg-2 cosine + the
-                # in-band F027 classifier + F377 tiebreaker); a redundant looser
-                # pre-gate only re-introduced the swallow.
+                # 1d (2026-06-13 audit, revised after codex PR #519): keep the
+                # raw-cosine paraphrase pre-check (learn()'s Leg-2 dedups only at
+                # fact_native_cosine_threshold, which defaults to 0.95 — so
+                # without this gate ordinary 0.85-0.95 paraphrases slip through),
+                # BUT gate it with the F377 distinct-vs-duplicate tiebreaker so a
+                # semantic OPPOSITE at high cosine ("MRR +5%" vs "MRR -5%") is
+                # stored, not collapsed. Mirrors fact_extractor._is_duplicate.
+                existing = await self._heart.find_similar_facts(content, limit=1)
+                if existing and existing[0].score is not None and existing[0].score > 0.85:
+                    tiebreaker_on = (
+                        getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
+                    )
+                    distinct = tiebreaker_on and (
+                        await self._heart.facts.is_distinct_fact(existing[0].content, content) is True
+                    )
+                    if not distinct:
+                        logger.debug("Skipping duplicate fact: %s", content[:50])
+                        continue
+
                 fact_input = FactInput(
                     subject=fact.get("subject", "unknown"),
                     content=content,
