@@ -1233,6 +1233,15 @@ class Brain:
                 _active_proc = select(Procedure.id).where(Procedure.active == True)  # noqa: E712
                 source_q = source_q.where(GraphEdge.target_id.in_(_active_proc))
                 target_q = target_q.where(GraphEdge.source_id.in_(_active_proc))
+            # Same guard for facts: a `supersedes` (or any) edge to a
+            # superseded/inactive fact must not surface it as a graph neighbor
+            # (Path A fact expansion). Without this, the 2026-06-13 supersedes-
+            # edge backfill would make obsolete facts traversable and let them
+            # displace active memories. Mirrors the F080 procedure filter.
+            if neighbor_type == "fact":
+                _active_fact = select(Fact.id).where(Fact.active == True)  # noqa: E712
+                source_q = source_q.where(GraphEdge.target_id.in_(_active_fact))
+                target_q = target_q.where(GraphEdge.source_id.in_(_active_fact))
 
         # F080: deduplicate to ONE row per neighbor (the max-weight edge) and cap,
         # all in SQL via a window function, so the dedup happens BEFORE the cap

@@ -200,3 +200,39 @@ async def test_spreading_excludes_comention_edges(brain, session):
     ids = {r[0] for r in activated}
     assert b.id in ids, "a normal edge must be traversed by spreading activation"
     assert c.id not in ids, "a co_mention edge must NOT be traversed by spreading activation"
+
+
+async def test_spreading_excludes_supersedes_edges(brain, session):
+    """2026-06-13 audit: spreading must NOT traverse supersedes edges — they
+    bridge an active fact to its superseded (inactive) predecessor, so traversal
+    would resurface obsolete facts once the supersedes-edge backfill runs."""
+    from sqlalchemy import text
+
+    from nous.brain.schemas import RecordInput
+
+    def _inp(d):
+        return RecordInput(description=d, confidence=0.8, category="architecture",
+                           stakes="low", reasons=_reasons())
+
+    a = await brain.record(_inp("Spreading seed decision for supersedes test"), session=session)
+    b = await brain.record(_inp("Decision reached by a normal related edge here"), session=session)
+    c = await brain.record(_inp("Decision reachable only via a supersedes edge"), session=session)
+
+    async def _edge(s_id, t_id, relation):
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+            "agent_id,relation,weight,auto_linked,extraction_method) "
+            "VALUES (:s,:t,'decision','decision',:a,:r,1.0,true,'deterministic')"),
+            {"s": str(s_id), "t": str(t_id), "a": brain.agent_id, "r": relation})
+
+    await _edge(a.id, b.id, "related_to")   # traversed
+    await _edge(a.id, c.id, "supersedes")   # must be skipped
+    await session.flush()
+
+    settings = Settings()
+    activated = await spreading_activation_search(
+        session, brain.agent_id, [(a.id, "decision", 1.0)], settings,
+    )
+    ids = {r[0] for r in activated}
+    assert b.id in ids, "a normal edge must be traversed"
+    assert c.id not in ids, "a supersedes edge must NOT be traversed by spreading activation"

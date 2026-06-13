@@ -110,7 +110,11 @@ async def spreading_activation_search(
             JOIN brain.graph_edges e
                 ON (e.source_id = a.id OR e.target_id = a.id)
             WHERE a.depth < :max_depth
-                AND e.relation != 'contradicts'
+                -- Exclude contradicts (negative) and supersedes (lineage to an
+                -- inactive/obsolete fact). The 2026-06-13 supersedes-edge
+                -- backfill makes active->inactive fact bridges traversable;
+                -- spreading must not resurface the superseded fact.
+                AND e.relation NOT IN ('contradicts', 'supersedes')
                 -- F076: co_mention edges are NOT a spreading-activation consumer.
                 -- Spreading is decision-seeded and auto-enabled by non-co_mention
                 -- density; without this filter, once spreading is on for an agent the
