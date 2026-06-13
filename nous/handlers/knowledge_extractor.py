@@ -121,6 +121,7 @@ class KnowledgeExtractor:
                 # BUT gate it with the F377 distinct-vs-duplicate tiebreaker so a
                 # semantic OPPOSITE at high cosine ("MRR +5%" vs "MRR -5%") is
                 # stored, not collapsed. Mirrors fact_extractor._is_duplicate.
+                exclude_ids: list = []
                 existing = await self._heart.find_similar_facts(content, limit=1)
                 if existing and existing[0].score is not None and existing[0].score > 0.85:
                     tiebreaker_on = (
@@ -132,6 +133,13 @@ class KnowledgeExtractor:
                     if not distinct:
                         logger.debug("Skipping duplicate fact: %s", content[:50])
                         continue
+                    # codex P1 (PR #519): the tiebreaker cleared this hit as
+                    # DISTINCT, so carry its id into learn(exclude_ids=...) — else
+                    # learn()'s own Leg-2 dedup re-selects the same fact (esp. at
+                    # the >=0.95 default where the band classifier doesn't run) and
+                    # confirms it away, silently collapsing the opposite we just
+                    # preserved. Mirrors FactExtractor.
+                    exclude_ids = [existing[0].id]
 
                 fact_input = FactInput(
                     subject=fact.get("subject", "unknown"),
@@ -140,7 +148,7 @@ class KnowledgeExtractor:
                     confidence=confidence,
                     category=fact.get("category"),
                 )
-                result = await self._heart.learn(fact_input)
+                result = await self._heart.learn(fact_input, exclude_ids=exclude_ids or None)
                 # F023: Don't count rejected facts as stored
                 if isinstance(result, FactRejected):
                     logger.debug("Admission rejected knowledge fact: %s", content[:50])

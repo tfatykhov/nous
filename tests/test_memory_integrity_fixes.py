@@ -189,6 +189,9 @@ class TestKnowledgeExtractorTiebreaker:
         assert "find_similar_facts" in src              # pre-check retained
         assert "is_distinct_fact" in src                # gated by tiebreaker
         assert "fact_dedup_tiebreaker_enabled" in src
+        # codex P1: DISTINCT hit's id carried into learn() so it isn't re-deduped.
+        assert "exclude_ids = [existing[0].id]" in src
+        assert "exclude_ids=exclude_ids or None" in src
 
 
 class TestApplyBandAction:
