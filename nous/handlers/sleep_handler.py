@@ -1002,6 +1002,16 @@ class SleepHandler:
                                                 merged_detail.id
                                             )
                                             orm_fact.active = False
+                                            # A: persist the supersedes graph
+                                            # edge alongside the column so the
+                                            # MERGE reaches the graph layer
+                                            # (2026-06-13 audit: column-only
+                                            # writes left 259 supersessions
+                                            # invisible to densifier/dashboards).
+                                            await self._heart.link_facts(
+                                                merged_detail.id, orig_id,
+                                                "supersedes", 1.0, session,
+                                            )
                                         await session.commit()
                                     sleep_stats["contradictions_resolved"] += 1
                                     sleep_stats["facts_created"] += 1
@@ -1025,6 +1035,18 @@ class SleepHandler:
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info("F031 resolve: REMOVE_B — deactivated %s (%.2f confidence)", fact2_id, confidence)
                     elif action == "KEEP_BOTH":
+                        # KEEP_BOTH leaves two ACTIVE contradictory facts. Writing
+                        # a contradicts edge here is deferred to the eval-gated
+                        # contradiction-semantics work (item C): (1) this branch
+                        # also catches downgraded SUPERSEDE/REMOVE/MERGE verdicts
+                        # (confidence < 0.7 or content-less MERGE), which must NOT
+                        # be recorded as contradictions; (2) at prod's 0.75
+                        # cross-type linking threshold the pair usually already
+                        # has a positive related_to edge, and spreading
+                        # activation only filters the contradicts row — so a bare
+                        # contradicts edge leaves the facts still reinforcing.
+                        # Both need consumer-side handling, designed + measured
+                        # together with detection-broadening.
                         logger.info(
                             "F031 resolve: KEEP_BOTH — %s and %s: %s",
                             fact1_id, fact2_id, resolution.get("reason", ""),
@@ -1316,6 +1338,12 @@ class SleepHandler:
                             continue
                         orm_fact.superseded_by = merged_detail.id
                         orm_fact.active = False
+                        # Mirror the supersedes edge (same fix as the F031
+                        # MERGE path) so cluster merges don't recreate the
+                        # column/graph mismatch the backfill repairs.
+                        await self._heart.link_facts(
+                            merged_detail.id, fact.id, "supersedes", 1.0, session,
+                        )
                     await session.commit()
 
                 merged_fact_id = str(merged_detail.id)
@@ -1448,6 +1476,14 @@ class SleepHandler:
                         SELECT e.id
                         FROM brain.graph_edges e
                         WHERE e.agent_id = :agent_id
+                          -- Preserve supersedes lineage: these edges point AT
+                          -- the superseded (inactive) fact by design — that is
+                          -- the record of the supersession. Pruning them undoes
+                          -- the 2026-06-13 edge-persistence fix (the original is
+                          -- marked inactive in the same cycle the edge is
+                          -- written). recall stays safe because brain._neighbors
+                          -- filters inactive facts out of expansion.
+                          AND e.relation <> 'supersedes'
                           AND (
                             (e.source_type, e.source_id) IN (
                               SELECT node_type, id FROM inactive_nodes

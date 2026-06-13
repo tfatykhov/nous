@@ -1047,3 +1047,74 @@ class TestStructuredContradictionResolution:
         heart.learn.assert_not_called()
         # Counter does NOT increment for KEEP_BOTH (correct prod behavior)
         assert sleep_stats.get("contradictions_resolved", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_keep_both_does_not_write_contradicts_edge(self):
+        """KEEP_BOTH must NOT write a contradicts edge yet — it also catches
+        downgraded SUPERSEDE/REMOVE/MERGE verdicts, and at prod's 0.75 linking
+        threshold the pair usually has a coexisting related_to edge that
+        consumers still traverse. Recording the contradiction is deferred to the
+        eval-gated contradiction-semantics work (item C). Pin the deferral so a
+        future edit can't silently re-introduce the unguarded edge."""
+        handler, brain, heart, bus, llm_client = _make_sleep_handler()
+
+        heart.find_contradiction_candidates = AsyncMock(return_value=[
+            {
+                "fact1_id": "f1", "fact2_id": "f2",
+                "content1": "Python is fast", "content2": "Python is slow",
+                "date1": "2026-01-01", "date2": "2026-02-01",
+                "subject": "python", "category": "technical",
+            }
+        ])
+        heart.link_facts = AsyncMock()
+
+        resolution = {
+            "action": "KEEP_BOTH", "confidence": 0.9,
+            "reason": "Both true in different contexts",
+        }
+        response = MagicMock()
+        response.content = [
+            {"type": "tool_use", "id": "toolu_x", "name": "resolve_contradiction",
+             "input": resolution}
+        ]
+        llm_client.call = AsyncMock(return_value=response)
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+
+        assert result is True
+        heart.link_facts.assert_not_called()
+
+    def test_f031_merge_persists_supersedes_edge(self):
+        """2026-06-13 audit: the MERGE path set superseded_by on the originals
+        but never wrote the supersedes graph edge (261 superseded_by vs 2
+        edges). Pin the edge write via source inspection — the success path
+        juggles a live session that the mocked harness can't exercise."""
+        import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
+        src = inspect.getsource(SleepHandler._phase_resolve_contradictions)
+        merge_start = src.index('elif action == "MERGE":')
+        merge_end = src.index('elif action == "REMOVE_A":', merge_start)
+        merge_branch = src[merge_start:merge_end]
+
+        assert 'link_facts(' in merge_branch and '"supersedes"' in merge_branch, (
+            "F031 MERGE must write the supersedes edge (link_facts(..., "
+            "'supersedes', ...)) alongside superseded_by — 2026-06-13 audit"
+        )
+
+    def test_f027_cluster_consolidation_persists_supersedes_edge(self):
+        """2026-06-13 audit (codex re-review): F027 cluster consolidation is a
+        third supersession path that sets superseded_by without the supersedes
+        edge — future cluster merges would recreate the mismatch the backfill
+        repairs. Pin the edge write via source inspection."""
+        import inspect
+
+        from nous.handlers.sleep_handler import SleepHandler
+
+        src = inspect.getsource(SleepHandler._phase_cluster_consolidation)
+        assert 'link_facts(' in src and '"supersedes"' in src, (
+            "F027 cluster consolidation must write the supersedes edge "
+            "(link_facts(..., 'supersedes', ...)) alongside superseded_by"
+        )

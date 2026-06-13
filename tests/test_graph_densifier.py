@@ -304,6 +304,38 @@ async def test_find_orphans_ignores_comention_edges(db, settings, mock_embedding
     assert cos_a not in orphan_ids and cos_b not in orphan_ids  # control still masks
 
 
+async def test_find_orphans_ignores_supersedes_edges(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """2026-06-13 audit: a replacement fact whose ONLY edge is supersedes must
+    still be an orphan. supersedes is lineage, not traversable connectivity
+    (_neighbors + spreading both skip it), so if it masked orphan status the
+    F040 backfill would never densify the replacement and it would stay
+    graph-isolated. A non-supersedes edge still masks (control)."""
+    agent_id = f"test-orphan-sup-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    async with db.session() as session:
+        emb = await mock_embeddings.embed("sup")
+        # new (replacement, active) supersedes old (superseded) — new's only edge.
+        new_fact = await _insert_fact(session, agent_id, "replacement fact new", emb)
+        old_fact = await _insert_fact(session, agent_id, "superseded fact old", emb)
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (agent_id, source_id, target_id, source_type, "
+            "target_type, relation, weight, auto_linked, extraction_method) "
+            "VALUES (:a, :s, :t, 'fact', 'fact', 'supersedes', 1.0, true, 'deterministic')"
+        ), {"a": agent_id, "s": new_fact, "t": old_fact})
+        # control: a fact linked by a non-supersedes edge still masks.
+        cos_a = await _insert_fact(session, agent_id, "cosine-linked fact A2", emb)
+        cos_b = await _insert_fact(session, agent_id, "cosine-linked fact B2", emb)
+        await _insert_edge(session, agent_id, cos_a, cos_b, "fact", "fact")
+        await session.commit()
+
+    async with db.session() as session:
+        orphan_ids = [oid for oid, _ in await densifier.find_orphans("fact", 100, session)]
+    assert new_fact in orphan_ids   # supersedes does NOT mask the replacement
+    assert cos_a not in orphan_ids and cos_b not in orphan_ids  # control still masks
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_comention_skips_pair_with_contradicts_edge(db, settings, mock_embeddings, _fix_stale_relation_constraint):
@@ -566,6 +598,35 @@ async def test_discover_clusters_runs_after_7_days(db, settings, mock_embeddings
     # Verify timestamp was updated
     assert densifier._last_cluster_discovery is not None
     assert (datetime.now(UTC) - densifier._last_cluster_discovery).seconds < 10
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_discover_clusters_ignores_supersedes_edges(db, settings, mock_embeddings, _fix_stale_relation_constraint):
+    """2026-06-13 audit: a supersedes edge must not union the replacement with
+    its inactive predecessor into a connected component. Two 2-node components
+    bridged ONLY by a supersedes edge must stay separate (no 3+ component =>
+    no cluster). If supersedes counted, all 4 would merge into one cluster."""
+    agent_id = f"test-cluster-sup-{uuid4().hex[:8]}"
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+    densifier._last_cluster_discovery = datetime.now(UTC) - timedelta(days=8)
+
+    a, b, c, d = uuid4(), uuid4(), uuid4(), uuid4()
+    async with db.session() as session:
+        await _insert_edge(session, agent_id, a, b, "decision", "decision")  # related_to
+        await _insert_edge(session, agent_id, c, d, "decision", "decision")  # related_to
+        # bridge the two 2-node components with ONLY a supersedes edge
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (agent_id, source_id, target_id, source_type,"
+            " target_type, relation, weight, auto_linked, extraction_method) "
+            "VALUES (:a, :s, :t, 'decision', 'decision', 'supersedes', 1.0, true, 'deterministic')"
+        ), {"a": agent_id, "s": str(b), "t": str(c)})
+        await session.commit()
+
+    result = await densifier.discover_clusters()
+    # supersedes excluded => {a,b} and {c,d} stay separate, both < 3 => no cluster
+    assert result == 0
 
 
 @pytest.mark.postgres_only

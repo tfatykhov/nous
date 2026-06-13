@@ -416,6 +416,32 @@ class Heart:
         """Soft-delete a fact."""
         await self.facts.deactivate(fact_id, session)
 
+    async def link_facts(
+        self,
+        source_id: UUID,
+        target_id: UUID,
+        relation: str,
+        weight: float = 1.0,
+        session: AsyncSession | None = None,
+    ) -> None:
+        """Create an idempotent fact↔fact graph edge.
+
+        Public wrapper over FactManager._create_graph_edge for callers outside
+        the write path (e.g. the sleep-cycle F031 resolver) that need to persist
+        a supersedes/contradicts edge. Idempotent (ON CONFLICT DO NOTHING) and
+        savepoint-wrapped, so a re-run over the same pair is a no-op.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                await self.facts._create_graph_edge(
+                    source_id, target_id, "fact", "fact", relation, weight, session,
+                )
+                await session.commit()
+            return
+        await self.facts._create_graph_edge(
+            source_id, target_id, "fact", "fact", relation, weight, session,
+        )
+
     async def find_contradiction_candidates(
         self,
         limit: int = 10,

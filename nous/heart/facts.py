@@ -922,6 +922,15 @@ class FactManager:
 
                     old.active = False
                     old.superseded_by = new_fact_id
+                    # Mirror the column write with the graph edge so the
+                    # supersession reaches the graph layer (densifier, adjacency
+                    # boost, dashboards). Every other supersede branch already
+                    # writes this edge; this subject-based path set the column
+                    # only — the dominant cause of the 261 superseded_by vs 2
+                    # supersedes-edge gap in the 2026-06-13 prod audit.
+                    await self._create_graph_edge(
+                        new_fact_id, old.id, "fact", "fact", "supersedes", 1.0, session,
+                    )
                     logger.info(
                         "Superseded fact %s (subject=%s, sim=%.2f) by %s",
                         old.id, subject, similarity, new_fact_id,

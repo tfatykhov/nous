@@ -633,6 +633,41 @@ async def test_neighbors_dedupes_multi_edge_neighbor(brain, session):
     assert len(neighbors) == 2
 
 
+async def test_neighbors_excludes_inactive_fact(brain, session):
+    """2026-06-13 audit: a supersedes (or any) edge to an inactive/superseded
+    fact must not surface it as a fact neighbor — otherwise the supersedes-edge
+    backfill resurfaces obsolete facts via Path A expansion. Mirrors the F080
+    procedure filter."""
+    from uuid import uuid4
+
+    from nous.storage.models import Fact, GraphEdge
+
+    seed_id, active_id, inactive_id = uuid4(), uuid4(), uuid4()
+    session.add(Fact(id=seed_id, agent_id=brain.agent_id, content="seed fact", active=True))
+    session.add(Fact(id=active_id, agent_id=brain.agent_id, content="active neighbor", active=True))
+    session.add(Fact(id=inactive_id, agent_id=brain.agent_id,
+                     content="superseded neighbor", active=False, superseded_by=active_id))
+    # seed --related_to--> active ; seed --supersedes--> inactive
+    session.add(GraphEdge(
+        source_id=seed_id, target_id=active_id, source_type="fact", target_type="fact",
+        agent_id=brain.agent_id, relation="related_to", weight=0.8,
+        auto_linked=True, extraction_method="heuristic",
+    ))
+    session.add(GraphEdge(
+        source_id=seed_id, target_id=inactive_id, source_type="fact", target_type="fact",
+        agent_id=brain.agent_id, relation="supersedes", weight=1.0,
+        auto_linked=True, extraction_method="deterministic",
+    ))
+    await session.flush()
+
+    neighbors = await brain.neighbors(
+        seed_id, node_type="fact", limit=10, session=session, neighbor_type="fact",
+    )
+    ids = [n.id for n in neighbors]
+    assert active_id in ids
+    assert inactive_id not in ids  # superseded/inactive fact filtered out
+
+
 # ---------------------------------------------------------------------------
 # 18a-Path-A. test_neighbors_resolves_content_for_all_node_types
 # ---------------------------------------------------------------------------
