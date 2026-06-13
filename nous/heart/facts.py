@@ -1049,15 +1049,21 @@ class FactManager:
         # action); the others gate at 0.5.
         if conf < 0.5:
             return None
-        # codex P1 (PR #519): in the EXTENDED range [threshold, 0.85) — below the
-        # true contradiction band — the classifier has no DUPLICATE verdict, so
-        # routing UNRELATED/REFINEMENT/UPDATE would INSERT a paraphrase and
-        # defeat the operator's aggressive low-threshold dedup. Only an explicit
-        # CONTRADICTION warrants insert+edge there (the swallow this fix targets);
-        # everything else confirms (dedup). Full routing still applies inside the
-        # true band [0.85, 0.95).
+        # codex P1 (PR #519, round 2): in the EXTENDED range [threshold, 0.85) —
+        # below the true contradiction band — the classifier has no DUPLICATE
+        # verdict, so routing UNRELATED/REFINEMENT would INSERT a paraphrase and
+        # defeat the operator's aggressive low-threshold dedup. But a real
+        # state-change MUST still act: a CONTRADICTION (insert+edge+warn) and an
+        # UPDATE that supersedes the stale fact ("API returns 200" -> "500", which
+        # the classifier maps to UPDATE/current=new) — otherwise the current-state
+        # change is swallowed onto the stale fact. Only UNRELATED/REFINEMENT/
+        # UPDATE-old confirm (dedup). Full routing applies inside [0.85, 0.95).
         if similarity < self.CONTRADICTION_SIMILARITY_MIN:
-            return "contradiction" if relation == "CONTRADICTION" else None
+            if relation == "CONTRADICTION":
+                return "contradiction"
+            if relation == "UPDATE" and current == "new" and conf >= 0.8:
+                return "supersede_old"
+            return None
         if relation == "UNRELATED":
             return "unrelated"
         if relation == "REFINEMENT":

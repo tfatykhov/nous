@@ -116,30 +116,31 @@ class KnowledgeExtractor:
 
                 # 1d (2026-06-13 audit, revised after codex PR #519): keep the
                 # raw-cosine paraphrase pre-check (learn()'s Leg-2 dedups only at
-                # fact_native_cosine_threshold, which defaults to 0.95 — so
-                # without this gate ordinary 0.85-0.95 paraphrases slip through),
-                # BUT gate it with the F377 distinct-vs-duplicate tiebreaker so a
-                # semantic OPPOSITE at high cosine ("MRR +5%" vs "MRR -5%") is
-                # stored, not collapsed. Mirrors fact_extractor._is_duplicate.
+                # fact_native_cosine_threshold, default 0.95 — so without this gate
+                # ordinary 0.85-0.95 paraphrases slip through), BUT gate it with
+                # the F377 tiebreaker so a semantic OPPOSITE at high cosine is
+                # stored, not collapsed. codex P2 (round 2): probe MULTIPLE hits
+                # (a duplicate cluster can have a 2nd copy learn() would confirm)
+                # and accumulate EVERY DISTINCT id into exclude_ids — mirrors
+                # FactExtractor._resolve_dedup.
                 exclude_ids: list = []
-                existing = await self._heart.find_similar_facts(content, limit=1)
-                if existing and existing[0].score is not None and existing[0].score > 0.85:
-                    tiebreaker_on = (
-                        getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
-                    )
-                    distinct = tiebreaker_on and (
-                        await self._heart.facts.is_distinct_fact(existing[0].content, content) is True
-                    )
-                    if not distinct:
-                        logger.debug("Skipping duplicate fact: %s", content[:50])
-                        continue
-                    # codex P1 (PR #519): the tiebreaker cleared this hit as
-                    # DISTINCT, so carry its id into learn(exclude_ids=...) — else
-                    # learn()'s own Leg-2 dedup re-selects the same fact (esp. at
-                    # the >=0.95 default where the band classifier doesn't run) and
-                    # confirms it away, silently collapsing the opposite we just
-                    # preserved. Mirrors FactExtractor.
-                    exclude_ids = [existing[0].id]
+                tiebreaker_on = (
+                    getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
+                )
+                is_duplicate = False
+                for cand in await self._heart.find_similar_facts(content, limit=5):
+                    if cand.score is None or cand.score <= 0.85:
+                        break  # similarity-descending: nothing further clears it
+                    if not (tiebreaker_on and
+                            await self._heart.facts.is_distinct_fact(cand.content, content) is True):
+                        is_duplicate = True  # a genuine paraphrase duplicate
+                        break
+                    exclude_ids.append(cand.id)  # tiebreaker judged DISTINCT
+                    if not tiebreaker_on:
+                        break
+                if is_duplicate:
+                    logger.debug("Skipping duplicate fact: %s", content[:50])
+                    continue
 
                 fact_input = FactInput(
                     subject=fact.get("subject", "unknown"),

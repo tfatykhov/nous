@@ -75,17 +75,18 @@ class TestClassifyDupeInBand:
         fm._classify_fact_pair.assert_called_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("relation, expected", [
-        ("CONTRADICTION", "contradiction"),  # the swallow this fix targets — routes
-        ("UNRELATED", None),                 # paraphrase below band — confirm (dedup)
-        ("REFINEMENT", None),
-        ("UPDATE", None),
+    @pytest.mark.parametrize("relation, current, expected", [
+        ("CONTRADICTION", "new", "contradiction"),  # real conflict — routes
+        ("UPDATE", "new", "supersede_old"),         # state change — supersedes (codex P1 r2)
+        ("UPDATE", "old", None),                    # old is current — confirm (dedup)
+        ("UNRELATED", "new", None),                 # paraphrase below band — confirm
+        ("REFINEMENT", "new", None),
     ])
-    async def test_extended_range_routes_only_contradiction(self, relation, expected):
-        """codex P1 (PR #519): in [threshold, 0.85) the classifier has no
-        DUPLICATE verdict, so only CONTRADICTION may insert; everything else
-        confirms (dedup), preserving aggressive low-threshold dedup."""
-        fm = _fm_with_llm({"relation": relation, "current_fact": "new", "confidence": 0.9})
+    async def test_extended_range_routes_contradiction_and_update_new(self, relation, current, expected):
+        """codex P1 (PR #519 r1+r2): in [threshold, 0.85) only a real state-change
+        (CONTRADICTION or UPDATE-new supersede) may act; UNRELATED/REFINEMENT/
+        UPDATE-old confirm (dedup), preserving aggressive low-threshold dedup."""
+        fm = _fm_with_llm({"relation": relation, "current_fact": current, "confidence": 0.9})
         assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) == expected
 
     @pytest.mark.asyncio
@@ -186,11 +187,11 @@ class TestKnowledgeExtractorTiebreaker:
         import inspect
         from nous.handlers.knowledge_extractor import KnowledgeExtractor
         src = inspect.getsource(KnowledgeExtractor)
-        assert "find_similar_facts" in src              # pre-check retained
-        assert "is_distinct_fact" in src                # gated by tiebreaker
+        assert "find_similar_facts(content, limit=5)" in src  # multi-hit probe (codex P2 r2)
+        assert "is_distinct_fact" in src                       # gated by tiebreaker
         assert "fact_dedup_tiebreaker_enabled" in src
-        # codex P1: DISTINCT hit's id carried into learn() so it isn't re-deduped.
-        assert "exclude_ids = [existing[0].id]" in src
+        # codex P1/P2: accumulate every DISTINCT hit id into learn(exclude_ids=...)
+        assert "exclude_ids.append(cand.id)" in src
         assert "exclude_ids=exclude_ids or None" in src
 
 
