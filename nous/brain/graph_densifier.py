@@ -1478,10 +1478,14 @@ class GraphDensifier:
             return 0
 
         async with self.db.session() as session:
-            # 1. Fetch all edges
+            # 1. Fetch all edges. Exclude supersedes lineage (2026-06-13 audit):
+            # it is not real connectivity (retrieval refuses to traverse it), so
+            # unioning a replacement with its inactive predecessor would merge
+            # otherwise-separate components and distort cluster discovery.
             result = await session.execute(text(
                 "SELECT source_id, target_id, source_type, target_type "
-                "FROM brain.graph_edges WHERE agent_id = :agent_id"
+                "FROM brain.graph_edges WHERE agent_id = :agent_id "
+                "AND relation <> 'supersedes'"
             ), {"agent_id": self._agent_id})
             edges = result.all()
 

@@ -128,6 +128,41 @@ async def test_density_excludes_comention_edges(brain, session):
     assert density == pytest.approx(1.0, abs=0.1)
 
 
+async def test_density_excludes_supersedes_edges(brain, session):
+    """2026-06-13 audit: supersedes edges must NOT inflate the density gate —
+    traversal refuses to follow them, so hundreds of backfilled lineage edges
+    must not flip auto-mode spreading on."""
+    from sqlalchemy import text
+
+    from nous.brain.schemas import RecordInput
+
+    def _input(desc):
+        return RecordInput(description=desc, confidence=0.8, category="architecture",
+                           stakes="low", reasons=_reasons())
+
+    d1 = await brain.record(_input("Supersedes density A"), session=session)
+    d2 = await brain.record(_input("Supersedes density B"), session=session)
+    d3 = await brain.record(_input("Supersedes density C"), session=session)
+    await brain.link(d1.id, d2.id, "supports", session=session)
+    await brain.link(d2.id, d3.id, "related_to", session=session)
+    await brain.link(d1.id, d3.id, "caused_by", session=session)
+
+    # A supersedes edge would push edge_count 3 -> 4 if counted. Must be excluded.
+    await session.execute(
+        text(
+            "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+            "agent_id,relation,weight,auto_linked,extraction_method) "
+            "VALUES (:s,:t,'decision','decision',:a,'supersedes',1.0,true,'deterministic')"
+        ),
+        {"s": str(d1.id), "t": str(d3.id), "a": brain.agent_id},
+    )
+    await session.flush()
+
+    density = await compute_graph_density(session, brain.agent_id)
+    # supersedes edge excluded => still 3 edges / 3 nodes = 1.0
+    assert density == pytest.approx(1.0, abs=0.1)
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_spreading_activation_empty_seeds(session):
