@@ -177,6 +177,20 @@ class TestF053DeadEdgePrune:
         )
 
     @pytest.mark.asyncio
+    async def test_sql_preserves_supersedes_lineage(self):
+        """2026-06-13 audit: supersedes edges point AT the superseded (inactive)
+        fact by design. The prune SQL must exclude them, or it would delete the
+        lineage edges the edge-persistence fix just wrote (the original is
+        deactivated in the same sleep cycle)."""
+        handler, mock_session = _make_handler()
+        await handler._phase_prune_dead_edges({})
+        sql_str = str(mock_session.execute.await_args.args[0])
+        assert "supersedes" in sql_str, (
+            "F053 prune SQL must exclude relation = 'supersedes' so it does not "
+            "delete supersession lineage edges incident to the inactive fact"
+        )
+
+    @pytest.mark.asyncio
     async def test_db_exception_records_error_type(self):
         """P2 review fix: persist exception type into sleep_stats so
         observability dashboards can detect silent regressions."""
@@ -253,6 +267,7 @@ class TestF053Integration:
         e_alive_2 = uuid4()
         e_dead_src = uuid4()
         e_dead_tgt = uuid4()
+        e_supersedes = uuid4()  # points at inactive fact but must SURVIVE
 
         try:
             # Insert and commit fixture so the handler's own session sees it.
@@ -283,6 +298,8 @@ class TestF053Integration:
                     (e_alive_2, f_active_b, "fact", f_active_a, "fact", "informed_by"),
                     (e_dead_src, f_inactive_a, "fact", f_active_a, "fact", "supports"),
                     (e_dead_tgt, f_active_a, "fact", f_inactive_b, "fact", "evidence_for"),
+                    # supersedes lineage: active → inactive, must NOT be pruned.
+                    (e_supersedes, f_active_a, "fact", f_inactive_a, "fact", "supersedes"),
                 ]
                 for eid, src, src_t, tgt, tgt_t, rel in edges:
                     await fs.execute(sql_text(
@@ -318,16 +335,18 @@ class TestF053Integration:
             result = await handler._phase_prune_dead_edges(sleep_stats)
 
             assert result is True
+            # Only the 2 non-lineage dead edges are pruned; the supersedes
+            # lineage edge survives despite pointing at an inactive fact.
             assert sleep_stats.get("dead_edges_pruned") == 2
 
-            # Verify exactly the 2 active-active edges survive.
+            # Verify the 2 active-active edges + the supersedes lineage survive.
             async with db.session() as vs:
                 rows = await vs.execute(sql_text(
                     "SELECT id FROM brain.graph_edges WHERE agent_id = :aid"
                 ), {"aid": agent_id})
                 surviving_ids = {r.id for r in rows}
-            assert surviving_ids == {e_alive_1, e_alive_2}, (
-                f"expected 2 surviving alive edges, got {surviving_ids}"
+            assert surviving_ids == {e_alive_1, e_alive_2, e_supersedes}, (
+                f"expected 2 alive + 1 supersedes lineage edge, got {surviving_ids}"
             )
 
             await heart.close()

@@ -1476,6 +1476,14 @@ class SleepHandler:
                         SELECT e.id
                         FROM brain.graph_edges e
                         WHERE e.agent_id = :agent_id
+                          -- Preserve supersedes lineage: these edges point AT
+                          -- the superseded (inactive) fact by design — that is
+                          -- the record of the supersession. Pruning them undoes
+                          -- the 2026-06-13 edge-persistence fix (the original is
+                          -- marked inactive in the same cycle the edge is
+                          -- written). recall stays safe because brain._neighbors
+                          -- filters inactive facts out of expansion.
+                          AND e.relation <> 'supersedes'
                           AND (
                             (e.source_type, e.source_id) IN (
                               SELECT node_type, id FROM inactive_nodes
