@@ -337,6 +337,13 @@ class Settings(BaseSettings):
     # contradiction_model. Default OFF (land dark; flip after the dedup eval).
     fact_dedup_tiebreaker_enabled: bool = False
 
+    # 1a (2026-06-13 audit): the in-band contradiction classifier now fires for
+    # every dedup hit in [native_cosine_threshold, 0.95) — at the prod 0.80
+    # threshold that includes [0.80, 0.85), previously blind-confirmed. Cap the
+    # resulting Haiku calls per hour (advisory in-process counter); on exhaustion
+    # the band falls open to confirm (today's behaviour). 0 disables the cap.
+    fact_band_classification_max_per_hour: int = 1000
+
     # Runtime
     host: str = "0.0.0.0"
     port: int = 8000

@@ -114,19 +114,31 @@ class KnowledgeExtractor:
                 if not content:
                     continue
 
-                # Dedup against existing facts.
-                # Audit S2 (2026-06-09): probe via raw cosine, not
-                # search_facts — RRF scores encode rank (~0.98 for the
-                # nearest fact regardless of similarity), so the old
-                # `score > 0.85` skipped virtually every candidate once
-                # any embedded fact existed. Cosine 0.85 is a real
-                # paraphrase threshold.
-                existing = await self._heart.find_similar_facts(content, limit=1)
-                if (
-                    existing
-                    and existing[0].score is not None
-                    and existing[0].score > 0.85
-                ):
+                # 1d (2026-06-13 audit, revised after codex PR #519): keep the
+                # raw-cosine paraphrase pre-check (learn()'s Leg-2 dedups only at
+                # fact_native_cosine_threshold, default 0.95 — so without this gate
+                # ordinary 0.85-0.95 paraphrases slip through), BUT gate it with
+                # the F377 tiebreaker so a semantic OPPOSITE at high cosine is
+                # stored, not collapsed. codex P2 (round 2): probe MULTIPLE hits
+                # (a duplicate cluster can have a 2nd copy learn() would confirm)
+                # and accumulate EVERY DISTINCT id into exclude_ids — mirrors
+                # FactExtractor._resolve_dedup.
+                exclude_ids: list = []
+                tiebreaker_on = (
+                    getattr(self._settings, "fact_dedup_tiebreaker_enabled", False) is True
+                )
+                is_duplicate = False
+                for cand in await self._heart.find_similar_facts(content, limit=5):
+                    if cand.score is None or cand.score <= 0.85:
+                        break  # similarity-descending: nothing further clears it
+                    if not (tiebreaker_on and
+                            await self._heart.facts.is_distinct_fact(cand.content, content) is True):
+                        is_duplicate = True  # a genuine paraphrase duplicate
+                        break
+                    exclude_ids.append(cand.id)  # tiebreaker judged DISTINCT
+                    if not tiebreaker_on:
+                        break
+                if is_duplicate:
                     logger.debug("Skipping duplicate fact: %s", content[:50])
                     continue
 
@@ -137,7 +149,7 @@ class KnowledgeExtractor:
                     confidence=confidence,
                     category=fact.get("category"),
                 )
-                result = await self._heart.learn(fact_input)
+                result = await self._heart.learn(fact_input, exclude_ids=exclude_ids or None)
                 # F023: Don't count rejected facts as stored
                 if isinstance(result, FactRejected):
                     logger.debug("Admission rejected knowledge fact: %s", content[:50])

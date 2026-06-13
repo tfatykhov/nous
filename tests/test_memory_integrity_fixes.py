@@ -64,10 +64,43 @@ class TestClassifyDupeInBand:
         fm._classify_fact_pair.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_below_band_paraphrase_confirms(self):
-        """similarity < 0.85 (reachable when the operator threshold is lower,
-        e.g. prod 0.80) is the paraphrase zone the operator opted into."""
-        fm = _fm_with_llm({"relation": "CONTRADICTION"})
+    async def test_below_old_band_now_classifies(self):
+        """1a (2026-06-13 audit): a hit in [threshold, 0.85) reaches the
+        classifier here only because the caller (_find_duplicate) returned it
+        (similarity >= the operator threshold, e.g. prod 0.80). The old 0.85
+        lower bound blind-confirmed this range, swallowing contradictions. Now a
+        0.82 CONTRADICTION is classified+routed, not confirmed."""
+        fm = _fm_with_llm({"relation": "CONTRADICTION", "confidence": 0.9})
+        assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) == "contradiction"
+        fm._classify_fact_pair.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("relation, current, expected", [
+        ("CONTRADICTION", "new", "contradiction"),  # real conflict — routes
+        ("UPDATE", "new", "supersede_old"),         # state change — supersedes (codex P1 r2)
+        ("UPDATE", "old", None),                    # old is current — confirm (dedup)
+        ("UNRELATED", "new", None),                 # paraphrase below band — confirm
+        ("REFINEMENT", "new", None),
+    ])
+    async def test_extended_range_routes_contradiction_and_update_new(self, relation, current, expected):
+        """codex P1 (PR #519 r1+r2): in [threshold, 0.85) only a real state-change
+        (CONTRADICTION or UPDATE-new supersede) may act; UNRELATED/REFINEMENT/
+        UPDATE-old confirm (dedup), preserving aggressive low-threshold dedup."""
+        fm = _fm_with_llm({"relation": relation, "current_fact": current, "confidence": 0.9})
+        assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) == expected
+
+    @pytest.mark.asyncio
+    async def test_true_band_still_full_routes(self):
+        """Inside [0.85, 0.95) full routing is unchanged — a REFINEMENT routes."""
+        fm = _fm_with_llm({"relation": "REFINEMENT", "confidence": 0.9})
+        assert await fm._classify_dupe_in_band(_dupe(), 0.90, _input(), True) == "refines"
+
+    @pytest.mark.asyncio
+    async def test_band_budget_exhaustion_falls_open(self):
+        """1a: when the hourly classifier budget is spent, the band falls open
+        to confirm (returns None) rather than making the Haiku call."""
+        fm = _fm_with_llm({"relation": "CONTRADICTION", "confidence": 0.9})
+        fm._band_budget_ok = lambda: False
         assert await fm._classify_dupe_in_band(_dupe(), 0.82, _input(), True) is None
         fm._classify_fact_pair.assert_not_called()
 
@@ -101,6 +134,65 @@ class TestClassifyDupeInBand:
         fm = _fm_with_llm(classification)
         result = await fm._classify_dupe_in_band(_dupe(), 0.90, _input(), True)
         assert result == expected
+
+
+class TestEmbedWithRetry:
+    """1b (2026-06-13 audit): embedding failure retries once then persists a
+    NULL-embed row (never hard-reject); no provider is a silent None."""
+
+    @pytest.mark.asyncio
+    async def test_success_returns_embedding(self):
+        fm = FactManager(db=MagicMock(), embeddings=MagicMock(), agent_id="test")
+        fm.embeddings.embed = AsyncMock(return_value=[0.1, 0.2])
+        assert await fm._embed_with_retry("x") == [0.1, 0.2]
+        fm.embeddings.embed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_retries_then_persists_null(self):
+        fm = FactManager(db=MagicMock(), embeddings=MagicMock(), agent_id="test")
+        fm.embeddings.embed = AsyncMock(side_effect=RuntimeError("embed outage"))
+        assert await fm._embed_with_retry("x", attempts=2) is None  # NULL, not raised
+        assert fm.embeddings.embed.await_count == 2  # retried
+
+    @pytest.mark.asyncio
+    async def test_no_provider_is_silent_none(self):
+        fm = FactManager(db=MagicMock(), embeddings=None, agent_id="test")
+        assert await fm._embed_with_retry("x") is None
+
+
+class TestConsolidationExcludeIds:
+    """1c: consolidation MERGE/cluster learn() must pass exclude_ids so dedup
+    can't confirm the merged restatement AS a still-active source."""
+
+    def test_merge_and_cluster_pass_exclude_ids(self):
+        import inspect
+        from nous.handlers.sleep_handler import SleepHandler
+        src = inspect.getsource(SleepHandler)
+        # F031 MERGE
+        merge = src[src.index('source="contradiction_resolution"'):]
+        merge = merge[:merge.index("exclude_ids=") + 200]
+        assert "exclude_ids=[fact1_id, fact2_id]" in merge
+        # F027 cluster
+        cluster = src[src.index('source="cluster_consolidation"'):]
+        cluster = cluster[:cluster.index("exclude_ids=") + 200]
+        assert "exclude_ids=[f.id for f in facts]" in cluster
+
+
+class TestKnowledgeExtractorTiebreaker:
+    """1d (revised after codex PR #519): the paraphrase pre-check stays (learn()
+    dedups only at the 0.95 default) but is gated by the F377 distinct-vs-dup
+    tiebreaker so semantic opposites are stored, not collapsed."""
+
+    def test_prefilter_gated_by_tiebreaker(self):
+        import inspect
+        from nous.handlers.knowledge_extractor import KnowledgeExtractor
+        src = inspect.getsource(KnowledgeExtractor)
+        assert "find_similar_facts(content, limit=5)" in src  # multi-hit probe (codex P2 r2)
+        assert "is_distinct_fact" in src                       # gated by tiebreaker
+        assert "fact_dedup_tiebreaker_enabled" in src
+        # codex P1/P2: accumulate every DISTINCT hit id into learn(exclude_ids=...)
+        assert "exclude_ids.append(cand.id)" in src
+        assert "exclude_ids=exclude_ids or None" in src
 
 
 class TestApplyBandAction:

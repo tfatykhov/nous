@@ -27,10 +27,12 @@ async def compute_graph_density(session: AsyncSession, agent_id: str) -> float:
     decision retrieval into spreading activation before that rollout is intentional.
     ``IS DISTINCT FROM`` keeps NULL/legacy ``extraction_method`` rows counted.
 
-    2026-06-13 audit: ``supersedes`` edges are likewise excluded. The traversal
-    refuses to follow them, so they are not real connectivity; counting hundreds
-    of backfilled lineage edges here could push an agent over the threshold and
-    flip ``auto`` mode into spreading activation unintentionally.
+    2026-06-13 audit: ``supersedes``, ``contradicts``, ``happened_before``, and
+    ``co_occurred`` are likewise excluded — none are real associative
+    connectivity (the traversal refuses or these are lineage/temporal/builder
+    edges), so counting them could push an agent over the threshold and flip
+    ``auto`` mode into spreading activation unintentionally. (1e — folded into
+    PR-1 so the new in-band contradiction edges can't inflate density.)
     """
     sql = text("""
         WITH node_counts AS (
@@ -38,15 +40,15 @@ async def compute_graph_density(session: AsyncSession, agent_id: str) -> float:
                    (SELECT COUNT(DISTINCT node_id) FROM (
                        SELECT source_id AS node_id FROM brain.graph_edges
                        WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
-                       AND relation <> 'supersedes'
+                       AND relation NOT IN ('supersedes', 'contradicts', 'happened_before', 'co_occurred')
                        UNION
                        SELECT target_id AS node_id FROM brain.graph_edges
                        WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
-                       AND relation <> 'supersedes'
+                       AND relation NOT IN ('supersedes', 'contradicts', 'happened_before', 'co_occurred')
                    ) nodes) AS unique_nodes
             FROM brain.graph_edges
             WHERE agent_id = :agent_id AND extraction_method IS DISTINCT FROM 'co_mention'
-                       AND relation <> 'supersedes'
+                       AND relation NOT IN ('supersedes', 'contradicts', 'happened_before', 'co_occurred')
         )
         SELECT CASE WHEN unique_nodes = 0 THEN 0.0
                     ELSE edge_count::float / unique_nodes
