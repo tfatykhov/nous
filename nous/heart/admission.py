@@ -378,6 +378,16 @@ Respond with ONLY a number between 0.0 and 1.0."""
     # Public API
     # ------------------------------------------------------------------
 
+    async def precompute_utility(self, fact_input: FactInput) -> float | None:
+        """W-1: compute the (LLM) utility score OUTSIDE any DB session so
+        score() doesn't hold a pooled connection through the Haiku call while
+        the dedup/insert transaction (+ the W-8 advisory lock) is open. Returns
+        None for bypass sources (score() short-circuits them — no wasted call).
+        """
+        if fact_input.source in self.config.bypass_sources:
+            return None
+        return await self._score_utility(fact_input)
+
     async def score(
         self,
         fact_input: FactInput,
@@ -385,8 +395,15 @@ Respond with ONLY a number between 0.0 and 1.0."""
         max_existing_similarity: float | None,
         source_text: str | None,
         session,  # AsyncSession | None — not used yet, reserved for future
+        *,
+        utility_override: float | None = None,
     ) -> AdmissionResult:
-        """Score a candidate fact for admission."""
+        """Score a candidate fact for admission.
+
+        ``utility_override`` (W-1): when provided, use it instead of making the
+        utility LLM call here — the caller computed it before opening the write
+        transaction.
+        """
         # Check bypass first
         source = fact_input.source
         if source in self.config.bypass_sources:
@@ -414,7 +431,11 @@ Respond with ONLY a number between 0.0 and 1.0."""
 
         scores = {}
 
-        scores["utility"] = await self._score_utility(fact_input)
+        scores["utility"] = (
+            utility_override
+            if utility_override is not None
+            else await self._score_utility(fact_input)
+        )
         scores["confidence"] = self._score_confidence(fact_input, source_text)
         scores["novelty"] = self._score_novelty(max_existing_similarity)
         scores["recency"] = self._score_recency(fact_input)
