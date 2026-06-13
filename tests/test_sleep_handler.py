@@ -1049,10 +1049,13 @@ class TestStructuredContradictionResolution:
         assert sleep_stats.get("contradictions_resolved", 0) == 0
 
     @pytest.mark.asyncio
-    async def test_keep_both_persists_contradicts_edge(self):
-        """2026-06-13 audit: KEEP_BOTH leaves two ACTIVE contradictory facts but
-        wrote nothing (782 resolutions → 0 contradicts edges). It must now
-        persist a contradicts edge so the live tension is recorded."""
+    async def test_keep_both_does_not_write_contradicts_edge(self):
+        """KEEP_BOTH must NOT write a contradicts edge yet — it also catches
+        downgraded SUPERSEDE/REMOVE/MERGE verdicts, and at prod's 0.75 linking
+        threshold the pair usually has a coexisting related_to edge that
+        consumers still traverse. Recording the contradiction is deferred to the
+        eval-gated contradiction-semantics work (item C). Pin the deferral so a
+        future edit can't silently re-introduce the unguarded edge."""
         handler, brain, heart, bus, llm_client = _make_sleep_handler()
 
         heart.find_contradiction_candidates = AsyncMock(return_value=[
@@ -1080,7 +1083,7 @@ class TestStructuredContradictionResolution:
         result = await handler._phase_resolve_contradictions(sleep_stats)
 
         assert result is True
-        heart.link_facts.assert_awaited_once_with("f1", "f2", "contradicts", 1.0)
+        heart.link_facts.assert_not_called()
 
     def test_f031_merge_persists_supersedes_edge(self):
         """2026-06-13 audit: the MERGE path set superseded_by on the originals

@@ -66,7 +66,7 @@ async def main() -> None:
             "SELECT count(*) FROM heart.facts WHERE agent_id=$1 AND contradiction_of IS NOT NULL", AGENT)
         print(f"  facts with contradiction_of set: {n_cof}")
 
-        print("\n=== events: contradiction / supersession activity (last 90d) ===")
+        print("\n=== events: contradiction / supersession activity (all-time) ===")
         rows = await conn.fetch(
             "SELECT event_type, count(*) n FROM nous_system.events "
             "WHERE agent_id=$1 AND (event_type ILIKE '%contrad%' OR event_type ILIKE '%supersed%' "

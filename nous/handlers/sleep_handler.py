@@ -1035,23 +1035,18 @@ class SleepHandler:
                         sleep_stats["contradictions_resolved"] += 1
                         logger.info("F031 resolve: REMOVE_B — deactivated %s (%.2f confidence)", fact2_id, confidence)
                     elif action == "KEEP_BOTH":
-                        # B: KEEP_BOTH leaves two ACTIVE contradictory facts.
-                        # The resolving branches above (SUPERSEDE/MERGE/REMOVE)
-                        # deactivate a fact, so they genuinely resolve and need
-                        # no edge; KEEP_BOTH is the only branch where the
-                        # contradiction stays live — and it was writing nothing
-                        # (2026-06-13 audit: 782 resolutions, 0 contradicts
-                        # edges). Persist the contradicts edge so the live
-                        # tension is recorded in the graph (dashboards/density),
-                        # correctly excluded from spreading activation, and
-                        # available to the recall-time contradiction warning.
-                        # NOTE: the recall consumer (retrieval_pipeline Stage 5)
-                        # is currently decision-scoped — surfacing fact↔fact
-                        # contradictions at recall is deferred to the eval-gated
-                        # detection-broadening work (item C).
-                        await self._heart.link_facts(
-                            fact1_id, fact2_id, "contradicts", 1.0,
-                        )
+                        # KEEP_BOTH leaves two ACTIVE contradictory facts. Writing
+                        # a contradicts edge here is deferred to the eval-gated
+                        # contradiction-semantics work (item C): (1) this branch
+                        # also catches downgraded SUPERSEDE/REMOVE/MERGE verdicts
+                        # (confidence < 0.7 or content-less MERGE), which must NOT
+                        # be recorded as contradictions; (2) at prod's 0.75
+                        # cross-type linking threshold the pair usually already
+                        # has a positive related_to edge, and spreading
+                        # activation only filters the contradicts row — so a bare
+                        # contradicts edge leaves the facts still reinforcing.
+                        # Both need consumer-side handling, designed + measured
+                        # together with detection-broadening.
                         logger.info(
                             "F031 resolve: KEEP_BOTH — %s and %s: %s",
                             fact1_id, fact2_id, resolution.get("reason", ""),
