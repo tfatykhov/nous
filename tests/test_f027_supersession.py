@@ -562,12 +562,22 @@ class TestPhaseClusterConsolidation:
         deactivate_session = AsyncMock()
         deactivate_session.__aenter__ = AsyncMock(return_value=deactivate_session)
         deactivate_session.__aexit__ = AsyncMock(return_value=False)
-        deactivate_session.get = AsyncMock(return_value=MagicMock())
+        # Return a FRESH orm mock per fact with superseded_by=None so the loop
+        # actually proceeds to the deactivate + supersedes-edge write (a single
+        # shared mock would have superseded_by set to a truthy MagicMock and
+        # short-circuit every iteration, never exercising the path).
+        def _make_orm(*_a, **_k):
+            m = MagicMock()
+            m.superseded_by = None
+            return m
+        deactivate_session.get = AsyncMock(side_effect=_make_orm)
 
         # Mock learn to return a FactDetail-like object
         merged_detail = MagicMock()
         merged_detail.id = uuid4()
         heart.learn = AsyncMock(return_value=merged_detail)
+        # 2026-06-13 audit: cluster consolidation now writes the supersedes edge.
+        heart.link_facts = AsyncMock()
 
         # db.session returns different sessions on each call
         call_count = 0
@@ -590,6 +600,11 @@ class TestPhaseClusterConsolidation:
         assert result is True
         assert stats["clusters_merged"] == 1
         heart.learn.assert_called_once()
+        # All 3 originals superseded by the merged fact → 3 supersedes edges.
+        assert heart.link_facts.await_count == 3
+        for call in heart.link_facts.await_args_list:
+            assert call.args[0] == merged_detail.id  # source = superseding fact
+            assert call.args[2] == "supersedes"
 
 
 # ===========================================================================
