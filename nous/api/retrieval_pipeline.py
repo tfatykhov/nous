@@ -175,6 +175,32 @@ class _PipelineAccumulator:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+_GRAPH_SOURCES = {"graph_expanded", "spreading_activation"}
+_GRAPH_ORIGINS = {"heart_graph", "brain_graph"}
+
+
+def _normalize_scores_per_stage(results: list["PipelineResult"]) -> list["PipelineResult"]:
+    """3e spike (eval-gated): min-max normalize scores within each stage group
+    (graph vs primary) to [0,1] so the cross-type ``rerank_by_score`` sort
+    compares comparable values. Hybrid/RRF primary scores are already [0,1]
+    (top ~1.0); graph items are flat ~0.70, so without this they sink below the
+    primary head. Frozen PipelineResult => rebuild via ``replace``."""
+    def _is_graph(r: "PipelineResult") -> bool:
+        return r.source in _GRAPH_SOURCES or (r.metadata or {}).get("stage_origin") in _GRAPH_ORIGINS
+
+    by_obj: dict[int, "PipelineResult"] = {}
+    for grp in ([r for r in results if not _is_graph(r)],
+                [r for r in results if _is_graph(r)]):
+        if not grp:
+            continue
+        scores = [r.score or 0.0 for r in grp]
+        lo, hi = min(scores), max(scores)
+        rng = hi - lo
+        for r in grp:
+            ns = (((r.score or 0.0) - lo) / rng) if rng > 0 else 1.0
+            by_obj[id(r)] = replace(r, score=ns)
+    return [by_obj[id(r)] for r in results]
+
 
 async def run_recall_pipeline(
     query: str,
@@ -280,6 +306,8 @@ async def run_recall_pipeline(
     # the merged ordering is preferable in production too, the default
     # can be flipped and the snapshot regenerated.
     if rerank_by_score:
+        if getattr(settings, "score_space_normalize_enabled", False):
+            results = _normalize_scores_per_stage(results)
         results.sort(key=lambda r: r.score or 0.0, reverse=True)
 
     # F071: drop results whose id is already in the system prompt for this

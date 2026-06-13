@@ -1250,6 +1250,18 @@ class Settings(BaseSettings):
             "adjacency-aware ranking. Leverages F040 sleep-built edges."
         ),
     )
+    score_space_normalize_enabled: bool = Field(
+        default=False,
+        description=(
+            "3e spike (2026-06-13, eval-gated). When true, the rerank_by_score "
+            "cross-type sort min-max normalizes scores within each stage group "
+            "(graph vs primary) to [0,1] first, so flat ~0.70 graph items "
+            "compete with RRF-normalized primary items instead of sinking below "
+            "them. WARNING: promotes graph items — R-1/R-5 showed this regresses "
+            "precision (densely-connected non-gold outranks specific gold). Land "
+            "dark; measure before any prod use."
+        ),
+    )
     graph_adjacency_boost_alpha: float = Field(
         default=0.15,
         description="P2: max boost as a fraction of original score (default 0.15 = +15% for the most-connected candidate).",
