@@ -491,8 +491,13 @@ def apply_frame_boost(
         wrapped = _wrap_with_score(item, min((getattr(item, "score", 0) or 0) * boost, 1.0))
         boosted.append((wrapped, boost))
 
-    # Sort by boost descending (stable sort preserves relevance order within same boost)
-    boosted.sort(key=lambda x: x[1], reverse=True)
+    # 3a (2026-06-13 audit, eval-gated): sort by the BOOSTED SCORE, not the boost
+    # multiplier. The old `key=x[1]` produced a frame-tier order — every same-frame
+    # item ranked above every non-frame item regardless of relevance, so a 0.3-
+    # relevance frame match buried a 0.95-relevance non-match. Frame match is a
+    # boost on relevance, not an override of it; sort by the boosted score so a
+    # close-relevance frame match still wins but a large relevance gap dominates.
+    boosted.sort(key=lambda x: x[0].score, reverse=True)
     return [item for item, _ in boosted]
 
 

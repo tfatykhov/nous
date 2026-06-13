@@ -20,10 +20,17 @@ from nous.heart.search import apply_frame_boost
 # ---------------------------------------------------------------------------
 
 
-def _make_item(encoded_frame=None, encoded_censors=None, name="item"):
-    """Create a mock memory item with frame encoding metadata."""
+def _make_item(encoded_frame=None, encoded_censors=None, name="item", score=0.5):
+    """Create a mock memory item with frame encoding metadata.
+
+    3a (2026-06-13): frame/censor boost MULTIPLIES the relevance score, so items
+    need a base score for the boost to order them. With equal base scores the
+    higher-boost item still ranks first (boost ordering preserved); the fix only
+    changes behaviour when relevance differs (see
+    test_high_relevance_nonframe_beats_low_relevance_frame)."""
     return SimpleNamespace(
         name=name,
+        score=score,
         encoded_frame=encoded_frame,
         encoded_censors=encoded_censors,
     )
@@ -44,6 +51,25 @@ class TestApplyFrameBoost:
         item = _make_item(encoded_frame="debug", name="debug_item")
         results = apply_frame_boost([item], current_frame="decision")
         assert results[0].name == "debug_item"  # Still returned, just not boosted
+
+    def test_high_relevance_nonframe_beats_low_relevance_frame(self):
+        """3a (eval-gated): the core fix. A highly-relevant NON-frame fact must
+        outrank a barely-relevant SAME-frame fact — the old multiplier-sort
+        buried it behind every frame match regardless of relevance."""
+        hi_nonframe = _make_item(encoded_frame="conversation", name="hi", score=0.95)
+        lo_frame = _make_item(encoded_frame="decision", name="lo", score=0.30)
+        results = apply_frame_boost([lo_frame, hi_nonframe], current_frame="decision")
+        # 0.95 * 1.0 = 0.95  vs  0.30 * 1.3 = 0.39  → relevance dominates.
+        assert results[0].name == "hi"
+        assert results[1].name == "lo"
+
+    def test_close_relevance_frame_match_still_wins(self):
+        """Frame boost still breaks a near-tie — a same-frame fact at 0.80 beats a
+        non-frame fact at 0.85 (0.80*1.3=1.04 clamp 1.0 > 0.85)."""
+        frame = _make_item(encoded_frame="decision", name="frame", score=0.80)
+        nonframe = _make_item(encoded_frame="conversation", name="nonframe", score=0.85)
+        results = apply_frame_boost([nonframe, frame], current_frame="decision")
+        assert results[0].name == "frame"
 
     def test_null_frame_neutral(self):
         """NULL encoded_frame = no boost, no penalty."""
