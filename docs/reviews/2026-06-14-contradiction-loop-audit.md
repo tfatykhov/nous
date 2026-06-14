@@ -40,8 +40,10 @@ cycle.
 
 ## Fix
 
-- `sleep_handler.py:874` resolver `max_tokens` **300 → 800** (the confirmed fix).
-- `sleep_handler.py:1275` cluster `merge_facts` `max_tokens` **600 → 800**
+- `sleep_handler.py:874` resolver `max_tokens` **300 → 1000** (800 was proven
+  sufficient at 6/6 with ~2× headroom over the ~400-token observed usage; 1000
+  is free tail headroom since `max_tokens` is a ceiling).
+- `sleep_handler.py:1275` cluster `merge_facts` `max_tokens` **600 → 1000**
   (precautionary — same truncation class, multi-fact merges can be longer).
 
 Tests green (`test_f031_consolidation`, `test_sleep_handler`).

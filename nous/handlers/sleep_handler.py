@@ -878,8 +878,11 @@ class SleepHandler:
                     # KEEP_BOTH. Prod: 708/774 (91%) of intended merges silently
                     # failed this way, leaving complementary facts unconsolidated.
                     # Probe (scripts/diag/probe_merge_truncation.py) recovered
-                    # merged_content on 6/6 of those pairs at 800.
-                    max_tokens=800,
+                    # merged_content on 6/6 of those pairs at 800 (observed usage
+                    # ~400 tok: reason ~170 + merged_content ~205). Set to 1000
+                    # for tail headroom — max_tokens is a ceiling, so the extra
+                    # costs nothing unless a generation actually needs it.
+                    max_tokens=1000,
                 )
 
                 if not resolution:
@@ -1272,12 +1275,12 @@ class SleepHandler:
                         "irreconcilable contradictions."
                     ),
                     output_schema=_CLUSTER_MERGE_SCHEMA,
-                    # Align with the pairwise resolver (600 -> 800): same
-                    # truncation class — a multi-fact cluster merge can need a
-                    # longer merged_content than 600 leaves room for after the
-                    # should_merge analysis. Precautionary (cluster path not
-                    # separately measured, but same failure mode).
-                    max_tokens=800,
+                    # Align with the pairwise resolver (600 -> 1000): same
+                    # truncation class, and a multi-fact cluster merge can need a
+                    # longer merged_content than the pairwise case. Precautionary
+                    # (cluster path not separately measured); the ceiling costs
+                    # nothing unless hit.
+                    max_tokens=1000,
                 )
 
                 # Per-action event for retrospective audit (sleep eval
