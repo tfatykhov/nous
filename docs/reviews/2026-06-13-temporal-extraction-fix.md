@@ -132,6 +132,37 @@ source. The live recency resolver no longer sees wrong-year dates.
 bad dates on *future* episodes (the reclassify only fixed existing data). The
 gate's `0.45` default also applies to every future sleep-cycle rebuild.
 
+## BEAM external validation (n=5, 100K) — net-neutral on event_ordering
+
+Re-ran the BEAM-100K benchmark (n=5) on this branch — a clean one-variable A/B
+vs the prior `f075`-on baseline (same flag, *buggy* prompt). Official harness
+`report`:
+
+| metric | baseline (buggy prompt) | post-fix | Δ |
+|---|---|---|---|
+| **event_ordering** | 0.038 | **0.039** | flat (trustworthy target read) |
+| aggregate (final_score) | 0.672 | **0.654** (strong_pass) | noise, not a regression¹ |
+
+¹ The baseline was a *stored* `f075`-on-n5 snapshot, not a same-session
+flag-off re-ingest control, so the aggregate delta confounds the fix with Opus
+summarizer stochasticity (per the established matched-control rule, decision
+`2fdfd2d8`). Only the **target metric** (`event_ordering`) is interpretable
+here, and it is flat.
+
+**The temporal extraction fix did NOT move BEAM `event_ordering`** — confirming
+the F074 diagnosis that the gap is *topical-choice divergence* (which events
+Nous extracts vs BEAM's gold canonical set), **not** date accuracy. Fixing the
+`event_date` on the events Nous already extracts cannot help an ordering metric
+gated by *coverage* of the right events. The next temporal lever for BEAM is
+extraction COVERAGE / canonical-event selection, not date precision.
+
+This is a useful negative result: the temporal fix's value is **retrieval-side
+and directly measured** (recency resolver no longer sees wrong-year dates;
+`happened_before` precision 0.27→1.00) — not BEAM ordering. Cost ~$31
+(ingest+answer $25 Opus + smoke). Harness note: source is lost (revived from
+`.pyc`); `evaluate` needs an ABSOLUTE `NOUS_BEAM_BEAM_PYTHON`; `report` needs
+`PYTHONUTF8=1` on Windows.
+
 ## Step 4 — prod remediation (after eval validation)
 
 Run the same `--reclassify` on prod (`nous-default`), which corrects the ~415
