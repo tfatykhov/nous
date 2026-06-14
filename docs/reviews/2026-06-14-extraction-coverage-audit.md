@@ -96,3 +96,19 @@ guards). Lands **dark** (flag OFF).
 noise side must clear a QA non-regression check — re-run LME/BEAM QA with the
 flag on and confirm the +1.9 facts/ep doesn't dilute retrieval/answers — before
 flipping `NOUS_EXTRACTION_COVERAGE_BROADENED=true`.
+
+### Codex review follow-ups (PR #524)
+
+- **P1 — `status` admission prior (production fix):** the new `status` category
+  had no `DEFAULT_TYPE_PRIORS` entry, so admission scored it at the 0.50 unknown
+  prior and could reject the very facts the feature recovers (the same failure
+  F075's `event: 0.75` entry fixed). Added `status: 0.70`.
+- **P1 — cap drift in storage:** both `FactExtractor` storage paths re-truncated
+  to `stable[:5]`; unified all three cap sites behind `cap_candidate_facts`.
+- **The 0.70 and 0.91 numbers are optimistic point estimates, not the delivered
+  number.** The A/B measures *model output* (bypasses the 30-char floor + the
+  admission filter, P1) and is *unpaired* (each arm re-discovers salient items,
+  P1); the audit excluded zero-fact episodes (now fixed in
+  `coverage_audit.py`, P2). The **authoritative delivered-coverage measure is
+  the QA flip-gate** — it runs the full storage→admission→retrieval→QA pipeline
+  end-to-end, which is what actually gates the prod flip.

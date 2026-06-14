@@ -82,12 +82,14 @@ async def main() -> None:
     await client.start()
     conn = await asyncpg.connect(**PROD)
     try:
+        # codex P2: sample ALL chunked episodes, NOT only those with facts —
+        # zero-fact episodes are the worst coverage failures and excluding them
+        # biases coverage upward. The fact query below returns "(none)" for them.
         eps = await conn.fetch(
             """
             SELECT e.id FROM heart.episodes e
             WHERE e.agent_id = $1
               AND EXISTS (SELECT 1 FROM heart.episode_chunks c WHERE c.episode_id = e.id)
-              AND EXISTS (SELECT 1 FROM heart.facts f WHERE f.source_episode_id = e.id)
             ORDER BY random() LIMIT $2
             """, AGENT, N)
 

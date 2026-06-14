@@ -32,6 +32,12 @@ DEFAULT_TYPE_PRIORS = {
     # events (e.g. "User obtained API key on March 10") are concrete,
     # date-anchored, and unlikely to be noise. Codex PR #461 P2 fix.
     "event": 0.75,
+    # Coverage fix (2026-06-14): the new "status" category (deliverables,
+    # forecasts, current state the user may later reference) needs its own
+    # prior or it falls to the 0.50 unknown prior, down-weighting the exact
+    # facts the feature recovers — the same failure F075's "event" entry fixed.
+    # 0.70 = concrete + queryable, on par with "technical". Codex PR #524 P1.
+    "status": 0.70,
     "technical": 0.70,
     "tool": 0.65,
     "concept": 0.60,
