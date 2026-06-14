@@ -15,7 +15,10 @@ import pytest
 from sqlalchemy import text
 
 from nous.brain.tinyhippo_lite import (
+    _RECALL_TOUCH_BUFFER,
+    flush_recall_touches,
     increment_ltp_on_rederivation,
+    record_recall_touches,
     stc_promote_and_measure,
 )
 
@@ -114,6 +117,31 @@ async def test_increment_on_rederivation_bumps_once_per_conflict(session):
         {"s": src, "t": tgt},
     )).scalar()
     assert again == 2
+
+
+@pytest.mark.postgres_only
+async def test_recall_touch_buffer_flushes_to_ltp(session):
+    """v1.1: buffered recall reactivations flush to ltp_count by their count,
+    then clear. An edge touched twice in the buffer gains +2."""
+    _RECALL_TOUCH_BUFFER.clear()
+    a, b = await _insert_edge(session, ltp=0, relation="related_to")
+    c, d = await _insert_edge(session, ltp=0, relation="related_to")
+    record_recall_touches([
+        (str(a), str(b), "related_to"),
+        (str(a), str(b), "related_to"),
+        (str(c), str(d), "related_to"),
+    ])
+    n_distinct = await flush_recall_touches(session)
+    assert n_distinct == 2
+    assert len(_RECALL_TOUCH_BUFFER) == 0
+    ab = (await session.execute(
+        text("SELECT ltp_count FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
+        {"s": a, "t": b})).scalar()
+    cd = (await session.execute(
+        text("SELECT ltp_count FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
+        {"s": c, "t": d})).scalar()
+    assert ab == 2
+    assert cd == 1
 
 
 @pytest.mark.postgres_only

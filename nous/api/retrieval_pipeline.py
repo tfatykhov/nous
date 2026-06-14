@@ -297,6 +297,15 @@ async def run_recall_pipeline(
         ]
         excluded_in_context = before - len(results)
 
+    # F044 v1.1: record edges among the final co-retrieved set as STC recall
+    # reactivations. Read-only here (one query); the ltp write is deferred to
+    # the sleep flush, so the recall path stays write-free.
+    if (
+        getattr(settings, "tinyhippo_lite_enabled", False)
+        and getattr(settings, "tinyhippo_recall_touch_enabled", False)
+    ):
+        await _record_recall_reactivation(brain, results)
+
     stats = PipelineStats(
         ce_reranked=False,  # CE rerank happens inside heart.recall already
         mmr_applied=False,  # MMR happens inside heart.recall already
@@ -781,7 +790,7 @@ async def _apply_graph_adjacency_boost(
             # Aligns with the spreading-activation filter at
             # spreading_activation.py:103.
             rows = (await s.execute(sa_text(
-                "SELECT source_id::text, target_id::text, weight "
+                "SELECT source_id::text, target_id::text, weight, consolidation_state "
                 "FROM brain.graph_edges "
                 "WHERE agent_id = :a "
                 "  AND relation != 'contradicts' "
@@ -794,9 +803,19 @@ async def _apply_graph_adjacency_boost(
         logger.warning("Adjacency boost failed; returning unboosted results", exc_info=True)
         return results
 
+    # F044 v1.1: weight consolidated edges higher so STC consolidation actually
+    # influences ranking — a candidate connected via a frequently-reactivated
+    # (consolidated) edge gets a larger adjacency degree than one connected via a
+    # provisional (tagged) edge. Inert unless tinyhippo_lite_enabled.
+    s_cfg = getattr(brain, "settings", None)
+    stc_on = bool(getattr(s_cfg, "tinyhippo_lite_enabled", False))
+    cons_factor = float(getattr(s_cfg, "tinyhippo_consolidated_boost_factor", 1.0)) if stc_on else 1.0
+
     degree: dict[str, float] = {}
-    for src, tgt, w in rows:
-        w = float(w or 0.0)
+    for row in rows:
+        src, tgt, w = row[0], row[1], float(row[2] or 0.0)
+        if stc_on and len(row) > 3 and row[3] == "consolidated":
+            w *= cons_factor
         degree[src] = degree.get(src, 0.0) + w
         degree[tgt] = degree.get(tgt, 0.0) + w
 
@@ -813,6 +832,40 @@ async def _apply_graph_adjacency_boost(
         boosted.append(replace(r, score=(r.score or 0.0) * boost))
     boosted.sort(key=lambda r: r.score or 0.0, reverse=True)
     return boosted
+
+
+async def _record_recall_reactivation(
+    brain: "Brain", results: list[PipelineResult],
+) -> None:
+    """F044 v1.1: buffer edges among co-retrieved results as STC reactivations.
+
+    An edge whose BOTH endpoints appear in this recall's final result set was
+    reactivated by the retrieval (retrieval == reactivation). We read those
+    edges (excluding ``contradicts``, mirroring the adjacency boost) and buffer
+    their (source, target, relation) keys in-process; the ltp write happens at
+    the next sleep flush. Fails open — reinforcement is best-effort.
+    """
+    from sqlalchemy import text as sa_text
+
+    if not results or len(results) < 2:
+        return
+    candidate_ids = [str(r.id) for r in results]
+    try:
+        async with brain.db.session() as s:
+            rows = (await s.execute(sa_text(
+                "SELECT source_id::text, target_id::text, relation "
+                "FROM brain.graph_edges "
+                "WHERE agent_id = :a "
+                "  AND relation != 'contradicts' "
+                "  AND source_id = ANY(CAST(:ids AS uuid[])) "
+                "  AND target_id = ANY(CAST(:ids AS uuid[]))"
+            ), {"a": brain.agent_id, "ids": candidate_ids})).all()
+    except Exception:
+        logger.warning("F044 recall reactivation read failed; skipping", exc_info=True)
+        return
+    if rows:
+        from nous.brain.tinyhippo_lite import record_recall_touches
+        record_recall_touches([(src, tgt, rel) for src, tgt, rel in rows])
 
 
 async def _attach_fact_source_episodes(

@@ -18,9 +18,60 @@ downstream consumer reads yet) and reports counts.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from sqlalchemy import text
+
+# F044 v1.1 — buffered recall-touch reinforcement. Edges among co-retrieved
+# results are "reactivated" by a recall (retrieval == STC reactivation). We
+# accumulate them in a process-global buffer so the read path stays write-free,
+# then flush to ltp_count at sleep. Single-process scope (the sleep handler and
+# the recall path share this module in one process); cross-worker touches in a
+# multi-worker prod deploy are a known v1.1 limitation.
+_RECALL_TOUCH_BUFFER: "Counter[tuple[str, str, str]]" = Counter()
+
+
+def record_recall_touches(edges: list[tuple[str, str, str]]) -> None:
+    """Buffer (source_id, target_id, relation) edges reactivated by one recall."""
+    for e in edges:
+        _RECALL_TOUCH_BUFFER[e] += 1
+
+
+def _recall_buffer_size() -> int:
+    """Distinct buffered edges (test/telemetry helper)."""
+    return len(_RECALL_TOUCH_BUFFER)
+
+
+_LTP_INCREMENT_BY_SQL = text(
+    """
+    UPDATE brain.graph_edges
+       SET ltp_count = ltp_count + :n,
+           last_ltp_at = now()
+     WHERE source_id = :source_id
+       AND target_id = :target_id
+       AND relation = :relation
+    """
+)
+
+
+async def flush_recall_touches(session: Any) -> int:
+    """Apply buffered recall touches to ltp_count and clear the buffer.
+
+    Called at sleep (before the promotion gate). Each distinct edge is bumped by
+    its buffered touch count. Returns the number of distinct edges reinforced.
+    """
+    if not _RECALL_TOUCH_BUFFER:
+        return 0
+    items = list(_RECALL_TOUCH_BUFFER.items())
+    _RECALL_TOUCH_BUFFER.clear()
+    for (source_id, target_id, relation), n in items:
+        await session.execute(
+            _LTP_INCREMENT_BY_SQL,
+            {"source_id": source_id, "target_id": target_id,
+             "relation": relation, "n": int(n)},
+        )
+    return len(items)
 
 # Cumulative-reinforcement histogram buckets reported each cycle. The whole
 # bet hinges on this distribution shifting right over cycles; if edges stay at
@@ -119,6 +170,8 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
     dict for merging into ``sleep_stats``.
     """
     async with db.session() as session:
+        touched = await flush_recall_touches(session)
         stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
         await session.commit()
+    stats["f044_recall_touches_flushed"] = touched
     return stats

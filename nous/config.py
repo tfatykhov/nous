@@ -705,6 +705,19 @@ class Settings(BaseSettings):
     tinyhippo_prp_threshold: int = Field(
         default=3, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD"
     )
+    # v1.1: reinforce edges among co-retrieved results on recall (retrieval ==
+    # reactivation). Buffered (write-free read path), flushed at sleep. Only
+    # active when tinyhippo_lite_enabled. Reaches the densifier-built bulk the
+    # write-linker never re-derives.
+    tinyhippo_recall_touch_enabled: bool = Field(
+        default=True, validation_alias="NOUS_TINYHIPPO_RECALL_TOUCH_ENABLED"
+    )
+    # v1.1: weight consolidated edges higher in the graph adjacency boost so
+    # consolidation actually influences retrieval ranking (multiplier applied to
+    # a consolidated edge's contribution to a candidate's adjacency degree).
+    tinyhippo_consolidated_boost_factor: float = Field(
+        default=2.0, validation_alias="NOUS_TINYHIPPO_CONSOLIDATED_BOOST_FACTOR"
+    )
 
     graph_backfill_enabled: bool = True
     graph_backfill_max_facts: int = 50
