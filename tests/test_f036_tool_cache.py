@@ -14,8 +14,13 @@ from nous.api.tools import ToolDispatcher
 # ---------------------------------------------------------------------------
 
 def _make_dispatcher() -> ToolDispatcher:
-    """Create a ToolDispatcher with two registered dummy tools."""
-    dispatcher = ToolDispatcher()
+    """Create a ToolDispatcher with two registered dummy tools.
+
+    stable_tool_set_enabled=False isolates the F036 cache mechanism + per-frame
+    FRAME_TOOLS mapping under test from the cache-stabilization collapse (which
+    is covered separately in test_stable_tool_set.py).
+    """
+    dispatcher = ToolDispatcher(stable_tool_set_enabled=False)
 
     async def dummy(**kwargs):
         return {"content": [{"type": "text", "text": "ok"}]}

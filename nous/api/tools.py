@@ -37,6 +37,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# Protocol-only tools registered for the one-time `initiation` frame. They must
+# never leak into the conversational-frame tool superset (the "*" / task set).
+_INITIATION_ONLY_TOOLS: frozenset[str] = frozenset(
+    {"store_identity", "complete_initiation"}
+)
+
+
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
 
@@ -46,11 +53,20 @@ class ToolDispatcher:
     The dispatcher extracts plain text for the Anthropic API tool_result format.
     """
 
-    def __init__(self, *, tool_schema_cache_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        tool_schema_cache_enabled: bool = True,
+        stable_tool_set_enabled: bool = True,
+    ) -> None:
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._schemas: dict[str, dict[str, Any]] = {}  # P0-7 fix
         self._tool_schema_cache: dict[str, list[dict[str, Any]]] = {}  # F036
         self._tool_schema_cache_enabled = tool_schema_cache_enabled  # F036
+        # Cache stabilization: collapse conversational frames to one tool
+        # superset so the Anthropic prompt-cache prefix isn't busted on frame
+        # change (tools sit at the front of the cacheable prefix).
+        self._stable_tool_set_enabled = stable_tool_set_enabled
 
     def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
         """Register a tool handler with its JSON schema."""
@@ -115,18 +131,39 @@ class ToolDispatcher:
 
         F036: Results cached per frame_id. Returns deep copy to prevent
         mutation from corrupting the cache.
+
+        Cache stabilization: when stable_tool_set_enabled, all non-initiation
+        frames resolve to the same "task" ("*") superset so the Anthropic
+        prompt-cache prefix (tools sit at its front) is not busted when the
+        frame changes turn-to-turn. Per-frame *behavioral* steering still
+        happens via _get_frame_instructions; FRAME_TOOLS no longer gates the
+        wire-level tool array for these frames. 'initiation' keeps its distinct
+        minimal set (isolated one-time protocol, never interleaved with chat).
         """
+        # Collapse conversational frames to one cache-stable superset. The
+        # effective frame is used as BOTH the cache key and the FRAME_TOOLS
+        # lookup, so every non-initiation frame returns a byte-identical list.
+        effective_frame = (
+            "task"
+            if self._stable_tool_set_enabled and frame_id != "initiation"
+            else frame_id
+        )
+
         # F036: Check cache first (skip if caching disabled)
-        if self._tool_schema_cache_enabled and frame_id in self._tool_schema_cache:
-            return copy.deepcopy(self._tool_schema_cache[frame_id])
+        if self._tool_schema_cache_enabled and effective_frame in self._tool_schema_cache:
+            return copy.deepcopy(self._tool_schema_cache[effective_frame])
 
         from nous.api.runner import FRAME_TOOLS
 
-        allowed = FRAME_TOOLS.get(frame_id, [])
+        allowed = FRAME_TOOLS.get(effective_frame, [])
 
-        # Wildcard means all tools
+        # Wildcard means all tools — minus initiation-only protocol tools,
+        # which must never leak into a conversational-frame tool array.
         if "*" in allowed:
-            result = self.tool_definitions()
+            result = [
+                d for d in self.tool_definitions()
+                if d["name"] not in _INITIATION_ONLY_TOOLS
+            ]
         else:
             result = [
                 {
@@ -140,7 +177,7 @@ class ToolDispatcher:
 
         # F036: Cache and return deep copy
         if self._tool_schema_cache_enabled:
-            self._tool_schema_cache[frame_id] = result
+            self._tool_schema_cache[effective_frame] = result
             return copy.deepcopy(result)
         return result
 
