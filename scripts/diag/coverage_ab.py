@@ -83,7 +83,8 @@ async def main() -> None:
         eps = await conn.fetch(
             """SELECT e.id FROM heart.episodes e
                WHERE e.agent_id=$1
-                 AND EXISTS(SELECT 1 FROM heart.episode_chunks c WHERE c.episode_id=e.id)
+                 AND EXISTS(SELECT 1 FROM heart.episode_chunks c WHERE c.episode_id=e.id
+                            AND c.source_kind IS DISTINCT FROM 'document')
                ORDER BY random() LIMIT $2""", AGENT, N)
         co = [0, 0]
         cn = [0, 0]
@@ -91,7 +92,8 @@ async def main() -> None:
         print(f"model={base.background_model}  episodes={len(eps)}\n")
         for row in eps:
             chunks = await conn.fetch(
-                "SELECT content FROM heart.episode_chunks WHERE episode_id=$1 ORDER BY chunk_index",
+                "SELECT content FROM heart.episode_chunks WHERE episode_id=$1 "
+                "AND source_kind IS DISTINCT FROM 'document' ORDER BY chunk_index",
                 row["id"])
             transcript = "\n".join(c["content"] for c in chunks if c["content"])[:14000]
             if len(transcript) < 200:

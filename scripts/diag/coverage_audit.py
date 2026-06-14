@@ -89,7 +89,8 @@ async def main() -> None:
             """
             SELECT e.id FROM heart.episodes e
             WHERE e.agent_id = $1
-              AND EXISTS (SELECT 1 FROM heart.episode_chunks c WHERE c.episode_id = e.id)
+              AND EXISTS (SELECT 1 FROM heart.episode_chunks c WHERE c.episode_id = e.id
+                          AND c.source_kind IS DISTINCT FROM 'document')
             ORDER BY random() LIMIT $2
             """, AGENT, N)
 
@@ -104,7 +105,7 @@ async def main() -> None:
             ep_id = row["id"]
             chunks = await conn.fetch(
                 "SELECT content FROM heart.episode_chunks WHERE episode_id = $1 "
-                "ORDER BY chunk_index", ep_id)
+                "AND source_kind IS DISTINCT FROM 'document' ORDER BY chunk_index", ep_id)
             transcript = "\n".join(c["content"] for c in chunks if c["content"])[:14000]
             facts = await conn.fetch(
                 "SELECT content FROM heart.facts WHERE source_episode_id = $1", ep_id)
