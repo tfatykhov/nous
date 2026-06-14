@@ -694,6 +694,18 @@ class Settings(BaseSettings):
     spreading_activation_gamma: float = 0.2
 
     # F040: Graph densification — backfill
+    # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).
+    # Master switch (default OFF): gates both the reinforcement hooks and the
+    # _phase_stc_consolidation sleep phase. When False, sleep + edge inserts
+    # behave bit-identically to pre-F044 main.
+    tinyhippo_lite_enabled: bool = Field(
+        default=False, validation_alias="NOUS_TINYHIPPO_LITE_ENABLED"
+    )
+    # PRP analog: a tagged edge consolidates once ltp_count >= this threshold.
+    tinyhippo_prp_threshold: int = Field(
+        default=3, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD"
+    )
+
     graph_backfill_enabled: bool = True
     graph_backfill_max_facts: int = 50
     graph_backfill_max_decisions: int = 30
