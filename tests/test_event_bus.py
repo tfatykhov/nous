@@ -65,6 +65,12 @@ def _mock_settings(**overrides) -> MagicMock:
     # Mock, sending the summarizer into the F067 chunking path with Mock
     # numeric settings (TypeError in chunk_text).
     s.episode_chunks_enabled = False
+    # Same footgun: extraction_coverage_broadened would be a truthy Mock,
+    # taking cap_candidate_facts down the broadened path with a Mock stable
+    # limit (slices to 1 via MagicMock.__index__). Pin the flag + int caps.
+    s.extraction_coverage_broadened = False
+    s.candidate_facts_event_limit = 30
+    s.candidate_facts_stable_limit = 15
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
