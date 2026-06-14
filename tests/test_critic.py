@@ -324,6 +324,34 @@ class TestDiagnosticCritics:
             d.fired and d.critic_name == "confidence_drift" for d in results
         )
 
+    def test_confidence_drift_handles_string_confidence(self):
+        """2026-06-14 prod bug: the LLM passes confidence as a STRING via tool
+        args; `"0.2" < 0.4` raised "'<' not supported between instances of
+        'str' and 'float'". Numeric strings must parse and still trip the gate."""
+        agent = CriticAgent(_settings())
+        tool_history = [
+            {"tool": "record_decision", "confidence": "0.3"},
+            {"tool": "record_decision", "confidence": "0.25"},
+            {"tool": "record_decision", "confidence": "0.2"},
+        ]
+        results = agent.run_diagnostics(tool_history, turn_number=1)
+        assert any(d.fired and d.critic_name == "confidence_drift" for d in results)
+
+    def test_confidence_drift_handles_non_numeric_string(self):
+        """A non-numeric confidence string must not crash; it coerces to the
+        neutral 0.5 (not low), so the gate does not fire."""
+        agent = CriticAgent(_settings())
+        tool_history = [
+            {"tool": "record_decision", "confidence": "high"},
+            {"tool": "record_decision", "confidence": "0.2"},
+            {"tool": "record_decision", "confidence": 0.3},
+        ]
+        # Must not raise; "high" -> 0.5 breaks the all(<0.4) gate.
+        results = agent.run_diagnostics(tool_history, turn_number=1)
+        assert not any(
+            d.fired and d.critic_name == "confidence_drift" for d in results
+        )
+
     def test_frame_mismatch_detector(self):
         agent = CriticAgent(_settings())
         tool_history = [
