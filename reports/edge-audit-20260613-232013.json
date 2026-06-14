@@ -1,0 +1,107 @@
+{
+  "generated_utc": "2026-06-13T23:20:13.784482+00:00",
+  "since": null,
+  "limit_per_type": 30,
+  "threshold": 0.75,
+  "relations": [
+    {
+      "relation": "caused_by",
+      "n": 2,
+      "yes": 0,
+      "weak": 2,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 0.0
+    },
+    {
+      "relation": "co_occurred",
+      "n": 30,
+      "yes": 20,
+      "weak": 5,
+      "no": 5,
+      "parse_error": 0,
+      "precision": 0.6666666666666666
+    },
+    {
+      "relation": "discussed_in",
+      "n": 2,
+      "yes": 1,
+      "weak": 1,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 0.5
+    },
+    {
+      "relation": "evidence_for",
+      "n": 30,
+      "yes": 21,
+      "weak": 8,
+      "no": 1,
+      "parse_error": 0,
+      "precision": 0.7
+    },
+    {
+      "relation": "extracted_from",
+      "n": 30,
+      "yes": 13,
+      "weak": 10,
+      "no": 7,
+      "parse_error": 0,
+      "precision": 0.43333333333333335
+    },
+    {
+      "relation": "happened_before",
+      "n": 30,
+      "yes": 8,
+      "weak": 4,
+      "no": 18,
+      "parse_error": 0,
+      "precision": 0.26666666666666666
+    },
+    {
+      "relation": "informed_by",
+      "n": 29,
+      "yes": 23,
+      "weak": 3,
+      "no": 3,
+      "parse_error": 0,
+      "precision": 0.7931034482758621
+    },
+    {
+      "relation": "part_of",
+      "n": 1,
+      "yes": 1,
+      "weak": 0,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 1.0
+    },
+    {
+      "relation": "related_to",
+      "n": 30,
+      "yes": 27,
+      "weak": 3,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 0.9
+    },
+    {
+      "relation": "summarized_by",
+      "n": 30,
+      "yes": 29,
+      "weak": 1,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 0.9666666666666667
+    },
+    {
+      "relation": "supersedes",
+      "n": 30,
+      "yes": 27,
+      "weak": 0,
+      "no": 3,
+      "parse_error": 0,
+      "precision": 0.9
+    }
+  ]
+}

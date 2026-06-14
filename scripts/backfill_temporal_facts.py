@@ -117,7 +117,13 @@ async def _fetch_chunk_context(
 _CLASSIFY_SYSTEM = (
     "You extract the single calendar date an event happened on, from a memory "
     "fact and its source context. Only use a date explicitly present in the "
-    "text — never guess. If there is no clear single event date, return null."
+    "text — never guess. If there is no clear single event date, return null.\n"
+    "Do NOT return the publication, arXiv, release, or version date of a paper, "
+    "article, library, model, or other referenced artifact — that is "
+    "bibliographic metadata, not an event. Return null for a fact that is just "
+    "describing or citing such an artifact.\n"
+    "Only return a date when you can pin the event to a specific DAY. If only a "
+    "month or year is known, return null — never default to the 1st of the month."
 )
 
 
@@ -141,9 +147,21 @@ async def _classify_event_date(
     """
     content = row["content"]
     context = (chunk_context or content)[:1500]
+    learned_at = row.get("learned_at")
+    anchor = ""
+    if learned_at is not None:
+        # Year anchor: relative/ambiguous dates must resolve against when the
+        # fact was recorded, not default to a prior year (fixes the wrong-year
+        # bug behind the 365-day happened_before chains).
+        anchor = (
+            f"This fact was recorded on {learned_at:%Y-%m-%d}. Resolve the YEAR "
+            f"of any relative or ambiguous date against that — never assume a "
+            f"prior year.\n\n"
+        )
     user_message = (
         f"Fact: {content}\n\n"
         f"Source context:\n{context}\n\n"
+        f"{anchor}"
         "Return the YYYY-MM-DD date this fact's event happened on, or null if "
         "no clear single date is present."
     )
@@ -175,6 +193,17 @@ async def _classify_event_date(
     return (validated, not malformed)
 
 
+def _eligibility_clause(reclassify: bool) -> str:
+    """SQL predicate selecting which facts to (re)classify.
+
+    Default backfill: never-classified rows (``event_date_classified_at IS NULL``).
+    ``--reclassify``: rows that ALREADY carry a date — used to re-examine the
+    suspect population after a prompt fix (bibliographic / wrong-year dates from
+    the pre-fix prompt). A re-examined bibliographic fact is corrected to NULL.
+    """
+    return "event_date IS NOT NULL" if reclassify else "event_date_classified_at IS NULL"
+
+
 async def _process_batch(
     session: AsyncSession,
     agent_id: str,
@@ -184,6 +213,7 @@ async def _process_batch(
     client,
     model: str,
     cursor: tuple | None,
+    reclassify: bool = False,
 ) -> tuple[int, bool, tuple | None, int]:
     """Classify one keyset-paginated batch of never-classified facts.
 
@@ -196,6 +226,7 @@ async def _process_batch(
     NULL rows are naturally retried on the next run.
     """
     params: dict = {"agent_id": agent_id, "batch_size": batch_size}
+    elig_clause = _eligibility_clause(reclassify)
     cursor_clause = ""
     if cursor is not None:
         cursor_clause = "AND (learned_at, id) < (:cur_la, :cur_id)"
@@ -208,7 +239,7 @@ async def _process_batch(
                    source_episode_id, learned_at
             FROM heart.facts
             WHERE agent_id = :agent_id
-              AND event_date_classified_at IS NULL
+              AND {elig_clause}
               AND active = TRUE
               {cursor_clause}
             ORDER BY learned_at DESC, id DESC
@@ -267,6 +298,7 @@ async def run_temporal_backfill(
     agent_id: str,
     batch_size: int,
     token_budget: int,
+    reclassify: bool = False,
 ) -> dict:
     """Lock-protected batch loop + happened_before edge build. Returns stats."""
     key = _advisory_lock_key(agent_id)
@@ -289,7 +321,7 @@ async def run_temporal_backfill(
                     updated, stop, cursor, fetched = await _process_batch(
                         work_session, agent_id, batch_size, budget,
                         client=client, model=settings.background_model,
-                        cursor=cursor,
+                        cursor=cursor, reclassify=reclassify,
                     )
                 total += updated
                 logger.info("F075 backfill: %d facts classified so far", total)
@@ -315,14 +347,14 @@ async def run_temporal_backfill(
     return {"agent_id": agent_id, "classified": total, "happened_before_edges": edges}
 
 
-async def _count_eligible(db: Database, agent_id: str) -> int:
+async def _count_eligible(db: Database, agent_id: str, reclassify: bool = False) -> int:
     async with db.session_factory() as session:
         result = await session.execute(
             text(
-                """
+                f"""
                 SELECT COUNT(*) FROM heart.facts
                 WHERE agent_id = :agent_id
-                  AND event_date_classified_at IS NULL
+                  AND {_eligibility_clause(reclassify)}
                   AND active = TRUE
                 """
             ),
@@ -346,13 +378,14 @@ async def _main(args) -> None:
     db = Database(settings)
     await db.connect()
     try:
-        eligible = await _count_eligible(db, args.agent_id)
+        eligible = await _count_eligible(db, args.agent_id, args.reclassify)
         if args.dry_run:
             calls = min(eligible, max(0, token_budget // _TOKENS_PER_LLM_CALL))
             est_tokens = calls * _TOKENS_PER_LLM_CALL
+            mode = "already-dated (reclassify)" if args.reclassify else "never-classified"
             print(
                 f"[dry-run] agent={args.agent_id}: {eligible} facts eligible "
-                f"(event_date_classified_at IS NULL). With token budget "
+                f"({mode}). With token budget "
                 f"{token_budget}, would classify ~{calls} this run "
                 f"(~{est_tokens} tokens, no LLM calls made)."
             )
@@ -369,6 +402,7 @@ async def _main(args) -> None:
                 agent_id=args.agent_id,
                 batch_size=args.batch_size,
                 token_budget=token_budget,
+                reclassify=args.reclassify,
             )
         finally:
             await client.close()
@@ -389,6 +423,13 @@ def main() -> None:
         "NOUS_TEMPORAL_BACKFILL_DEFAULT_TOKEN_BUDGET.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Estimate only; no LLM calls")
+    parser.add_argument(
+        "--reclassify",
+        action="store_true",
+        help="Re-examine facts that ALREADY have an event_date (corrects "
+        "bibliographic / wrong-year dates from the pre-fix prompt) instead of "
+        "only never-classified rows.",
+    )
     asyncio.run(_main(parser.parse_args()))
 
 

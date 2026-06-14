@@ -111,13 +111,23 @@ Examples:
     {"subject": "v2.1 deployment", "content": "Team deployed v2.1 to staging on 2024-04-09.",
      "category": "event", "event_date": "2024-04-09"}
 
+DO NOT set event_date for these — they are metadata, not events in the user's
+timeline (extract the fact WITHOUT event_date):
+  - The publication / arXiv / release / version date of a paper, article,
+    library, model, or any artifact the user is merely reading, citing, or
+    discussing. "(Xu, Jan 2026, arXiv:2601.01743)" is bibliographic metadata,
+    not something that happened on a timeline.
+  - Any date you cannot pin to a specific DAY. If only a month or year is known
+    ("Feb 2026", "last spring"), OMIT event_date — never default to the 1st.
+
 CRITICAL: extract dates from the TRANSCRIPT text (above), not from any summary
 you have generated. Dates mentioned in passing — inside code blocks, user
 asides, scheduling discussions — are just as important as headline dates.
 Resolve relative phrases ("yesterday", "last week", "3 days ago") against
-the EPISODE_START_TIMESTAMP block when one is provided. If a date is
-ambiguous or unresolvable, OMIT event_date (set null) but still extract the
-fact without the date field — it becomes a stable fact."""
+the EPISODE_START_TIMESTAMP block when one is provided, and take the YEAR from
+it — never assume a prior year. If a date is ambiguous or unresolvable, OMIT
+event_date (set null) but still extract the fact without the date field — it
+becomes a stable fact."""
 
 
 _F075_EPISODE_TS_BLOCK = "EPISODE_START_TIMESTAMP: {iso}\n\n"

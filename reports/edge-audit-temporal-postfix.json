@@ -1,0 +1,80 @@
+{
+  "generated_utc": "2026-06-13T23:59:51.446944+00:00",
+  "since": null,
+  "limit_per_type": 30,
+  "threshold": 0.75,
+  "relations": [
+    {
+      "relation": "co_occurred",
+      "n": 30,
+      "yes": 18,
+      "weak": 4,
+      "no": 8,
+      "parse_error": 0,
+      "precision": 0.6
+    },
+    {
+      "relation": "discussed_in",
+      "n": 2,
+      "yes": 1,
+      "weak": 1,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 0.5
+    },
+    {
+      "relation": "evidence_for",
+      "n": 30,
+      "yes": 23,
+      "weak": 4,
+      "no": 3,
+      "parse_error": 0,
+      "precision": 0.7666666666666667
+    },
+    {
+      "relation": "extracted_from",
+      "n": 30,
+      "yes": 13,
+      "weak": 14,
+      "no": 3,
+      "parse_error": 0,
+      "precision": 0.43333333333333335
+    },
+    {
+      "relation": "happened_before",
+      "n": 8,
+      "yes": 5,
+      "weak": 1,
+      "no": 2,
+      "parse_error": 0,
+      "precision": 0.625
+    },
+    {
+      "relation": "informed_by",
+      "n": 26,
+      "yes": 22,
+      "weak": 2,
+      "no": 2,
+      "parse_error": 0,
+      "precision": 0.8461538461538461
+    },
+    {
+      "relation": "related_to",
+      "n": 18,
+      "yes": 16,
+      "weak": 2,
+      "no": 0,
+      "parse_error": 0,
+      "precision": 0.8888888888888888
+    },
+    {
+      "relation": "supersedes",
+      "n": 30,
+      "yes": 28,
+      "weak": 1,
+      "no": 1,
+      "parse_error": 0,
+      "precision": 0.9333333333333333
+    }
+  ]
+}

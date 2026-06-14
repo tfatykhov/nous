@@ -81,3 +81,48 @@ async def test_classify_no_result_is_not_stamped(monkeypatch):
     """A transient LLM failure (no structured result) stays eligible."""
     result = await _classify_with_llm_returning(monkeypatch, None)
     assert result == (None, False)
+
+
+async def test_classify_injects_year_anchor_from_learned_at(monkeypatch):
+    """When the row carries learned_at, the prompt anchors the YEAR to it so a
+    relative date doesn't resolve to a prior year (the 365-day-chain bug)."""
+    from datetime import datetime
+
+    captured: dict = {}
+
+    async def _stub(*_a, **kw):
+        captured.update(kw)
+        return {"event_date": None}
+
+    monkeypatch.setattr(backfill, "call_background_llm_structured", _stub)
+    await _classify_event_date(
+        client=object(),
+        model="m",
+        row={"content": "deployed v2 last Tuesday", "learned_at": datetime(2026, 5, 25)},
+        chunk_context=None,
+    )
+    assert "2026-05-25" in captured["user_message"]
+    assert "never assume a prior year" in captured["user_message"]
+
+
+async def test_classify_no_anchor_without_learned_at(monkeypatch):
+    """Backward compat: a row lacking learned_at gets no anchor line."""
+    captured: dict = {}
+
+    async def _stub(*_a, **kw):
+        captured.update(kw)
+        return {"event_date": None}
+
+    monkeypatch.setattr(backfill, "call_background_llm_structured", _stub)
+    await _classify_event_date(
+        client=object(), model="m", row={"content": "x"}, chunk_context=None
+    )
+    assert "recorded on" not in captured["user_message"]
+
+
+def test_classify_system_excludes_bibliographic_and_month_granularity():
+    """Regression: the two measured failure modes (bibliographic publication
+    dates, month-only false precision) must stay excluded in the system prompt."""
+    sys = backfill._CLASSIFY_SYSTEM.lower()
+    assert "arxiv" in sys and "publication" in sys
+    assert "specific day" in sys and "1st of the month" in sys
