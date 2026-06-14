@@ -811,17 +811,26 @@ async def _apply_graph_adjacency_boost(
     stc_on = bool(getattr(s_cfg, "tinyhippo_lite_enabled", False))
     cons_factor = float(getattr(s_cfg, "tinyhippo_consolidated_boost_factor", 1.0)) if stc_on else 1.0
 
+    # degree = consolidation-scaled adjacency; raw_degree = unscaled baseline.
+    # We normalize by the RAW max, not the scaled max — otherwise the ×factor
+    # scales both numerator and denominator and cancels out (capping a
+    # consolidated candidate's boost at the tagged ceiling instead of pushing it
+    # above). With raw-max normalization a consolidated-connected candidate's
+    # ratio exceeds 1.0 and the factor actually bites. When stc is off,
+    # degree == raw_degree, so OFF behavior is byte-identical to pre-F044.
     degree: dict[str, float] = {}
+    raw_degree: dict[str, float] = {}
     for row in rows:
         src, tgt, w = row[0], row[1], float(row[2] or 0.0)
-        if stc_on and len(row) > 3 and row[3] == "consolidated":
-            w *= cons_factor
-        degree[src] = degree.get(src, 0.0) + w
-        degree[tgt] = degree.get(tgt, 0.0) + w
+        eff = w * cons_factor if (stc_on and len(row) > 3 and row[3] == "consolidated") else w
+        degree[src] = degree.get(src, 0.0) + eff
+        degree[tgt] = degree.get(tgt, 0.0) + eff
+        raw_degree[src] = raw_degree.get(src, 0.0) + w
+        raw_degree[tgt] = raw_degree.get(tgt, 0.0) + w
 
     if not degree:
         return results
-    max_deg = max(degree.values())
+    max_deg = max(raw_degree.values())
     if max_deg <= 0:
         return results
 
