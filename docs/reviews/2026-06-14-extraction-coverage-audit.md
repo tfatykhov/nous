@@ -112,3 +112,32 @@ flipping `NOUS_EXTRACTION_COVERAGE_BROADENED=true`.
   `coverage_audit.py`, P2). The **authoritative delivered-coverage measure is
   the QA flip-gate** — it runs the full storage→admission→retrieval→QA pipeline
   end-to-end, which is what actually gates the prod flip.
+
+### QA flip-gate result (matched Opus BEAM-100K n=5 A/B) — PASS
+
+`scripts/diag/beam_flipgate.sh`: same corpus, same session, Opus, OFF then ON.
+
+| ability | OFF | ON | Δ |
+|---|---|---|---|
+| temporal_reasoning | 0.575 | 0.625 | **+0.050** |
+| abstention | 0.950 | 1.000 | +0.050 |
+| knowledge_update | 0.575 | 0.600 | +0.025 |
+| contradiction_resolution | 0.794 | 0.806 | +0.013 |
+| information_extraction | 0.729 | 0.738 | +0.008 |
+| multi_session_reasoning | 0.751 | 0.732 | −0.019 |
+| event_ordering | 0.039 | 0.036 | −0.003 |
+| **AGGREGATE** | **0.654** | **0.667** | **+0.013** |
+
+**No QA regression — a small net gain (+0.013), concentrated in the
+coverage-relevant abilities** (temporal_reasoning, knowledge_update,
+information_extraction, abstention). `event_ordering` stays flat (canonical-event
+topical-choice gated, not coverage-gated). Both measures now agree — recall up
+(0.73→0.91) AND QA up — so the gate **passes**: recommend
+`NOUS_EXTRACTION_COVERAGE_BROADENED=true` in prod.
+
+The first flip-gate attempt was confounded and stopped early: it surfaced (a)
+eval-scratch `graph_edges` constraint drift (synced), and (b) a **flag-correlated
+parse crash** — broadened (longer) output more often makes
+`_summarize_single`'s `parse_llm_json` return a bare list, crashing the episode's
+fact storage. Fixed as a real prod robustness bug (non-dict parse → clean skip,
+not a crash) so the matched A/B isn't biased against the ON arm.

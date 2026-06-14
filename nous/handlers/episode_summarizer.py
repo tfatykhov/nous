@@ -563,10 +563,22 @@ class EpisodeSummarizer:
             return None
 
         try:
-            return parse_llm_json(text)
+            result = parse_llm_json(text)
         except json.JSONDecodeError as e:
             logger.warning("Summary generation failed: %s", e)
             return None
+        # parse_llm_json can return a bare list when the model emits a JSON
+        # array instead of the summary object (truncation / format drift —
+        # more likely with the longer coverage-broadened output). The caller
+        # and _merge_summaries call .get() on the result, so a non-dict must be
+        # a clean skip (None), not a crash that loses the whole episode.
+        if not isinstance(result, dict):
+            logger.warning(
+                "Summary parse returned %s, not an object; skipping summary",
+                type(result).__name__,
+            )
+            return None
+        return result
 
     def _chunk_transcript(self, transcript: str, max_chars: int = 16000) -> list[str]:
         """F025 P3-B: Split long transcript into chunks at turn boundaries.
