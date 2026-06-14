@@ -138,6 +138,45 @@ class TestFindContradictionCandidates:
         result = await heart.find_contradiction_candidates(limit=10)
         assert result == []
 
+    @pytest.mark.asyncio
+    async def test_recheck_cooldown_clause_gated(self):
+        """F031 re-check cooldown (2026-06-14): the candidate SQL skips pairs
+        with a recent GENUINE keep-both resolution when cooldown_days>0, and
+        omits the clause at 0. raw_action='KEEP_BOTH' so truncation-downgraded
+        merges still retry."""
+        from types import SimpleNamespace
+
+        from nous.heart.facts import FactManager
+
+        captured: dict = {}
+
+        class _EmptyResult:
+            def all(self):
+                return []
+
+            def __iter__(self):
+                return iter([])
+
+        async def _exec(sql, params):
+            captured["sql"] = str(sql)
+            captured["params"] = dict(params)
+            return _EmptyResult()
+
+        session = SimpleNamespace(execute=_exec)
+        mgr = FactManager.__new__(FactManager)
+        mgr.agent_id = "a"
+
+        mgr._settings = SimpleNamespace(contradiction_recheck_cooldown_days=30)
+        await mgr._find_contradiction_candidates(10, session)
+        assert "NOT EXISTS" in captured["sql"]
+        assert "raw_action" in captured["sql"] and "KEEP_BOTH" in captured["sql"]
+        assert captured["params"].get("cooldown_days") == 30
+
+        mgr._settings = SimpleNamespace(contradiction_recheck_cooldown_days=0)
+        await mgr._find_contradiction_candidates(10, session)
+        assert "NOT EXISTS" not in captured["sql"]
+        assert "cooldown_days" not in captured["params"]
+
 
 # ===========================================================================
 # Task 2: Orient context in sleep reflection

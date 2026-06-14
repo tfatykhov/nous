@@ -667,6 +667,19 @@ class Settings(BaseSettings):
     contradiction_detection: bool = True
     contradiction_similarity_threshold: float = 0.85
     contradiction_model: str = "claude-haiku-4-5-20251001"
+    contradiction_recheck_cooldown_days: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "F031 re-check cooldown (2026-06-14 audit). find_contradiction_candidates "
+            "had no 'already-resolved' filter, so genuine-KEEP_BOTH pairs (both stay "
+            "active) were re-fetched + re-resolved every sleep cycle forever — wasted "
+            "LLM calls, and at scale they fill the ORDER BY similarity LIMIT slots and "
+            "starve new candidates. When > 0, a pair with an f031_contradiction_resolution "
+            "event within this many days is skipped (re-evaluated after the window, so a "
+            "changed pair still gets reconsidered). 0 disables the cooldown."
+        ),
+    )
 
     # F022 Phase 4: Spreading activation
     spreading_activation_enabled: str = "auto"  # "auto", "true", "false"

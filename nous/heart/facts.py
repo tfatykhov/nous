@@ -2056,7 +2056,35 @@ class FactManager:
         limit: int,
         session: AsyncSession,
     ) -> list[dict]:
-        sql = text("""
+        params: dict = {"agent_id": self.agent_id, "limit": limit}
+        # F031 re-check cooldown: skip pairs resolved within the cooldown window
+        # so genuine-KEEP_BOTH pairs aren't re-resolved every sleep cycle (wasted
+        # LLM calls + LIMIT-slot starvation). Reuses the persisted resolution
+        # events — no new table. After the window the pair is reconsidered.
+        cooldown_days = (
+            getattr(self._settings, "contradiction_recheck_cooldown_days", 30)
+            if self._settings is not None else 30
+        )
+        cooldown_clause = ""
+        if cooldown_days and cooldown_days > 0:
+            params["cooldown_days"] = int(cooldown_days)
+            cooldown_clause = """
+              AND NOT EXISTS (
+                  SELECT 1 FROM nous_system.events e
+                  WHERE e.agent_id = :agent_id
+                    AND e.event_type = 'f031_contradiction_resolution'
+                    AND e.created_at > now() - (:cooldown_days * interval '1 day')
+                    -- Only cool down GENUINE keep-both verdicts. Truncation-
+                    -- downgraded merges (raw_action='MERGE') must still retry —
+                    -- they are mergeable and now succeed under the 1000-token cap,
+                    -- so they should NOT be suppressed by the cooldown.
+                    AND e.data->>'raw_action' = 'KEEP_BOTH'
+                    AND (
+                        (e.data->>'fact1_id' = f1.id::text AND e.data->>'fact2_id' = f2.id::text)
+                        OR (e.data->>'fact1_id' = f2.id::text AND e.data->>'fact2_id' = f1.id::text)
+                    )
+              )"""
+        sql = text(f"""
             SELECT f1.id AS fact1_id, f2.id AS fact2_id,
                    f1.content AS content1, f2.content AS content2,
                    f1.created_at AS date1, f2.created_at AS date2,
@@ -2075,10 +2103,11 @@ class FactManager:
               AND f1.active = true
               AND f1.embedding IS NOT NULL
               AND f1.subject IS NOT NULL
+              {cooldown_clause}
             ORDER BY similarity DESC
             LIMIT :limit
         """)
-        result = await session.execute(sql, {"agent_id": self.agent_id, "limit": limit})
+        result = await session.execute(sql, params)
         return [
             {
                 "fact1_id": row.fact1_id,
