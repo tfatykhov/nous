@@ -2,6 +2,14 @@
 OFF vs ON (live summarizer _summarize_single), judge coverage of each, and report
 the lift + the fact-count delta (the noise/bloat side).
 
+NOTE (codex P2): this measures the model OUTPUT of _summarize_single, not the
+post-storage facts — it bypasses _merge_summaries / FactExtractor's
+cap_candidate_facts cap. That is intentional for measuring the prompt's
+extraction richness, and it is faithful to production BECAUSE the storage stable
+cap is now candidate_facts_stable_limit (15) when broadened, which exceeds the
+measured ~5.4 facts/ep — so every extracted fact survives to storage. If the
+broadened output ever exceeds 15/ep, re-check against the stored set.
+
     PROD_PW=... NOUS_BACKGROUND_MODEL=claude-sonnet-4-6 \\
     PYTHONPATH=. uv run python scripts/diag/coverage_ab.py [N]
 """

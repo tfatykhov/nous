@@ -219,6 +219,27 @@ def _try_parse_json(candidate: str, context: str) -> Any | None:
     return None
 
 
+def cap_candidate_facts(candidates: list, settings: Any) -> list:
+    """Partition candidate_facts into dated/stable pools and apply per-pool caps.
+
+    Single source of truth for the F075 dated/stable partition + the
+    coverage-fix stable cap, shared by the summarizer (``_merge_summaries``) and
+    both FactExtractor storage paths so the cap can never drift between them
+    (the 2026-06-14 coverage fix raised the merge cap but the storage paths
+    re-truncated to 5 — codex P1). Dated facts cap at
+    ``candidate_facts_event_limit`` (default 30); stable (non-dated) facts cap at
+    ``candidate_facts_stable_limit`` (default 15) when
+    ``extraction_coverage_broadened`` is on, else the legacy 5. ``settings`` may
+    be None (test ``__new__`` paths) — getattr defaults apply.
+    """
+    dated = [c for c in candidates if isinstance(c, dict) and c.get("event_date")]
+    stable = [c for c in candidates if not (isinstance(c, dict) and c.get("event_date"))]
+    event_limit = getattr(settings, "candidate_facts_event_limit", 30)
+    broadened = getattr(settings, "extraction_coverage_broadened", False)
+    stable_limit = getattr(settings, "candidate_facts_stable_limit", 15) if broadened else 5
+    return dated[:event_limit] + stable[:stable_limit]
+
+
 def parse_llm_json(text: str) -> Any:
     """Parse JSON from LLM response, handling markdown fences and preamble.
 

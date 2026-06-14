@@ -153,3 +153,31 @@ def test_coverage_expansion_instruction_guards():
     assert '"event"' in low and '"status"' in low and '"person"' in low
     assert "queryable" in low
     assert "exclude only pure conversational" in low
+
+
+def test_cap_candidate_facts_single_source_of_truth():
+    """The shared cap helper (summarizer + both FactExtractor storage paths)
+    must apply the stable cap consistently: legacy 5 off, stable_limit on,
+    None settings → legacy defaults."""
+    from types import SimpleNamespace
+
+    from nous.handlers import cap_candidate_facts
+
+    stable = [{"subject": f"s{i}", "content": f"c{i}"} for i in range(20)]
+    dated = [{"content": f"d{i}", "event_date": "2024-01-01"} for i in range(40)]
+    cands = stable + dated
+
+    off = SimpleNamespace(extraction_coverage_broadened=False,
+                          candidate_facts_stable_limit=15, candidate_facts_event_limit=30)
+    r = cap_candidate_facts(cands, off)
+    assert sum(1 for c in r if not c.get("event_date")) == 5
+    assert sum(1 for c in r if c.get("event_date")) == 30
+
+    on = SimpleNamespace(extraction_coverage_broadened=True,
+                         candidate_facts_stable_limit=15, candidate_facts_event_limit=30)
+    r = cap_candidate_facts(cands, on)
+    assert sum(1 for c in r if not c.get("event_date")) == 15
+
+    # None settings (test __new__ paths) → legacy defaults
+    r = cap_candidate_facts(cands, None)
+    assert sum(1 for c in r if not c.get("event_date")) == 5

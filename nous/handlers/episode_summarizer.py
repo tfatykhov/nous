@@ -16,7 +16,7 @@ from uuid import UUID
 
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import LLMClient, call_background_llm, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
 from nous.brain.brain import Brain
 from nous.brain.graph_linker import GraphLinker
 from nous.heart.heart import Heart
@@ -621,18 +621,15 @@ class EpisodeSummarizer:
         # where temporal_reasoning failures originate. Stable cap stays at 5.
         # Double-getattr handles test fixtures that construct the summarizer
         # without _settings (test_f025_chunked.py uses EpisodeSummarizer.__new__).
-        dated = [c for c in merged_candidate_facts if isinstance(c, dict) and c.get("event_date")]
-        stable = [c for c in merged_candidate_facts if not (isinstance(c, dict) and c.get("event_date"))]
-        settings = getattr(self, "_settings", None)
-        event_limit = getattr(settings, "candidate_facts_event_limit", 30)
-        # Coverage fix: the legacy hardcoded stable cap of 5 was a hard ceiling
-        # on multi-chunk episodes (audit: 8K-char transcripts → 1 fact). Raise it
-        # via candidate_facts_stable_limit only when the broadening flag is on.
-        broadened = getattr(settings, "extraction_coverage_broadened", False)
-        stable_limit = (
-            getattr(settings, "candidate_facts_stable_limit", 15) if broadened else 5
+        # F075 + coverage fix: shared partition/cap helper (single source of
+        # truth — the storage paths in FactExtractor use the same helper, so a
+        # broadened merge is never re-truncated downstream). The legacy hardcoded
+        # stable cap of 5 was a hard ceiling on multi-chunk episodes (audit:
+        # 8K-char transcripts → 1 fact); candidate_facts_stable_limit raises it
+        # when extraction_coverage_broadened is on.
+        merged_candidate_facts = cap_candidate_facts(
+            merged_candidate_facts, getattr(self, "_settings", None)
         )
-        merged_candidate_facts = dated[:event_limit] + stable[:stable_limit]
 
         return {
             "title": summaries[0].get("title", "Multi-part episode"),
