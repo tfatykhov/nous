@@ -369,6 +369,19 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             )
         return self._not_fired(name)
 
+    @staticmethod
+    def _coerce_confidence(value: Any) -> float:
+        """Coerce a tool-supplied confidence to float for numeric comparison.
+
+        record_decision confidence arrives from LLM tool args and may be None,
+        a float, or a numeric string ("0.8"). Parse numerics; map None and
+        non-numeric values to a neutral 0.5 (preserves a real 0.0).
+        """
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.5
+
     def _check_confidence_drift(self, tool_history: list[dict[str, Any]]) -> DiagnosticResult:
         """Multiple low-confidence decisions in sequence."""
         name = "confidence_drift"
@@ -380,10 +393,13 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             # default when the key is ABSENT. record_decision may store an
             # explicit confidence=None, which returns None here and crashes the
             # `None < 0.4` comparison below (TypeError) on the non-streaming
-            # post_turn path. Coerce None -> 0.5 while preserving a real 0.0.
+            # post_turn path. 2026-06-14: the LLM also passes confidence as a
+            # STRING ("0.8") via tool args, which raised "'<' not supported
+            # between instances of 'str' and 'float'" in prod. Coerce robustly:
+            # parse numeric strings, map None/non-numeric to a neutral 0.5,
+            # preserve a real 0.0.
             confidences = [
-                c if (c := d.get("confidence")) is not None else 0.5
-                for d in decisions[-3:]
+                self._coerce_confidence(d.get("confidence")) for d in decisions[-3:]
             ]
             if all(c < 0.4 for c in confidences):
                 return self._fire(
