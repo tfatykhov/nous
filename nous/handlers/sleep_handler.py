@@ -871,7 +871,18 @@ class SleepHandler:
                     tool_name="resolve_contradiction",
                     tool_description="Resolve a contradiction between two facts in memory.",
                     output_schema=_CONTRADICTION_RESOLUTION_SCHEMA,
-                    max_tokens=300,
+                    # 300 truncated the tool call: the model writes a ~500-char
+                    # `reason` (schema-ordered before `merged_content`) which
+                    # exhausted the budget, so MERGE verdicts arrived with empty
+                    # merged_content and the safety floor downgraded them to
+                    # KEEP_BOTH. Prod: 708/774 (91%) of intended merges silently
+                    # failed this way, leaving complementary facts unconsolidated.
+                    # Probe (scripts/diag/probe_merge_truncation.py) recovered
+                    # merged_content on 6/6 of those pairs at 800 (observed usage
+                    # ~400 tok: reason ~170 + merged_content ~205). Set to 1000
+                    # for tail headroom — max_tokens is a ceiling, so the extra
+                    # costs nothing unless a generation actually needs it.
+                    max_tokens=1000,
                 )
 
                 if not resolution:
@@ -1264,7 +1275,12 @@ class SleepHandler:
                         "irreconcilable contradictions."
                     ),
                     output_schema=_CLUSTER_MERGE_SCHEMA,
-                    max_tokens=600,
+                    # Align with the pairwise resolver (600 -> 1000): same
+                    # truncation class, and a multi-fact cluster merge can need a
+                    # longer merged_content than the pairwise case. Precautionary
+                    # (cluster path not separately measured); the ceiling costs
+                    # nothing unless hit.
+                    max_tokens=1000,
                 )
 
                 # Per-action event for retrospective audit (sleep eval
