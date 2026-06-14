@@ -1276,6 +1276,29 @@ class Settings(BaseSettings):
             "with daily check-ins."
         ),
     )
+    extraction_coverage_broadened: bool = Field(
+        default=False,
+        description=(
+            "Coverage fix (2026-06-14 audit: 0.70 extraction coverage; "
+            "status_state 0.54 / dated_event 0.45 / preference 0.36 missed). "
+            "When True, the summarizer appends a coverage-expansion block that "
+            "extracts queryable specifics (events, status/state, personal facts, "
+            "named details) beyond reusable engineering knowledge, raises the "
+            "summary max_tokens, and uses candidate_facts_stable_limit instead of "
+            "the hardcoded 5. Land dark; flip after the coverage A/B confirms a "
+            "lift with no QA regression from noise."
+        ),
+    )
+    candidate_facts_stable_limit: int = Field(
+        default=15,
+        ge=1,
+        description=(
+            "Per-episode cap on non-dated (stable) candidate facts merged across "
+            "chunks. Only consulted when extraction_coverage_broadened is True "
+            "(otherwise the legacy hardcoded 5 applies). Mirrors "
+            "candidate_facts_event_limit for the stable pool."
+        ),
+    )
     temporal_backfill_default_token_budget: int = Field(
         default=50000,
         description="F075: default Haiku token cap for backfill script when --token-budget is not supplied.",

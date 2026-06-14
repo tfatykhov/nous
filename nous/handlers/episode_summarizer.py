@@ -133,6 +133,33 @@ becomes a stable fact."""
 _F075_EPISODE_TS_BLOCK = "EPISODE_START_TIMESTAMP: {iso}\n\n"
 
 
+# Coverage fix (2026-06-14 audit): appended to _SUMMARY_PROMPT when
+# settings.extraction_coverage_broadened is True. The base candidate_facts
+# framing ("concrete, reusable knowledge: tool configs, preferences,
+# architectural decisions, API behaviors") under-extracts user-task detail —
+# the audit measured status_state 0.54 / dated_event 0.45 / preference 0.36
+# missed. This block broadens the mandate to queryable specifics with a noise
+# guard. CONCATENATED (not .format()'d) — single braces only.
+_COVERAGE_EXPANSION_INSTRUCTION = """
+
+COVERAGE EXPANSION:
+candidate_facts should capture ANY concrete, queryable fact the user might later
+ask about — not only reusable engineering knowledge. In ADDITION to the
+categories above, extract each of the following as its OWN candidate_fact:
+  - Specific things the user DID or experienced, with any place/date
+    ("Tim travelled to Portland, ME on May 15-18, 2026"). category: "event"
+  - Results or status the user may reference later: deliverables produced
+    (filenames, word counts), figures/forecasts/data they requested, current
+    configuration or state. category: "status"
+  - Personal facts about the user: location, background, identity, traits.
+    category: "person"
+  - Specific named details tied to the above: people, numbers, IDs, versions,
+    settings, measurements.
+Emit one fact per discrete, separately-queryable item — do not bundle several
+into one. EXCLUDE only pure conversational scaffolding with no queryable content
+(greetings, acknowledgements, meta-chatter about the conversation itself)."""
+
+
 class EpisodeSummarizer:
     """Generates episode summaries on session end.
 
@@ -516,12 +543,19 @@ class EpisodeSummarizer:
                 prompt = _F075_EPISODE_TS_BLOCK.format(iso=started_at.isoformat()) + prompt
             prompt = prompt + _F075_TEMPORAL_INSTRUCTION
 
+        # Coverage fix: broaden extraction + raise the token budget so more
+        # candidate_facts fit (the narrow 1500 cap truncated long fact lists).
+        max_tokens = 1500
+        if getattr(self._settings, "extraction_coverage_broadened", False):
+            prompt = prompt + _COVERAGE_EXPANSION_INSTRUCTION
+            max_tokens = 3000
+
         text = await call_background_llm(
             self._llm,
             model=self._settings.background_model,
             system_prompt="You are summarizing a conversation episode for an AI agent's long-term memory.",
             user_message=prompt,
-            max_tokens=1500,
+            max_tokens=max_tokens,
         )
 
         if not text:
@@ -589,10 +623,16 @@ class EpisodeSummarizer:
         # without _settings (test_f025_chunked.py uses EpisodeSummarizer.__new__).
         dated = [c for c in merged_candidate_facts if isinstance(c, dict) and c.get("event_date")]
         stable = [c for c in merged_candidate_facts if not (isinstance(c, dict) and c.get("event_date"))]
-        event_limit = getattr(
-            getattr(self, "_settings", None), "candidate_facts_event_limit", 30,
+        settings = getattr(self, "_settings", None)
+        event_limit = getattr(settings, "candidate_facts_event_limit", 30)
+        # Coverage fix: the legacy hardcoded stable cap of 5 was a hard ceiling
+        # on multi-chunk episodes (audit: 8K-char transcripts → 1 fact). Raise it
+        # via candidate_facts_stable_limit only when the broadening flag is on.
+        broadened = getattr(settings, "extraction_coverage_broadened", False)
+        stable_limit = (
+            getattr(settings, "candidate_facts_stable_limit", 15) if broadened else 5
         )
-        merged_candidate_facts = dated[:event_limit] + stable[:5]
+        merged_candidate_facts = dated[:event_limit] + stable[:stable_limit]
 
         return {
             "title": summaries[0].get("title", "Multi-part episode"),
