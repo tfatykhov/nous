@@ -1694,7 +1694,16 @@ class Brain:
                     index_elements=["source_id", "target_id", "relation"],
                 )
             )
-            await session.execute(stmt)
+            result = await session.execute(stmt)
+
+            # F044-STC-HOOK: a conflict (rowcount 0) means this decision↔decision
+            # edge already existed and was re-derived → reinforce its LTP counter.
+            if (
+                getattr(self.settings, "tinyhippo_lite_enabled", False)
+                and result.rowcount == 0
+            ):
+                from nous.brain.tinyhippo_lite import increment_ltp_on_rederivation
+                await increment_ltp_on_rederivation(session, src, tgt, "related_to")
 
             edges.append(
                 GraphEdgeInfo(

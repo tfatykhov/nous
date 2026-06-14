@@ -140,6 +140,19 @@ class GraphLinker:
         result = await session.execute(stmt)
 
         if result.rowcount == 0:
+            # F044-STC-HOOK: conflict = this edge was re-derived. Reinforce its
+            # LTP counter — but only for LIVE similarity links. Deterministic
+            # structural rebuilds (F070 chunk anchors) re-derive the same edges
+            # every cycle and would inflate the counter uniformly, so they are
+            # excluded by provenance.
+            if (
+                getattr(self.settings, "tinyhippo_lite_enabled", False)
+                and provenance_source != "structural"
+            ):
+                from nous.brain.tinyhippo_lite import increment_ltp_on_rederivation
+                await increment_ltp_on_rederivation(
+                    session, source_id, target_id, relation
+                )
             return None
 
         return GraphEdgeInfo(

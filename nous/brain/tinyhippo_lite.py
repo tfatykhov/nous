@@ -53,24 +53,53 @@ _PROMOTE_SQL = text(
     """
 )
 
-
-async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> dict[str, int]:
-    """Run the promotion gate + gather STC telemetry for one sleep cycle.
-
-    Returns a flat ``f044_*`` stats dict for merging into ``sleep_stats``.
-    Single short transaction; the promotion runs before the aggregate so the
-    counts reflect this cycle's promotions.
+_LTP_INCREMENT_SQL = text(
     """
-    async with db.session() as session:
-        promoted = await session.execute(
-            _PROMOTE_SQL, {"agent": agent_id, "prp": int(prp_threshold)}
-        )
-        n_promoted = promoted.rowcount or 0
-        row = (
-            await session.execute(_TELEMETRY_SQL, {"agent": agent_id})
-        ).mappings().one()
-        await session.commit()
+    UPDATE brain.graph_edges
+       SET ltp_count = ltp_count + 1,
+           last_ltp_at = now()
+     WHERE source_id = :source_id
+       AND target_id = :target_id
+       AND relation = :relation
+    """
+)
 
+
+async def increment_ltp_on_rederivation(
+    session: Any, source_id: Any, target_id: Any, relation: str
+) -> None:
+    """F044 reinforcement hook: bump the LTP counter of a RE-DERIVED edge.
+
+    Called only on the ``ON CONFLICT`` (already-exists) branch of a *live*
+    similarity linker — a conflict there means the same (source, target,
+    relation) was independently rediscovered, i.e. reinforced. Issued as a
+    separate UPDATE so the linker's ``rowcount``-based new-edge accounting is
+    unchanged. Raw increment, no debounce: v1 measures the true per-cycle
+    re-derivation rate, so deterministic sleep-time rebuilders are deliberately
+    NOT routed here.
+    """
+    await session.execute(
+        _LTP_INCREMENT_SQL,
+        {"source_id": source_id, "target_id": target_id, "relation": relation},
+    )
+
+
+async def stc_promote_and_measure(
+    session: Any, agent_id: str, prp_threshold: int
+) -> dict[str, int]:
+    """Run the promotion gate + gather telemetry on a caller-provided session.
+
+    Promotion runs before the aggregate so the counts reflect this cycle's
+    promotions. Caller owns the transaction (commit/rollback) — this lets tests
+    exercise the gate under rollback isolation.
+    """
+    promoted = await session.execute(
+        _PROMOTE_SQL, {"agent": agent_id, "prp": int(prp_threshold)}
+    )
+    n_promoted = promoted.rowcount or 0
+    row = (
+        await session.execute(_TELEMETRY_SQL, {"agent": agent_id})
+    ).mappings().one()
     return {
         "f044_promoted": n_promoted,
         "f044_n_edges": int(row["n_edges"]),
@@ -81,3 +110,15 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
         "f044_ltp_ge3": int(row["ltp_ge3"]),
         "f044_reinforced_24h": int(row["reinforced_24h"]),
     }
+
+
+async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> dict[str, int]:
+    """Run the STC promotion gate + telemetry for one sleep cycle.
+
+    Thin wrapper that owns the transaction; returns a flat ``f044_*`` stats
+    dict for merging into ``sleep_stats``.
+    """
+    async with db.session() as session:
+        stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
+        await session.commit()
+    return stats
