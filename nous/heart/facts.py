@@ -2061,6 +2061,13 @@ class FactManager:
         # so genuine-KEEP_BOTH pairs aren't re-resolved every sleep cycle (wasted
         # LLM calls + LIMIT-slot starvation). Reuses the persisted resolution
         # events — no new table. After the window the pair is reconsidered.
+        # BEST-EFFORT BY DESIGN: this is an optimization, not a correctness gate.
+        # The f031 event is written fire-and-forget (sleep_handler), so a lost
+        # event (crash before the task runs, or insert failure) simply means the
+        # pair is re-processed once more next cycle — re-resolved KEEP_BOTH
+        # (idempotent) and the event re-written. It can never produce a wrong
+        # result, only momentarily revert to the pre-cooldown re-processing it
+        # reduces; not worth synchronizing the background event write to harden.
         cooldown_days = (
             getattr(self._settings, "contradiction_recheck_cooldown_days", 30)
             if self._settings is not None else 30
