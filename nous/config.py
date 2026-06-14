@@ -484,6 +484,9 @@ class Settings(BaseSettings):
     tool_schema_cache_enabled: bool = Field(
         default=True, validation_alias="NOUS_TOOL_SCHEMA_CACHE_ENABLED"
     )
+    stable_tool_set_enabled: bool = Field(
+        default=True, validation_alias="NOUS_STABLE_TOOL_SET_ENABLED"
+    )
 
     # Compaction: Layer 1 (Tool Pruning)
     tool_pruning_enabled: bool = Field(

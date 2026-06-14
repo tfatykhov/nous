@@ -491,7 +491,7 @@ class TestToolDispatcher:
         Register several tools, verify that frame filtering works.
         The 'question' frame only allows 'recall_deep'.
         """
-        dispatcher = ToolDispatcher()
+        dispatcher = ToolDispatcher(stable_tool_set_enabled=False)
 
         # Register multiple tools (using mock handlers)
         handler = AsyncMock(return_value={"content": [{"type": "text", "text": "ok"}]})
@@ -506,7 +506,7 @@ class TestToolDispatcher:
 
     def test_dispatcher_available_tools_wildcard_frame(self):
         """Frame with wildcard '*' returns all registered tools."""
-        dispatcher = ToolDispatcher()
+        dispatcher = ToolDispatcher(stable_tool_set_enabled=False)
 
         handler = AsyncMock(return_value={"content": [{"type": "text", "text": "ok"}]})
         for name in ["record_decision", "recall_deep", "bash", "read_file", "write_file"]:
@@ -519,7 +519,7 @@ class TestToolDispatcher:
 
     def test_dispatcher_available_tools_unknown_frame(self):
         """Unknown frame ID returns empty tool list."""
-        dispatcher = ToolDispatcher()
+        dispatcher = ToolDispatcher(stable_tool_set_enabled=False)
 
         handler = AsyncMock(return_value={"content": [{"type": "text", "text": "ok"}]})
         dispatcher.register("recall_deep", handler, {"type": "object", "description": "test"})

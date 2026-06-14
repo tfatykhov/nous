@@ -477,7 +477,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CACHE_BREAK_DETECTION_ENABLED` | `true` | Enable cache break detection logging (F036) |
 | `NOUS_CACHE_SPLIT_SYSTEM_PROMPT` | `true` | Enable 3-tier system prompt splitting (F036) |
 | `NOUS_CACHE_SINGLE_BREAKPOINT` | `true` | Use single cache breakpoint strategy (F036) |
-| `NOUS_TOOL_SCHEMA_CACHE_ENABLED` | `true` | Cache tool schemas per frame (F036) |
+| `NOUS_TOOL_SCHEMA_CACHE_ENABLED` | `true` | Cache tool schemas per frame (F036) — process-side Python memoization only; does NOT affect the Anthropic prompt cache |
+| `NOUS_STABLE_TOOL_SET_ENABLED` | `true` | Send a STABLE tool superset across all non-`initiation` frames instead of frame-scoped tool arrays. Tools sit at the front of the Anthropic cacheable prefix, so frame-scoped tools busted the whole prefix on every frame change (~10% of prod cache-creation tokens, measured 2026-06-14). Collapses conversational frames to the `task` (`*`) superset; `initiation` keeps its distinct minimal set; `store_identity`/`complete_initiation` are excluded from the superset. `FRAME_TOOLS` still drives the textual frame instructions. Set `false` to restore per-frame tool gating. |
 | `NOUS_DAG_ENABLED` | `true` | Enable DAG orchestration (F038) |
 | `NOUS_CORRECTION_EXTRACTION_ENABLED` | `true` | Enable correction learning pipeline (F039) |
 | `NOUS_GRAPH_BACKFILL_ENABLED` | `true` | Enable graph densification backfill during sleep (F040) |
