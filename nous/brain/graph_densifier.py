@@ -1171,19 +1171,38 @@ class GraphDensifier:
         """F075 Layer 2: chain temporally-adjacent dated facts within episodes.
 
         Each dated, active fact gets at most ONE outgoing ``happened_before``
-        edge pointing to the next-distinct-date active fact in the same
-        episode. LATERAL with ``LIMIT 1`` prevents quadratic explosion when
-        multiple facts share the same ``event_date``. Same-date facts
-        deliberately do not link to each other (we don't claim ordering on
-        concurrent events).
+        edge pointing to the earliest later-dated active fact in the same
+        episode that is also semantically related (cosine >=
+        ``happened_before_relatedness_threshold``). The relatedness gate stops
+        date-order alone from chaining unrelated co-episode events (edge audit
+        2026-06-13: 0.27 precision; the gate cleanly separated related
+        sequences from unrelated co-episode facts on the prod sample). When the
+        threshold is 0 the gate is disabled (pre-fix date-order-only behaviour,
+        embedding-less facts still chain). LATERAL with ``LIMIT 1`` prevents
+        quadratic explosion when multiple facts share the same ``event_date``.
+        Same-date facts deliberately do not link to each other (we don't claim
+        ordering on concurrent events).
 
         Returns the number of edges newly inserted (excluding ON CONFLICT
         DO NOTHING hits — those are no-ops on re-run).
         """
+        threshold = float(
+            getattr(self._settings, "happened_before_relatedness_threshold", 0.0) or 0.0
+        )
+        params: dict = {"agent_id": self._agent_id}
+        outer_emb = ""
+        lateral_rel = ""
+        if threshold > 0:
+            params["rel_threshold"] = threshold
+            outer_emb = "AND a.embedding IS NOT NULL"
+            lateral_rel = (
+                "AND b.embedding IS NOT NULL "
+                "AND (1 - (a.embedding <=> b.embedding)) >= :rel_threshold"
+            )
         async with self.db.session() as session:
             result = await session.execute(
                 text(
-                    """
+                    f"""
                     INSERT INTO brain.graph_edges
                         (source_id, source_type, target_id, target_type,
                          agent_id, relation, weight, auto_linked,
@@ -1200,16 +1219,18 @@ class GraphDensifier:
                           AND b.event_date IS NOT NULL
                           AND b.event_date > a.event_date
                           AND b.active = TRUE
+                          {lateral_rel}
                         ORDER BY b.event_date ASC, b.id ASC
                         LIMIT 1
                     ) b ON TRUE
                     WHERE a.agent_id = :agent_id
                       AND a.event_date IS NOT NULL
                       AND a.active = TRUE
+                      {outer_emb}
                     ON CONFLICT (source_id, target_id, relation) DO NOTHING
                     """
                 ),
-                {"agent_id": self._agent_id},
+                params,
             )
             await session.commit()
             count = result.rowcount or 0

@@ -39,6 +39,23 @@ _REQUIRES_PG = pytest.mark.skipif(
 
 
 # ---------------------------------------------------------------------------
+# Extraction-prompt guards (regression — 2026-06-13 edge-precision audit)
+# ---------------------------------------------------------------------------
+
+
+def test_temporal_instruction_excludes_bibliographic_and_anchors_year():
+    """The summarizer's date-extraction addendum must keep the three guards
+    that fix the measured happened_before 0.27 precision: exclude bibliographic
+    publication dates, omit month/year-only dates, and anchor the year."""
+    from nous.handlers.episode_summarizer import _F075_TEMPORAL_INSTRUCTION as instr
+
+    low = instr.lower()
+    assert "arxiv" in low and "publication" in low  # bibliographic exclusion
+    assert "omit event_date" in low  # month/year-granularity omission
+    assert "never assume a prior year" in low  # year anchor
+
+
+# ---------------------------------------------------------------------------
 # Schema / validator unit tests — run on any harness
 # ---------------------------------------------------------------------------
 

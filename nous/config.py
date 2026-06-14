@@ -1280,6 +1280,16 @@ class Settings(BaseSettings):
         default=50000,
         description="F075: default Haiku token cap for backfill script when --token-budget is not supplied.",
     )
+    happened_before_relatedness_threshold: float = Field(
+        default=0.45, ge=0.0, le=1.0,
+        description=(
+            "F075: minimum cosine similarity between two same-episode dated facts "
+            "before a happened_before edge links them. Date-order alone chained "
+            "unrelated events (edge-precision audit 2026-06-13: 0.27). On the prod "
+            "sample 0.45 cleanly separated related sequences (>=0.50) from unrelated "
+            "co-episode facts (<=0.37). 0 disables the gate (pre-fix date-order-only)."
+        ),
+    )
     # Layer 3 (deferred — settings declared so plumbing is in place for F075.x)
     date_aware_boost_enabled: bool = Field(
         default=False,
