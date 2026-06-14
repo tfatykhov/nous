@@ -32,7 +32,7 @@ def _parse_episode_uuid(episode_id: str | None) -> UUID | None:
 
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import LLMClient, call_background_llm, parse_llm_json
+from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 
@@ -261,16 +261,13 @@ class FactExtractor:
         """
         stored_ids: list[UUID] = []
         stored = 0
-        # F075: split dated and stable candidates with separate caps so dated
-        # events from later in the LLM list aren't dropped by the [:5] truncation.
-        # NOTE: the _EXTRACT_PROMPT fallback path's prompt schema does NOT
-        # include event_date (only the summarizer's prompt does). Any "dated"
-        # candidates here would be the LLM hallucinating a field — possible
-        # but rare. We still partition defensively to match _store_candidate_facts.
-        dated = [c for c in candidates if isinstance(c, dict) and c.get("event_date")]
-        stable = [c for c in candidates if not (isinstance(c, dict) and c.get("event_date"))]
-        event_limit = getattr(self._settings, "candidate_facts_event_limit", 30)
-        capped = dated[:event_limit] + stable[:5]
+        # F075 + coverage fix: partition dated/stable and cap each pool via the
+        # shared helper so the stable cap (5, or candidate_facts_stable_limit when
+        # extraction_coverage_broadened) never drifts from the summarizer /
+        # candidate-facts storage path. The _EXTRACT_PROMPT fallback schema has no
+        # event_date, so "dated" candidates here would be LLM hallucination (rare);
+        # the helper partitions defensively regardless.
+        capped = cap_candidate_facts(candidates, self._settings)
         for fact in capped:
             confidence = fact.get("confidence", 0.7)
             if confidence < 0.6:
@@ -384,15 +381,10 @@ class FactExtractor:
         """
         stored_ids: list[UUID] = []
         stored = 0
-        # F075: split dated and stable candidates with separate caps so dated
-        # events from later chunks aren't dropped by the [:5] truncation.
-        # The summarizer's _merge_summaries already partitions; mirror that
-        # discipline here so a partial round-trip (e.g. test paths bypassing
-        # the summarizer) doesn't re-truncate.
-        dated = [c for c in candidates if isinstance(c, dict) and c.get("event_date")]
-        stable = [c for c in candidates if not (isinstance(c, dict) and c.get("event_date"))]
-        event_limit = getattr(self._settings, "candidate_facts_event_limit", 30)
-        capped = dated[:event_limit] + stable[:5]
+        # F075 + coverage fix: shared partition/cap helper (single source of
+        # truth so the stable cap matches the summarizer + the LLM-fallback path,
+        # rather than re-truncating a broadened merge back to 5).
+        capped = cap_candidate_facts(candidates, self._settings)
         for item in capped:
             # Handle both structured dicts and plain strings
             if isinstance(item, dict):

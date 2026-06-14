@@ -107,3 +107,77 @@ class TestMergeSummaries:
         merged = summarizer._merge_summaries(summaries)
         required = {"title", "summary", "key_points", "candidate_facts", "outcome", "outcome_rationale", "topics"}
         assert required.issubset(set(merged.keys()))
+
+    def test_merge_stable_cap_broadened_uses_setting(self):
+        """Coverage fix: flag ON raises the stable cap to candidate_facts_stable_limit."""
+        from types import SimpleNamespace
+
+        summarizer = EpisodeSummarizer.__new__(EpisodeSummarizer)
+        summarizer._settings = SimpleNamespace(
+            extraction_coverage_broadened=True,
+            candidate_facts_stable_limit=15,
+            candidate_facts_event_limit=30,
+        )
+        facts = [{"subject": f"s{i}", "content": f"c{i}", "category": "concept"} for i in range(20)]
+        summaries = [
+            {"title": "T", "summary": "S", "candidate_facts": facts[:10]},
+            {"title": "T", "summary": "S", "candidate_facts": facts[10:]},
+        ]
+        merged = summarizer._merge_summaries(summaries)
+        assert len(merged["candidate_facts"]) == 15
+
+    def test_merge_stable_cap_legacy_when_flag_off(self):
+        """Flag OFF keeps the legacy hardcoded stable cap of 5."""
+        from types import SimpleNamespace
+
+        summarizer = EpisodeSummarizer.__new__(EpisodeSummarizer)
+        summarizer._settings = SimpleNamespace(
+            extraction_coverage_broadened=False,
+            candidate_facts_stable_limit=15,
+            candidate_facts_event_limit=30,
+        )
+        facts = [{"subject": f"s{i}", "content": f"c{i}", "category": "concept"} for i in range(20)]
+        summaries = [
+            {"title": "T", "summary": "S", "candidate_facts": facts[:10]},
+            {"title": "T", "summary": "S", "candidate_facts": facts[10:]},
+        ]
+        merged = summarizer._merge_summaries(summaries)
+        assert len(merged["candidate_facts"]) == 5
+
+
+def test_coverage_expansion_instruction_guards():
+    """The coverage-expansion block must keep its target categories + noise guard."""
+    from nous.handlers.episode_summarizer import _COVERAGE_EXPANSION_INSTRUCTION as instr
+
+    low = instr.lower()
+    assert '"event"' in low and '"status"' in low and '"person"' in low
+    assert "queryable" in low
+    assert "exclude only pure conversational" in low
+
+
+def test_cap_candidate_facts_single_source_of_truth():
+    """The shared cap helper (summarizer + both FactExtractor storage paths)
+    must apply the stable cap consistently: legacy 5 off, stable_limit on,
+    None settings → legacy defaults."""
+    from types import SimpleNamespace
+
+    from nous.handlers import cap_candidate_facts
+
+    stable = [{"subject": f"s{i}", "content": f"c{i}"} for i in range(20)]
+    dated = [{"content": f"d{i}", "event_date": "2024-01-01"} for i in range(40)]
+    cands = stable + dated
+
+    off = SimpleNamespace(extraction_coverage_broadened=False,
+                          candidate_facts_stable_limit=15, candidate_facts_event_limit=30)
+    r = cap_candidate_facts(cands, off)
+    assert sum(1 for c in r if not c.get("event_date")) == 5
+    assert sum(1 for c in r if c.get("event_date")) == 30
+
+    on = SimpleNamespace(extraction_coverage_broadened=True,
+                         candidate_facts_stable_limit=15, candidate_facts_event_limit=30)
+    r = cap_candidate_facts(cands, on)
+    assert sum(1 for c in r if not c.get("event_date")) == 15
+
+    # None settings (test __new__ paths) → legacy defaults
+    r = cap_candidate_facts(cands, None)
+    assert sum(1 for c in r if not c.get("event_date")) == 5
