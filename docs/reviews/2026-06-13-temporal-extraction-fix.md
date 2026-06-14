@@ -91,6 +91,47 @@ relatedness gate (separate, deferred).
 supersessions) and any future date-aware retrieval. `happened_before` precision
 is just the visible proxy.
 
+## Edge-relatedness gate (residual fix) — 0.62 → 1.00
+
+The residual after the extraction fix was unrelated co-episode facts chained on
+date order alone (`_build_happened_before_edges` had no semantic gate). Cosine
+of the 8 surviving pairs separated cleanly:
+
+```
+0.671  audit → repo update          ┐ related sequences (judge YES)
+0.636  decision → its self-review   │
+0.539  autopilot state → capital    │
+0.503  DAG created → repo state     ┘
+────── gap → threshold 0.45 ──────
+0.365  gbrain lsd → session state   ┐ unrelated co-episode (judge WEAK/NO)
+0.349  email recipient → sailing    │
+0.289  guideline → guideline        │
+0.209  self-eval → research doc     ┘
+```
+
+Added `happened_before_relatedness_threshold` (default **0.45**, env
+`NOUS_HAPPENED_BEFORE_RELATEDNESS_THRESHOLD`, 0 disables): the LATERAL now
+requires `1 - (a.embedding <=> b.embedding) >= threshold`, so A links to its
+earliest later-dated *related* successor in the episode. Rebuilding the eval
+copy with the gate: **8 → 4 edges, judged 4 YES / 0 WEAK / 0 NO = precision
+1.00** (`scripts/diag/judge_hb.py`). Tradeoff: ~1 lost YES to recall — the right
+call for an adjacency-boost input where precision dominates. Tests:
+`test_graph_densifier.py::{test_happened_before_relatedness_gate,
+test_happened_before_gate_disabled_at_zero}` (Postgres lane).
+
+**Full arc: 0.27 (49 edges) → 0.62 (extraction fix, 8) → 1.00 (relatedness gate, 4).**
+
+## Step 4 — prod remediation (DONE)
+
+`--reclassify` on prod `nous-default`: 415 facts re-examined, **140 bad dates →
+NULL** (first-of-month 25%→3%, wrong-year 13%→1%). Then rebuilt
+`happened_before` with the gate: **49 → 5 edges**, 0% from a bibliographic
+source. The live recency resolver no longer sees wrong-year dates.
+
+**Operator note:** PR #523 must DEPLOY for the live summarizer to stop minting
+bad dates on *future* episodes (the reclassify only fixed existing data). The
+gate's `0.45` default also applies to every future sleep-cycle rebuild.
+
 ## Step 4 — prod remediation (after eval validation)
 
 Run the same `--reclassify` on prod (`nous-default`), which corrects the ~415

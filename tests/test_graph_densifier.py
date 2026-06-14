@@ -229,6 +229,77 @@ async def _insert_edge(session: AsyncSession, agent_id: str, source_id, target_i
     })
 
 
+async def _insert_dated_fact(
+    session: AsyncSession, agent_id: str, content: str,
+    embedding: list[float], event_date, source_episode_id,
+) -> str:
+    """Insert an active fact with embedding + event_date + source_episode_id."""
+    fact_id = uuid4()
+    embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+    await session.execute(text("""
+        INSERT INTO heart.facts
+            (id, agent_id, content, active, embedding, event_date, source_episode_id)
+        VALUES (:id, :agent_id, :content, true, CAST(:emb AS vector), :ed, :ep_id)
+    """), {
+        "id": fact_id, "agent_id": agent_id, "content": content,
+        "emb": embedding_str, "ed": event_date, "ep_id": source_episode_id,
+    })
+    return fact_id
+
+
+def _vec(*head: float) -> list[float]:
+    """1536-dim test embedding: the given head, zero-padded."""
+    return list(head) + [0.0] * (1536 - len(head))
+
+
+@pytest.mark.postgres_only
+async def test_happened_before_relatedness_gate(densifier, db, settings):
+    """F075 (2026-06-13): a happened_before edge links two same-episode dated
+    facts only when they are semantically related — date order alone must not
+    chain an unrelated co-episode event (the 0.27-precision residual)."""
+    from datetime import date
+
+    settings.happened_before_relatedness_threshold = 0.45
+    agent = densifier._agent_id
+    async with db.session() as s:
+        ep_rel = await _insert_episode(s, agent, "related events")
+        ep_unrel = await _insert_episode(s, agent, "unrelated events")
+        # related pair: near-identical embeddings (cosine ~1.0 >= 0.45 -> link)
+        await _insert_dated_fact(s, agent, "A", _vec(1.0), date(2024, 1, 1), ep_rel)
+        await _insert_dated_fact(s, agent, "B", _vec(1.0, 0.01), date(2024, 1, 2), ep_rel)
+        # unrelated pair: orthogonal embeddings (cosine ~0 < 0.45 -> no link)
+        await _insert_dated_fact(s, agent, "X", _vec(1.0), date(2024, 1, 1), ep_unrel)
+        await _insert_dated_fact(s, agent, "Y", _vec(0.0, 1.0), date(2024, 1, 2), ep_unrel)
+        await s.commit()
+
+    n = await densifier._build_happened_before_edges()
+    assert n == 1, "only the related same-episode pair should link"
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT 1 FROM brain.graph_edges WHERE agent_id = :a "
+            "AND relation = 'happened_before'"
+        ), {"a": agent})).all()
+    assert len(rows) == 1
+
+
+@pytest.mark.postgres_only
+async def test_happened_before_gate_disabled_at_zero(densifier, db, settings):
+    """threshold 0 disables the gate: unrelated dated facts still chain
+    (pre-fix date-order-only behaviour preserved)."""
+    from datetime import date
+
+    settings.happened_before_relatedness_threshold = 0.0
+    agent = densifier._agent_id
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent, "unrelated but dated")
+        await _insert_dated_fact(s, agent, "X", _vec(1.0), date(2024, 1, 1), ep)
+        await _insert_dated_fact(s, agent, "Y", _vec(0.0, 1.0), date(2024, 1, 2), ep)
+        await s.commit()
+
+    n = await densifier._build_happened_before_edges()
+    assert n == 1, "gate disabled -> unrelated pair still links on date order"
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_find_orphans_returns_unlinked(db, settings, mock_embeddings, _fix_stale_relation_constraint):
