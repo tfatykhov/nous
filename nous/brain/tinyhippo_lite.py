@@ -119,6 +119,30 @@ _LTP_INCREMENT_SQL = text(
 )
 
 
+_DOWNSCALE_SQL = text(
+    """
+    UPDATE brain.graph_edges
+       SET weight = weight * :alpha
+     WHERE agent_id = :agent
+       AND consolidation_state = 'tagged'
+    """
+)
+
+
+async def homeostatic_downscale(session: Any, agent_id: str, alpha: float) -> int:
+    """F044 Phase 8d (spec-faithful): multiplicatively decay TAGGED edge weights
+    by ``alpha`` each sleep cycle; consolidated edges are exempt (sticky).
+
+    This is the spec's actual mechanism for making consolidation influence
+    retrieval — a *global* edge-weight change read by every weight-based graph
+    consumer (spreading activation, adjacency, neighbor scoring), not a
+    read-time boost in one function. Over cycles, frequently-reactivated
+    (consolidated) edges become relatively dominant. Returns rows downscaled.
+    """
+    res = await session.execute(_DOWNSCALE_SQL, {"alpha": float(alpha), "agent": agent_id})
+    return res.rowcount or 0
+
+
 async def increment_ltp_on_rederivation(
     session: Any, source_id: Any, target_id: Any, relation: str
 ) -> None:

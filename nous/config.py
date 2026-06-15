@@ -718,6 +718,11 @@ class Settings(BaseSettings):
     tinyhippo_consolidated_boost_factor: float = Field(
         default=2.0, validation_alias="NOUS_TINYHIPPO_CONSOLIDATED_BOOST_FACTOR"
     )
+    # F044 Phase 8d spec mechanism: per-cycle multiplicative decay of TAGGED
+    # edge weights (consolidated exempt). Spec-validated band [0.50, 0.90].
+    tinyhippo_alpha: float = Field(
+        default=0.75, validation_alias="NOUS_TINYHIPPO_ALPHA"
+    )
 
     graph_backfill_enabled: bool = True
     graph_backfill_max_facts: int = 50
