@@ -723,6 +723,12 @@ class Settings(BaseSettings):
     tinyhippo_alpha: float = Field(
         default=0.75, validation_alias="NOUS_TINYHIPPO_ALPHA"
     )
+    # Master switch for the Phase 8d weight downscale (the actual retrieval
+    # mechanism). Default OFF: tinyhippo_lite_enabled alone stays telemetry-only
+    # (promotion + counts, no weight change). Set true to apply the downscale.
+    tinyhippo_downscale_enabled: bool = Field(
+        default=False, validation_alias="NOUS_TINYHIPPO_DOWNSCALE_ENABLED"
+    )
 
     graph_backfill_enabled: bool = True
     graph_backfill_max_facts: int = 50

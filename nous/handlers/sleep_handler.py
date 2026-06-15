@@ -1500,6 +1500,22 @@ class SleepHandler:
                 self._settings.tinyhippo_prp_threshold,
             )
             sleep_stats.update(stats)
+            # F044 Phase 8d (spec): homeostatic α-downscale of TAGGED edge
+            # weights (consolidated exempt). Runs AFTER promotion (8c) so
+            # freshly-promoted edges aren't penalized this cycle. Opt-in
+            # (default off) — the telemetry-only v1 leaves weights untouched.
+            if getattr(self._settings, "tinyhippo_downscale_enabled", False):
+                from nous.brain.tinyhippo_lite import homeostatic_downscale
+                async with self._heart.db.session() as sess:
+                    n_down = await homeostatic_downscale(
+                        sess, self._settings.agent_id, self._settings.tinyhippo_alpha
+                    )
+                    await sess.commit()
+                sleep_stats["f044_downscaled"] = n_down
+                logger.info(
+                    "F044 Phase 8d: downscaled %d tagged edges by α=%.2f",
+                    n_down, self._settings.tinyhippo_alpha,
+                )
             logger.info(
                 "F044 STC: promoted=%d tagged=%d consolidated=%d "
                 "ltp>=1/2/3=%d/%d/%d reinforced_24h=%d",
