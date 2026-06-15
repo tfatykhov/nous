@@ -129,6 +129,7 @@ async def fetch_edge_candidates(
     *,
     sample_size: int,
     min_weight: float = 0.7,
+    allow_inferred: bool = False,
 ) -> list[EdgeCandidate]:
     """Pull trusted edges from the eval DB.
 
@@ -159,7 +160,14 @@ async def fetch_edge_candidates(
     # informed_by) because the source-target embedding gap is larger,
     # giving the validator a better chance of finding a query where
     # graph helps the rank.
-    sql = text("""
+    # `allow_inferred` relaxes the anti-circularity guard. That guard exists
+    # for the F065 PENALTY eval (which down-weights inferred edges, so using
+    # them as bridges would be circular). It does NOT apply to F044 α-downscale,
+    # which keys on consolidation_state, not extraction_method — so F044 qrel
+    # generation may include inferred bridges (the only decision bridges that
+    # exist on prod-shape corpora). Default off preserves the F065 contract.
+    inferred_clause = "" if allow_inferred else "AND e.extraction_method <> 'inferred'"
+    sql = text(f"""
         WITH candidates AS (
             SELECT
                 e.source_id, e.target_id, e.source_type, e.target_type,
@@ -170,7 +178,7 @@ async def fetch_edge_candidates(
                 END AS same_type_penalty
             FROM brain.graph_edges e
             WHERE e.agent_id = :agent_id
-              AND e.extraction_method <> 'inferred'
+              {inferred_clause}
               AND e.weight >= :min_weight
               AND e.source_type IN ('fact','decision','episode','procedure')
               AND e.target_type = 'decision'
@@ -375,6 +383,7 @@ async def _run_async(args: argparse.Namespace) -> int:
             agent_id=main_settings.agent_id,
             sample_size=args.sample_size,
             min_weight=args.min_weight,
+            allow_inferred=args.allow_inferred,
         )
         logger.info("Sampled %d edge candidates", len(candidates))
         if not candidates:
@@ -440,6 +449,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="Stop early once this many qrels are kept.")
     parser.add_argument("--min-weight", type=float, default=0.7,
                         help="Minimum edge weight for trusted bridges.")
+    parser.add_argument("--allow-inferred", action="store_true",
+                        help="Include extraction_method='inferred' bridges. Default OFF "
+                             "preserves the F065 anti-circularity contract; safe to enable "
+                             "for F044 (keys on consolidation_state, not extraction_method).")
     parser.add_argument("--top-k", type=int, default=10,
                         help="Top-K depth used by validation passes.")
     parser.add_argument("--model", default="claude-haiku-4-5-20251001",
