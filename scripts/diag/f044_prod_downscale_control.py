@@ -108,23 +108,30 @@ async def main():
         await restore(conn)
         await report("consolidation(content)", m_cons, f"[exempt={ncons} consolidated]")
 
-        # 2. RANDOM control: exempt the SAME count of random edges
+        # 2. RANDOM control: exempt the SAME count of random edges — but only
+        # from rows the downscale would actually touch (tagged, non-deterministic),
+        # so the consolidation vs random arms exempt the same eligible population.
+        # Sampling from all edges would let the control "exempt" already-exempt
+        # deterministic structural edges, biasing the verdict.
         await reset(conn)
-        await conn.execute(f"UPDATE brain.graph_edges SET consolidation_state='consolidated' WHERE id IN (SELECT id FROM brain.graph_edges WHERE agent_id='{AGENT}' ORDER BY random() LIMIT {ncons})")
+        await conn.execute(f"UPDATE brain.graph_edges SET consolidation_state='consolidated' WHERE id IN (SELECT id FROM brain.graph_edges WHERE agent_id='{AGENT}' AND consolidation_state='tagged' AND extraction_method IS DISTINCT FROM 'deterministic' ORDER BY random() LIMIT {ncons})")
         async with db.session() as sess:
             await homeostatic_downscale(sess, AGENT, ALPHA); await sess.commit()
         assert await edge_count(conn) == e0
         m_rand = await run_cfg("random", qrels, eval_settings, template, top_k)
         await restore(conn); await reset(conn)
-        await report("random-exempt", m_rand, f"[exempt={ncons} RANDOM]")
+        await report("random-exempt", m_rand, f"[exempt={ncons} RANDOM eligible]")
 
-        # 3. ALL-downscale sanity: nothing exempt -> uniform scale -> must ~= baseline
+        # 3. UNIFORM-scale sanity: scale EVERY tagged edge (bypassing the
+        # deterministic exemption) so this arm is genuinely "nothing exempt".
+        # Ranking is scale-invariant under a uniform multiply => must ~= baseline.
+        # (Using homeostatic_downscale here would leave deterministic edges at
+        # full weight and could legitimately move rankings — not a sanity null.)
         await reset(conn)
-        async with db.session() as sess:
-            await homeostatic_downscale(sess, AGENT, ALPHA); await sess.commit()
+        await conn.execute(f"UPDATE brain.graph_edges SET weight = weight * {ALPHA} WHERE agent_id='{AGENT}' AND consolidation_state='tagged'")
         m_all = await run_cfg("all_downscale", qrels, eval_settings, template, top_k)
         await restore(conn)
-        await report("all-downscale(sanity)", m_all, "[nothing exempt -> expect ~baseline]")
+        await report("uniform-scale(sanity)", m_all, "[nothing exempt -> expect ~baseline]")
 
         await reset(conn); await restore(conn)
         await conn.execute("DROP TABLE IF EXISTS public._f044_wsnap")
