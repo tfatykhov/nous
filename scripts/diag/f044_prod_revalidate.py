@@ -102,18 +102,26 @@ async def main():
         await restore(conn)
         print(f"consolidation(content): MRR={m_cons.mrr:.4f} ({compute_delta(m_base,m_cons,'mrr').absolute:+.4f})  nDCG@10={m_cons.ndcg_at_10:.4f} ({compute_delta(m_base,m_cons,'ndcg_at_10').absolute:+.4f})  [exempt={ncons}]")
 
+        # Random control: exempt the SAME count of DOWNSCALE-ELIGIBLE edges
+        # (tagged, non-deterministic) so it matches the consolidation arm's
+        # population — homeostatic_downscale skips the deterministic tier, so
+        # sampling from all edges could "exempt" already-exempt structural rows.
         await reset(conn)
-        await conn.execute(f"UPDATE brain.graph_edges SET consolidation_state='consolidated' WHERE id IN (SELECT id FROM brain.graph_edges WHERE agent_id='{AGENT}' ORDER BY random() LIMIT {ncons})")
+        await conn.execute(f"UPDATE brain.graph_edges SET consolidation_state='consolidated' WHERE id IN (SELECT id FROM brain.graph_edges WHERE agent_id='{AGENT}' AND consolidation_state='tagged' AND extraction_method IS DISTINCT FROM 'deterministic' ORDER BY random() LIMIT {ncons})")
         async with db.session() as sess: await homeostatic_downscale(sess, AGENT, ALPHA); await sess.commit()
         m_rand, _ = await run_cfg("random", qrels, es, tmpl, k)
         await restore(conn); await reset(conn)
-        print(f"random-exempt:          MRR={m_rand.mrr:.4f} ({compute_delta(m_base,m_rand,'mrr').absolute:+.4f})  [exempt={ncons} RANDOM]")
+        print(f"random-exempt:          MRR={m_rand.mrr:.4f} ({compute_delta(m_base,m_rand,'mrr').absolute:+.4f})  [exempt={ncons} RANDOM eligible]")
 
+        # Uniform-scale sanity: scale EVERY tagged edge (bypassing the
+        # deterministic exemption) so this arm is genuinely "nothing exempt" —
+        # ranking is scale-invariant => expect ~0. homeostatic_downscale would
+        # leave deterministic edges at full weight and could move ranking.
         await reset(conn)
-        async with db.session() as sess: await homeostatic_downscale(sess, AGENT, ALPHA); await sess.commit()
+        await conn.execute(f"UPDATE brain.graph_edges SET weight = weight * {ALPHA} WHERE agent_id='{AGENT}' AND consolidation_state='tagged'")
         m_all, _ = await run_cfg("all_downscale", qrels, es, tmpl, k)
         await restore(conn)
-        print(f"all-downscale(sanity):  MRR={m_all.mrr:.4f} ({compute_delta(m_base,m_all,'mrr').absolute:+.4f})  [expect ~0]")
+        print(f"uniform-scale(sanity):  MRR={m_all.mrr:.4f} ({compute_delta(m_base,m_all,'mrr').absolute:+.4f})  [expect ~0]")
 
         n, mean, se, t, pos, neg, p = paired(rr_base, rr_cons)
         print(f"\nPAIRED per-qrel RR (consolidation vs baseline): n={n} meanΔRR={mean:+.4f} SE={se:.4f} t={t:+.2f}")
