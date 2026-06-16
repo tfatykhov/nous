@@ -188,3 +188,82 @@ async def test_three_rederivations_then_gate_promotes(session):
         {"s": src, "t": tgt},
     )).scalar()
     assert state == "consolidated"
+
+
+# ---------------------------------------------------------------------------
+# Codex round-2 (HEAD 0a150bb) findings — telemetry-only contract + hardening
+# ---------------------------------------------------------------------------
+
+def test_alpha_validator_rejects_out_of_band():
+    """tinyhippo_alpha must be a (0.0, 1.0] decay factor (codex P2).
+
+    A typo like 75 or a negative value must fail config init rather than
+    silently corrupting every tagged edge weight on the next downscale.
+    Experiment values down to 0.42 stay valid.
+    """
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    for bad in (75.0, 0.0, -0.5, 1.5):
+        with pytest.raises(ValidationError):
+            Settings(NOUS_TINYHIPPO_ALPHA=bad)
+    # In-band values are accepted (default + documented band + experiment low).
+    for ok in (0.42, 0.5, 0.75, 0.9, 1.0):
+        assert Settings(NOUS_TINYHIPPO_ALPHA=ok).tinyhippo_alpha == ok
+
+
+def test_consolidated_boost_is_opt_in_not_master_flag():
+    """The consolidated ranking boost must NOT ride on the master flag (codex P1).
+
+    Default-off so tinyhippo_lite_enabled ALONE (shadow/telemetry mode) leaves
+    recall ranking byte-identical even when graph_adjacency_boost_enabled is on.
+    Source-pinned: the retrieval gate must AND the dedicated boost flag.
+    """
+    from nous.config import Settings
+
+    assert Settings().tinyhippo_consolidated_boost_enabled is False
+    # Flipping only the master flag does not enable the boost.
+    s = Settings(NOUS_TINYHIPPO_LITE_ENABLED=True)
+    assert s.tinyhippo_consolidated_boost_enabled is False
+
+    pipeline_src = (
+        Path(__file__).resolve().parent.parent
+        / "nous" / "api" / "retrieval_pipeline.py"
+    ).read_text(encoding="utf-8")
+    assert "tinyhippo_consolidated_boost_enabled" in pipeline_src, (
+        "consolidated boost gate must reference the opt-in flag (P1 regression)"
+    )
+
+
+@pytest.mark.postgres_only
+async def test_flush_preserves_touch_recorded_during_writes(session):
+    """A recall that records a touch mid-flush must survive (codex P2 race).
+
+    flush snapshots the buffer, awaits DB writes, then must NOT blanket-clear —
+    a touch recorded during those awaits is not in the snapshot and has to
+    remain for the next flush. Simulated via a session whose execute() appends a
+    concurrent touch.
+    """
+    _RECALL_TOUCH_BUFFER.clear()
+    a, b = await _insert_edge(session, ltp=0, relation="related_to")
+    concurrent = ("concurrent-src", "concurrent-tgt", "related_to")
+    record_recall_touches([(str(a), str(b), "related_to")])
+
+    class _RacingSession:
+        def __init__(self, inner):
+            self._inner = inner
+            self._fired = False
+
+        async def execute(self, *args, **kwargs):
+            if not self._fired:
+                self._fired = True
+                # A concurrent recall lands while this write is in flight.
+                record_recall_touches([concurrent])
+            return await self._inner.execute(*args, **kwargs)
+
+    n = await flush_recall_touches(_RacingSession(session))
+    assert n == 1  # one snapshotted edge written
+    # The concurrent touch survived the flush (was not clobbered by clear()).
+    assert _RECALL_TOUCH_BUFFER.get(concurrent) == 1
+    _RECALL_TOUCH_BUFFER.clear()

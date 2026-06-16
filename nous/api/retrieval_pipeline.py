@@ -807,8 +807,14 @@ async def _apply_graph_adjacency_boost(
     # influences ranking — a candidate connected via a frequently-reactivated
     # (consolidated) edge gets a larger adjacency degree than one connected via a
     # provisional (tagged) edge. Inert unless tinyhippo_lite_enabled.
+    # Gate on a dedicated opt-in flag, NOT the master flag: flipping
+    # tinyhippo_lite_enabled alone (shadow/telemetry mode) must not change
+    # ranking even when graph_adjacency_boost_enabled is on, or it contaminates
+    # the A/B baseline. The boost is an active mechanism, sibling to downscale.
     s_cfg = getattr(brain, "settings", None)
-    stc_on = bool(getattr(s_cfg, "tinyhippo_lite_enabled", False))
+    stc_on = bool(getattr(s_cfg, "tinyhippo_lite_enabled", False)) and bool(
+        getattr(s_cfg, "tinyhippo_consolidated_boost_enabled", False)
+    )
     cons_factor = float(getattr(s_cfg, "tinyhippo_consolidated_boost_factor", 1.0)) if stc_on else 1.0
 
     # degree = consolidation-scaled adjacency; raw_degree = unscaled baseline.

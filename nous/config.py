@@ -718,11 +718,34 @@ class Settings(BaseSettings):
     tinyhippo_consolidated_boost_factor: float = Field(
         default=2.0, validation_alias="NOUS_TINYHIPPO_CONSOLIDATED_BOOST_FACTOR"
     )
+    # Master switch for the consolidated-edge ranking boost (the active retrieval
+    # mechanism that applies the factor above). Default OFF so that
+    # tinyhippo_lite_enabled ALONE stays telemetry-only even when
+    # graph_adjacency_boost_enabled is on — flipping the master flag for a shadow
+    # run must not change ranking and contaminate the A/B baseline. Opt-in,
+    # sibling to tinyhippo_downscale_enabled.
+    tinyhippo_consolidated_boost_enabled: bool = Field(
+        default=False, validation_alias="NOUS_TINYHIPPO_CONSOLIDATED_BOOST_ENABLED"
+    )
     # F044 Phase 8d spec mechanism: per-cycle multiplicative decay of TAGGED
-    # edge weights (consolidated exempt). Spec-validated band [0.50, 0.90].
+    # edge weights (consolidated exempt). Spec-validated band [0.50, 0.90];
+    # experiments run as low as 0.42. The validator below enforces only the hard
+    # (0.0, 1.0] decay-factor bound so a typo (e.g. 75) or negative value fails
+    # config init instead of silently corrupting every tagged edge weight when
+    # tinyhippo_downscale_enabled is on.
     tinyhippo_alpha: float = Field(
         default=0.75, validation_alias="NOUS_TINYHIPPO_ALPHA"
     )
+
+    @field_validator("tinyhippo_alpha")
+    @classmethod
+    def _validate_tinyhippo_alpha(cls, v: float) -> float:
+        if not (0.0 < v <= 1.0):
+            raise ValueError(
+                f"tinyhippo_alpha must be in (0.0, 1.0] (a multiplicative decay "
+                f"factor); got {v}"
+            )
+        return v
     # Master switch for the Phase 8d weight downscale (the actual retrieval
     # mechanism). Default OFF: tinyhippo_lite_enabled alone stays telemetry-only
     # (promotion + counts, no weight change). Set true to apply the downscale.

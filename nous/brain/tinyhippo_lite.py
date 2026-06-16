@@ -64,16 +64,27 @@ async def flush_recall_touches(session: Any) -> int:
     if not _RECALL_TOUCH_BUFFER:
         return 0
     items = list(_RECALL_TOUCH_BUFFER.items())
-    for (source_id, target_id, relation), n in items:
-        await session.execute(
-            _LTP_INCREMENT_BY_SQL,
-            {"source_id": source_id, "target_id": target_id,
-             "relation": relation, "n": int(n)},
-        )
-    # Clear only after all writes succeed — if a write raises, the caller's
-    # session rolls back and the buffer is retained for a clean re-flush
-    # (no partial double-count).
-    _RECALL_TOUCH_BUFFER.clear()
+    # Subtract the snapshot up front, synchronously (no await in this loop), so a
+    # recall that records new touches while the writes below are suspended on an
+    # await is NOT clobbered by a blanket clear() — only the concurrent remainder
+    # stays in the global buffer for the next flush.
+    for key, n in items:
+        _RECALL_TOUCH_BUFFER[key] -= n
+        if _RECALL_TOUCH_BUFFER[key] <= 0:
+            del _RECALL_TOUCH_BUFFER[key]
+    try:
+        for (source_id, target_id, relation), n in items:
+            await session.execute(
+                _LTP_INCREMENT_BY_SQL,
+                {"source_id": source_id, "target_id": target_id,
+                 "relation": relation, "n": int(n)},
+            )
+    except BaseException:
+        # A write raised: the caller's session rolls back, so restore the
+        # snapshot for a clean re-flush (no partial double-count, no lost touches).
+        for key, n in items:
+            _RECALL_TOUCH_BUFFER[key] += n
+        raise
     return len(items)
 
 # Cumulative-reinforcement histogram buckets reported each cycle. The whole
