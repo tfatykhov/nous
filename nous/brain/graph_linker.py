@@ -240,7 +240,16 @@ class GraphLinker:
                     )
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
-                await session.execute(stmt)
+                res = await session.execute(stmt)
+                if res.rowcount == 0 and getattr(
+                    self.settings, "tinyhippo_lite_enabled", False
+                ):
+                    # F044-STC-HOOK: conflict = re-derived live evidence_for edge.
+                    # This upsert path bypasses create_edge(), so reinforce here too.
+                    from nous.brain.tinyhippo_lite import increment_ltp_on_rederivation
+                    await increment_ltp_on_rederivation(
+                        session, fact_id, row.id, "evidence_for"
+                    )
                 edges.append(GraphEdgeInfo(
                     source_id=fact_id,
                     target_id=row.id,
@@ -319,7 +328,16 @@ class GraphLinker:
                     )
                     .on_conflict_do_nothing(index_elements=["source_id", "target_id", "relation"])
                 )
-                await session.execute(stmt)
+                res = await session.execute(stmt)
+                if res.rowcount == 0 and getattr(
+                    self.settings, "tinyhippo_lite_enabled", False
+                ):
+                    # F044-STC-HOOK: conflict = re-derived live related_to edge.
+                    # This upsert path bypasses create_edge(), so reinforce here too.
+                    from nous.brain.tinyhippo_lite import increment_ltp_on_rederivation
+                    await increment_ltp_on_rederivation(
+                        session, fact_id, row.id, "related_to"
+                    )
                 edges.append(GraphEdgeInfo(
                     source_id=fact_id,
                     target_id=row.id,

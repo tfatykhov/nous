@@ -32,8 +32,12 @@ _AGENT = "f044-test-agent"
 # ---------------------------------------------------------------------------
 
 def test_stc_hook_site_count_is_pinned():
-    """Exactly the two LIVE similarity-linker sites carry the F044-STC-HOOK.
+    """The four LIVE similarity-linker upsert sites carry the F044-STC-HOOK.
 
+    The live re-derivation sources are: brain._auto_link, graph_linker.create_edge,
+    and the two FactGraphLinker upserts (link_fact_to_decisions /
+    link_fact_to_facts) — the latter two own the ON CONFLICT path for every
+    ``fact_learned`` event and bypass create_edge() (codex P1b, PR #531).
     Deterministic sleep-time rebuilders (graph_densifier raw-SQL builders,
     F070 structural anchors) are intentionally NOT hooked. If this count
     changes, a producer was added/removed — update deliberately and confirm
@@ -45,9 +49,35 @@ def test_stc_hook_site_count_is_pinned():
         for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
             if "F044-STC-HOOK" in line:
                 hits.append(f"{py.name}:{i}")
-    assert len(hits) == 2, f"expected 2 STC hook sites, found {len(hits)}: {hits}"
+    assert len(hits) == 4, f"expected 4 STC hook sites, found {len(hits)}: {hits}"
     files = {h.split(":")[0] for h in hits}
     assert files == {"brain.py", "graph_linker.py"}, files
+    # The two fact-linker upserts must both be hooked (P1b regression lock).
+    gl_hits = sum(1 for h in hits if h.startswith("graph_linker.py"))
+    assert gl_hits == 3, f"expected 3 hooks in graph_linker.py, found {gl_hits}"
+
+
+def test_linker_commit_gates_are_f044_aware():
+    """Every live-linker handler commits reinforcement-only sessions (codex P1a).
+
+    A re-derivation can increment LTP counters without creating any new edge.
+    If the handler still commits only when ``edges_created > 0`` / ``if all_edges``,
+    those increments roll back. Each of the four handlers must therefore OR the
+    F044 flag into its commit gate. Source-pinned (the same discipline as the
+    hook-site guard) so a regression to ``if edges_created > 0:`` trips CI.
+    """
+    handlers_dir = Path(__file__).resolve().parent.parent / "nous" / "handlers"
+    expected = {
+        "fact_graph_linker.py",
+        "decision_graph_linker.py",
+        "procedure_graph_linker.py",
+        "episode_summarizer.py",
+    }
+    for name in expected:
+        text_src = (handlers_dir / name).read_text(encoding="utf-8")
+        assert "tinyhippo_lite_enabled" in text_src and "await" in text_src, (
+            f"{name} commit gate is not F044-aware (P1a regression)"
+        )
 
 
 # ---------------------------------------------------------------------------
