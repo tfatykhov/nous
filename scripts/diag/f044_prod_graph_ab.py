@@ -106,7 +106,7 @@ async def main():
         await reset_assert(conn)
         await warmup(db, embedder, [q.query for q in qrels], "self")
         e = (await _counts(conn))[1]; assert e == edges0, f"edge count changed {e}!={edges0}"
-        m_self = await run_cfg("f044_self", {**GRAPH, "tinyhippo_lite_enabled": True}, qrels, eval_settings, template, top_k)
+        m_self = await run_cfg("f044_self", {**GRAPH, "tinyhippo_lite_enabled": True, "tinyhippo_consolidated_boost_enabled": True}, qrels, eval_settings, template, top_k)
 
         # ===== F044 CONTENT (generalization: warm-up on corpus facts) =====
         print("\n=== F044 CONTENT (warm-up = corpus facts, non-leaky) ===")
@@ -114,7 +114,7 @@ async def main():
         facts = [r[0][:240] for r in await conn.fetch(f"SELECT content FROM heart.facts WHERE agent_id='{AGENT}' AND content IS NOT NULL AND length(content)>20 ORDER BY id LIMIT 120")]
         await warmup(db, embedder, facts, "content")
         e = (await _counts(conn))[1]; assert e == edges0, f"edge count changed {e}!={edges0}"
-        m_cont = await run_cfg("f044_content", {**GRAPH, "tinyhippo_lite_enabled": True}, qrels, eval_settings, template, top_k)
+        m_cont = await run_cfg("f044_content", {**GRAPH, "tinyhippo_lite_enabled": True, "tinyhippo_consolidated_boost_enabled": True}, qrels, eval_settings, template, top_k)
 
         # ===== compare =====
         print("\n=== RESULT (real prod graph-targeted, n={}) ===".format(m_base.n_qrels))

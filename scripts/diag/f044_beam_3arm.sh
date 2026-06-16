@@ -39,7 +39,7 @@ arm () { # $1=name  $2=tinyhippo(true/false)  $3=warmup ("none"|"questions"|"con
   echo "  pre-answer: consolidated=$cons edges=$edges"
   [ "$edges" = "$EDGES0" ] || { echo "ABORT: edge count changed ($edges != $EDGES0) — re-ingest/wipe detected"; exit 1; }
   local out
-  out=$(NOUS_TINYHIPPO_LITE_ENABLED=$flag NOUS_GRAPH_ADJACENCY_BOOST_ENABLED=true uv run python -m nous_eval.beam --conv-limit 5 --cost-cap-usd 9 answer 2>&1)
+  out=$(NOUS_TINYHIPPO_LITE_ENABLED=$flag NOUS_TINYHIPPO_CONSOLIDATED_BOOST_ENABLED=$flag NOUS_GRAPH_ADJACENCY_BOOST_ENABLED=true uv run python -m nous_eval.beam --conv-limit 5 --cost-cap-usd 9 answer 2>&1)
   echo "$out" | grep -iE "answer: total cost|cost cap hit"
   echo "$out" | grep -qi "cost cap hit" && { echo "ABORT: $name answer hit cost cap (incomplete)"; exit 1; }
   set -- $(snap); echo "  post-answer: consolidated=$1 edges=$2"
