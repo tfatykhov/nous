@@ -253,6 +253,36 @@ async def test_update_summary_backfills_columns(heart, session):
     assert updated.structured_summary == structured
 
 
+async def test_list_recent_tolerates_legacy_list_structured_summary(heart, session):
+    """Regression: a legacy pre-#525 row whose structured_summary is a bare LIST
+    must not crash list_recent / get_episode — that ValidationError took down the
+    whole batch and killed sleep-cycle procedure learning (episodes.py:400/688).
+    """
+    from datetime import UTC, datetime
+
+    from nous.storage.models import Episode
+
+    inp = _episode_input(summary="legacy bad row")
+    detail = await heart.start_episode(inp, session=session)
+    # Simulate the bad row: a bare list persisted where a dict is expected
+    # (update_episode_summary is typed dict but stores raw; the LLM-parse guard
+    # that prevents this is PR #525, so only old rows look like this).
+    await heart.update_episode_summary(detail.id, ["A truncated body"], session=session)
+    # Mark ended (list_recent only returns ended episodes) without going through
+    # end_episode's embedding path.
+    ep = (await session.execute(select(Episode).where(Episode.id == detail.id))).scalar_one()
+    ep.ended_at = datetime.now(UTC)
+    ep.outcome = "success"
+    await session.flush()
+
+    listed = await heart.list_episodes(limit=50, session=session)  # must not raise
+    bad = next(e for e in listed if e.id == detail.id)
+    assert bad.structured_summary is None  # coerced, not crashed
+
+    fetched = await heart.get_episode(detail.id, session=session)  # _to_detail must not raise
+    assert fetched.structured_summary is None
+
+
 # ---------------------------------------------------------------------------
 # 9. test_update_summary_partial_data (008.3)
 # ---------------------------------------------------------------------------
