@@ -488,6 +488,14 @@ class SleepHandler:
                 if success:
                     phases_completed.append("relink_open_episodes")
 
+            # F044 tinyHippo-Lite v1: STC promotion gate + telemetry. Runs
+            # after densification/relink (count this cycle's re-derivations)
+            # and before dead-edge prune. No-op unless tinyhippo_lite_enabled.
+            if not self._interrupted:
+                success = await self._phase_stc_consolidation(sleep_stats)
+                if success:
+                    phases_completed.append("stc_consolidation")
+
             if not self._interrupted:
                 success = await self._phase_prune_dead_edges(sleep_stats)
                 if success:
@@ -1472,6 +1480,53 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("F040 graph densification phase failed", exc_info=True)
+            return False
+
+    async def _phase_stc_consolidation(self, sleep_stats: dict) -> bool:
+        """F044 tinyHippo-Lite v1: STC promotion gate + telemetry (flag-gated).
+
+        Runs after F040 densification (so freshly re-derived edges are counted)
+        and before F053 dead-edge prune. Promotes tagged edges whose ltp_count
+        reached the PRP threshold and records the reinforcement distribution to
+        sleep_stats. No weight change, no deletion — telemetry-only v1.
+        """
+        if not self._settings.tinyhippo_lite_enabled:
+            return True
+        try:
+            from nous.brain.tinyhippo_lite import run_stc_consolidation
+            stats = await run_stc_consolidation(
+                self._heart.db,
+                self._settings.agent_id,
+                self._settings.tinyhippo_prp_threshold,
+            )
+            sleep_stats.update(stats)
+            # F044 Phase 8d (spec): homeostatic α-downscale of TAGGED edge
+            # weights (consolidated exempt). Runs AFTER promotion (8c) so
+            # freshly-promoted edges aren't penalized this cycle. Opt-in
+            # (default off) — the telemetry-only v1 leaves weights untouched.
+            if getattr(self._settings, "tinyhippo_downscale_enabled", False):
+                from nous.brain.tinyhippo_lite import homeostatic_downscale
+                async with self._heart.db.session() as sess:
+                    n_down = await homeostatic_downscale(
+                        sess, self._settings.agent_id, self._settings.tinyhippo_alpha
+                    )
+                    await sess.commit()
+                sleep_stats["f044_downscaled"] = n_down
+                logger.info(
+                    "F044 Phase 8d: downscaled %d tagged edges by α=%.2f",
+                    n_down, self._settings.tinyhippo_alpha,
+                )
+            logger.info(
+                "F044 STC: promoted=%d tagged=%d consolidated=%d "
+                "ltp>=1/2/3=%d/%d/%d reinforced_24h=%d",
+                stats["f044_promoted"], stats["f044_n_tagged"],
+                stats["f044_n_consolidated"], stats["f044_ltp_ge1"],
+                stats["f044_ltp_ge2"], stats["f044_ltp_ge3"],
+                stats["f044_reinforced_24h"],
+            )
+            return True
+        except Exception:
+            logger.warning("F044 STC consolidation phase failed", exc_info=True)
             return False
 
     async def _phase_prune_dead_edges(self, sleep_stats: dict) -> bool:

@@ -66,7 +66,10 @@ class FactGraphLinker:
                     session=link_session,
                 )
                 all_edges = decision_edges + fact_edges
-                if all_edges:
+                # F044: commit even when no new edges were created — a re-derivation
+                # may have only incremented LTP counters (reinforcement). Gated on the
+                # flag so default-prod (F044 off) keeps the original commit semantics.
+                if all_edges or getattr(self._settings, "tinyhippo_lite_enabled", False):
                     await link_session.commit()
                     logger.debug(
                         "F022: Linked fact %s to %d decisions + %d facts",

@@ -471,12 +471,16 @@ class EpisodeSummarizer:
                         if edge:
                             edges_created += 1
 
-                if edges_created > 0:
+                # F044: commit reinforcement-only sessions too (re-derived edges
+                # increment LTP but create no new rows). Flag-gated to preserve
+                # default-prod commit semantics when F044 is off.
+                if edges_created > 0 or getattr(self._settings, "tinyhippo_lite_enabled", False):
                     await session.commit()
-                    logger.debug(
-                        "F040: Linked episode %s to %d similar episodes",
-                        episode_id, edges_created,
-                    )
+                    if edges_created > 0:
+                        logger.debug(
+                            "F040: Linked episode %s to %d similar episodes",
+                            episode_id, edges_created,
+                        )
                 return edges_created
         except Exception:
             logger.debug("F040: Episode semantic linking failed for %s", episode_id)

@@ -287,6 +287,18 @@ class GraphEdge(Base):
         server_default="heuristic",
     )
     created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # F044 tinyHippo-Lite v1 — STC state machine (migration 061). Defaults keep
+    # feature-off bit-identical: every edge is a 'tagged'/ltp_count=0 no-op until
+    # the (flag-gated) reinforcement hooks start counting re-derivations.
+    consolidation_state: Mapped[str] = mapped_column(
+        String, nullable=False, default="tagged", server_default="tagged"
+    )
+    ltp_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    last_ltp_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class GraphHubSnapshot(Base):

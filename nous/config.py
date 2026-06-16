@@ -694,6 +694,68 @@ class Settings(BaseSettings):
     spreading_activation_gamma: float = 0.2
 
     # F040: Graph densification — backfill
+    # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).
+    # Master switch (default OFF): gates both the reinforcement hooks and the
+    # _phase_stc_consolidation sleep phase. When False, sleep + edge inserts
+    # behave bit-identically to pre-F044 main.
+    tinyhippo_lite_enabled: bool = Field(
+        default=False, validation_alias="NOUS_TINYHIPPO_LITE_ENABLED"
+    )
+    # PRP analog: a tagged edge consolidates once ltp_count >= this threshold.
+    # ge=1: a threshold of 0/negative would promote every edge on the first
+    # sleep (migration 061 inits ltp_count=0), collapsing the experiment and
+    # exempting the whole graph from downscale.
+    tinyhippo_prp_threshold: int = Field(
+        default=3, ge=1, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD"
+    )
+    # v1.1: reinforce edges among co-retrieved results on recall (retrieval ==
+    # reactivation). Buffered (write-free read path), flushed at sleep. Only
+    # active when tinyhippo_lite_enabled. Reaches the densifier-built bulk the
+    # write-linker never re-derives.
+    tinyhippo_recall_touch_enabled: bool = Field(
+        default=True, validation_alias="NOUS_TINYHIPPO_RECALL_TOUCH_ENABLED"
+    )
+    # v1.1: weight consolidated edges higher in the graph adjacency boost so
+    # consolidation actually influences retrieval ranking (multiplier applied to
+    # a consolidated edge's contribution to a candidate's adjacency degree).
+    tinyhippo_consolidated_boost_factor: float = Field(
+        default=2.0, validation_alias="NOUS_TINYHIPPO_CONSOLIDATED_BOOST_FACTOR"
+    )
+    # Master switch for the consolidated-edge ranking boost (the active retrieval
+    # mechanism that applies the factor above). Default OFF so that
+    # tinyhippo_lite_enabled ALONE stays telemetry-only even when
+    # graph_adjacency_boost_enabled is on — flipping the master flag for a shadow
+    # run must not change ranking and contaminate the A/B baseline. Opt-in,
+    # sibling to tinyhippo_downscale_enabled.
+    tinyhippo_consolidated_boost_enabled: bool = Field(
+        default=False, validation_alias="NOUS_TINYHIPPO_CONSOLIDATED_BOOST_ENABLED"
+    )
+    # F044 Phase 8d spec mechanism: per-cycle multiplicative decay of TAGGED
+    # edge weights (consolidated exempt). Spec-validated band [0.50, 0.90];
+    # experiments run as low as 0.42. The validator below enforces only the hard
+    # (0.0, 1.0] decay-factor bound so a typo (e.g. 75) or negative value fails
+    # config init instead of silently corrupting every tagged edge weight when
+    # tinyhippo_downscale_enabled is on.
+    tinyhippo_alpha: float = Field(
+        default=0.75, validation_alias="NOUS_TINYHIPPO_ALPHA"
+    )
+
+    @field_validator("tinyhippo_alpha")
+    @classmethod
+    def _validate_tinyhippo_alpha(cls, v: float) -> float:
+        if not (0.0 < v <= 1.0):
+            raise ValueError(
+                f"tinyhippo_alpha must be in (0.0, 1.0] (a multiplicative decay "
+                f"factor); got {v}"
+            )
+        return v
+    # Master switch for the Phase 8d weight downscale (the actual retrieval
+    # mechanism). Default OFF: tinyhippo_lite_enabled alone stays telemetry-only
+    # (promotion + counts, no weight change). Set true to apply the downscale.
+    tinyhippo_downscale_enabled: bool = Field(
+        default=False, validation_alias="NOUS_TINYHIPPO_DOWNSCALE_ENABLED"
+    )
+
     graph_backfill_enabled: bool = True
     graph_backfill_max_facts: int = 50
     graph_backfill_max_decisions: int = 30

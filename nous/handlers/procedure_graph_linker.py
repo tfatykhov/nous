@@ -138,12 +138,16 @@ class ProcedureGraphLinker:
                         if edge:
                             edges_created += 1
 
-                if edges_created > 0:
+                # F044: commit reinforcement-only sessions too (re-derived edges
+                # increment LTP but create no new rows). Flag-gated to preserve
+                # default-prod commit semantics when F044 is off.
+                if edges_created > 0 or getattr(self._settings, "tinyhippo_lite_enabled", False):
                     await session.commit()
-                    logger.debug(
-                        "F040: Linked procedure %s to %d nodes",
-                        proc_id, edges_created,
-                    )
+                    if edges_created > 0:
+                        logger.debug(
+                            "F040: Linked procedure %s to %d nodes",
+                            proc_id, edges_created,
+                        )
         except asyncio.CancelledError:
             raise
         except Exception:
