@@ -859,6 +859,12 @@ async def _record_recall_reactivation(
     edges (excluding ``contradicts``, mirroring the adjacency boost) and buffer
     their (source, target, relation) keys in-process; the ltp write happens at
     the next sleep flush. Fails open — reinforcement is best-effort.
+
+    Deterministic/structural edges (``extraction_method = 'deterministic'`` —
+    F070 chunk ``part_of`` anchors etc.) are excluded: the write-side LTP hook
+    and the downscale both skip them, so reinforcing them here would inflate
+    consolidation telemetry and hand structural anchors the consolidated boost.
+    This keeps all three F044 reinforcement touchpoints on the same eligible set.
     """
     from sqlalchemy import text as sa_text
 
@@ -872,6 +878,7 @@ async def _record_recall_reactivation(
                 "FROM brain.graph_edges "
                 "WHERE agent_id = :a "
                 "  AND relation != 'contradicts' "
+                "  AND extraction_method IS DISTINCT FROM 'deterministic' "
                 "  AND source_id = ANY(CAST(:ids AS uuid[])) "
                 "  AND target_id = ANY(CAST(:ids AS uuid[]))"
             ), {"a": brain.agent_id, "ids": candidate_ids})).all()

@@ -241,6 +241,26 @@ def test_consolidated_boost_is_opt_in_not_master_flag():
     )
 
 
+def test_recall_reactivation_excludes_deterministic_edges():
+    """The recall-touch reactivation query must skip structural edges.
+
+    All three F044 reinforcement touchpoints (write-side LTP hook, sleep
+    downscale, recall-touch) must operate on the same eligible set — the
+    associative tier, never the deterministic/structural one. Source-pinned so
+    the recall-touch read can't silently drop the exemption and start promoting
+    F070 part_of anchors (codex round-5 P2).
+    """
+    pipeline_src = (
+        Path(__file__).resolve().parent.parent
+        / "nous" / "api" / "retrieval_pipeline.py"
+    ).read_text(encoding="utf-8")
+    reactivation = pipeline_src.split("_record_recall_reactivation", 2)[2]
+    body = reactivation.split("async def ", 1)[0]
+    assert "extraction_method IS DISTINCT FROM 'deterministic'" in body, (
+        "recall reactivation read must exclude the deterministic tier"
+    )
+
+
 @pytest.mark.postgres_only
 async def test_flush_preserves_touch_recorded_during_writes(session):
     """A recall that records a touch mid-flush must survive (codex P2 race).
