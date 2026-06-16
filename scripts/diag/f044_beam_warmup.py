@@ -47,16 +47,17 @@ async def main():
                 except Exception as e:
                     print("  recall err:", str(e)[:140])
             print(f"{agent}: recalled {ok}/{len(qs)} | global buffer={_recall_buffer_size()} edges")
-        async with db.session() as sess:
-            touched = await flush_recall_touches(sess)
-            await sess.commit()
-        print(f"\nflushed {touched} distinct recall-touched edges -> ltp_count")
+        # Per-agent flush: the buffer is agent-keyed, so each agent's sleep
+        # drains only its own touches.
         print("=== consolidation per agent (PRP=3) ===")
+        touched = 0
         for agent in agents:
             async with db.session() as sess:
+                touched += await flush_recall_touches(sess, agent)
                 st = await stc_promote_and_measure(sess, agent, 3)
                 await sess.commit()
             print(f"  {agent}: edges={st['f044_n_edges']} ltp>=1={st['f044_ltp_ge1']} >=2={st['f044_ltp_ge2']} >=3={st['f044_ltp_ge3']} consolidated={st['f044_n_consolidated']}")
+        print(f"\nflushed {touched} distinct recall-touched edges -> ltp_count")
     finally:
         await db.disconnect()
 

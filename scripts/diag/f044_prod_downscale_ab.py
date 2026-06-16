@@ -64,7 +64,7 @@ async def restore_weights(conn):
 
 async def warmup(db, embedder, queries):
     _RECALL_TOUCH_BUFFER.clear()
-    s = Settings().model_copy(update={"agent_id": AGENT})
+    s = Settings().model_copy(update={"agent_id": AGENT, "tinyhippo_lite_enabled": True})
     heart = Heart(db, s, embedding_provider=embedder)
     brain = Brain(db, s, embedding_provider=embedder)
     for q in queries:
@@ -73,7 +73,7 @@ async def warmup(db, embedder, queries):
         except Exception:
             pass
     async with db.session() as sess:
-        await flush_recall_touches(sess)
+        await flush_recall_touches(sess, AGENT)
         st = await stc_promote_and_measure(sess, AGENT, s.tinyhippo_prp_threshold)
         await sess.commit()
     return st["f044_n_consolidated"]

@@ -56,7 +56,7 @@ async def reset_assert(conn):
 
 async def warmup(db, embedder, queries, label):
     _RECALL_TOUCH_BUFFER.clear()
-    s = Settings().model_copy(update={"agent_id": AGENT})
+    s = Settings().model_copy(update={"agent_id": AGENT, "tinyhippo_lite_enabled": True})
     heart = Heart(db, s, embedding_provider=embedder)
     brain = Brain(db, s, embedding_provider=embedder)
     ok = 0
@@ -66,7 +66,7 @@ async def warmup(db, embedder, queries, label):
         except Exception as e:
             print("    recall err:", str(e)[:90])
     async with db.session() as sess:
-        touched = await flush_recall_touches(sess)
+        touched = await flush_recall_touches(sess, AGENT)
         st = await stc_promote_and_measure(sess, AGENT, s.tinyhippo_prp_threshold)
         await sess.commit()
     print(f"  {label} warm-up: {ok}/{len(queries)} queries -> flushed {touched} edges -> {st['f044_n_consolidated']} consolidated")

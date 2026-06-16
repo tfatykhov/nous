@@ -359,3 +359,22 @@ async def test_downscale_exempts_deterministic_structural_edges(session):
         {"s": d_src, "t": d_tgt})).scalar()
     assert h_w == pytest.approx(0.40)  # heuristic decayed by alpha
     assert d_w == pytest.approx(0.80)  # deterministic exempt
+
+
+@pytest.mark.postgres_only
+async def test_ltp_increment_skips_deterministic_target(session):
+    """The LTP increment must not reinforce a deterministic target row (round-8 P2).
+
+    A live non-structural producer can ON-CONFLICT onto a deterministic
+    structural edge; the UPDATE must leave that row's ltp_count untouched so
+    structural anchors never promote, even when a non-structural producer
+    triggered the conflict.
+    """
+    d_src, d_tgt = await _insert_edge(
+        session, ltp=0, relation="related_to", extraction_method="deterministic"
+    )
+    await increment_ltp_on_rederivation(session, d_src, d_tgt, "related_to")
+    ltp = (await session.execute(
+        text("SELECT ltp_count FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
+        {"s": d_src, "t": d_tgt})).scalar()
+    assert ltp == 0  # deterministic target exempt from LTP reinforcement

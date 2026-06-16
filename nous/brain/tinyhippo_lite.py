@@ -57,6 +57,7 @@ _LTP_INCREMENT_BY_SQL = text(
        AND source_id = :source_id
        AND target_id = :target_id
        AND relation = :relation
+       AND extraction_method IS DISTINCT FROM 'deterministic'
     """
 )
 
@@ -136,8 +137,15 @@ _LTP_INCREMENT_SQL = text(
      WHERE source_id = :source_id
        AND target_id = :target_id
        AND relation = :relation
+       AND extraction_method IS DISTINCT FROM 'deterministic'
     """
 )
+# The deterministic guard is the structural fix for the whole reinforcement
+# family: a live non-structural producer (e.g. DecisionGraphLinker `discussed_in`)
+# can ON-CONFLICT onto the deterministic episode→decision edge written by
+# link_episode_deterministic. Filtering at the UPDATE keeps structural anchors
+# out of LTP regardless of which producer triggered the conflict — defense at the
+# mutation point, not just the producer-side provenance check / read-side filter.
 
 
 _DOWNSCALE_SQL = text(

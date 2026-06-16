@@ -83,11 +83,13 @@ async def main():
                 except Exception as e:
                     print("  recall err:", str(e)[:100])
             print(f"{agent}: {MODE} warm-up {ok}/{len(qs)} queries | buffer={_recall_buffer_size()}")
-        async with db.session() as sess:
-            touched = await flush_recall_touches(sess); await sess.commit()
+        # Per-agent flush: the buffer is agent-keyed, so each agent drains only
+        # its own touches.
+        touched = 0
         tot = 0
         for agent in AGENTS:
             async with db.session() as sess:
+                touched += await flush_recall_touches(sess, agent)
                 st = await stc_promote_and_measure(sess, agent, base.tinyhippo_prp_threshold); await sess.commit()
             tot += st["f044_n_consolidated"]
         print(f"{MODE} warm-up: flushed {touched} edges -> {tot} consolidated across 5 agents")
