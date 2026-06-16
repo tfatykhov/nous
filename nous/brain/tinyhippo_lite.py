@@ -136,8 +136,15 @@ _DOWNSCALE_SQL = text(
        SET weight = weight * :alpha
      WHERE agent_id = :agent
        AND consolidation_state = 'tagged'
+       AND extraction_method IS DISTINCT FROM 'deterministic'
     """
 )
+# `extraction_method = 'deterministic'` is the F065 structural tier (F070 chunk
+# `part_of` anchors, adjacent-chunk links, supersession/episode-token edges).
+# These are deterministically rebuilt and the LTP hook explicitly skips them
+# (provenance_source == 'structural'), so they never reinforce → never promote →
+# would decay toward zero across sleeps. Exempt them, mirroring that skip. NULL
+# rows fail open to the 'heuristic' tier and remain subject to downscale.
 
 
 async def homeostatic_downscale(session: Any, agent_id: str, alpha: float) -> int:

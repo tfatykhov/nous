@@ -17,6 +17,7 @@ from sqlalchemy import text
 from nous.brain.tinyhippo_lite import (
     _RECALL_TOUCH_BUFFER,
     flush_recall_touches,
+    homeostatic_downscale,
     increment_ltp_on_rederivation,
     record_recall_touches,
     stc_promote_and_measure,
@@ -84,7 +85,10 @@ def test_linker_commit_gates_are_f044_aware():
 # Postgres-lane: gate, telemetry, increment
 # ---------------------------------------------------------------------------
 
-async def _insert_edge(session, *, ltp=0, state="tagged", relation="related_to"):
+async def _insert_edge(
+    session, *, ltp=0, state="tagged", relation="related_to",
+    extraction_method="heuristic", weight=0.9,
+):
     src, tgt = uuid4(), uuid4()
     await session.execute(
         text(
@@ -93,11 +97,12 @@ async def _insert_edge(session, *, ltp=0, state="tagged", relation="related_to")
                 (source_id, target_id, source_type, target_type, agent_id,
                  relation, weight, auto_linked, extraction_method,
                  consolidation_state, ltp_count)
-            VALUES (:s, :t, 'decision', 'decision', :a, :rel, 0.9, true,
-                    'heuristic', :state, :ltp)
+            VALUES (:s, :t, 'decision', 'decision', :a, :rel, :w, true,
+                    :em, :state, :ltp)
             """
         ),
-        {"s": src, "t": tgt, "a": _AGENT, "rel": relation, "state": state, "ltp": ltp},
+        {"s": src, "t": tgt, "a": _AGENT, "rel": relation, "w": weight,
+         "em": extraction_method, "state": state, "ltp": ltp},
     )
     return src, tgt
 
@@ -267,3 +272,46 @@ async def test_flush_preserves_touch_recorded_during_writes(session):
     # The concurrent touch survived the flush (was not clobbered by clear()).
     assert _RECALL_TOUCH_BUFFER.get(concurrent) == 1
     _RECALL_TOUCH_BUFFER.clear()
+
+
+def test_prp_threshold_rejects_non_positive():
+    """tinyhippo_prp_threshold must be >= 1 (codex round-3 P2).
+
+    A 0/negative threshold promotes every edge on the first sleep (all edges
+    init ltp_count=0), collapsing the experiment and exempting the graph from
+    downscale.
+    """
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            Settings(NOUS_TINYHIPPO_PRP_THRESHOLD=bad)
+    assert Settings(NOUS_TINYHIPPO_PRP_THRESHOLD=1).tinyhippo_prp_threshold == 1
+
+
+@pytest.mark.postgres_only
+async def test_downscale_exempts_deterministic_structural_edges(session):
+    """Downscale must skip the deterministic (structural) tier (codex round-3 P2).
+
+    F070 structural anchors never reinforce via the LTP hook, so decaying them
+    every sleep walks their weight toward zero. They must be exempt; cosine
+    (heuristic) tagged edges still decay.
+    """
+    h_src, h_tgt = await _insert_edge(
+        session, state="tagged", extraction_method="heuristic", weight=0.80
+    )
+    d_src, d_tgt = await _insert_edge(
+        session, state="tagged", extraction_method="deterministic", weight=0.80
+    )
+    await homeostatic_downscale(session, _AGENT, 0.5)
+
+    h_w = (await session.execute(
+        text("SELECT weight FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
+        {"s": h_src, "t": h_tgt})).scalar()
+    d_w = (await session.execute(
+        text("SELECT weight FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
+        {"s": d_src, "t": d_tgt})).scalar()
+    assert h_w == pytest.approx(0.40)  # heuristic decayed by alpha
+    assert d_w == pytest.approx(0.80)  # deterministic exempt

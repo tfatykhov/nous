@@ -702,8 +702,11 @@ class Settings(BaseSettings):
         default=False, validation_alias="NOUS_TINYHIPPO_LITE_ENABLED"
     )
     # PRP analog: a tagged edge consolidates once ltp_count >= this threshold.
+    # ge=1: a threshold of 0/negative would promote every edge on the first
+    # sleep (migration 061 inits ltp_count=0), collapsing the experiment and
+    # exempting the whole graph from downscale.
     tinyhippo_prp_threshold: int = Field(
-        default=3, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD"
+        default=3, ge=1, validation_alias="NOUS_TINYHIPPO_PRP_THRESHOLD"
     )
     # v1.1: reinforce edges among co-retrieved results on recall (retrieval ==
     # reactivation). Buffered (write-free read path), flushed at sleep. Only
