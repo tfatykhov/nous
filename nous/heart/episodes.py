@@ -397,7 +397,10 @@ class EpisodeManager:
                 # legacy creation-time echo even for summarized episodes —
                 # the recall_deep parent-episode path already COALESCEs to
                 # structured_summary->>'summary' (tools.py, codex fix).
-                structured_summary=e.structured_summary,
+                # Guard against legacy pre-#525 rows where a bare-list summary
+                # was persisted — a non-dict crashes EpisodeSummary validation
+                # and takes down the whole batch (sleep-cycle procedure learner).
+                structured_summary=e.structured_summary if isinstance(e.structured_summary, dict) else None,
             )
             for e in episodes
         ]
@@ -682,7 +685,9 @@ class EpisodeManager:
             tags=episode.tags or [],
             decision_ids=decision_ids,
             active=episode.active,
-            structured_summary=episode.structured_summary,
+            # Legacy bad-row guard (see list_recent): a non-dict structured_summary
+            # would fail EpisodeDetail validation.
+            structured_summary=episode.structured_summary if isinstance(episode.structured_summary, dict) else None,
             user_id=episode.user_id,
             user_display_name=episode.user_display_name,
             created_at=episode.created_at,
