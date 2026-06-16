@@ -887,7 +887,9 @@ async def _record_recall_reactivation(
         return
     if rows:
         from nous.brain.tinyhippo_lite import record_recall_touches
-        record_recall_touches([(src, tgt, rel) for src, tgt, rel in rows])
+        record_recall_touches(
+            [(src, tgt, rel) for src, tgt, rel in rows], brain.agent_id
+        )
 
 
 async def _attach_fact_source_episodes(

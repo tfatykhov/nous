@@ -165,8 +165,8 @@ async def test_recall_touch_buffer_flushes_to_ltp(session):
         (str(a), str(b), "related_to"),
         (str(a), str(b), "related_to"),
         (str(c), str(d), "related_to"),
-    ])
-    n_distinct = await flush_recall_touches(session)
+    ], _AGENT)
+    n_distinct = await flush_recall_touches(session, _AGENT)
     assert n_distinct == 2
     assert len(_RECALL_TOUCH_BUFFER) == 0
     ab = (await session.execute(
@@ -273,7 +273,8 @@ async def test_flush_preserves_touch_recorded_during_writes(session):
     _RECALL_TOUCH_BUFFER.clear()
     a, b = await _insert_edge(session, ltp=0, relation="related_to")
     concurrent = ("concurrent-src", "concurrent-tgt", "related_to")
-    record_recall_touches([(str(a), str(b), "related_to")])
+    concurrent_key = (_AGENT, *concurrent)
+    record_recall_touches([(str(a), str(b), "related_to")], _AGENT)
 
     class _RacingSession:
         def __init__(self, inner):
@@ -284,13 +285,36 @@ async def test_flush_preserves_touch_recorded_during_writes(session):
             if not self._fired:
                 self._fired = True
                 # A concurrent recall lands while this write is in flight.
-                record_recall_touches([concurrent])
+                record_recall_touches([concurrent], _AGENT)
             return await self._inner.execute(*args, **kwargs)
 
-    n = await flush_recall_touches(_RacingSession(session))
+    n = await flush_recall_touches(_RacingSession(session), _AGENT)
     assert n == 1  # one snapshotted edge written
     # The concurrent touch survived the flush (was not clobbered by clear()).
-    assert _RECALL_TOUCH_BUFFER.get(concurrent) == 1
+    assert _RECALL_TOUCH_BUFFER.get(concurrent_key) == 1
+    _RECALL_TOUCH_BUFFER.clear()
+
+
+@pytest.mark.postgres_only
+async def test_flush_is_agent_scoped(session):
+    """flush drains only the sleeping agent's touches (codex round-7 P2).
+
+    A multi-agent process must not let agent B's sleep apply/clear agent A's
+    buffered recall touches.
+    """
+    _RECALL_TOUCH_BUFFER.clear()
+    a, b = await _insert_edge(session, ltp=0, relation="related_to")
+    record_recall_touches([(str(a), str(b), "related_to")], _AGENT)
+    record_recall_touches([("other-src", "other-tgt", "related_to")], "other-agent")
+
+    n = await flush_recall_touches(session, _AGENT)
+    assert n == 1  # only this agent's edge
+    ab = (await session.execute(
+        text("SELECT ltp_count FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
+        {"s": a, "t": b})).scalar()
+    assert ab == 1
+    # The other agent's touch is untouched, awaiting its own flush.
+    assert _RECALL_TOUCH_BUFFER.get(("other-agent", "other-src", "other-tgt", "related_to")) == 1
     _RECALL_TOUCH_BUFFER.clear()
 
 

@@ -29,13 +29,18 @@ from sqlalchemy import text
 # then flush to ltp_count at sleep. Single-process scope (the sleep handler and
 # the recall path share this module in one process); cross-worker touches in a
 # multi-worker prod deploy are a known v1.1 limitation.
-_RECALL_TOUCH_BUFFER: "Counter[tuple[str, str, str]]" = Counter()
+#
+# Keyed by (agent_id, source_id, target_id, relation): a single process may
+# serve more than one agent, and promotion/telemetry are agent-scoped, so the
+# flush must drain only the sleeping agent's touches — otherwise agent B's sleep
+# would apply and clear agent A's buffered touches.
+_RECALL_TOUCH_BUFFER: "Counter[tuple[str, str, str, str]]" = Counter()
 
 
-def record_recall_touches(edges: list[tuple[str, str, str]]) -> None:
+def record_recall_touches(edges: list[tuple[str, str, str]], agent_id: str) -> None:
     """Buffer (source_id, target_id, relation) edges reactivated by one recall."""
-    for e in edges:
-        _RECALL_TOUCH_BUFFER[e] += 1
+    for source_id, target_id, relation in edges:
+        _RECALL_TOUCH_BUFFER[(agent_id, source_id, target_id, relation)] += 1
 
 
 def _recall_buffer_size() -> int:
@@ -48,22 +53,27 @@ _LTP_INCREMENT_BY_SQL = text(
     UPDATE brain.graph_edges
        SET ltp_count = ltp_count + :n,
            last_ltp_at = now()
-     WHERE source_id = :source_id
+     WHERE agent_id = :agent
+       AND source_id = :source_id
        AND target_id = :target_id
        AND relation = :relation
     """
 )
 
 
-async def flush_recall_touches(session: Any) -> int:
-    """Apply buffered recall touches to ltp_count and clear the buffer.
+async def flush_recall_touches(session: Any, agent_id: str) -> int:
+    """Apply ``agent_id``'s buffered recall touches to ltp_count, clear its keys.
 
     Called at sleep (before the promotion gate). Each distinct edge is bumped by
-    its buffered touch count. Returns the number of distinct edges reinforced.
+    its buffered touch count. Only the sleeping agent's keys are drained — other
+    agents' buffered touches survive for their own flush. Returns the number of
+    distinct edges reinforced.
     """
     if not _RECALL_TOUCH_BUFFER:
         return 0
-    items = list(_RECALL_TOUCH_BUFFER.items())
+    items = [(key, n) for key, n in _RECALL_TOUCH_BUFFER.items() if key[0] == agent_id]
+    if not items:
+        return 0
     # Subtract the snapshot up front, synchronously (no await in this loop), so a
     # recall that records new touches while the writes below are suspended on an
     # await is NOT clobbered by a blanket clear() — only the concurrent remainder
@@ -73,10 +83,10 @@ async def flush_recall_touches(session: Any) -> int:
         if _RECALL_TOUCH_BUFFER[key] <= 0:
             del _RECALL_TOUCH_BUFFER[key]
     try:
-        for (source_id, target_id, relation), n in items:
+        for (agent, source_id, target_id, relation), n in items:
             await session.execute(
                 _LTP_INCREMENT_BY_SQL,
-                {"source_id": source_id, "target_id": target_id,
+                {"agent": agent, "source_id": source_id, "target_id": target_id,
                  "relation": relation, "n": int(n)},
             )
     except BaseException:
@@ -215,7 +225,7 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
     dict for merging into ``sleep_stats``.
     """
     async with db.session() as session:
-        touched = await flush_recall_touches(session)
+        touched = await flush_recall_touches(session, agent_id)
         stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
         await session.commit()
     stats["f044_recall_touches_flushed"] = touched
