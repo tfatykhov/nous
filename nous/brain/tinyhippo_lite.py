@@ -229,11 +229,18 @@ async def stc_promote_and_measure(
 async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> dict[str, int]:
     """Run the STC promotion gate + telemetry for one sleep cycle.
 
-    Thin wrapper that owns the transaction; returns a flat ``f044_*`` stats
-    dict for merging into ``sleep_stats``.
+    Returns a flat ``f044_*`` stats dict for merging into ``sleep_stats``.
+
+    The flush commits in its OWN transaction, ahead of promotion: the in-process
+    buffer drain is not durable until commit, so sharing one transaction would
+    lose the drained touches if promotion or its commit aborted (DB rolled back,
+    buffer already cleared). Committing the flush first makes the touches durable;
+    promotion is idempotent and simply re-runs next sleep if it fails.
     """
     async with db.session() as session:
         touched = await flush_recall_touches(session, agent_id)
+        await session.commit()
+    async with db.session() as session:
         stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
         await session.commit()
     stats["f044_recall_touches_flushed"] = touched
