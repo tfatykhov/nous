@@ -62,13 +62,19 @@ _LTP_INCREMENT_BY_SQL = text(
 )
 
 
-async def flush_recall_touches(session: Any, agent_id: str) -> int:
+async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = True) -> int:
     """Apply ``agent_id``'s buffered recall touches to ltp_count, clear its keys.
 
     Called at sleep (before the promotion gate). Each distinct edge is bumped by
     its buffered touch count. Only the sleeping agent's keys are drained — other
     agents' buffered touches survive for their own flush. Returns the number of
     distinct edges reinforced.
+
+    The buffer drain is in-process and only valid if the writes commit durably,
+    so the commit lives INSIDE the restore-guarded block: any failure (an
+    execute OR the commit) rolls the writes back AND restores the snapshot for a
+    clean re-flush. Callers that manage their own transaction/rollback isolation
+    (the Postgres-lane tests) pass ``commit=False`` and read pre-rollback.
     """
     if not _RECALL_TOUCH_BUFFER:
         return 0
@@ -90,9 +96,12 @@ async def flush_recall_touches(session: Any, agent_id: str) -> int:
                 {"agent": agent, "source_id": source_id, "target_id": target_id,
                  "relation": relation, "n": int(n)},
             )
+        if commit:
+            await session.commit()
     except BaseException:
-        # A write raised: the caller's session rolls back, so restore the
-        # snapshot for a clean re-flush (no partial double-count, no lost touches).
+        # A write OR the commit raised: the transaction rolls back, so restore
+        # the snapshot for a clean re-flush (no partial double-count, no lost
+        # touches — the loss window codex flagged at round 9/10).
         for key, n in items:
             _RECALL_TOUCH_BUFFER[key] += n
         raise
@@ -231,15 +240,15 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
 
     Returns a flat ``f044_*`` stats dict for merging into ``sleep_stats``.
 
-    The flush commits in its OWN transaction, ahead of promotion: the in-process
-    buffer drain is not durable until commit, so sharing one transaction would
-    lose the drained touches if promotion or its commit aborted (DB rolled back,
-    buffer already cleared). Committing the flush first makes the touches durable;
-    promotion is idempotent and simply re-runs next sleep if it fails.
+    The flush commits in its OWN transaction (commit=True), ahead of promotion:
+    the in-process buffer drain is not durable until commit, so sharing one
+    transaction would lose the drained touches if promotion or its commit aborted
+    (DB rolled back, buffer already cleared). Committing the flush first makes the
+    touches durable; promotion is idempotent and simply re-runs next sleep if it
+    fails.
     """
     async with db.session() as session:
         touched = await flush_recall_touches(session, agent_id)
-        await session.commit()
     async with db.session() as session:
         stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
         await session.commit()

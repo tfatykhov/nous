@@ -166,7 +166,7 @@ async def test_recall_touch_buffer_flushes_to_ltp(session):
         (str(a), str(b), "related_to"),
         (str(c), str(d), "related_to"),
     ], _AGENT)
-    n_distinct = await flush_recall_touches(session, _AGENT)
+    n_distinct = await flush_recall_touches(session, _AGENT, commit=False)
     assert n_distinct == 2
     assert len(_RECALL_TOUCH_BUFFER) == 0
     ab = (await session.execute(
@@ -288,7 +288,7 @@ async def test_flush_preserves_touch_recorded_during_writes(session):
                 record_recall_touches([concurrent], _AGENT)
             return await self._inner.execute(*args, **kwargs)
 
-    n = await flush_recall_touches(_RacingSession(session), _AGENT)
+    n = await flush_recall_touches(_RacingSession(session), _AGENT, commit=False)
     assert n == 1  # one snapshotted edge written
     # The concurrent touch survived the flush (was not clobbered by clear()).
     assert _RECALL_TOUCH_BUFFER.get(concurrent_key) == 1
@@ -307,7 +307,7 @@ async def test_flush_is_agent_scoped(session):
     record_recall_touches([(str(a), str(b), "related_to")], _AGENT)
     record_recall_touches([("other-src", "other-tgt", "related_to")], "other-agent")
 
-    n = await flush_recall_touches(session, _AGENT)
+    n = await flush_recall_touches(session, _AGENT, commit=False)
     assert n == 1  # only this agent's edge
     ab = (await session.execute(
         text("SELECT ltp_count FROM brain.graph_edges WHERE source_id=:s AND target_id=:t"),
