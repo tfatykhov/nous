@@ -81,7 +81,7 @@ async def record_attachment_fact(heart: "Heart", att: "Attachment", *,
     content = (f"User shared a {att.content_type} '{att.filename}'.{where}"
                + (f" Summary: {snippet}" if snippet else ""))
     try:
-        await heart.learn(
+        result = await heart.learn(
             FactInput(
                 content=content, category="attachment", subject=att.filename,
                 source=f"{att.source}-attachment",
@@ -91,6 +91,10 @@ async def record_attachment_fact(heart: "Heart", att: "Attachment", *,
             ),
             session=session,
         )
+        from nous.heart.schemas import FactRejected
+        if isinstance(result, FactRejected):
+            logger.info("attachment fact rejected by admission for %s: %s",
+                        att.filename, getattr(result, "explanation", "n/a"))
     except Exception as e:  # a memory write must never break the turn
         logger.warning("attachment fact failed for %s: %s (saved at %s)",
                        att.filename, e, att.workspace_path)
@@ -108,8 +112,13 @@ async def maybe_ingest_text_file(heart: "Heart", settings: "Settings",
         return
     from nous.api.tools import ingest_document_text
     try:
-        await ingest_document_text(heart, settings, content=body,
-                                   source_ref=att.workspace_path or att.filename,
-                                   session_id=session_id, episode_id=episode_id)
+        result = await ingest_document_text(heart, settings, content=body,
+                                            source_ref=att.workspace_path or att.filename,
+                                            session_id=session_id, episode_id=episode_id)
+        if isinstance(result, dict) and result.get("error"):
+            code = result.get("code")
+            level = logging.WARNING if code in ("embed_failed", "vector_mismatch", "no_episode") else logging.INFO
+            logger.log(level, "text-file ingest no-op for %s: code=%s (%s)",
+                       att.filename, code, result.get("error"))
     except Exception as e:
         logger.warning("text-file ingest failed for %s: %s", att.filename, e)

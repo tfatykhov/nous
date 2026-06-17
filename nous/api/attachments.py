@@ -33,6 +33,7 @@ MAX_TEXT_FILE_SIZE = 1 * 1024 * 1024
 MAX_FILENAME_LENGTH = 255
 _FILENAME_SAFE = re.compile(r"[^\w\s\-.()]", re.UNICODE)
 _TEXT_FILE_HEADER = "--- File: "
+_TEXT_FILE_SENTINEL = "​"  # zero-width space: marks synthesized text-file blocks; invisible to the model, users never type it
 
 
 def sanitize_filename(filename: str) -> str:
@@ -40,6 +41,7 @@ def sanitize_filename(filename: str) -> str:
     filename = os.path.basename(filename or "")
     filename = filename.replace("\x00", "")
     filename = _FILENAME_SAFE.sub("_", filename)
+    filename = re.sub(r"\s+", " ", filename).strip()
     filename = filename[:MAX_FILENAME_LENGTH]
     if filename.strip(".") == "":  # "", ".", "..", "...." -> unusable as a path segment
         return "unnamed_file"
@@ -113,7 +115,7 @@ def build_content_blocks(text: str, attachments: list["Attachment"]) -> list[dic
             try:
                 body = base64.b64decode(att.data_base64).decode("utf-8", errors="replace")
                 blocks.append({"type": "text",
-                               "text": f"{_TEXT_FILE_HEADER}{att.filename} ---\n{body}"})
+                               "text": f"{_TEXT_FILE_SENTINEL}{_TEXT_FILE_HEADER}{att.filename} ---\n{body}"})
             except Exception:
                 blocks.append({"type": "text", "text": f"[Could not decode file: {att.filename}]"})
     if text:
@@ -151,7 +153,7 @@ def sanitize_blocks_for_storage(content: "str | list[dict]", attachments: "list[
             att = media[mi] if mi < len(media) else None
             mi += 1
             parts.append({"type": "text", "text": _ref_label(att, bt)})
-        elif bt == "text" and str(block.get("text", "")).startswith(_TEXT_FILE_HEADER):
+        elif bt == "text" and str(block.get("text", "")).startswith(_TEXT_FILE_SENTINEL):
             att = text_files[ti] if ti < len(text_files) else None
             ti += 1
             parts.append({"type": "text",
