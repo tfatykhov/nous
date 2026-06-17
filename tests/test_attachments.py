@@ -50,12 +50,23 @@ def test_validate_base64_size_matches_actual():
 
 def test_validate_attachment_rejects_unsupported_and_oversize():
     assert validate_attachment(_att(filename="a.mp3", media_type="audio/mpeg")) is not None
-    big = _att(filename="a.png", media_type="image/png", size_bytes=MAX_IMAGE_SIZE + 1)
+    # Non-empty base64 that decodes past the image limit (empty data is rejected
+    # first by the empty-data guard, so it must carry real oversized bytes here).
+    oversize_raw = b"\x89PNG\r\n\x1a\n" * (MAX_IMAGE_SIZE // 4)
+    big = _att(filename="a.png", media_type="image/png",
+               data_base64=base64.b64encode(oversize_raw).decode(),
+               size_bytes=MAX_IMAGE_SIZE + 1)
     assert "too large" in validate_attachment(big)
     ok_raw = b"\x89PNG\r\n\x1a\n" * 4
     ok = _att(filename="a.png", media_type="image/png",
               data_base64=base64.b64encode(ok_raw).decode(), size_bytes=len(ok_raw))
     assert validate_attachment(ok) is None
+
+
+def test_validate_attachment_rejects_empty_data():
+    a = Attachment(filename="x.png", media_type="image/png", data_base64="", size_bytes=0)
+    a.content_type = classify_attachment(a.filename, a.media_type)
+    assert validate_attachment(a) is not None
 
 
 def test_validate_attachment_derives_size_from_base64():

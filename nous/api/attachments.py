@@ -75,6 +75,8 @@ def validate_attachment(attachment: "Attachment") -> str | None:
         ext = _ext(attachment.filename) or attachment.media_type
         return (f"\U0001F4CE I can't process {ext} files yet. I support images "
                 f"(JPEG, PNG, GIF, WebP), PDFs, and text/code files.")
+    if attachment.content_type in ("image", "document", "text_file") and not attachment.data_base64:
+        return (f"\U0001F4CE {attachment.filename} appears to be empty. Please resend the file.")
     limits = {"image": MAX_IMAGE_SIZE, "document": MAX_DOCUMENT_SIZE,
               "text_file": MAX_TEXT_FILE_SIZE}
     limit = limits.get(attachment.content_type, 0)

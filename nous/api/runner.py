@@ -438,6 +438,12 @@ class AgentRunner:
                 for att in valid_attachments:
                     await attachment_store.persist_attachment(
                         att, session_id=session_id, settings=self._settings)
+                    # F024: ingest text/code file bodies here, while data_base64 is
+                    # still populated — the compaction finally clears it before the
+                    # success branch runs, so this must precede the tool loop.
+                    await attachment_store.maybe_ingest_text_file(
+                        self._heart, self._settings, att,
+                        session_id=session_id, episode_id=None)
                 msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
                     if warnings else user_message
                 if valid_attachments:
@@ -579,14 +585,13 @@ class AgentRunner:
                 _caught_exc = None
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). TurnContext has no episode_id — pass None.
+                # (maybe_ingest_text_file runs earlier, at persist time, before
+                # base64 is cleared by the compaction finally.)
                 if valid_attachments:
                     for att in valid_attachments:
                         await attachment_store.record_attachment_fact(
                             self._heart, att, agent_id=_agent_id,
                             source_episode_id=None, analysis=response_text)
-                        await attachment_store.maybe_ingest_text_file(
-                            self._heart, self._settings, att,
-                            session_id=session_id, episode_id=None)
 
             # F026: Post-response claim verification + ghost planning detection
             if _caught_exc is None:
@@ -1045,6 +1050,12 @@ class AgentRunner:
                 for att in valid_attachments:
                     await attachment_store.persist_attachment(
                         att, session_id=session_id, settings=self._settings)
+                    # F024: ingest text/code file bodies here, while data_base64 is
+                    # still populated — the compaction finally clears it before the
+                    # success branch runs, so this must precede the tool loop.
+                    await attachment_store.maybe_ingest_text_file(
+                        self._heart, self._settings, att,
+                        session_id=session_id, episode_id=None)
                 msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
                     if warnings else user_message
                 if valid_attachments:
@@ -1472,14 +1483,13 @@ class AgentRunner:
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). TurnContext has no episode_id — pass None.
+                # (maybe_ingest_text_file runs earlier, at persist time, before
+                # base64 is cleared by the compaction finally.)
                 if valid_attachments:
                     for att in valid_attachments:
                         await attachment_store.record_attachment_fact(
                             self._heart, att, agent_id=_agent_id,
                             source_episode_id=None, analysis=response_text)
-                        await attachment_store.maybe_ingest_text_file(
-                            self._heart, self._settings, att,
-                            session_id=session_id, episode_id=None)
             finally:
                 # F071: clear the per-turn exclusion set first — restoring the
                 # contextvar must not depend on post_turn's success. Value-based
