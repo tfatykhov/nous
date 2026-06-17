@@ -165,16 +165,18 @@ async def maybe_ingest_pdf(heart: "Heart", settings: "Settings", att: "Attachmen
     if (not settings.attachments_ingest_pdfs or att.content_type != "document"
             or att.media_type != "application/pdf" or not att.data_base64):
         return
+    # Belt-and-suspenders: a memory write must never break the turn (parity with
+    # persist_attachment / maybe_ingest_text_file, whose entire bodies are wrapped).
     try:
-        raw = base64.b64decode(att.data_base64)
-    except Exception as e:
-        logger.warning("PDF base64 decode failed for %s: %s", att.filename, e)
-        return
-    text = await asyncio.to_thread(_extract_pdf_text, raw)
-    source_ref = att.workspace_path or att.filename
-    if len(text.strip()) >= MIN_PDF_TEXT_CHARS:
-        from nous.api.tools import ingest_document_text
         try:
+            raw = base64.b64decode(att.data_base64)
+        except Exception as e:
+            logger.warning("PDF base64 decode failed for %s: %s", att.filename, e)
+            return
+        text = await asyncio.to_thread(_extract_pdf_text, raw)
+        source_ref = att.workspace_path or att.filename
+        if len(text.strip()) >= MIN_PDF_TEXT_CHARS:
+            from nous.api.tools import ingest_document_text
             result = await ingest_document_text(heart, settings, content=text,
                                                 source_ref=source_ref,
                                                 session_id=session_id, episode_id=episode_id)
@@ -182,17 +184,17 @@ async def maybe_ingest_pdf(heart: "Heart", settings: "Settings", att: "Attachmen
                 code = result.get("code")
                 level = logging.WARNING if code in ("embed_failed", "vector_mismatch", "no_episode") else logging.INFO
                 logger.log(level, "PDF ingest no-op for %s: code=%s (%s)", att.filename, code, result.get("error"))
-        except Exception as e:
-            logger.warning("PDF ingest failed for %s: %s", att.filename, e)
-        return
-    # Scanned/image PDF: no extractable text. Fall back to model transcription (non-blocking).
-    if llm_client is not None:
-        asyncio.create_task(_transcribe_and_ingest_pdf(
-            raw, heart, settings, llm_client, source_ref=source_ref, episode_id=episode_id,
-            model=settings.attachments_pdf_transcription_model,
-            max_tokens=settings.attachments_pdf_max_transcription_tokens, filename=att.filename))
-    else:
-        logger.info("PDF %s has no extractable text and no llm_client; skipping ingest", att.filename)
+            return
+        # Scanned/image PDF: no extractable text. Fall back to model transcription (non-blocking).
+        if llm_client is not None:
+            asyncio.create_task(_transcribe_and_ingest_pdf(
+                raw, heart, settings, llm_client, source_ref=source_ref, episode_id=episode_id,
+                model=settings.attachments_pdf_transcription_model,
+                max_tokens=settings.attachments_pdf_max_transcription_tokens, filename=att.filename))
+        else:
+            logger.info("PDF %s has no extractable text and no llm_client; skipping ingest", att.filename)
+    except Exception as e:
+        logger.warning("PDF ingest path failed for %s: %s", att.filename, e)
 
 
 async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Settings",
@@ -204,7 +206,8 @@ async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Sett
         b64 = base64.b64encode(raw).decode()
         payload = {"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": [
             {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
-            {"type": "text", "text": "Transcribe the full text content of this document verbatim. Output only the document's text, with no commentary."},
+            {"type": "text", "text": "Transcribe the full text content of this document "
+                                     "verbatim. Output only the document's text, with no commentary."},
         ]}]}
         resp = await llm_client.call(payload)
         text, stop_reason = _parse_transcription_response(resp)
