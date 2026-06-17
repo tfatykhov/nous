@@ -435,6 +435,9 @@ class Settings(BaseSettings):
     attachments_max_per_message: int = 5
     attachments_persist: bool = True  # save originals to disk + record fact reference
     attachments_ingest_text_files: bool = True  # chunk text/code bodies into episode_chunks
+    attachments_ingest_pdfs: bool = True  # extract + chunk-ingest PDF text for recall
+    attachments_pdf_transcription_model: str = "claude-haiku-4-5-20251001"  # scanned-PDF fallback
+    attachments_pdf_max_transcription_tokens: int = 8000  # output cap for the fallback transcription
     attachments_default_prompt: str = "What can you tell me about this?"
 
     # Web tools
