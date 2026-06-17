@@ -188,7 +188,8 @@ async def maybe_ingest_pdf(heart: "Heart", settings: "Settings", att: "Attachmen
         # Scanned/image PDF: no extractable text. Fall back to model transcription (non-blocking).
         if llm_client is not None:
             asyncio.create_task(_transcribe_and_ingest_pdf(
-                raw, heart, settings, llm_client, source_ref=source_ref, episode_id=episode_id,
+                raw, heart, settings, llm_client, source_ref=source_ref,
+                session_id=session_id, episode_id=episode_id,
                 model=settings.attachments_pdf_transcription_model,
                 max_tokens=settings.attachments_pdf_max_transcription_tokens, filename=att.filename))
         else:
@@ -198,7 +199,8 @@ async def maybe_ingest_pdf(heart: "Heart", settings: "Settings", att: "Attachmen
 
 
 async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Settings",
-                                     llm_client, *, source_ref: str, episode_id: str | None,
+                                     llm_client, *, source_ref: str,
+                                     session_id: str | None = None, episode_id: str | None = None,
                                      model: str, max_tokens: int, filename: str) -> None:
     """Fire-and-forget: transcribe a scanned PDF via Claude, then chunk-ingest the text.
     Best-effort — must never raise (it's an un-awaited task)."""
@@ -224,7 +226,8 @@ async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Sett
         if text and text.strip():
             from nous.api.tools import ingest_document_text
             result = await ingest_document_text(heart, settings, content=text.strip(),
-                                                source_ref=source_ref, session_id=None, episode_id=episode_id)
+                                                source_ref=source_ref,
+                                                session_id=session_id, episode_id=episode_id)
             if isinstance(result, dict) and result.get("error"):
                 logger.info("PDF transcription ingest no-op for %s: %s", filename, result.get("error"))
         else:

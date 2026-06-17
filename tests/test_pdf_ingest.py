@@ -58,7 +58,7 @@ async def test_maybe_ingest_pdf_scanned_fallback_transcribes(monkeypatch):
     # Call the fallback coroutine directly to avoid create_task timing flakiness.
     await _transcribe_and_ingest_pdf(
         b"%PDF raw", object(), gs, llm,
-        source_ref="doc.pdf", episode_id="e1",
+        source_ref="doc.pdf", session_id="s1", episode_id=None,
         model=gs.attachments_pdf_transcription_model,
         max_tokens=gs.attachments_pdf_max_transcription_tokens,
         filename="doc.pdf",
@@ -72,6 +72,9 @@ async def test_maybe_ingest_pdf_scanned_fallback_transcribes(monkeypatch):
     assert sent_payload.get("system")
     ingest.assert_awaited_once()
     assert ingest.await_args.kwargs["content"] == "transcribed body of the scanned pdf"
+    # Parity with the pypdf path: session_id is threaded through so ingest can
+    # resolve the active episode when no explicit episode_id is available.
+    assert ingest.await_args.kwargs["session_id"] == "s1"
 
 
 @pytest.mark.asyncio
