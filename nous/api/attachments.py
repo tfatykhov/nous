@@ -29,6 +29,7 @@ TEXT_EXTENSIONS = {
 MAX_IMAGE_SIZE = 20 * 1024 * 1024
 MAX_DOCUMENT_SIZE = 32 * 1024 * 1024
 MAX_TEXT_FILE_SIZE = 1 * 1024 * 1024
+MAX_TOTAL_TEXT_FILE_SIZE = 2 * 1024 * 1024  # aggregate cap across text_file attachments in one message
 
 MAX_FILENAME_LENGTH = 255
 _FILENAME_SAFE = re.compile(r"[^\w\s\-.()]", re.UNICODE)

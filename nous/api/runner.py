@@ -28,6 +28,7 @@ from nous.api.compaction import ConversationCompactor
 from nous.api.smart_compress import smart_compress
 from nous.api.models import ApiResponse, Attachment, Conversation, Message  # noqa: F401 — re-exported for backward compat
 from nous.api.attachments import (
+    MAX_TOTAL_TEXT_FILE_SIZE,
     build_content_blocks,
     compact_message_for_history,
     sanitize_blocks_for_storage,
@@ -432,9 +433,23 @@ class AgentRunner:
             valid_attachments: list[Attachment] = []
             if attachments and self._settings.attachments_enabled:
                 warnings: list[str] = []
+                _total_text_bytes = 0  # aggregate text-file size guard
                 for att in attachments[: self._settings.attachments_max_per_message]:
                     err = validate_attachment(att)
-                    (warnings.append(err) if err else valid_attachments.append(att))
+                    if err:
+                        warnings.append(err)
+                        continue
+                    if att.content_type == "text_file":
+                        if _total_text_bytes + att.size_bytes > MAX_TOTAL_TEXT_FILE_SIZE:
+                            warnings.append(
+                                f"\U0001F4CE {att.filename} skipped — total text-file size "
+                                f"exceeds {MAX_TOTAL_TEXT_FILE_SIZE // (1024 * 1024)} MB.")
+                            continue
+                        _total_text_bytes += att.size_bytes
+                    valid_attachments.append(att)
+                # F024 Fix A: resolve the active episode once so attachment memory
+                # links into the graph. pre_turn already created the episode.
+                episode_id = self._cognitive.get_active_episode_id(session_id)
                 for att in valid_attachments:
                     await attachment_store.persist_attachment(
                         att, session_id=session_id, settings=self._settings)
@@ -443,7 +458,7 @@ class AgentRunner:
                     # success branch runs, so this must precede the tool loop.
                     await attachment_store.maybe_ingest_text_file(
                         self._heart, self._settings, att,
-                        session_id=session_id, episode_id=None)
+                        session_id=session_id, episode_id=episode_id)
                 msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
                     if warnings else user_message
                 if valid_attachments:
@@ -584,14 +599,16 @@ class AgentRunner:
             else:
                 _caught_exc = None
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
-                # response_text). TurnContext has no episode_id — pass None.
+                # response_text). Fix A: link the fact to the active episode so
+                # it joins the graph (value is stable within the turn).
                 # (maybe_ingest_text_file runs earlier, at persist time, before
                 # base64 is cleared by the compaction finally.)
                 if valid_attachments:
+                    _episode_id = self._cognitive.get_active_episode_id(session_id)
                     for att in valid_attachments:
                         await attachment_store.record_attachment_fact(
                             self._heart, att, agent_id=_agent_id,
-                            source_episode_id=None, analysis=response_text)
+                            source_episode_id=_episode_id, analysis=response_text)
 
             # F026: Post-response claim verification + ghost planning detection
             if _caught_exc is None:
@@ -1044,9 +1061,23 @@ class AgentRunner:
             valid_attachments: list[Attachment] = []
             if attachments and self._settings.attachments_enabled:
                 warnings: list[str] = []
+                _total_text_bytes = 0  # aggregate text-file size guard
                 for att in attachments[: self._settings.attachments_max_per_message]:
                     err = validate_attachment(att)
-                    (warnings.append(err) if err else valid_attachments.append(att))
+                    if err:
+                        warnings.append(err)
+                        continue
+                    if att.content_type == "text_file":
+                        if _total_text_bytes + att.size_bytes > MAX_TOTAL_TEXT_FILE_SIZE:
+                            warnings.append(
+                                f"\U0001F4CE {att.filename} skipped — total text-file size "
+                                f"exceeds {MAX_TOTAL_TEXT_FILE_SIZE // (1024 * 1024)} MB.")
+                            continue
+                        _total_text_bytes += att.size_bytes
+                    valid_attachments.append(att)
+                # F024 Fix A: resolve the active episode once so attachment memory
+                # links into the graph. pre_turn already created the episode.
+                episode_id = self._cognitive.get_active_episode_id(session_id)
                 for att in valid_attachments:
                     await attachment_store.persist_attachment(
                         att, session_id=session_id, settings=self._settings)
@@ -1055,7 +1086,7 @@ class AgentRunner:
                     # success branch runs, so this must precede the tool loop.
                     await attachment_store.maybe_ingest_text_file(
                         self._heart, self._settings, att,
-                        session_id=session_id, episode_id=None)
+                        session_id=session_id, episode_id=episode_id)
                 msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
                     if warnings else user_message
                 if valid_attachments:
@@ -1482,14 +1513,16 @@ class AgentRunner:
                 self._verify_claims(session_id, response_text, all_tool_results, ledger)
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
-                # response_text). TurnContext has no episode_id — pass None.
+                # response_text). Fix A: link the fact to the active episode so
+                # it joins the graph (value is stable within the turn).
                 # (maybe_ingest_text_file runs earlier, at persist time, before
                 # base64 is cleared by the compaction finally.)
                 if valid_attachments:
+                    _episode_id = self._cognitive.get_active_episode_id(session_id)
                     for att in valid_attachments:
                         await attachment_store.record_attachment_fact(
                             self._heart, att, agent_id=_agent_id,
-                            source_episode_id=None, analysis=response_text)
+                            source_episode_id=_episode_id, analysis=response_text)
             finally:
                 # F071: clear the per-turn exclusion set first — restoring the
                 # contextvar must not depend on post_turn's success. Value-based

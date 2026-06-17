@@ -952,7 +952,7 @@ class ConversationCompactor:
         """
         accumulated = 0
         for i in range(len(messages) - 1, -1, -1):
-            accumulated += self.estimator.estimate(messages[i].get("content", ""))
+            accumulated += self.estimator.estimate_message(messages[i])
             if accumulated >= keep_recent_tokens:
                 for j in range(i, len(messages)):
                     if messages[j].get("role") == "user":
