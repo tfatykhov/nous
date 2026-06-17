@@ -1237,8 +1237,12 @@ class ConversationCompactor:
     def _serialize_for_summary(messages: list[dict[str, Any]]) -> str:
         """Serialize messages as readable text for summarization.
 
-        conversation.messages stores plain text only (tool results are
-        in-turn locals, never persisted). Content is always str here.
+        Tool results are in-turn locals, never persisted. F024: message
+        content may be a list of content blocks (multimodal turns), not
+        just str. Image/document base64 is stripped to reference labels
+        before this point (sanitize_blocks_for_storage /
+        compact_message_for_history), so any list content here is
+        text-only and safe to serialize/summarize.
         """
         lines = []
         for msg in messages:
