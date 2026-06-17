@@ -12,11 +12,26 @@ from nous.cognitive.schemas import TurnContext
 
 
 @dataclass
+class Attachment:
+    """A file attachment accompanying a message (F024)."""
+
+    filename: str
+    media_type: str
+    data_base64: str = field(repr=False)  # required; cleared after compaction; never logged
+    size_bytes: int = 0
+    source: str = "upload"    # "telegram" | "rest" | "url"
+    content_type: str = "unknown"  # image | document | text_file | unsupported
+    workspace_path: str = ""  # on-disk location after persistence
+
+
+@dataclass
 class Message:
     """A single message in a conversation."""
 
     role: str  # "user" or "assistant"
-    content: str
+    content: str | list[dict[str, Any]]  # str for text-only, list for multimodal
+    attachments: list[Attachment] | None = None  # metadata only (no base64 post-compaction)
+    text_content: str = ""  # plain-text portion (episodes/search/cognitive layer)
 
 
 @dataclass
