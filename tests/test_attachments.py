@@ -58,6 +58,14 @@ def test_validate_attachment_rejects_unsupported_and_oversize():
     assert validate_attachment(ok) is None
 
 
+def test_validate_attachment_derives_size_from_base64():
+    # Untrusted size_bytes=0 but the actual base64 decodes to > MAX_IMAGE_SIZE.
+    raw = b"\x89PNG\r\n\x1a\n" * (MAX_IMAGE_SIZE // 4)
+    huge = _att(filename="a.png", media_type="image/png",
+                data_base64=base64.b64encode(raw).decode(), size_bytes=0)
+    assert "too large" in validate_attachment(huge)
+
+
 def test_validate_attachment_rejects_corrupt_base64():
     # F9: malformed base64 for image/document must be caught here, not at the API
     bad = _att(filename="a.png", media_type="image/png",

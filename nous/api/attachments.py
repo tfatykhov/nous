@@ -78,9 +78,10 @@ def validate_attachment(attachment: "Attachment") -> str | None:
     limits = {"image": MAX_IMAGE_SIZE, "document": MAX_DOCUMENT_SIZE,
               "text_file": MAX_TEXT_FILE_SIZE}
     limit = limits.get(attachment.content_type, 0)
-    if attachment.size_bytes > limit:
+    effective_size = validate_base64_size(attachment.data_base64) if attachment.data_base64 else attachment.size_bytes
+    if effective_size > limit:
         return (f"\U0001F4CE {attachment.filename} is too large "
-                f"({attachment.size_bytes / 1024 / 1024:.1f} MB). Max for "
+                f"({effective_size / 1024 / 1024:.1f} MB). Max for "
                 f"{attachment.content_type} is {limit / 1024 / 1024:.0f} MB.")
     # F9: image/document base64 must actually decode, else the API 400s opaquely.
     if attachment.content_type in ("image", "document") and attachment.data_base64:
@@ -128,7 +129,7 @@ def _ref_label(att: "Attachment | None", kind: str = "file") -> str:
     return f"[Attached {label}: {att.filename}{where}]"
 
 
-def sanitize_blocks_for_storage(content, attachments=None):
+def sanitize_blocks_for_storage(content: "str | list[dict]", attachments: "list[Attachment] | None" = None) -> "str | list[dict]":
     """Return DB-safe content: strip base64 from image/doc blocks and replace
     text-file body blocks with a reference label. Pure; safe to call repeatedly.
 
