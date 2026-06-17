@@ -465,6 +465,206 @@ def _format_pipeline_text(
 
 
 # ---------------------------------------------------------------------------
+# Document ingest core (shared by the ingest_document tool + attachment pipeline)
+# ---------------------------------------------------------------------------
+
+
+async def ingest_document_text(
+    heart: Heart,
+    settings: Settings,
+    *,
+    content: str,
+    source_ref: str,
+    session_id: str | None = None,
+    episode_id: str | None = None,
+) -> dict[str, Any]:
+    """Chunk + embed + persist document text to heart.episode_chunks.
+
+    Extracted from the ingest_document tool. Returns a PLAIN dict:
+      {"inserted": N, "source_ref": ..., "episode_id": ...}  on success
+      {"error": "..."}                                        on failure
+    Honors settings.document_ingest_enabled and the chunk-size settings.
+    """
+    from uuid import UUID as _UUID
+    from sqlalchemy import text as _sql_text
+
+    from nous.heart.document_chunker import chunk_document
+
+    if not settings.document_ingest_enabled:
+        return {"code": "disabled", "error": "ingest_document is disabled (NOUS_DOCUMENT_INGEST_ENABLED=false)."}
+    if not content or not content.strip():
+        return {"code": "empty_content", "error": "content is empty."}
+    if not source_ref or not source_ref.strip():
+        return {"code": "no_source_ref", "error": "source_ref is required (URL or file path)."}
+
+    try:
+        # 1. Resolve target episode.
+        target_episode_id: _UUID
+        if episode_id:
+            try:
+                target_episode_id = _UUID(episode_id)
+            except ValueError:
+                return {"code": "bad_uuid", "error": f"episode_id must be a UUID, got {episode_id!r}."}
+        else:
+            if not session_id:
+                return {"code": "no_session", "error": "no episode_id provided and no active session — pass episode_id explicitly."}
+            async with heart.db.session() as session:
+                row = await session.execute(
+                    _sql_text(
+                        "SELECT id FROM heart.episodes "
+                        "WHERE agent_id = :a AND session_id = :s AND active = true "
+                        "ORDER BY started_at DESC LIMIT 1"
+                    ),
+                    {"a": heart.agent_id, "s": session_id},
+                )
+                found = row.scalar()
+            if not found:
+                return {"code": "no_episode", "error": f"no active episode for session {session_id}; pass episode_id explicitly."}
+            target_episode_id = found
+
+        # 2. Chunk the document.
+        chunks = chunk_document(
+            content,
+            target_size=settings.document_chunk_size,
+            overlap=settings.document_chunk_overlap,
+            min_chars=settings.document_chunk_min_chars,
+        )
+        if not chunks:
+            return {"code": "too_short", "error": (
+                f"Ingest skipped: content shorter than min_chars ({settings.document_chunk_min_chars})."
+            )}
+
+        # 3. Embed in one batch (cheaper than per-chunk).
+        try:
+            embeddings = await heart._embeddings.embed_batch(chunks)
+        except Exception as exc:
+            logger.exception("ingest_document_text: embed_batch failed")
+            return {"code": "embed_failed", "error": f"Error embedding chunks: {exc}"}
+
+        # Codex P2 round 3 (2026-05-26): guard against embedder returning
+        # fewer vectors than chunks. zip() would silently truncate and
+        # drop tail chunks. Mirrors the F067 writer at
+        # handlers/episode_summarizer.py:205-211.
+        if len(embeddings) != len(chunks):
+            logger.warning(
+                "ingest_document_text: embedder returned %d vectors for %d chunks "
+                "(episode=%s, source_ref=%s); aborting to avoid partial ingest",
+                len(embeddings), len(chunks), target_episode_id, source_ref,
+            )
+            return {"code": "vector_mismatch", "error": (
+                f"embedder returned {len(embeddings)} vectors "
+                f"for {len(chunks)} chunks; refusing to write a "
+                f"partial ingest. Retry."
+            )}
+
+        # 4. Atomic idempotency + insert.
+        #
+        # Lock is keyed on episode_id ONLY (Codex P1 round 4, 2026-05-26),
+        # NOT (episode_id, source_ref). Reason: chunk_index is allocated
+        # per-episode via MAX(chunk_index)+1. If two concurrent ingests
+        # for the same episode but DIFFERENT source_refs took separate
+        # locks, they could both pick the same start_idx, both INSERT,
+        # and ON CONFLICT (episode_id, chunk_index) DO NOTHING would
+        # silently drop one caller's rows — silent data loss.
+        #
+        # By locking at episode scope, both concurrent ingests serialize
+        # so their start_idx allocations are disjoint. The idempotency
+        # COUNT (filtered by source_ref) still works correctly inside
+        # the same transaction.
+        #
+        # Single transaction guarded by pg_advisory_xact_lock; lock
+        # auto-releases on COMMIT/ROLLBACK. Vector literal format
+        # mirrors handlers/episode_summarizer.py:219.
+        lock_key = f"ingest_document:{target_episode_id}"
+        async with heart.db.session() as session:
+            # Advisory lock — released at COMMIT / ROLLBACK.
+            await session.execute(
+                _sql_text(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
+                ),
+                {"k": lock_key},
+            )
+
+            existing_row = await session.execute(
+                _sql_text(
+                    "SELECT COUNT(*) AS cnt FROM heart.episode_chunks "
+                    "WHERE agent_id = :a AND episode_id = :e "
+                    "  AND source_ref = :r"
+                ),
+                {
+                    "a": heart.agent_id,
+                    "e": target_episode_id,
+                    "r": source_ref,
+                },
+            )
+            existing_cnt = int(existing_row.scalar() or 0)
+
+            if existing_cnt > 0:
+                # Release the lock by committing (no writes happened).
+                await session.commit()
+                return {
+                    "already_ingested": True,
+                    "inserted": 0,
+                    "existing": existing_cnt,
+                    "source_ref": source_ref,
+                    "episode_id": str(target_episode_id),
+                }
+
+            # Determine starting chunk_index: append after any existing
+            # chunks for this episode so dialogue chunks (F067) +
+            # document chunks (different source_ref) under the same
+            # episode do not collide.
+            next_idx_row = await session.execute(
+                _sql_text(
+                    "SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next_idx "
+                    "FROM heart.episode_chunks "
+                    "WHERE agent_id = :a AND episode_id = :e"
+                ),
+                {"a": heart.agent_id, "e": target_episode_id},
+            )
+            start_idx = int(next_idx_row.scalar() or 0)
+
+            inserted = 0
+            for offset, (chunk_text, emb) in enumerate(zip(chunks, embeddings)):
+                if not emb:
+                    # Defensive — embed_batch should never return None,
+                    # but a single bad vector should not crash the batch.
+                    continue
+                vec_lit = "[" + ",".join(f"{v:.6f}" for v in emb) + "]"
+                await session.execute(
+                    _sql_text(
+                        "INSERT INTO heart.episode_chunks "
+                        "(agent_id, episode_id, chunk_index, content, embedding, "
+                        " source_kind, source_ref) "
+                        "VALUES (:a, :e, :i, :c, CAST(:emb AS vector), "
+                        " 'document', :ref) "
+                        "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
+                    ),
+                    {
+                        "a": heart.agent_id,
+                        "e": str(target_episode_id),
+                        "i": start_idx + offset,
+                        "c": chunk_text,
+                        "emb": vec_lit,
+                        "ref": source_ref,
+                    },
+                )
+                inserted += 1
+            await session.commit()
+
+        return {
+            "inserted": inserted,
+            "start_index": start_idx,
+            "source_ref": source_ref,
+            "episode_id": str(target_episode_id),
+        }
+
+    except Exception as e:
+        logger.exception("ingest_document_text failed")
+        return {"code": "exception", "error": f"Error ingesting document: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Nous memory tool closures
 # ---------------------------------------------------------------------------
 
@@ -1189,203 +1389,47 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             _session_id: Auto-injected by ToolDispatcher; used to resolve
                 the active episode when episode_id is not provided.
         """
-        from uuid import UUID as _UUID
-        from sqlalchemy import text as _sql_text
+        # Thin wrapper over the module-level ingest_document_text helper.
+        # The helper returns a PLAIN dict; here we adapt it back into the
+        # exact MCP content-block shape (and exact text) this tool has
+        # always returned, so the LLM-facing contract is byte-identical.
+        result = await ingest_document_text(
+            heart,
+            settings,
+            content=content,
+            source_ref=source_ref,
+            session_id=_session_id,
+            episode_id=episode_id,
+        )
 
-        from nous.heart.document_chunker import chunk_document
+        def _block(text: str) -> dict[str, Any]:
+            return {"content": [{"type": "text", "text": text}]}
 
-        if not settings.document_ingest_enabled:
-            return {"content": [{"type": "text", "text": "ingest_document is disabled (NOUS_DOCUMENT_INGEST_ENABLED=false)."}]}
-        if not content or not content.strip():
-            return {"content": [{"type": "text", "text": "Error: content is empty."}]}
-        if not source_ref or not source_ref.strip():
-            return {"content": [{"type": "text", "text": "Error: source_ref is required (URL or file path)."}]}
+        if "error" in result:
+            code = result.get("code")
+            # These messages historically carried an "Error: " prefix; the
+            # helper drops it so callers get clean text. Re-add it here.
+            if code in ("empty_content", "no_source_ref", "bad_uuid",
+                        "no_session", "no_episode", "vector_mismatch"):
+                return _block(f"Error: {result['error']}")
+            # disabled / too_short / embed_failed / exception are emitted
+            # verbatim (they never had the prefix).
+            return _block(result["error"])
 
-        try:
-            # 1. Resolve target episode.
-            target_episode_id: _UUID
-            if episode_id:
-                try:
-                    target_episode_id = _UUID(episode_id)
-                except ValueError:
-                    return {"content": [{"type": "text", "text": f"Error: episode_id must be a UUID, got {episode_id!r}."}]}
-            else:
-                if not _session_id:
-                    return {"content": [{"type": "text", "text": "Error: no episode_id provided and no active session — pass episode_id explicitly."}]}
-                async with heart.db.session() as session:
-                    row = await session.execute(
-                        _sql_text(
-                            "SELECT id FROM heart.episodes "
-                            "WHERE agent_id = :a AND session_id = :s AND active = true "
-                            "ORDER BY started_at DESC LIMIT 1"
-                        ),
-                        {"a": heart.agent_id, "s": _session_id},
-                    )
-                    found = row.scalar()
-                if not found:
-                    return {"content": [{"type": "text", "text": f"Error: no active episode for session {_session_id}; pass episode_id explicitly."}]}
-                target_episode_id = found
-
-            # 2. Chunk the document.
-            chunks = chunk_document(
-                content,
-                target_size=settings.document_chunk_size,
-                overlap=settings.document_chunk_overlap,
-                min_chars=settings.document_chunk_min_chars,
+        if result.get("already_ingested"):
+            return _block(
+                f"Already ingested: {result['existing']} chunks exist for "
+                f"source_ref={result['source_ref']!r} under episode "
+                f"{result['episode_id']}. Use a different source_ref "
+                f"or delete existing rows to re-ingest."
             )
-            if not chunks:
-                return {"content": [{"type": "text", "text": (
-                    f"Ingest skipped: content shorter than min_chars ({settings.document_chunk_min_chars})."
-                )}]}
 
-            # 3. Embed in one batch (cheaper than per-chunk).
-            try:
-                embeddings = await heart._embeddings.embed_batch(chunks)
-            except Exception as exc:
-                logger.exception("ingest_document: embed_batch failed")
-                return {"content": [{"type": "text", "text": f"Error embedding chunks: {exc}"}]}
-
-            # Codex P2 round 3 (2026-05-26): guard against embedder returning
-            # fewer vectors than chunks. zip() would silently truncate and
-            # drop tail chunks. Mirrors the F067 writer at
-            # handlers/episode_summarizer.py:205-211.
-            if len(embeddings) != len(chunks):
-                logger.warning(
-                    "ingest_document: embedder returned %d vectors for %d chunks "
-                    "(episode=%s, source_ref=%s); aborting to avoid partial ingest",
-                    len(embeddings), len(chunks), target_episode_id, source_ref,
-                )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Error: embedder returned {len(embeddings)} vectors "
-                                f"for {len(chunks)} chunks; refusing to write a "
-                                f"partial ingest. Retry."
-                            ),
-                        }
-                    ]
-                }
-
-            # 4. Atomic idempotency + insert.
-            #
-            # Lock is keyed on episode_id ONLY (Codex P1 round 4, 2026-05-26),
-            # NOT (episode_id, source_ref). Reason: chunk_index is allocated
-            # per-episode via MAX(chunk_index)+1. If two concurrent ingests
-            # for the same episode but DIFFERENT source_refs took separate
-            # locks, they could both pick the same start_idx, both INSERT,
-            # and ON CONFLICT (episode_id, chunk_index) DO NOTHING would
-            # silently drop one caller's rows — silent data loss.
-            #
-            # By locking at episode scope, both concurrent ingests serialize
-            # so their start_idx allocations are disjoint. The idempotency
-            # COUNT (filtered by source_ref) still works correctly inside
-            # the same transaction.
-            #
-            # Single transaction guarded by pg_advisory_xact_lock; lock
-            # auto-releases on COMMIT/ROLLBACK. Vector literal format
-            # mirrors handlers/episode_summarizer.py:219.
-            lock_key = f"ingest_document:{target_episode_id}"
-            async with heart.db.session() as session:
-                # Advisory lock — released at COMMIT / ROLLBACK.
-                await session.execute(
-                    _sql_text(
-                        "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
-                    ),
-                    {"k": lock_key},
-                )
-
-                existing_row = await session.execute(
-                    _sql_text(
-                        "SELECT COUNT(*) AS cnt FROM heart.episode_chunks "
-                        "WHERE agent_id = :a AND episode_id = :e "
-                        "  AND source_ref = :r"
-                    ),
-                    {
-                        "a": heart.agent_id,
-                        "e": target_episode_id,
-                        "r": source_ref,
-                    },
-                )
-                existing_cnt = int(existing_row.scalar() or 0)
-
-                if existing_cnt > 0:
-                    # Release the lock by committing (no writes happened).
-                    await session.commit()
-                    return {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    f"Already ingested: {existing_cnt} chunks exist for "
-                                    f"source_ref={source_ref!r} under episode "
-                                    f"{target_episode_id}. Use a different source_ref "
-                                    f"or delete existing rows to re-ingest."
-                                ),
-                            }
-                        ]
-                    }
-
-                # Determine starting chunk_index: append after any existing
-                # chunks for this episode so dialogue chunks (F067) +
-                # document chunks (different source_ref) under the same
-                # episode do not collide.
-                next_idx_row = await session.execute(
-                    _sql_text(
-                        "SELECT COALESCE(MAX(chunk_index), -1) + 1 AS next_idx "
-                        "FROM heart.episode_chunks "
-                        "WHERE agent_id = :a AND episode_id = :e"
-                    ),
-                    {"a": heart.agent_id, "e": target_episode_id},
-                )
-                start_idx = int(next_idx_row.scalar() or 0)
-
-                inserted = 0
-                for offset, (chunk_text, emb) in enumerate(zip(chunks, embeddings)):
-                    if not emb:
-                        # Defensive — embed_batch should never return None,
-                        # but a single bad vector should not crash the batch.
-                        continue
-                    vec_lit = "[" + ",".join(f"{v:.6f}" for v in emb) + "]"
-                    await session.execute(
-                        _sql_text(
-                            "INSERT INTO heart.episode_chunks "
-                            "(agent_id, episode_id, chunk_index, content, embedding, "
-                            " source_kind, source_ref) "
-                            "VALUES (:a, :e, :i, :c, CAST(:emb AS vector), "
-                            " 'document', :ref) "
-                            "ON CONFLICT (episode_id, chunk_index) DO NOTHING"
-                        ),
-                        {
-                            "a": heart.agent_id,
-                            "e": str(target_episode_id),
-                            "i": start_idx + offset,
-                            "c": chunk_text,
-                            "emb": vec_lit,
-                            "ref": source_ref,
-                        },
-                    )
-                    inserted += 1
-                await session.commit()
-
-            return {
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Ingested {inserted} chunks from {source_ref!r} "
-                            f"into episode {target_episode_id} "
-                            f"(start_index={start_idx}, source_kind=document, "
-                            f"target_size={settings.document_chunk_size})."
-                        ),
-                    }
-                ]
-            }
-
-        except Exception as e:
-            logger.exception("ingest_document tool failed")
-            return {"content": [{"type": "text", "text": f"Error ingesting document: {e}"}]}
+        return _block(
+            f"Ingested {result['inserted']} chunks from {result['source_ref']!r} "
+            f"into episode {result['episode_id']} "
+            f"(start_index={result['start_index']}, source_kind=document, "
+            f"target_size={settings.document_chunk_size})."
+        )
 
     return {
         "record_decision": record_decision,
