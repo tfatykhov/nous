@@ -49,6 +49,7 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
+from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.cognitive import CognitiveLayer
@@ -79,16 +80,42 @@ def create_app(
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
+    def _parse_attachments(body: dict) -> list[Attachment]:
+        from nous.api.attachments import (
+            sanitize_filename, classify_attachment, validate_base64_size)
+        out: list[Attachment] = []
+        for a in (body.get("attachments") or [])[: settings.attachments_max_per_message]:
+            data_b64 = a.get("data_base64", "")
+            filename = sanitize_filename(a.get("filename", "unnamed"))
+            media_type = a.get("media_type", "application/octet-stream")
+            out.append(Attachment(
+                filename=filename, media_type=media_type, data_base64=data_b64,
+                size_bytes=validate_base64_size(data_b64),  # actual, not client-declared
+                source="rest",
+                content_type=classify_attachment(filename, media_type),
+            ))
+        return out
+
+    def _body_too_large(request) -> bool:
+        max_body = int(settings.attachments_max_per_message * 32 * 1024 * 1024 * 1.4) + 1_000_000
+        clen = request.headers.get("content-length")
+        return bool(clen and clen.isdigit() and int(clen) > max_body)
+
     async def chat(request: Request) -> JSONResponse:
         """POST /chat - Send a message, get a response."""
+        if _body_too_large(request):
+            return JSONResponse({"error": "Request too large"}, status_code=413)
         try:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         message = body.get("message")
-        if not message:
+        attachments = _parse_attachments(body) if settings.attachments_enabled else []
+        if not message and not attachments:
             return JSONResponse({"error": "Missing required field: message"}, status_code=400)
+        if not message:
+            message = settings.attachments_default_prompt
 
         session_id = body.get("session_id") or str(uuid4())
 
@@ -101,6 +128,7 @@ def create_app(
             response_text, turn_context, usage = await runner.run_turn(
                 session_id, message, platform=platform,
                 user_id=user_id, user_display_name=user_display_name,
+                attachments=attachments or None,
             )
             result: dict[str, Any] = {
                 "response": response_text,
@@ -133,14 +161,19 @@ def create_app(
 
     async def chat_stream(request: Request) -> StreamingResponse:
         """POST /chat/stream - SSE streaming chat."""
+        if _body_too_large(request):
+            return JSONResponse({"error": "Request too large"}, status_code=413)
         try:
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
 
         message = body.get("message")
-        if not message:
+        attachments = _parse_attachments(body) if settings.attachments_enabled else []
+        if not message and not attachments:
             return JSONResponse({"error": "Missing required field: message"}, status_code=400)
+        if not message:
+            message = settings.attachments_default_prompt
 
         session_id = body.get("session_id") or str(uuid4())
         platform = body.get("platform")
@@ -152,6 +185,7 @@ def create_app(
             stream = runner.stream_chat(
                 session_id, message, platform=platform,
                 user_id=user_id, user_display_name=user_display_name,
+                attachments=attachments or None,
             )
             aiter = stream.__aiter__()
             ping_interval = settings.sse_ping_interval

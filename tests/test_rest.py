@@ -425,6 +425,7 @@ class _StallingStreamRunner(MockAgentRunner):
         platform=None,
         user_id=None,
         user_display_name=None,
+        attachments=None,
     ):
         from nous.api.runner import StreamEvent
 
