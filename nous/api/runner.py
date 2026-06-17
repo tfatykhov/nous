@@ -26,7 +26,14 @@ from nous.api.anthropic_client import (
 from nous.api.cache_optimizer import CacheBreakDetector, _hash as cache_hash
 from nous.api.compaction import ConversationCompactor
 from nous.api.smart_compress import smart_compress
-from nous.api.models import ApiResponse, Conversation, Message  # noqa: F401 — re-exported for backward compat
+from nous.api.models import ApiResponse, Attachment, Conversation, Message  # noqa: F401 — re-exported for backward compat
+from nous.api.attachments import (
+    build_content_blocks,
+    compact_message_for_history,
+    sanitize_blocks_for_storage,
+    validate_attachment,
+)
+from nous.api import attachment_store
 from nous.brain.brain import Brain
 from nous.cognitive.action_gate import ActionGate
 from nous.cognitive.claim_verifier import ClaimVerifier, IntentTracker
@@ -313,6 +320,7 @@ class AgentRunner:
         self,
         session_id: str,
         user_message: str,
+        attachments: list[Attachment] | None = None,
         agent_id: str | None = None,
         user_id: str | None = None,
         user_display_name: str | None = None,
@@ -383,8 +391,11 @@ class AgentRunner:
 
             # 2. Pre-turn (F4: plumb conversation_messages for dedup)
             # Filter to user messages first, then take last 8 (D7: window = user turns)
+            # F024 F6: content may be a multimodal list — use text_content (or the
+            # str content) so dedup/cognitive layer never sees block dicts.
             recent_messages = [
-                m.content for m in conversation.messages if m.role == "user"
+                (m.text_content or (m.content if isinstance(m.content, str) else ""))
+                for m in conversation.messages if m.role == "user"
             ][-8:]
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
@@ -397,8 +408,9 @@ class AgentRunner:
                 is_subtask=is_subtask,
             )
 
-            # 3. Append user message
-            conversation.messages.append(Message(role="user", content=user_message))
+            # 3. Append user message (text-only; upgraded to multimodal after censor check)
+            conversation.messages.append(
+                Message(role="user", content=user_message, text_content=user_message))
             usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
 
             # 3b. Censor block check — skip LLM if input was blocked
@@ -411,6 +423,31 @@ class AgentRunner:
                     is_background=is_background,
                 )
                 return response_text, turn_context, usage
+
+            # 3c. F024: upgrade the just-appended user message to multimodal
+            # (only reached when NOT censor-blocked, so base64 never lands on the
+            # censor early-return path). valid_attachments is referenced later in
+            # the compaction finally + memory-record success branch, so it must be
+            # defined on every path — including when the feature is off.
+            valid_attachments: list[Attachment] = []
+            if attachments and self._settings.attachments_enabled:
+                warnings: list[str] = []
+                for att in attachments[: self._settings.attachments_max_per_message]:
+                    err = validate_attachment(att)
+                    (warnings.append(err) if err else valid_attachments.append(att))
+                for att in valid_attachments:
+                    await attachment_store.persist_attachment(
+                        att, session_id=session_id, settings=self._settings)
+                msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
+                    if warnings else user_message
+                if valid_attachments:
+                    conversation.messages[-1] = Message(
+                        role="user",
+                        content=build_content_blocks(msg_text, valid_attachments),
+                        attachments=valid_attachments, text_content=user_message)
+                elif warnings:
+                    conversation.messages[-1] = Message(
+                        role="user", content=msg_text, text_content=msg_text)
 
             # F026: Get/create execution ledger and set turn
             ledger = self._get_or_create_ledger(session_id)
@@ -499,26 +536,37 @@ class AgentRunner:
                 _f071_token = CURRENT_TURN_EXCLUDE_IDS.set(
                     _build_exclude_ids(self._settings, turn_context)
                 )
+                # F024 F2/F3: compact the live user message (strip base64) on BOTH
+                # success and exception. Outer try wraps the F071 try/finally so
+                # this runs after the contextvar reset on every path.
                 try:
-                    response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
-                        system_prompt=system_prompt,
-                        conversation=conversation,
-                        frame_id=turn_context.frame.frame_id,
-                        session_id=session_id,
-                        is_subtask=is_subtask,
-                        max_tool_calls=max_tool_calls,
-                        model_override=model_override,
-                        user_message=user_message,
-                        ledger=ledger,
-                        tool_filter=tool_filter,
-                        is_background=is_background,
-                        extra_tools=extra_tools,
-                        force_tool_on_penultimate=force_tool_on_penultimate,
-                        dag_node_id=dag_node_id,
-                        refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
-                    )
+                    try:
+                        response_text, tool_results, usage, thinking_blocks = await self._tool_loop(
+                            system_prompt=system_prompt,
+                            conversation=conversation,
+                            frame_id=turn_context.frame.frame_id,
+                            session_id=session_id,
+                            is_subtask=is_subtask,
+                            max_tool_calls=max_tool_calls,
+                            model_override=model_override,
+                            user_message=user_message,
+                            ledger=ledger,
+                            tool_filter=tool_filter,
+                            is_background=is_background,
+                            extra_tools=extra_tools,
+                            force_tool_on_penultimate=force_tool_on_penultimate,
+                            dag_node_id=dag_node_id,
+                            refuse_active=getattr(turn_context, "refuse_active", False),  # F078 R6
+                        )
+                    finally:
+                        CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
                 finally:
-                    CURRENT_TURN_EXCLUDE_IDS.reset(_f071_token)
+                    if valid_attachments:
+                        for i in range(len(conversation.messages) - 1, -1, -1):
+                            if conversation.messages[i].role == "user":
+                                conversation.messages[i] = compact_message_for_history(
+                                    conversation.messages[i])
+                                break
                 conversation.messages.append(Message(role="assistant", content=response_text))
             except Exception as e:
                 logger.error("API call error: %s", e)
@@ -529,6 +577,16 @@ class AgentRunner:
                 _caught_exc = e
             else:
                 _caught_exc = None
+                # F024 F4/F5: record memory on the SUCCESS path only (needs
+                # response_text). TurnContext has no episode_id — pass None.
+                if valid_attachments:
+                    for att in valid_attachments:
+                        await attachment_store.record_attachment_fact(
+                            self._heart, att, agent_id=_agent_id,
+                            source_episode_id=None, analysis=response_text)
+                        await attachment_store.maybe_ingest_text_file(
+                            self._heart, self._settings, att,
+                            session_id=session_id, episode_id=None)
 
             # F026: Post-response claim verification + ghost planning detection
             if _caught_exc is None:
@@ -912,6 +970,7 @@ class AgentRunner:
         self,
         session_id: str,
         user_message: str,
+        attachments: list[Attachment] | None = None,
         agent_id: str | None = None,
         user_id: str | None = None,
         user_display_name: str | None = None,
@@ -946,8 +1005,10 @@ class AgentRunner:
             conversation = await self._get_or_create_conversation(session_id)
 
             # Pre-turn with conversation dedup (F4)
+            # F024 F6: content may be a multimodal list — use text_content.
             recent_messages = [
-                m.content for m in conversation.messages if m.role == "user"
+                (m.text_content or (m.content if isinstance(m.content, str) else ""))
+                for m in conversation.messages if m.role == "user"
             ][-8:]
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
@@ -958,7 +1019,9 @@ class AgentRunner:
                 user_display_name=user_display_name,
             )
 
-            conversation.messages.append(Message(role="user", content=user_message))
+            # Append user message (text-only; upgraded to multimodal after censor check)
+            conversation.messages.append(
+                Message(role="user", content=user_message, text_content=user_message))
 
             # Censor block check — yield block message and return
             if turn_context.censor_blocked:
@@ -969,6 +1032,29 @@ class AgentRunner:
                 yield StreamEvent(type="text", text=block_msg)
                 yield StreamEvent(type="done")
                 return
+
+            # F024: upgrade the just-appended user message to multimodal (only
+            # reached when NOT censor-blocked). valid_attachments must exist on
+            # every path — it's read in the compaction finally + success branch.
+            valid_attachments: list[Attachment] = []
+            if attachments and self._settings.attachments_enabled:
+                warnings: list[str] = []
+                for att in attachments[: self._settings.attachments_max_per_message]:
+                    err = validate_attachment(att)
+                    (warnings.append(err) if err else valid_attachments.append(att))
+                for att in valid_attachments:
+                    await attachment_store.persist_attachment(
+                        att, session_id=session_id, settings=self._settings)
+                msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
+                    if warnings else user_message
+                if valid_attachments:
+                    conversation.messages[-1] = Message(
+                        role="user",
+                        content=build_content_blocks(msg_text, valid_attachments),
+                        attachments=valid_attachments, text_content=user_message)
+                elif warnings:
+                    conversation.messages[-1] = Message(
+                        role="user", content=msg_text, text_content=msg_text)
 
             # F026: Get/create execution ledger and set turn
             ledger = self._get_or_create_ledger(session_id)
@@ -1383,6 +1469,17 @@ class AgentRunner:
 
                 # F026: Post-response claim verification (streaming: warn+inject only)
                 self._verify_claims(session_id, response_text, all_tool_results, ledger)
+
+                # F024 F4/F5: record memory on the SUCCESS path only (needs
+                # response_text). TurnContext has no episode_id — pass None.
+                if valid_attachments:
+                    for att in valid_attachments:
+                        await attachment_store.record_attachment_fact(
+                            self._heart, att, agent_id=_agent_id,
+                            source_episode_id=None, analysis=response_text)
+                        await attachment_store.maybe_ingest_text_file(
+                            self._heart, self._settings, att,
+                            session_id=session_id, episode_id=None)
             finally:
                 # F071: clear the per-turn exclusion set first — restoring the
                 # contextvar must not depend on post_turn's success. Value-based
@@ -1390,6 +1487,14 @@ class AgentRunner:
                 # async-generator's per-chunk context boundaries (see set above).
                 if _f071_exclude is not None:
                     CURRENT_TURN_EXCLUDE_IDS.set(None)
+                # F024 F2/F3: compact the live user message (strip base64) on
+                # every exit path — success, exception, and client-disconnect.
+                if valid_attachments:
+                    for i in range(len(conversation.messages) - 1, -1, -1):
+                        if conversation.messages[i].role == "user":
+                            conversation.messages[i] = compact_message_for_history(
+                                conversation.messages[i])
+                            break
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
@@ -2518,7 +2623,11 @@ Rules:
         recent = conversation.messages[-MAX_HISTORY_MESSAGES:]
         for msg in recent:
             role_label = "User" if msg.role == "user" else "Assistant"
-            lines.append(f"{role_label}: {msg.content}")
+            # F024 F6: content may be a multimodal list — prefer text_content,
+            # else stringify str content, else a placeholder.
+            text = (msg.text_content if getattr(msg, "text_content", "") else
+                    (msg.content if isinstance(msg.content, str) else "[multimodal message]"))
+            lines.append(f"{role_label}: {text}")
         return "\n\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -2530,8 +2639,13 @@ Rules:
     ) -> None:
         """Persist conversation state to Heart after compaction."""
         try:
+            # F024 F1 (critical leak fix): route every message's content through
+            # the sanitizer so base64 / text-file bodies never reach
+            # heart.conversation_state — even if compaction hasn't compacted the
+            # live message yet (this runs inside the start-of-turn gate).
             messages_json = [
-                {"role": m.role, "content": m.content}
+                {"role": m.role,
+                 "content": sanitize_blocks_for_storage(m.content, m.attachments)}
                 for m in conversation.messages
             ]
             await self._heart.save_conversation_state(
