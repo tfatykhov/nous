@@ -103,7 +103,7 @@ def create_app(
 
     async def chat(request: Request) -> JSONResponse:
         """POST /chat - Send a message, get a response."""
-        if _body_too_large(request):
+        if settings.attachments_enabled and _body_too_large(request):
             return JSONResponse({"error": "Request too large"}, status_code=413)
         try:
             body = await request.json()
@@ -161,7 +161,7 @@ def create_app(
 
     async def chat_stream(request: Request) -> StreamingResponse:
         """POST /chat/stream - SSE streaming chat."""
-        if _body_too_large(request):
+        if settings.attachments_enabled and _body_too_large(request):
             return JSONResponse({"error": "Request too large"}, status_code=413)
         try:
             body = await request.json()

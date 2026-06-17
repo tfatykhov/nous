@@ -524,7 +524,10 @@ class NousTelegramBot:
             raise ValueError(f"getFile returned no file_path for {file_id}")
         url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
         resp = await self._http.get(url, timeout=60)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            # Do NOT include `url` (it carries the bot token) in the error.
+            raise ValueError(
+                f"Telegram file download failed: HTTP {resp.status_code} for file_path={file_path}")
         data = resp.content
         if not data:
             raise ValueError(f"Empty download for file_id={file_id}")
