@@ -15,14 +15,19 @@ Environment:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import mimetypes
 import os
 import sys
 import time
 from typing import Any
 
 import httpx
+
+from nous.api.attachments import classify_attachment, sanitize_filename
+from nous.api.models import Attachment
 
 logger = logging.getLogger(__name__)
 
@@ -472,10 +477,14 @@ class NousTelegramBot:
         bot_token: str,
         nous_url: str = "http://localhost:8000",
         allowed_users: set[int] | None = None,
+        attachments_enabled: bool = False,
+        attachments_default_prompt: str = "What can you tell me about this?",
     ):
         self.bot_token = bot_token
         self.nous_url = nous_url.rstrip("/")
         self.allowed_users = allowed_users
+        self.attachments_enabled = attachments_enabled
+        self.attachments_default_prompt = attachments_default_prompt
         self._offset = 0
         # Map telegram chat_id -> nous session_id for continuity
         self._sessions: dict[int, str] = {}
@@ -504,6 +513,26 @@ class NousTelegramBot:
                 logger.error("Polling error: %s", e)
                 await asyncio.sleep(5)
 
+    async def _download_telegram_file(self, file_id: str) -> bytes:
+        """Resolve file_id via getFile, then GET the file-download URL.
+
+        Telegram files are downloadable for ~1h; Bot API max 20 MB.
+        """
+        info = await self._tg("getFile", params={"file_id": file_id})
+        file_path = info.get("file_path")
+        if not file_path:
+            raise ValueError(f"getFile returned no file_path for {file_id}")
+        url = f"https://api.telegram.org/file/bot{self.bot_token}/{file_path}"
+        resp = await self._http.get(url, timeout=60)
+        if resp.status_code != 200:
+            # Do NOT include `url` (it carries the bot token) in the error.
+            raise ValueError(
+                f"Telegram file download failed: HTTP {resp.status_code} for file_path={file_path}")
+        data = resp.content
+        if not data:
+            raise ValueError(f"Empty download for file_id={file_id}")
+        return data
+
     async def _handle_update(self, update: dict[str, Any]) -> None:
         """Handle a single Telegram update."""
         message = update.get("message")
@@ -512,12 +541,10 @@ class NousTelegramBot:
 
         chat_id = message["chat"]["id"]
         user_id = message.get("from", {}).get("id")
-        text = message.get("text", "").strip()
+        # Photos/documents/stickers arrive with a caption (or no text at all).
+        text = (message.get("text") or message.get("caption") or "").strip()
 
-        if not text:
-            return
-
-        # Access control
+        # Access control — must precede any download or forwarding.
         if self.allowed_users and user_id not in self.allowed_users:
             await self._send(chat_id, "⛔ Not authorized.")
             return
@@ -552,9 +579,83 @@ class NousTelegramBot:
             await self._show_identity(chat_id)
             return
 
+        # Download inbound attachments (photos/documents/stickers).
+        attachments: list[Attachment] = []
+        if self.attachments_enabled:
+            failed = 0
+            # photo
+            photos = message.get("photo") or []
+            if photos:
+                try:
+                    p = photos[-1]  # largest size
+                    raw = await self._download_telegram_file(p["file_id"])
+                    attachments.append(Attachment(
+                        filename=f"photo_{p['file_unique_id']}.jpg",
+                        media_type="image/jpeg",
+                        data_base64=base64.b64encode(raw).decode(),
+                        size_bytes=len(raw), source="telegram", content_type="image"))
+                except Exception as e:
+                    failed += 1
+                    logger.error("photo download failed: %s", e, exc_info=True)
+
+            # document
+            doc = message.get("document")
+            if doc:
+                try:
+                    raw = await self._download_telegram_file(doc["file_id"])
+                    mime = (doc.get("mime_type")
+                            or mimetypes.guess_type(doc.get("file_name", ""))[0]
+                            or "application/octet-stream")
+                    fname = sanitize_filename(doc.get("file_name") or "document")
+                    attachments.append(Attachment(
+                        filename=fname, media_type=mime,
+                        data_base64=base64.b64encode(raw).decode(),
+                        size_bytes=len(raw), source="telegram",
+                        content_type=classify_attachment(fname, mime)))
+                except Exception as e:
+                    failed += 1
+                    logger.error("document download failed: %s", e, exc_info=True)
+
+            # sticker (skip animated/video)
+            sticker = message.get("sticker")
+            if sticker and not sticker.get("is_animated") and not sticker.get("is_video"):
+                try:
+                    raw = await self._download_telegram_file(sticker["file_id"])
+                    attachments.append(Attachment(
+                        filename=f"sticker_{sticker['file_unique_id']}.webp",
+                        media_type="image/webp",
+                        data_base64=base64.b64encode(raw).decode(),
+                        size_bytes=len(raw), source="telegram", content_type="image"))
+                except Exception as e:
+                    failed += 1
+                    logger.error("sticker download failed: %s", e, exc_info=True)
+
+            # voice/audio unsupported
+            if (message.get("voice") or message.get("audio")) and not attachments:
+                await self._send(chat_id, "\U0001F3A4 I can't process audio yet. "
+                                          "Send text, images, PDFs, or code files.")
+                if not text:
+                    return
+
+            if failed:
+                await self._send(
+                    chat_id,
+                    f"⚠️ I couldn't download {failed} file(s); continuing with what I have.")
+                if not attachments and not text:
+                    return
+
+        if not text and not attachments:
+            return
+
+        # If the user sent only an attachment (no caption), give the agent a prompt.
+        if not text and attachments:
+            text = self.attachments_default_prompt
+
         # Forward to Nous (streaming) — 007.4: pass user identity
         user_display_name = message.get("from", {}).get("first_name")
-        await self._chat_streaming(chat_id, text, user_id=str(user_id) if user_id else None, user_display_name=user_display_name)
+        await self._chat_streaming(
+            chat_id, text, user_id=str(user_id) if user_id else None,
+            user_display_name=user_display_name, attachments=attachments or None)
 
     async def _show_identity(self, chat_id: int) -> None:
         """Show current agent identity via REST API."""
@@ -673,6 +774,7 @@ class NousTelegramBot:
     async def _chat_streaming(
         self, chat_id: int, text: str,
         user_id: str | None = None, user_display_name: str | None = None,
+        attachments: list[Attachment] | None = None,
     ) -> None:
         """Send message to Nous streaming API and progressively edit Telegram message."""
         from uuid import uuid4
@@ -694,6 +796,12 @@ class NousTelegramBot:
             payload["user_id"] = user_id
         if user_display_name:
             payload["user_display_name"] = user_display_name
+        if attachments:
+            payload["attachments"] = [
+                {"filename": a.filename, "media_type": a.media_type,
+                 "data_base64": a.data_base64, "size_bytes": a.size_bytes}
+                for a in attachments
+            ]
 
         streamer = StreamingMessage(self, chat_id)
 
@@ -862,7 +970,13 @@ async def main() -> None:
     if allowed_str:
         allowed_users = {int(uid.strip()) for uid in allowed_str.split(",") if uid.strip()}
 
-    bot = NousTelegramBot(bot_token, nous_url, allowed_users)
+    from nous.config import Settings
+    _settings = Settings()
+    bot = NousTelegramBot(
+        bot_token, nous_url, allowed_users,
+        attachments_enabled=_settings.attachments_enabled,
+        attachments_default_prompt=_settings.attachments_default_prompt,
+    )
     try:
         await bot.start()
     finally:

@@ -444,9 +444,31 @@ class TokenEstimator:
             return max(1, int(len(text) * self._ratio))
         return max(1, int(len(str(text)) * self._ratio))
 
+    def estimate_image_tokens(self, width: int = 0, height: int = 0) -> int:
+        """Claude's image token formula: (w*h)/750; conservative default if unknown."""
+        if width > 0 and height > 0:
+            return max(1, (width * height) // 750)
+        return 1600
+
+    def estimate_message(self, message: dict[str, Any]) -> int:
+        """Per-message estimate; block-aware for multimodal content."""
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return self.estimate(content) + 4
+        total = 4
+        for block in content:
+            btype = block.get("type") if isinstance(block, dict) else None
+            if btype == "text":
+                total += self.estimate(block.get("text", ""))
+            elif btype == "image":
+                total += self.estimate_image_tokens()
+            elif btype == "document":
+                total += 7500  # ~5 pages @ ~1500 tok/page
+        return total
+
     def estimate_messages(self, messages: list[dict[str, Any]]) -> int:
-        """Estimate total tokens for a message list."""
-        return sum(self.estimate(m.get("content", "")) + 4 for m in messages)
+        """Estimate total tokens for a message list (multimodal-aware)."""
+        return sum(self.estimate_message(m) for m in messages)
 
     def calibrate(self, input_chars: int, actual_tokens: int) -> None:
         """Update ratio from actual API input_tokens. EMA with alpha=0.1."""
@@ -930,7 +952,7 @@ class ConversationCompactor:
         """
         accumulated = 0
         for i in range(len(messages) - 1, -1, -1):
-            accumulated += self.estimator.estimate(messages[i].get("content", ""))
+            accumulated += self.estimator.estimate_message(messages[i])
             if accumulated >= keep_recent_tokens:
                 for j in range(i, len(messages)):
                     if messages[j].get("role") == "user":
@@ -1215,8 +1237,12 @@ class ConversationCompactor:
     def _serialize_for_summary(messages: list[dict[str, Any]]) -> str:
         """Serialize messages as readable text for summarization.
 
-        conversation.messages stores plain text only (tool results are
-        in-turn locals, never persisted). Content is always str here.
+        Tool results are in-turn locals, never persisted. F024: message
+        content may be a list of content blocks (multimodal turns), not
+        just str. Image/document base64 is stripped to reference labels
+        before this point (sanitize_blocks_for_storage /
+        compact_message_for_history), so any list content here is
+        text-only and safe to serialize/summarize.
         """
         lines = []
         for msg in messages:

@@ -124,7 +124,7 @@ All shipped implementation specs with PR references:
 | F036 | Prompt Cache Optimization | ✅ Shipped | #253 — 3-tier system prompt split, cache break detection, single breakpoint, tool schema cache |
 | F038 | Memory Quality Fixes | ✅ Shipped | #258 — quality gate 0.55, fact 30-char min, procedure floor, episode recency, admission bonus, task synthesis, context dedup, bash hints |
 | 012.3 | Programmatic Tool Calling | ✅ Shipped | — run_python tool with memory functions in scope |
-| 011.2 | Multimodal File Support | 📋 Draft | — image/document processing across input channels |
+| 011.2 | Multimodal File Support | 🚧 In Review (feat/F024-inbound-attachments) | — image/document/text-file attachments across Telegram + REST; implemented pending merge (F024 inbound attachments) |
 | 012.1 | Frame Splitting | 📋 Specced | — parallel cognitive frames via sub-agents (deferred to F024) |
 | 012.2 | Subtask Enhancements Light | 📋 Specced | — replaces 012.1 with lighter subtask improvements |
 
