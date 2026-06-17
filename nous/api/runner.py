@@ -459,6 +459,10 @@ class AgentRunner:
                     await attachment_store.maybe_ingest_text_file(
                         self._heart, self._settings, att,
                         session_id=session_id, episode_id=episode_id)
+                    await attachment_store.maybe_ingest_pdf(
+                        self._heart, self._settings, att,
+                        session_id=session_id, episode_id=episode_id,
+                        llm_client=self._api)
                 msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
                     if warnings else user_message
                 if valid_attachments:
@@ -1087,6 +1091,10 @@ class AgentRunner:
                     await attachment_store.maybe_ingest_text_file(
                         self._heart, self._settings, att,
                         session_id=session_id, episode_id=episode_id)
+                    await attachment_store.maybe_ingest_pdf(
+                        self._heart, self._settings, att,
+                        session_id=session_id, episode_id=episode_id,
+                        llm_client=self._api)
                 msg_text = ("\n".join(warnings) + ("\n\n" + user_message if user_message else "")).strip() \
                     if warnings else user_message
                 if valid_attachments:
