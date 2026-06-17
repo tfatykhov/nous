@@ -430,7 +430,7 @@ class Settings(BaseSettings):
     workspace_dir: str = "/tmp/nous-workspace"
 
     # 011.2 / F024 — Inbound multimodal attachments
-    attachments_enabled: bool = False  # master switch; land dark
+    attachments_enabled: bool = True  # master switch (on by default; requires a vision-capable NOUS_MODEL)
     attachments_dir: str = ""  # empty => computed as f"{workspace_dir}/attachments"
     attachments_max_per_message: int = 5
     attachments_persist: bool = True  # save originals to disk + record fact reference
