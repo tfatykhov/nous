@@ -65,6 +65,11 @@ async def test_maybe_ingest_pdf_scanned_fallback_transcribes(monkeypatch):
     )
 
     llm.call.assert_awaited_once()
+    # Regression: the payload MUST carry a non-empty "system" — the default sdk
+    # backend's _payload_to_kwargs indexes payload["system"] and would KeyError
+    # (silently killing the fallback) if it were absent.
+    sent_payload = llm.call.await_args.args[0]
+    assert sent_payload.get("system")
     ingest.assert_awaited_once()
     assert ingest.await_args.kwargs["content"] == "transcribed body of the scanned pdf"
 

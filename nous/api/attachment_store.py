@@ -204,11 +204,19 @@ async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Sett
     Best-effort — must never raise (it's an un-awaited task)."""
     try:
         b64 = base64.b64encode(raw).decode()
-        payload = {"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": [
-            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
-            {"type": "text", "text": "Transcribe the full text content of this document "
-                                     "verbatim. Output only the document's text, with no commentary."},
-        ]}]}
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            # SdkAnthropicClient._payload_to_kwargs (anthropic_client.py) indexes
+            # payload["system"] unconditionally, so this key MUST be present on every
+            # backend or the call raises and the fallback silently no-ops.
+            "system": "You are a document transcription engine. Transcribe the provided "
+                      "document's full text verbatim, with no commentary.",
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}},
+                {"type": "text", "text": "Transcribe this document's full text verbatim."},
+            ]}],
+        }
         resp = await llm_client.call(payload)
         text, stop_reason = _parse_transcription_response(resp)
         if stop_reason == "max_tokens":
