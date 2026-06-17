@@ -429,6 +429,14 @@ class Settings(BaseSettings):
 
     workspace_dir: str = "/tmp/nous-workspace"
 
+    # 011.2 / F024 — Inbound multimodal attachments
+    attachments_enabled: bool = False  # master switch; land dark
+    attachments_dir: str = ""  # empty => computed as f"{workspace_dir}/attachments"
+    attachments_max_per_message: int = 5
+    attachments_persist: bool = True  # save originals to disk + record fact reference
+    attachments_ingest_text_files: bool = True  # chunk text/code bodies into episode_chunks
+    attachments_default_prompt: str = "What can you tell me about this?"
+
     # Web tools
     brave_search_api_key: str = Field("", validation_alias="BRAVE_SEARCH_API_KEY")
     web_search_daily_limit: int = 100  # Max web searches per day
@@ -1664,6 +1672,12 @@ class Settings(BaseSettings):
                 f"dag_node_max_timeout ({self.dag_node_max_timeout})"
             )
         return self
+
+    @property
+    def attachments_root(self) -> str:
+        """Resolved attachments directory (defaults under workspace_dir)."""
+        import os
+        return self.attachments_dir or os.path.join(self.workspace_dir, "attachments")
 
     @property
     def db_url(self) -> str:
