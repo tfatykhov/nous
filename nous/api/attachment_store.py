@@ -85,7 +85,7 @@ async def record_attachment_fact(heart: "Heart", att: "Attachment", *,
             FactInput(
                 content=content, category="attachment", subject=att.filename,
                 source=f"{att.source}-attachment",
-                source_text=att.workspace_path or None,
+                source_text=(summary or None),
                 source_episode_id=UUID(source_episode_id) if source_episode_id else None,
                 tags=["attachment", att.content_type],
             ),

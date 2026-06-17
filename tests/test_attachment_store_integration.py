@@ -55,9 +55,14 @@ async def _cleanup(db, agent_id: str) -> None:
         await session.commit()
 
 
-async def test_record_attachment_fact_is_recallable(db, heart):
-    """record_attachment_fact stores a Heart fact whose filename + analysis
-    are discoverable via heart.recall()."""
+async def test_record_attachment_fact_writes_discoverable_row(db, heart):
+    """record_attachment_fact stores exactly one Heart fact row whose content,
+    category, and tags match the contract of record_attachment_fact.
+
+    Asserts directly against heart.facts (deterministic) rather than via
+    heart.recall(), which is unreliable under the fixture's hash-based
+    MockEmbeddingProvider.
+    """
     agent_id = heart.agent_id
     # Unique filename so a prior run's leftover row can't satisfy the assertion.
     filename = f"login-error-{uuid.uuid4().hex[:8]}.png"
@@ -76,13 +81,19 @@ async def test_record_attachment_fact_is_recallable(db, heart):
             heart, att, agent_id=agent_id, source_episode_id=None, analysis=analysis,
         )
 
-        hits = await heart.recall("login screen attachment", limit=5)
-
-        assert hits, "recall returned no results for the attachment fact"
-        assert any(
-            ("login" in (r.summary or "").lower()) or (att.filename in (r.summary or ""))
-            for r in hits
-        ), f"no recall result referenced the filename or analysis: {[r.summary for r in hits]}"
+        async with db.session() as session:
+            rows = await session.execute(
+                text("SELECT content, source, category, tags FROM heart.facts "
+                     "WHERE agent_id = :a AND source = 'rest-attachment' "
+                     "AND content LIKE :pat"),
+                {"a": agent_id, "pat": f"%{filename}%"})
+            facts = rows.fetchall()
+        assert len(facts) == 1, f"expected exactly one attachment fact, got {len(facts)}"
+        row = facts[0]
+        assert filename in row.content
+        assert "500 error" in row.content  # analysis snippet folded into content
+        assert row.category == "attachment"
+        assert "attachment" in (row.tags or [])
     finally:
         await _cleanup(db, agent_id)
 
