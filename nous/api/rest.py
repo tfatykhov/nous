@@ -84,7 +84,10 @@ def create_app(
         from nous.api.attachments import (
             sanitize_filename, classify_attachment, validate_base64_size)
         out: list[Attachment] = []
-        for a in (body.get("attachments") or [])[: settings.attachments_max_per_message]:
+        raw = body.get("attachments") if isinstance(body, dict) else None
+        for a in (raw or [])[: settings.attachments_max_per_message]:
+            if not isinstance(a, dict):
+                continue  # ignore malformed entries rather than 500
             data_b64 = a.get("data_base64", "")
             filename = sanitize_filename(a.get("filename", "unnamed"))
             media_type = a.get("media_type", "application/octet-stream")

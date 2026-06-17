@@ -582,9 +582,11 @@ class NousTelegramBot:
         # Download inbound attachments (photos/documents/stickers).
         attachments: list[Attachment] = []
         if self.attachments_enabled:
-            try:
-                photos = message.get("photo") or []
-                if photos:
+            failed = 0
+            # photo
+            photos = message.get("photo") or []
+            if photos:
+                try:
                     p = photos[-1]  # largest size
                     raw = await self._download_telegram_file(p["file_id"])
                     attachments.append(Attachment(
@@ -592,9 +594,14 @@ class NousTelegramBot:
                         media_type="image/jpeg",
                         data_base64=base64.b64encode(raw).decode(),
                         size_bytes=len(raw), source="telegram", content_type="image"))
+                except Exception as e:
+                    failed += 1
+                    logger.error("photo download failed: %s", e, exc_info=True)
 
-                doc = message.get("document")
-                if doc:
+            # document
+            doc = message.get("document")
+            if doc:
+                try:
                     raw = await self._download_telegram_file(doc["file_id"])
                     mime = (doc.get("mime_type")
                             or mimetypes.guess_type(doc.get("file_name", ""))[0]
@@ -605,27 +612,37 @@ class NousTelegramBot:
                         data_base64=base64.b64encode(raw).decode(),
                         size_bytes=len(raw), source="telegram",
                         content_type=classify_attachment(fname, mime)))
+                except Exception as e:
+                    failed += 1
+                    logger.error("document download failed: %s", e, exc_info=True)
 
-                sticker = message.get("sticker")
-                if sticker and not sticker.get("is_animated") and not sticker.get("is_video"):
+            # sticker (skip animated/video)
+            sticker = message.get("sticker")
+            if sticker and not sticker.get("is_animated") and not sticker.get("is_video"):
+                try:
                     raw = await self._download_telegram_file(sticker["file_id"])
                     attachments.append(Attachment(
                         filename=f"sticker_{sticker['file_unique_id']}.webp",
                         media_type="image/webp",
                         data_base64=base64.b64encode(raw).decode(),
                         size_bytes=len(raw), source="telegram", content_type="image"))
+                except Exception as e:
+                    failed += 1
+                    logger.error("sticker download failed: %s", e, exc_info=True)
 
-                if (message.get("voice") or message.get("audio")) and not attachments:
-                    await self._send(chat_id, "\U0001F3A4 I can't process audio yet. "
-                                              "Send text, images, PDFs, or code files.")
-                    if not text:
-                        return
-            except Exception as e:
-                logger.error("Attachment download failed: %s", e, exc_info=True)
+            # voice/audio unsupported
+            if (message.get("voice") or message.get("audio")) and not attachments:
+                await self._send(chat_id, "\U0001F3A4 I can't process audio yet. "
+                                          "Send text, images, PDFs, or code files.")
                 if not text:
-                    await self._send(chat_id, "⚠️ I couldn't download that file. Please try again.")
                     return
-                attachments = []  # continue text-only
+
+            if failed:
+                await self._send(
+                    chat_id,
+                    f"⚠️ I couldn't download {failed} file(s); continuing with what I have.")
+                if not attachments and not text:
+                    return
 
         if not text and not attachments:
             return

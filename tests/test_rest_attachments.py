@@ -34,6 +34,13 @@ class CapturingRunner(MockAgentRunner):
         return self.preset_response, self.preset_context, {
             "input_tokens": 100, "output_tokens": 50}
 
+    async def stream_chat(self, session_id, user_message, **kwargs):
+        from nous.api.runner import StreamEvent
+
+        self.last_attachments = kwargs.get("attachments")
+        yield StreamEvent(type="text_delta", text="hello")
+        yield StreamEvent(type="done", stop_reason="end_turn")
+
 
 def _settings(**overrides) -> Settings:
     base = dict(
@@ -123,6 +130,86 @@ async def test_chat_body_too_large(brain, heart, cognitive, db):
 
     assert resp.status_code == 413
     assert resp.json()["error"] == "Request too large"
+
+
+@pytest.mark.asyncio
+async def test_chat_non_dict_attachment_entries_skipped(brain, heart, cognitive, db):
+    """Malformed (non-dict) attachment entries are skipped, not 500.
+
+    Body carries a str, a null, and one valid dict; runner must receive exactly
+    one Attachment (the valid dict)."""
+    runner = CapturingRunner()
+    settings = _settings()
+    app = _make_app(runner, brain, heart, cognitive, db, settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        resp = await c.post("/chat", json={
+            "message": "hi",
+            "attachments": [
+                "oops",
+                None,
+                {
+                    "filename": "a.png",
+                    "media_type": "image/png",
+                    "data_base64": _DATA_B64,
+                },
+            ],
+        })
+
+    assert resp.status_code == 200, resp.text
+    atts = runner.last_attachments
+    assert atts is not None and len(atts) == 1
+    assert atts[0].filename == "a.png"
+    assert atts[0].content_type == "image"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_with_attachment(brain, heart, cognitive, db):
+    """POST /chat/stream with an attachment -> 200 (no 500), and the runner's
+    stream_chat receives exactly one Attachment."""
+    runner = CapturingRunner()
+    settings = _settings()
+    app = _make_app(runner, brain, heart, cognitive, db, settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        resp = await c.post("/chat/stream", json={
+            "message": "",
+            "attachments": [{
+                "filename": "hello.png",
+                "media_type": "image/png",
+                "data_base64": _DATA_B64,
+            }],
+        })
+
+    assert resp.status_code == 200, resp.text
+    atts = runner.last_attachments
+    assert atts is not None and len(atts) == 1
+    assert atts[0].filename == "hello.png"
+    assert atts[0].content_type == "image"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_attachments_disabled_ignored(brain, heart, cognitive, db):
+    """attachments_enabled=False on /chat/stream -> attachments ignored."""
+    runner = CapturingRunner()
+    settings = _settings(attachments_enabled=False)
+    app = _make_app(runner, brain, heart, cognitive, db, settings)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as c:
+        resp = await c.post("/chat/stream", json={
+            "message": "hi",
+            "attachments": [{
+                "filename": "hello.png",
+                "media_type": "image/png",
+                "data_base64": _DATA_B64,
+            }],
+        })
+
+    assert resp.status_code == 200, resp.text
+    assert runner.last_attachments is None
 
 
 @pytest.mark.asyncio
