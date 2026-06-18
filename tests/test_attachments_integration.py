@@ -42,6 +42,23 @@ def _png_att() -> Attachment:
     return a
 
 
+# Minimal-but-valid PDF bytes (must decode as base64; content doesn't matter
+# here because the test monkeypatches maybe_ingest_pdf — we only prove the wire).
+_PDF_BYTES = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
+
+
+def _pdf_att() -> Attachment:
+    a = Attachment(
+        filename="doc.pdf",
+        media_type="application/pdf",
+        data_base64=base64.b64encode(_PDF_BYTES).decode(),
+        size_bytes=len(_PDF_BYTES),
+        source="rest",
+    )
+    a.content_type = classify_attachment(a.filename, a.media_type)
+    return a
+
+
 # ---------------------------------------------------------------------------
 # Minimal cognitive / brain / heart stubs (mirrors test_runner.py)
 # ---------------------------------------------------------------------------
@@ -187,6 +204,29 @@ async def test_run_turn_records_attachment_fact_on_success(runner_with_fake_api)
     runner, _captured = runner_with_fake_api
     await runner.run_turn("sess-fact", "what is this?", attachments=[_png_att()])
     assert runner._heart.learn.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_turn_invokes_pdf_ingest(runner_with_fake_api, monkeypatch):
+    """F024.1: the runner wires maybe_ingest_pdf into the attachment persist
+    block. Proves the WIRE (Task 1 covers the module internals) — monkeypatch
+    the ingest entrypoint so this runs without real pypdf in the env."""
+    import nous.api.attachment_store as attachment_store
+
+    fake_ingest = AsyncMock()
+    monkeypatch.setattr(attachment_store, "maybe_ingest_pdf", fake_ingest)
+
+    runner, _captured = runner_with_fake_api
+    att = _pdf_att()
+    await runner.run_turn("sess-pdf", "summarize this", attachments=[att])
+
+    fake_ingest.assert_awaited_once()
+    _args, kwargs = fake_ingest.await_args
+    # att is passed positionally (heart, settings, att); confirm it's our PDF.
+    assert att in _args
+    assert kwargs.get("session_id") == "sess-pdf"
+    # llm_client threaded through is the runner's AnthropicClient handle (or None).
+    assert "llm_client" in kwargs
 
 
 # ---------------------------------------------------------------------------
