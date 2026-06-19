@@ -1062,3 +1062,33 @@ export interface RubricData {
   weight_history: RubricWeightSnapshot[];
   config: RubricConfig;
 }
+
+// ── /dashboard/density (F040) ──────────────────────────────────────────────
+
+/** Per-type orphan stats returned inside density_by_type. */
+export interface DensityTypeStats {
+  total: number;
+  orphan: number;
+  orphan_rate: number;
+}
+
+/** One row in backfill_progress (auto-linked edges per day). */
+export interface DensityBackfillRow {
+  date: string;
+  edges: number;
+}
+
+/** Full response from GET /dashboard/density. */
+export interface DensityData {
+  total_nodes: number;
+  total_edges: number;
+  total_orphans: number;
+  orphan_rate: number;
+  avg_degree: number;
+  connected_nodes: number;
+  /** Keyed by node type: fact, decision, episode, procedure, chunk. */
+  density_by_type: Record<string, DensityTypeStats>;
+  /** Keyed by relation name; value is edge count. */
+  edge_distribution: Record<string, number>;
+  backfill_progress: DensityBackfillRow[];
+}

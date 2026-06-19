@@ -16,6 +16,7 @@
   import Health from './views/Health.svelte';
   import Admission from './views/Admission.svelte';
   import Rubric from './views/Rubric.svelte';
+  import Density from './views/Density.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -184,7 +185,7 @@
   {:else if $currentRoute === 'cache'}
     <Cache />
   {:else if $currentRoute === 'density'}
-    <Placeholder route={$currentRoute} />
+    <Density />
   {:else if $currentRoute === 'dag'}
     <DagView />
   {:else if $currentRoute === 'subtasks'}
