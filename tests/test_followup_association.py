@@ -5,6 +5,7 @@ from nous.config import Settings
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import ContextBudget, FrameSelection
 from nous.cognitive.intent import IntentClassifier
+from nous.cognitive.layer import _DEICTIC_FOLLOWUP, _should_boost_deictic
 
 
 def test_followup_flags_defaults():
@@ -120,9 +121,6 @@ async def test_recall_before_clarify_absent_when_off():
 # C1: first-turn-gated deictic follow-up detector (F083)
 # ---------------------------------------------------------------------------
 
-from nous.cognitive.layer import _DEICTIC_FOLLOWUP
-
-
 def test_deictic_matches_cross_session_referents():
     for s in ["what about the second option you mentioned?",
               "can you continue what we were doing?",
@@ -136,3 +134,20 @@ def test_deictic_does_not_match_same_session_coding():
               "write a python function to reverse a string",
               "what about performance?"]:
         assert not _DEICTIC_FOLLOWUP.search(s), s
+
+
+def test_c1_gate_fires_on_first_turn_deictic():
+    assert _should_boost_deictic(True, True, "the second option you mentioned") is True
+
+
+def test_c1_gate_blocked_when_not_first_turn():
+    # same-session referent must NOT pull cross-session episodes (R2 safety property)
+    assert _should_boost_deictic(False, True, "the second option you mentioned") is False
+
+
+def test_c1_gate_blocked_when_flag_off():
+    assert _should_boost_deictic(True, False, "the second option you mentioned") is False
+
+
+def test_c1_gate_no_match_no_boost():
+    assert _should_boost_deictic(True, True, "use the first argument") is False

@@ -81,6 +81,13 @@ _DEICTIC_FOLLOWUP = re.compile(
     re.IGNORECASE,
 )
 
+_DEICTIC_RECENCY_FLOOR = 0.6  # > 0.5 so it flips _temporal_boost and the plan_retrieval episode-budget rescue
+
+
+def _should_boost_deictic(is_first_turn: bool, enabled: bool, user_input: str) -> bool:
+    """F083 C1 gate: boost only a cross-session (first-turn) deictic follow-up."""
+    return is_first_turn and enabled and bool(_DEICTIC_FOLLOWUP.search(user_input))
+
 
 def _is_recap_query(user_input: str) -> bool:
     """Detect if user is asking for a temporal recap."""
@@ -633,10 +640,9 @@ class CognitiveLayer:
         # raises recency so episodes are retrieved + temporal_boost fires. Gated on
         # is_first_turn so same-session references — already in live history — never
         # pull cross-session episodes.
-        if (is_first_turn and self._settings.followup_deictic_detection_enabled
-                and _DEICTIC_FOLLOWUP.search(user_input)):
-            signals.temporal_recency = max(signals.temporal_recency, 0.6)
-            plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
+        if _should_boost_deictic(is_first_turn, self._settings.followup_deictic_detection_enabled, user_input):
+            signals.temporal_recency = max(signals.temporal_recency, _DEICTIC_RECENCY_FLOOR)
+            plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)  # rebuild plan with updated recency
 
         # 008.6: Detect recap queries and set temporal boost
         _is_recap = _is_recap_query(user_input)
