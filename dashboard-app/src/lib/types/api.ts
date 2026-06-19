@@ -973,3 +973,92 @@ export interface ActivityData {
   schedule_stats: ActivityScheduleStats;
   sleep_stats: ActivitySleepStats;
 }
+
+// ── /dashboard/rubric (F024-3b) ────────────────────────────────────────────
+
+/** One rubric dimension from heart.rubric_versions.dimensions (JSONB array). */
+export interface RubricDimension {
+  name: string;
+  weight: number;
+  description: string;
+  min_weight: number;
+  max_weight: number;
+}
+
+/** Summary of the currently active rubric version. */
+export interface RubricActiveRubric {
+  version: string;
+  status: string;
+  dimension_count: number;
+  created_at: string | null;
+  dimensions: RubricDimension[];
+}
+
+/** One version history entry (no dimensions detail, just counts). */
+export interface RubricVersionEntry {
+  version: string;
+  status: string;
+  change_reason: string | null;
+  dimension_count: number;
+  created_at: string | null;
+}
+
+/** One recent outcome signal row. */
+export interface RubricSignal {
+  signal_type: string;
+  confidence: number;
+  evidence: string | null;
+  created_at: string | null;
+}
+
+/** One day in the 30-day outcome signal trend. */
+export interface RubricTrendDay {
+  date: string;
+  completed: number;
+  corrected: number;
+  praised: number;
+  reworked: number;
+  self_corrected: number;
+}
+
+/** One correlation entry from outcome_correlations JSONB. */
+export interface RubricCorrelation {
+  dimension: string;
+  signal_type: string;
+  pearson_r: number;
+  spearman_rho: number;
+}
+
+/** Weight snapshot for one rubric version. */
+export interface RubricWeightSnapshot {
+  version: string;
+  created_at: string | null;
+  weights: Record<string, number>;
+}
+
+/** Feature-flag config from settings. */
+export interface RubricConfig {
+  rubric_enabled: boolean;
+  evolution_enabled: boolean;
+  outcome_detection_enabled: boolean;
+  min_episodes_for_correlation: number;
+  weight_change_cap: number;
+}
+
+/** Full response from GET /dashboard/rubric. */
+export interface RubricData {
+  active_rubric: RubricActiveRubric | null;
+  version_history: RubricVersionEntry[];
+  outcome_signals: {
+    total: number;
+    by_type: Record<string, number>;
+    recent: RubricSignal[];
+    daily_trend: RubricTrendDay[];
+  };
+  correlations: {
+    data: RubricCorrelation[];
+    sample_size: number;
+  };
+  weight_history: RubricWeightSnapshot[];
+  config: RubricConfig;
+}
