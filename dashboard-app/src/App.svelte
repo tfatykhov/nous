@@ -2,6 +2,7 @@
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
   import Placeholder from '$lib/ui/Placeholder.svelte';
+  import Cache from './views/Cache.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -168,7 +169,7 @@
   {:else if $currentRoute === 'execution'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'cache'}
-    <Placeholder route={$currentRoute} />
+    <Cache />
   {:else if $currentRoute === 'density'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'dag'}
