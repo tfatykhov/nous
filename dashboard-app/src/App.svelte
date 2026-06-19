@@ -3,6 +3,7 @@
   import Nav from '$lib/ui/Nav.svelte';
   import Placeholder from '$lib/ui/Placeholder.svelte';
   import Cache from './views/Cache.svelte';
+  import Subtasks from './views/Subtasks.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -175,7 +176,7 @@
   {:else if $currentRoute === 'dag'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'subtasks'}
-    <Placeholder route={$currentRoute} />
+    <Subtasks />
   {/if}
 </main>
 
