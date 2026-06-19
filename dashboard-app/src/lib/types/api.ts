@@ -382,6 +382,95 @@ export interface LedgerData {
   sessions: LedgerSession[];
 }
 
+// ── GET /status?dashboard=true (Overview view) ────────────────────────────
+
+/** Memory counts from /status. */
+export interface StatusMemory {
+  active_conversations: number;
+  active_censors: number;
+  total_decisions: number;
+  total_facts: number;
+  total_episodes: number;
+  total_procedures: number;
+  total_chunks: number;
+}
+
+/** Calibration summary from /status. */
+export interface StatusCalibration {
+  brier_score: number | null;
+  accuracy: number | null;
+  total_decisions: number;
+  reviewed_decisions: number;
+}
+
+/** 7-day delta for one entity type. */
+export interface StatusDeltaEntry {
+  total: number;
+  last_7_days: number;
+}
+
+/** One timeseries point: {date: ISO string, count: number}. */
+export interface StatusTimeseriesPoint {
+  date: string;
+  count: number;
+}
+
+/** dashboard sub-object from get_dashboard_stats(). */
+export interface StatusDashboard {
+  /** 7-day deltas for facts/episodes/decisions/procedures. */
+  deltas: {
+    facts: StatusDeltaEntry;
+    episodes: StatusDeltaEntry;
+    decisions: StatusDeltaEntry;
+    procedures: StatusDeltaEntry;
+  };
+  distributions: {
+    /** category → count */
+    fact_categories: Record<string, number>;
+    /** outcome → count (success/partial/failure/pending) */
+    decision_outcomes: Record<string, number>;
+    /** category → count */
+    decision_categories: Record<string, number>;
+    /** relation → count */
+    edge_relations: Record<string, number>;
+  };
+  /** 30-day daily timeseries for facts/episodes/decisions/procedures. */
+  timeseries: {
+    facts: StatusTimeseriesPoint[];
+    episodes: StatusTimeseriesPoint[];
+    decisions: StatusTimeseriesPoint[];
+    procedures: StatusTimeseriesPoint[];
+  };
+  /** edges / nodes ratio; null when no edges exist. */
+  graph_density: number | null;
+}
+
+/** Execution integrity block from /status. */
+export interface StatusIntegrity {
+  enabled: { ledger: boolean; claim_verification: boolean; action_gating: boolean };
+  modes: { claim_verification: string; action_gating: string };
+  active_ledgers: number;
+  sessions: Record<string, {
+    total_actions: number;
+    blocked_actions: number;
+    current_turn: number;
+    summary: string;
+  }>;
+  pending_corrections: Record<string, number>;
+}
+
+/** Full response from GET /status?dashboard=true. */
+export interface StatusData {
+  agent_id: string;
+  agent_name: string;
+  model: string;
+  memory: StatusMemory;
+  calibration: StatusCalibration;
+  execution_integrity: StatusIntegrity;
+  /** Only present when ?dashboard=true. */
+  dashboard: StatusDashboard;
+}
+
 // ── /dashboard/dag (F038) ─────────────────────────────────────────────────
 
 /** A node inside an active DAG (nested under DagActiveDag.nodes). */
