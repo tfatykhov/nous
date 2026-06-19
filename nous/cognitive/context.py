@@ -32,6 +32,7 @@ TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
     "Context Safety": "static",
+    "Recall Before Clarifying": "static",
     "Procedure Awareness": "static",  # F079 P1: static cue -> cached, never busts
     "Procedure Catalog": "static",  # F079 catalog-first: query-independent breadth list -> cached
     "Epistemic Routing": "dynamic",  # §2
@@ -259,6 +260,25 @@ class ContextEngine:
                     content=anti_halluc,
                     token_estimate=self._estimate_tokens(anti_halluc),
                     tier=SECTION_TIERS.get("Context Safety", "dynamic"),
+                )
+            )
+
+        # F083 C2: recall-before-clarify cue. Static → caches in the stable prefix.
+        if self._settings.recall_before_clarify_prompt:
+            recall_first = (
+                "Before asking the user to clarify a referent — a pronoun, "
+                '"that", "the thing/option you mentioned", or a continuation of '
+                "earlier work — first call recall_deep or recall_recent to resolve "
+                "it from your memory of prior sessions. Only ask the user to "
+                "clarify if recall returns nothing relevant."
+            )
+            sections.append(
+                ContextSection(
+                    priority=2,
+                    label="Recall Before Clarifying",
+                    content=recall_first,
+                    token_estimate=self._estimate_tokens(recall_first),
+                    tier=SECTION_TIERS.get("Recall Before Clarifying", "static"),
                 )
             )
 
