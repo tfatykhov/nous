@@ -3,6 +3,7 @@
   import Nav from '$lib/ui/Nav.svelte';
   import Placeholder from '$lib/ui/Placeholder.svelte';
   import Cache from './views/Cache.svelte';
+  import Heartbeat from './views/Heartbeat.svelte';
   import Subtasks from './views/Subtasks.svelte';
 
   // ── Router ────────────────────────────────────────────────────
@@ -158,7 +159,7 @@
   {:else if $currentRoute === 'activity'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'heartbeat'}
-    <Placeholder route={$currentRoute} />
+    <Heartbeat />
   {:else if $currentRoute === 'observability'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'health'}
