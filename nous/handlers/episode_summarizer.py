@@ -701,7 +701,7 @@ class EpisodeSummarizer:
             merged_candidate_facts, getattr(self, "_settings", None)
         )
 
-        return {
+        merged = {
             "title": summaries[0].get("title", "Multi-part episode"),
             "summary": " ".join(merged_summary_parts),
             "key_points": merged_key_points[:10],
@@ -709,8 +709,13 @@ class EpisodeSummarizer:
             "outcome": summaries[-1].get("outcome", "informational"),
             "outcome_rationale": summaries[-1].get("outcome_rationale", ""),
             "topics": sorted(merged_topics),
-            "open_threads": merged_open_threads[:10],  # F083 P3: persist up to 10; A2 displays up to 5
         }
+        # F083: only add the open_threads key when there is a value, so the flag-off
+        # (and B-off / no-unfinished-work) path stays byte-identical to the legacy
+        # schema. A2's reader guards on isinstance(list), so an absent key is fine.
+        if merged_open_threads:
+            merged["open_threads"] = merged_open_threads[:10]  # persist up to 10; A2 displays up to 5
+        return merged
 
     def _truncate_transcript(self, transcript: str, max_chars: int = 16000) -> str:
         """008.4: Truncate transcript preserving high-value turns.

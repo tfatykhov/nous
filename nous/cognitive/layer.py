@@ -642,6 +642,11 @@ class CognitiveLayer:
         # pull cross-session episodes.
         if _should_boost_deictic(is_first_turn, self._settings.followup_deictic_detection_enabled, user_input):
             signals.temporal_recency = max(signals.temporal_recency, _DEICTIC_RECENCY_FLOOR)
+            # A greeting-prefixed deictic follow-up ("hi, can you continue what we were
+            # doing?") is substantively a follow-up, not a bare greeting — clear the
+            # greeting flag so plan_retrieval's greeting short-circuit (intent.py) does
+            # not zero the episode budget before the recency rescue runs.
+            signals.is_greeting = False
             plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)  # rebuild plan with updated recency
 
         # 008.6: Detect recap queries and set temporal boost

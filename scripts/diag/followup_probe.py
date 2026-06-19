@@ -60,17 +60,26 @@ def end_session(session_id):
         print(f"  end_session({session_id}) note: {e}")
 
 
-def wait_for_summary(deadline):
-    """Poll GET /episodes until a summarized episode appears (best-effort)."""
+def _summarized_ids():
+    """IDs of episodes that currently have a summary (structured or legacy)."""
+    try:
+        eps = _req("GET", "/episodes")
+        rows = eps if isinstance(eps, list) else eps.get("episodes", [])
+        return {str(e.get("id")) for e in rows if (e.get("structured_summary") or e.get("summary"))}
+    except Exception:
+        return set()
+
+
+def wait_for_new_summary(before, deadline):
+    """Wait until a NEW summarized episode (not in `before`) appears.
+
+    Scoped to the just-ended seed: capture `before` after the seed chat but
+    before ending it, so a pre-existing summarized episode does not satisfy the
+    wait and let the follow-up run before the seed is actually summarized.
+    """
     while time.time() < deadline:
-        try:
-            eps = _req("GET", "/episodes")
-            rows = eps if isinstance(eps, list) else eps.get("episodes", [])
-            for e in rows:
-                if e.get("structured_summary") or e.get("summary"):
-                    return True
-        except Exception:
-            pass
+        if _summarized_ids() - before:
+            return True
         time.sleep(3)
     return False
 
@@ -83,8 +92,9 @@ def main():
     for p in PROBES:
         seed_sid = f"f083-seed-{p['id']}-{args.label}"
         chat(p["seed"], seed_sid)
+        before = _summarized_ids()                         # snapshot BEFORE ending the seed
         end_session(seed_sid)                              # trigger async summarize
-        summarized = wait_for_summary(time.time() + SUMMARY_WAIT)
+        summarized = wait_for_new_summary(before, time.time() + SUMMARY_WAIT)
         r = chat(p["followup"], f"f083-followup-{p['id']}-{args.label}")  # NEW session
         resp = (r.get("response") or "")
         clarify = any(k in resp.lower() for k in

@@ -364,3 +364,38 @@ def test_merge_open_threads_typesafe():
         {"summary": "c", "candidate_facts": [], "topics": [], "open_threads": ["ok"]},
     ])
     assert merged["open_threads"] == ["ok"]
+
+
+def test_merge_omits_open_threads_when_empty():
+    # codex P2: flag-off / no-unfinished-work must NOT add an empty open_threads key
+    # (byte-identity with the legacy multi-chunk schema).
+    s = _summarizer()
+    merged = s._merge_summaries([
+        {"title": "p1", "summary": "a", "key_points": [], "outcome": "informational",
+         "outcome_rationale": "", "topics": [], "candidate_facts": []},
+        {"title": "p2", "summary": "b", "key_points": [], "outcome": "informational",
+         "outcome_rationale": "", "topics": [], "candidate_facts": []},
+    ])
+    assert "open_threads" not in merged
+
+
+def test_greeting_shortcircuit_zeros_episodes():
+    # codex P2: documents WHY C1 clears is_greeting — the greeting short-circuit
+    # zeros the episode budget regardless of temporal_recency.
+    clf = IntentClassifier(settings=Settings())
+    sig = clf.classify("hi", _frame())
+    assert sig.is_greeting is True
+    sig.temporal_recency = 0.9
+    plan = clf.plan_retrieval(sig, input_text="hi")
+    assert plan.budget_overrides.get("episodes") == 0
+
+
+def test_clearing_greeting_allows_episode_budget():
+    # The C1 fix: clearing is_greeting before the rebuild lets the recency rescue apply
+    # to a greeting-prefixed deictic follow-up ("hi, can you continue what we were doing?").
+    clf = IntentClassifier(settings=Settings())
+    sig = clf.classify("hi, can you continue what we were doing?", _frame())
+    sig.temporal_recency = 0.6
+    sig.is_greeting = False
+    plan = clf.plan_retrieval(sig, input_text="hi, can you continue what we were doing?")
+    assert plan.budget_overrides.get("episodes") == 1000
