@@ -13,6 +13,7 @@
   import Browser from './views/Browser.svelte';
   import Decisions from './views/Decisions.svelte';
   import Activity from './views/Activity.svelte';
+  import Health from './views/Health.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -171,7 +172,7 @@
   {:else if $currentRoute === 'observability'}
     <Observability />
   {:else if $currentRoute === 'health'}
-    <Placeholder route={$currentRoute} />
+    <Health />
   {:else if $currentRoute === 'admission'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'rubric'}

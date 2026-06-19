@@ -760,6 +760,49 @@ export interface GraphData {
   stats: GraphStats;
 }
 
+// ── /dashboard/health (get_health_data) ──────────────────────────────────
+
+/** One day of edge creation data (30-day window, hardcoded in backend). */
+export interface HealthDailyEdge {
+  date: string;
+  count: number;
+  auto: number;
+  manual: number;
+}
+
+/** Degree distribution bucket: how many nodes have this degree. */
+export interface HealthDegreeEntry {
+  degree: number;
+  count: number;
+}
+
+/** Cumulative daily graph density data point. */
+export interface HealthDensityPoint {
+  date: string;
+  density: number;
+}
+
+/** Daily orphan node count. */
+export interface HealthOrphanTrendPoint {
+  date: string;
+  count: number;
+}
+
+/** Full response from GET /dashboard/health (backend ignores ?days param — always 30d). */
+export interface HealthData {
+  daily_edges: HealthDailyEdge[];
+  degree_distribution: HealthDegreeEntry[];
+  /** Current graph density (edges / nodes ratio). */
+  density: number;
+  density_history: HealthDensityPoint[];
+  /** Orphan counts per type: decisions, facts, episodes, procedures, chunks. */
+  orphan_counts: Record<string, number>;
+  orphan_trend: HealthOrphanTrendPoint[];
+  total_orphans: number;
+  total_edges: number;
+  connected_nodes: number;
+}
+
 // ── /dashboard/activity (Task 8 / get_activity_data) ──────────────────────
 
 /** One event row from nous_system.events, ordered DESC by created_at. */
