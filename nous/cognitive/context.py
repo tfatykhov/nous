@@ -138,6 +138,7 @@ class ContextEngine:
         temporal_boost: bool = False,  # 008.6
         critic_skills: list[str] | None = None,
         epistemic_class: str | None = None,  # §2
+        is_first_turn: bool = False,  # F083 A2
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -937,12 +938,27 @@ class ContextEngine:
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
-                    for e in recent:
+                    inject_full = self._settings.followup_first_turn_episode and is_first_turn
+                    for idx, e in enumerate(recent):
                         title = e.title or (e.summary[:60] if e.summary else "Untitled")
                         time_str = e.started_at.strftime("%b %d %H:%M")
                         recent_lines.append(f"- [{time_str}] {title}")
-                        # 008.6: Include summaries when temporal boost is active
-                        if temporal_boost and e.summary and e.summary != e.title:
+                        # F083 A2: on a verified first turn, inject the most-recent episode's
+                        # FULL structured summary (+ open_threads) instead of titles-only.
+                        # Precedence over temporal_boost (both true on a C1 follow-up).
+                        if inject_full and idx == 0:
+                            struct = getattr(e, "structured_summary", None) or {}
+                            full_summary = struct.get("summary") or e.summary
+                            if full_summary and full_summary != title:
+                                trunc = self._settings.recall_parent_episode_truncate
+                                recent_lines.append(f"  {full_summary[:trunc]}")
+                            threads = struct.get("open_threads")  # shape-guard: tolerate non-list
+                            if isinstance(threads, list):
+                                items = [str(t) for t in threads if isinstance(t, (str, int, float))][:5]
+                                if items:
+                                    recent_lines.append("  Open threads: " + "; ".join(items))
+                        elif temporal_boost and e.summary and e.summary != e.title:
+                            # 008.6: Include summaries when temporal boost is active
                             recent_lines.append(f"  {e.summary[:200]}")
                     recent_text = "\n".join(recent_lines)
                     sections.append(

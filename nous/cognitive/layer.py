@@ -711,6 +711,7 @@ class CognitiveLayer:
                     temporal_boost=_temporal_boost,  # 008.6
                     critic_skills=_critic_skills,  # Issue #229
                     epistemic_class=epistemic_class,  # §2
+                    is_first_turn=is_first_turn,  # F083 A2
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)
