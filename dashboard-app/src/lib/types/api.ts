@@ -339,6 +339,49 @@ export interface SubtasksData {
   daily_trend: SubtaskDailyTrendEntry[];
 }
 
+// ── /dashboard/ledger (F032) ──────────────────────────────────────────────
+
+/** One tool invocation recorded in the execution ledger. */
+export interface LedgerAction {
+  turn: number;
+  tool_name: string;
+  /** Redacted key args — string values only. */
+  key_args: Record<string, string>;
+  /** 'success' | 'blocked' | 'error' | 'timeout' */
+  status: string;
+  timestamp: string;
+  result_summary: string | null;
+  /** 'none' | 'write' | 'external' | 'irreversible' */
+  side_effect_type: string | null;
+}
+
+/** Per-session ledger entry from /dashboard/ledger. */
+export interface LedgerSession {
+  session_id: string;
+  current_turn: number;
+  total_actions: number;
+  success_actions: number;
+  blocked_actions: number;
+  error_actions: number;
+  timeout_actions: number;
+  summary: string;
+  actions: LedgerAction[];
+  actions_truncated: boolean;
+}
+
+export interface LedgerData {
+  enabled: {
+    ledger: boolean;
+    claim_verification: boolean;
+    action_gating: boolean;
+  };
+  modes: {
+    claim_verification: string;
+    action_gating: string;
+  };
+  sessions: LedgerSession[];
+}
+
 // ── /dashboard/dag (F038) ─────────────────────────────────────────────────
 
 /** A node inside an active DAG (nested under DagActiveDag.nodes). */

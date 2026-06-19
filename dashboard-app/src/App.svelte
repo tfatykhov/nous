@@ -6,6 +6,7 @@
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
+  import Ledger from './views/Ledger.svelte';
   import Subtasks from './views/Subtasks.svelte';
 
   // ── Router ────────────────────────────────────────────────────
@@ -171,7 +172,7 @@
   {:else if $currentRoute === 'rubric'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'execution'}
-    <Placeholder route={$currentRoute} />
+    <Ledger />
   {:else if $currentRoute === 'cache'}
     <Cache />
   {:else if $currentRoute === 'density'}
