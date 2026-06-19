@@ -160,6 +160,30 @@ into one. EXCLUDE only pure conversational scaffolding with no queryable content
 (greetings, acknowledgements, meta-chatter about the conversation itself)."""
 
 
+# F083 B: appended to _SUMMARY_PROMPT when settings.episode_open_threads is True.
+# CONCATENATED (single braces), mirroring _F075_TEMPORAL_INSTRUCTION. Respects the
+# NO PADDING rule: empty/omitted when nothing is genuinely unfinished.
+_OPEN_THREADS_INSTRUCTION = """
+
+OPEN THREADS (F083):
+If the TRANSCRIPT above leaves work unfinished — a next step the user intended, a
+question left open, a task started but not completed — add a top-level "open_threads"
+array, each entry one short actionable phrase:
+
+  "open_threads": ["finish wiring the auth callback", "decide on retry budget"]
+
+Add `open_threads` as a new top-level key in the JSON object alongside `topics`
+and `candidate_facts` (not nested inside them). Return an empty array (or omit)
+when nothing is unfinished. Do NOT invent or pad."""
+
+
+def _coerce_open_threads(value) -> list[str]:
+    """F083: normalize an LLM/merged open_threads value to a clean list[str]."""
+    if not isinstance(value, list):
+        return []
+    return [str(t) for t in value if isinstance(t, (str, int, float))]
+
+
 class EpisodeSummarizer:
     """Generates episode summaries on session end.
 
@@ -528,6 +552,39 @@ class EpisodeSummarizer:
 
         return self._merge_summaries(chunk_summaries)
 
+    def _build_summary_prompt(
+        self,
+        transcript: str,
+        decision_context: str,
+        started_at: "datetime | None",
+    ) -> str:
+        """Assemble the summarization prompt with optional instruction addenda.
+
+        Flag-gated addenda are concatenated (never .format()'d) in a fixed
+        order so each new flag only adds text at the tail.
+        """
+        prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
+        if getattr(self._settings, "temporal_extraction_enabled", False):
+            if started_at is not None:
+                prompt = _F075_EPISODE_TS_BLOCK.format(iso=started_at.isoformat()) + prompt
+            prompt = prompt + _F075_TEMPORAL_INSTRUCTION
+        if getattr(self._settings, "extraction_coverage_broadened", False):
+            prompt = prompt + _COVERAGE_EXPANSION_INSTRUCTION
+        if getattr(self._settings, "episode_open_threads", False):
+            prompt = prompt + _OPEN_THREADS_INSTRUCTION
+        return prompt
+
+    def _summary_max_tokens(self) -> int:
+        """Return the max_tokens budget for a single summarization LLM call.
+
+        F083 R5: the extended output schema (coverage facts or open_threads)
+        needs more headroom so a long transcript's JSON doesn't truncate.
+        """
+        if (getattr(self._settings, "extraction_coverage_broadened", False)
+                or getattr(self._settings, "episode_open_threads", False)):
+            return 3000
+        return 1500
+
     async def _summarize_single(
         self,
         transcript: str,
@@ -541,18 +598,8 @@ class EpisodeSummarizer:
         the episode start timestamp (when known) is injected so relative
         date phrases resolve deterministically.
         """
-        prompt = _SUMMARY_PROMPT.format(transcript=transcript, decision_context=decision_context)
-        if getattr(self._settings, "temporal_extraction_enabled", False):
-            if started_at is not None:
-                prompt = _F075_EPISODE_TS_BLOCK.format(iso=started_at.isoformat()) + prompt
-            prompt = prompt + _F075_TEMPORAL_INSTRUCTION
-
-        # Coverage fix: broaden extraction + raise the token budget so more
-        # candidate_facts fit (the narrow 1500 cap truncated long fact lists).
-        max_tokens = 1500
-        if getattr(self._settings, "extraction_coverage_broadened", False):
-            prompt = prompt + _COVERAGE_EXPANSION_INSTRUCTION
-            max_tokens = 3000
+        prompt = self._build_summary_prompt(transcript, decision_context, started_at)
+        max_tokens = self._summary_max_tokens()
 
         text = await call_background_llm(
             self._llm,
@@ -582,6 +629,11 @@ class EpisodeSummarizer:
                 type(result).__name__,
             )
             return None
+        # F083: coerce a present open_threads to clean list[str] (write-time
+        # symmetry with _merge_summaries). Guard on presence so flag-off
+        # persists are byte-identical — when B is off the LLM won't emit it.
+        if "open_threads" in result:
+            result["open_threads"] = _coerce_open_threads(result["open_threads"])
         return result
 
     def _chunk_transcript(self, transcript: str, max_chars: int = 16000) -> list[str]:
@@ -623,6 +675,7 @@ class EpisodeSummarizer:
         merged_key_points: list[str] = []
         merged_candidate_facts: list = []
         merged_topics: set[str] = set()
+        merged_open_threads: list = []
 
         for s in summaries:
             if s.get("summary"):
@@ -630,6 +683,7 @@ class EpisodeSummarizer:
             merged_key_points.extend(s.get("key_points", []))
             merged_candidate_facts.extend(s.get("candidate_facts", []))
             merged_topics.update(s.get("topics", []))
+            merged_open_threads.extend(_coerce_open_threads(s.get("open_threads")))
 
         # F075: split dated and stable candidates into separate pools with
         # independent caps. Dated events from later chunks must survive the
@@ -647,7 +701,7 @@ class EpisodeSummarizer:
             merged_candidate_facts, getattr(self, "_settings", None)
         )
 
-        return {
+        merged = {
             "title": summaries[0].get("title", "Multi-part episode"),
             "summary": " ".join(merged_summary_parts),
             "key_points": merged_key_points[:10],
@@ -656,6 +710,12 @@ class EpisodeSummarizer:
             "outcome_rationale": summaries[-1].get("outcome_rationale", ""),
             "topics": sorted(merged_topics),
         }
+        # F083: only add the open_threads key when there is a value, so the flag-off
+        # (and B-off / no-unfinished-work) path stays byte-identical to the legacy
+        # schema. A2's reader guards on isinstance(list), so an absent key is fine.
+        if merged_open_threads:
+            merged["open_threads"] = merged_open_threads[:10]  # persist up to 10; A2 displays up to 5
+        return merged
 
     def _truncate_transcript(self, transcript: str, max_chars: int = 16000) -> str:
         """008.4: Truncate transcript preserving high-value turns.

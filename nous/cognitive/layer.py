@@ -64,6 +64,31 @@ _RECAP_PATTERNS = frozenset({
 })
 
 
+# F083 C1: cross-session deictic/continuation follow-up markers. Deliberately
+# narrow — must NOT match same-session coding instructions ("continue the loop",
+# "use the first argument"). Requires a referent tied to prior discussion.
+_DEICTIC_FOLLOWUP = re.compile(
+    r"\b(?:"
+    r"that (?:option|approach|idea|fix|bug) (?:you|we)\b"
+    r"|the (?:second|first|other|previous|last) (?:option|approach|idea) (?:you|we)\b"
+    r"|(?:option|approach|idea) you (?:mentioned|suggested|proposed)\b"
+    r"|you (?:mentioned|suggested|proposed) (?:earlier|before|last time)\b"
+    r"|continue what we (?:were|had been) (?:doing|working)\b"
+    r"|(?:pick up |continue )?where we left off\b"
+    r"|did (?:that|it)(?:\s+\w+){0,2}\s+work\b"
+    r"|as we discussed (?:earlier|before|last time)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+_DEICTIC_RECENCY_FLOOR = 0.6  # > 0.5 so it flips _temporal_boost and the plan_retrieval episode-budget rescue
+
+
+def _should_boost_deictic(is_first_turn: bool, enabled: bool, user_input: str) -> bool:
+    """F083 C1 gate: boost only a cross-session (first-turn) deictic follow-up."""
+    return is_first_turn and enabled and bool(_DEICTIC_FOLLOWUP.search(user_input))
+
+
 def _is_recap_query(user_input: str) -> bool:
     """Detect if user is asking for a temporal recap."""
     lower = user_input.lower().strip()
@@ -232,7 +257,7 @@ class CognitiveLayer:
         # P1-1: Use brain.db (public), not brain._db
         self._frames = FrameEngine(brain.db, settings)
         # F3: Instantiate IntentClassifier and UsageTracker
-        self._intent_classifier = IntentClassifier()
+        self._intent_classifier = IntentClassifier(settings=settings)
         self._usage_tracker = UsageTracker()
         # F14: Pass EmbeddingProvider from brain.embeddings to deduplicator
         _deduplicator = ConversationDeduplicator(
@@ -599,9 +624,40 @@ class CognitiveLayer:
                     and critic_result.skills):
                 _critic_skills = critic_result.skills
 
+        # F083 A2/C1: warm the active-episode map from DB first, so a session that is
+        # ongoing after a process restart is not mis-seen as a first turn.
+        # warm_active_episode is idempotent (returns the cached value if present) and
+        # only restores ongoing (ended_at IS NULL, active=True) episodes — a just-ENDED
+        # session correctly stays first-turn. R15: exclude subtask/background turns.
+        await self.warm_active_episode(session_id)
+        # First turn iff: (a) no prior in-process turn for this session (turn_count==0 —
+        # robust to the dedup branch below that skips episode creation, which would
+        # otherwise leave _active_episodes empty on turn 2), AND (b) no ongoing episode
+        # in the map after warm (survives LRU eviction / process restart via DB warm),
+        # AND (c) not a subtask/background turn. meta is created by setdefault above.
+        _meta_ft = self._session_metadata.get(session_id)
+        is_first_turn = (
+            (_meta_ft is None or _meta_ft.turn_count == 0)
+            and (session_id not in self._active_episodes)
+            and not is_subtask
+        )
+
         # 2b. CLASSIFY — extract intent signals and plan retrieval (005.1)
         signals = self._intent_classifier.classify(user_input, frame)
         plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
+
+        # F083 C1: on the FIRST turn of a new session, a cross-session deictic follow-up
+        # raises recency so episodes are retrieved + temporal_boost fires. Gated on
+        # is_first_turn so same-session references — already in live history — never
+        # pull cross-session episodes.
+        if _should_boost_deictic(is_first_turn, self._settings.followup_deictic_detection_enabled, user_input):
+            signals.temporal_recency = max(signals.temporal_recency, _DEICTIC_RECENCY_FLOOR)
+            # A greeting-prefixed deictic follow-up ("hi, can you continue what we were
+            # doing?") is substantively a follow-up, not a bare greeting — clear the
+            # greeting flag so plan_retrieval's greeting short-circuit (intent.py) does
+            # not zero the episode budget before the recency rescue runs.
+            signals.is_greeting = False
+            plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)  # rebuild plan with updated recency
 
         # 008.6: Detect recap queries and set temporal boost
         _is_recap = _is_recap_query(user_input)
@@ -670,6 +726,7 @@ class CognitiveLayer:
                     temporal_boost=_temporal_boost,  # 008.6
                     critic_skills=_critic_skills,  # Issue #229
                     epistemic_class=epistemic_class,  # §2
+                    is_first_turn=is_first_turn,  # F083 A2
                 )
                 system_prompt = build_result.system_prompt
                 context_token_estimate = sum(s.token_estimate for s in build_result.sections)

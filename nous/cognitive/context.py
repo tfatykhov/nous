@@ -32,6 +32,7 @@ TIER1_FACT_CATEGORIES = ["preference", "person", "rule"]
 SECTION_TIERS: dict[str, str] = {
     "Identity": "static",
     "Context Safety": "static",
+    "Recall Before Clarifying": "static",
     "Procedure Awareness": "static",  # F079 P1: static cue -> cached, never busts
     "Procedure Catalog": "static",  # F079 catalog-first: query-independent breadth list -> cached
     "Epistemic Routing": "dynamic",  # §2
@@ -137,6 +138,7 @@ class ContextEngine:
         temporal_boost: bool = False,  # 008.6
         critic_skills: list[str] | None = None,
         epistemic_class: str | None = None,  # §2
+        is_first_turn: bool = False,  # F083 A2
     ) -> BuildResult:
         """Build system prompt + context sections within budget.
 
@@ -259,6 +261,25 @@ class ContextEngine:
                     content=anti_halluc,
                     token_estimate=self._estimate_tokens(anti_halluc),
                     tier=SECTION_TIERS.get("Context Safety", "dynamic"),
+                )
+            )
+
+        # F083 C2: recall-before-clarify cue. Static → caches in the stable prefix.
+        if self._settings.recall_before_clarify_prompt:
+            recall_first = (
+                "Before asking the user to clarify a referent — a pronoun, "
+                '"that", "the thing/option you mentioned", or a continuation of '
+                "earlier work — first call recall_deep or recall_recent to resolve "
+                "it from your memory of prior sessions. Only ask the user to "
+                "clarify if recall returns nothing relevant."
+            )
+            sections.append(
+                ContextSection(
+                    priority=2,
+                    label="Recall Before Clarifying",
+                    content=recall_first,
+                    token_estimate=self._estimate_tokens(recall_first),
+                    tier=SECTION_TIERS.get("Recall Before Clarifying", "static"),
                 )
             )
 
@@ -917,12 +938,27 @@ class ContextEngine:
                 if recent:
                     _temporal_episode_ids = {str(e.id) for e in recent}
                     recent_lines = []
-                    for e in recent:
+                    inject_full = self._settings.followup_first_turn_episode and is_first_turn
+                    for idx, e in enumerate(recent):
                         title = e.title or (e.summary[:60] if e.summary else "Untitled")
                         time_str = e.started_at.strftime("%b %d %H:%M")
                         recent_lines.append(f"- [{time_str}] {title}")
-                        # 008.6: Include summaries when temporal boost is active
-                        if temporal_boost and e.summary and e.summary != e.title:
+                        # F083 A2: on a verified first turn, inject the most-recent episode's
+                        # FULL structured summary (+ open_threads) instead of titles-only.
+                        # Precedence over temporal_boost (both true on a C1 follow-up).
+                        if inject_full and idx == 0:
+                            struct = getattr(e, "structured_summary", None) or {}
+                            full_summary = struct.get("summary") or e.summary
+                            if full_summary and full_summary != e.title:
+                                trunc = self._settings.recall_parent_episode_truncate
+                                recent_lines.append(f"  {full_summary[:trunc]}")
+                            threads = struct.get("open_threads")  # shape-guard: tolerate non-list
+                            if isinstance(threads, list):
+                                items = [str(t) for t in threads if isinstance(t, (str, int, float))][:5]
+                                if items:
+                                    recent_lines.append("  Open threads: " + "; ".join(items))
+                        elif temporal_boost and e.summary and e.summary != e.title:
+                            # 008.6: Include summaries when temporal boost is active
                             recent_lines.append(f"  {e.summary[:200]}")
                     recent_text = "\n".join(recent_lines)
                     sections.append(
