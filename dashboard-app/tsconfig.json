@@ -3,5 +3,20 @@
   "references": [
     { "path": "./tsconfig.app.json" },
     { "path": "./tsconfig.node.json" }
-  ]
+  ],
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "$lib": ["src/lib"],
+      "$lib/*": ["src/lib/*"],
+      "$lib/components": ["src/lib/components"],
+      "$lib/components/*": ["src/lib/components/*"],
+      "$lib/ui": ["src/lib/ui"],
+      "$lib/ui/*": ["src/lib/ui/*"],
+      "$lib/utils": ["src/lib/utils"],
+      "$lib/utils/*": ["src/lib/utils/*"],
+      "$lib/hooks": ["src/lib/hooks"],
+      "$lib/hooks/*": ["src/lib/hooks/*"]
+    }
+  }
 }

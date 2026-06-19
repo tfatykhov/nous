@@ -1,296 +1,159 @@
-:root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+/* Google Fonts must precede @import tailwindcss */
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+/* ============================================================
+   Nous Dashboard – Dark Token Set
+   Ported from static/dashboard/css/dashboard.css
+   ============================================================ */
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
-}
-
-@media (prefers-color-scheme: dark) {
+@layer base {
   :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+    /* --- Nous dark palette --- */
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface-hover: #181824;
+    --border: #1e1e2e;
+    --accent: #7c6af7;
+    --accent-dim: #4f46a8;
+    --accent-glow: rgba(124, 106, 247, 0.15);
+    --text: #e2e2f0;
+    --muted: #6b6b8a;
+
+    /* Status / type colours */
+    --green: #34d399;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --fact-color: #60a5fa;
+    --episode-color: #34d399;
+    --decision-color: #a78bfa;
+    --procedure-color: #fb923c;
+    --censor-color: #f87171;
+    --heartbeat-color: #22d3ee;
+    --chunk-color: #06b6d4;
+
+    /* Layout */
+    --sidebar-width: 220px;
+    --sidebar-collapsed: 56px;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --transition: 0.2s ease;
+
+    /* Fonts */
+    --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+
+    /* ---- shadcn-svelte CSS variable contract ----
+       Map Nous tokens → shadcn semantic names so components
+       (Button, Card, Dialog, etc.) render correctly in dark mode.
+    ------------------------------------------------ */
+    --background: 222 13% 6%;          /* #0a0a0f */
+    --foreground: 240 33% 92%;         /* #e2e2f0 */
+
+    --card: 240 17% 8%;                /* #12121a */
+    --card-foreground: 240 33% 92%;
+
+    --popover: 240 17% 8%;
+    --popover-foreground: 240 33% 92%;
+
+    --primary: 249 89% 63%;            /* #7c6af7 */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 16% 11%;          /* #181824 */
+    --secondary-foreground: 240 33% 92%;
+
+    --muted-token: 240 13% 47%;        /* #6b6b8a  (--muted is taken as a raw hex above) */
+    --muted-foreground: 240 13% 47%;
+
+    --accent-token: 249 89% 63%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 91% 71%;          /* #f87171 */
+    --destructive-foreground: 0 0% 100%;
+
+    --border-token: 237 25% 14%;       /* #1e1e2e */
+    --input: 237 25% 14%;
+    --ring: 249 89% 63%;               /* accent */
+
+    --radius-tw: 0.75rem;              /* 12px = var(--radius) */
+  }
+}
+
+/* ============================================================
+   Tailwind v4 theme extension – expose Nous tokens as
+   utilities so components can use e.g. bg-nous-bg, text-muted
+   ============================================================ */
+@theme {
+  --color-nous-bg:        #0a0a0f;
+  --color-nous-surface:   #12121a;
+  --color-nous-surface-hover: #181824;
+  --color-nous-border:    #1e1e2e;
+  --color-nous-accent:    #7c6af7;
+  --color-nous-accent-dim:#4f46a8;
+  --color-nous-text:      #e2e2f0;
+  --color-nous-muted:     #6b6b8a;
+  --color-nous-green:     #34d399;
+  --color-nous-red:       #f87171;
+  --color-nous-yellow:    #fbbf24;
+  --color-nous-fact:      #60a5fa;
+  --color-nous-episode:   #34d399;
+  --color-nous-decision:  #a78bfa;
+  --color-nous-procedure: #fb923c;
+  --color-nous-censor:    #f87171;
+  --color-nous-heartbeat: #22d3ee;
+  --color-nous-chunk:     #06b6d4;
+
+  --font-ui:   'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+
+  --radius-nous: 12px;
+  --radius-nous-sm: 8px;
+}
+
+/* ============================================================
+   Base resets & body defaults
+   ============================================================ */
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
   }
 
-  #social .button-icon {
-    filter: invert(1) brightness(2);
+  html {
+    height: 100%;
+    color-scheme: dark;
   }
-}
 
-body {
-  margin: 0;
-}
-
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
+  body {
+    height: 100%;
+    font-family: var(--font-ui);
+    background: var(--bg);
+    background-image: radial-gradient(
+      ellipse at 50% 0%,
+      rgba(124, 106, 247, 0.03) 0%,
+      transparent 60%
+    );
+    color: var(--text);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
   }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
-}
-
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
-}
-
-.counter {
-  font-size: 16px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 2px solid transparent;
-  transition: border-color 0.3s;
-  margin-bottom: 24px;
-
-  &:hover {
-    border-color: var(--accent-border);
-  }
-  &:focus-visible {
+  :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
-}
 
-.hero {
-  position: relative;
-
-  .base,
-  .framework,
-  .vite {
-    inset-inline: 0;
-    margin: 0 auto;
-  }
-
-  .base {
-    width: 170px;
-    position: relative;
-    z-index: 0;
-  }
-
-  .framework,
-  .vite {
+  /* Screen-reader only utility */
+  .sr-only {
     position: absolute;
-  }
-
-  .framework {
-    z-index: 1;
-    top: 34px;
-    height: 28px;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
-      scale(1.4);
-  }
-
-  .vite {
-    z-index: 0;
-    top: 107px;
-    height: 26px;
-    width: auto;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
-      scale(0.8);
-  }
-}
-
-#app {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-}
-
-#center {
-  display: flex;
-  flex-direction: column;
-  gap: 25px;
-  place-content: center;
-  place-items: center;
-  flex-grow: 1;
-
-  @media (max-width: 1024px) {
-    padding: 32px 20px 24px;
-    gap: 18px;
-  }
-}
-
-#next-steps {
-  display: flex;
-  border-top: 1px solid var(--border);
-  text-align: left;
-
-  & > div {
-    flex: 1 1 0;
-    padding: 32px;
-    @media (max-width: 1024px) {
-      padding: 24px 20px;
-    }
-  }
-
-  .icon {
-    margin-bottom: 16px;
-    width: 22px;
-    height: 22px;
-  }
-
-  @media (max-width: 1024px) {
-    flex-direction: column;
-    text-align: center;
-  }
-}
-
-#docs {
-  border-right: 1px solid var(--border);
-
-  @media (max-width: 1024px) {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
-}
-
-#next-steps ul {
-  list-style: none;
-  padding: 0;
-  display: flex;
-  gap: 8px;
-  margin: 32px 0 0;
-
-  .logo {
-    height: 18px;
-  }
-
-  a {
-    color: var(--text-h);
-    font-size: 16px;
-    border-radius: 6px;
-    background: var(--social-bg);
-    display: flex;
-    padding: 6px 12px;
-    align-items: center;
-    gap: 8px;
-    text-decoration: none;
-    transition: box-shadow 0.3s;
-
-    &:hover {
-      box-shadow: var(--shadow);
-    }
-    .button-icon {
-      height: 18px;
-      width: 18px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    margin-top: 20px;
-    flex-wrap: wrap;
-    justify-content: center;
-
-    li {
-      flex: 1 1 calc(50% - 8px);
-    }
-
-    a {
-      width: 100%;
-      justify-content: center;
-      box-sizing: border-box;
-    }
-  }
-}
-
-#spacer {
-  height: 88px;
-  border-top: 1px solid var(--border);
-  @media (max-width: 1024px) {
-    height: 48px;
-  }
-}
-
-.ticks {
-  position: relative;
-  width: 100%;
-
-  &::before,
-  &::after {
-    content: '';
-    position: absolute;
-    top: -4.5px;
-    border: 5px solid transparent;
-  }
-
-  &::before {
-    left: 0;
-    border-left-color: var(--border);
-  }
-  &::after {
-    right: 0;
-    border-right-color: var(--border);
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
   }
 }
