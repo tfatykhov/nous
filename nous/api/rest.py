@@ -2625,26 +2625,38 @@ def create_app(
         Route("/behavior/drift-report", behavior_drift_report, methods=["GET"]),
     ]
 
-    # Static dashboard mount — only add if directory exists (avoids crash during tests)
+    # Hoisted unconditionally so both v2 and legacy mounts can use it even if
+    # only one of the two static directories exists at runtime.
+    class _NoCacheStaticFiles(StaticFiles):
+        """StaticFiles wrapper that forces ETag re-validation on every
+        request. Every dashboard PR was hitting stale-bundle issues
+        because the default StaticFiles response has no Cache-Control
+        header — browsers cache aggressively via heuristic freshness.
+        ETag is already set, so re-validation is cheap (304 when
+        unchanged); we just need to tell the browser to revalidate."""
+
+        async def get_response(self, path, scope):
+            response = await super().get_response(path, scope)
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return response
+
+    # Dashboard v2 (Svelte) — registered BEFORE the catch-all /dashboard mount.
+    dashboard_v2_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "static", "dashboard-v2", "dist",
+    )
+    if os.path.isdir(dashboard_v2_dir):
+        routes.append(
+            Mount("/dashboard/v2", app=_NoCacheStaticFiles(directory=dashboard_v2_dir, html=True)),
+        )
+
+    # Static legacy dashboard mount — only add if directory exists (avoids crash during tests)
     # MUST be LAST in routes list (catch-all for /dashboard/*)
     dashboard_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "static", "dashboard",
     )
     if os.path.isdir(dashboard_dir):
-        class _NoCacheStaticFiles(StaticFiles):
-            """StaticFiles wrapper that forces ETag re-validation on every
-            request. Every dashboard PR was hitting stale-bundle issues
-            because the default StaticFiles response has no Cache-Control
-            header — browsers cache aggressively via heuristic freshness.
-            ETag is already set, so re-validation is cheap (304 when
-            unchanged); we just need to tell the browser to revalidate."""
-
-            async def get_response(self, path, scope):
-                response = await super().get_response(path, scope)
-                response.headers["Cache-Control"] = "no-cache, must-revalidate"
-                return response
-
         routes.append(
             Mount("/dashboard", app=_NoCacheStaticFiles(directory=dashboard_dir, html=True)),
         )
