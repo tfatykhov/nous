@@ -539,3 +539,44 @@ export interface DagDashboardData {
   recent_dags: DagRecentDag[];
   stats: DagStats;
 }
+
+// ── /dashboard/graph (F022/F040/F067/F070) ───────────────────────────────
+
+/** One node from get_graph_data(). */
+export interface GraphNodeData {
+  id: string;
+  /** 'decision' | 'fact' | 'episode' | 'procedure' | 'chunk' */
+  type: string;
+  label: string;
+  category: string | null;
+}
+
+/** One edge from get_graph_data(). */
+export interface GraphEdgeData {
+  id: string;
+  source: string;
+  target: string;
+  source_type: string;
+  target_type: string;
+  relation: string;
+  weight: number;
+  auto_linked: boolean;
+  /** 'deterministic' | 'heuristic' | 'inferred' */
+  extraction_method: string | null;
+}
+
+/** Stats block from get_graph_data(). */
+export interface GraphStats {
+  total_edges: number;
+  displayed_edges: number;
+  node_count: number;
+  /** key = 'decisions' | 'facts' | 'episodes' | 'procedures' | 'chunks' */
+  orphan_counts: Record<string, number>;
+}
+
+/** Full response from GET /dashboard/graph?limit=500. */
+export interface GraphData {
+  nodes: GraphNodeData[];
+  edges: GraphEdgeData[];
+  stats: GraphStats;
+}

@@ -8,6 +8,7 @@
   import Observability from './views/Observability.svelte';
   import Ledger from './views/Ledger.svelte';
   import Subtasks from './views/Subtasks.svelte';
+  import GraphView from './views/GraphView.svelte';
   import Overview from './views/Overview.svelte';
 
   // ── Router ────────────────────────────────────────────────────
@@ -155,7 +156,7 @@
   {#if $currentRoute === 'overview'}
     <Overview />
   {:else if $currentRoute === 'graph'}
-    <Placeholder route={$currentRoute} />
+    <GraphView />
   {:else if $currentRoute === 'browser'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'decisions'}
