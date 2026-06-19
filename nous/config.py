@@ -1312,6 +1312,47 @@ class Settings(BaseSettings):
         default=500,
         description="F067 per-parent-episode summary char truncation.",
     )
+
+    # --- F083 Follow-up Association ---
+    followup_episode_budget_enabled: bool = Field(
+        default=True,
+        description=(
+            "F083 A1 kill-switch. When true, the 'conversation' frame gets a non-zero "
+            "episode retrieval budget so semantic episode recall fires for follow-ups. "
+            "Set false to restore episodes=0."
+        ),
+    )
+    followup_deictic_detection_enabled: bool = Field(
+        default=True,
+        description=(
+            "F083 C1 kill-switch. When true, on the FIRST turn of a new session a deictic/"
+            "continuation follow-up ('continue what we were doing', 'the second option you "
+            "mentioned') raises temporal_recency, flipping the episode-budget rescue + temporal_boost."
+        ),
+    )
+    recall_before_clarify_prompt: bool = Field(
+        default=True,
+        description=(
+            "F083 C2. When true, inject a static instruction to call recall_deep/recall_recent "
+            "to resolve a referent before asking the user to clarify."
+        ),
+    )
+    followup_first_turn_episode: bool = Field(
+        default=False,
+        description=(
+            "F083 A2 (land-dark). When true, on a verified first turn of a new session the temporal "
+            "tier injects the most-recent episode's FULL summary (+ open_threads) instead of titles. "
+            "Flip default after local-instance validation."
+        ),
+    )
+    episode_open_threads: bool = Field(
+        default=False,
+        description=(
+            "F083 B (land-dark). When true, the episode summarizer extracts an 'open_threads' array "
+            "(unfinished items / next steps) into structured_summary. Flip default after validation."
+        ),
+    )
+
     recall_exclude_context_ids: bool = Field(
         default=False,
         description=(
