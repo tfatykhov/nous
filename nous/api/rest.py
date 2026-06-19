@@ -2628,9 +2628,25 @@ def create_app(
 
     # Hoisted unconditionally so both v2 and legacy mounts can use it even if
     # only one of the two static directories exists at runtime.
+    # Correct MIME types for assets the browser is strict about. On Windows the
+    # stdlib `mimetypes` maps `.js` -> `text/plain` (registry-driven), and a
+    # browser REFUSES to execute an ES module (`<script type="module">`) unless
+    # it is served with a JavaScript MIME type. That silently breaks the Svelte
+    # v2 SPA (blank page, no console error). Linux prod maps `.js` correctly, but
+    # we force it here so serving is robust cross-platform.
+    _STATIC_MIME_OVERRIDES = {
+        ".js": "text/javascript; charset=utf-8",
+        ".mjs": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+        ".map": "application/json",
+    }
+
     class _NoCacheStaticFiles(StaticFiles):
-        """StaticFiles wrapper that forces ETag re-validation on every
-        request. Every dashboard PR was hitting stale-bundle issues
+        """StaticFiles wrapper that (1) forces ETag re-validation on every
+        request and (2) corrects the Content-Type for module-script-critical
+        asset types. Every dashboard PR was hitting stale-bundle issues
         because the default StaticFiles response has no Cache-Control
         header — browsers cache aggressively via heuristic freshness.
         ETag is already set, so re-validation is cheap (304 when
@@ -2639,6 +2655,10 @@ def create_app(
         async def get_response(self, path: str, scope: Scope) -> Response:
             response = await super().get_response(path, scope)
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            _ext = os.path.splitext(path)[1].lower()
+            _mime = _STATIC_MIME_OVERRIDES.get(_ext)
+            if _mime is not None:
+                response.headers["Content-Type"] = _mime
             return response
 
     # Dashboard v2 (Svelte) — registered BEFORE the catch-all /dashboard mount.
