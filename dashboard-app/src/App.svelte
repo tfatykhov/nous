@@ -11,6 +11,7 @@
   import GraphView from './views/GraphView.svelte';
   import Overview from './views/Overview.svelte';
   import Browser from './views/Browser.svelte';
+  import Decisions from './views/Decisions.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -161,7 +162,7 @@
   {:else if $currentRoute === 'browser'}
     <Browser />
   {:else if $currentRoute === 'decisions'}
-    <Placeholder route={$currentRoute} />
+    <Decisions />
   {:else if $currentRoute === 'activity'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'heartbeat'}

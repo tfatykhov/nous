@@ -670,6 +670,55 @@ export interface ChunksResponse {
   offset: number;
 }
 
+// ── /dashboard/calibration (F021 Decision Intelligence) ──────────────────
+
+export interface CalibrationCurvePoint {
+  /** FLOOR(confidence * 10) / 10 — e.g. "0.7" */
+  bucket: string;
+  actual_success_rate: number;
+  total: number;
+  successes: number;
+  avg_confidence: number;
+}
+
+export interface ConfidenceHistogramBucket {
+  /** e.g. "0.7-0.8" */
+  range: string;
+  count: number;
+}
+
+export interface ReasonTypeStat {
+  count: number;
+  success_rate: number;
+  successes: number;
+  reviewed: number;
+}
+
+export interface BrierHistoryPoint {
+  date: string;
+  brier_score: number;
+}
+
+export interface DailyDecisionPoint {
+  date: string;
+  count: number;
+  successes: number;
+  reviewed: number;
+}
+
+export interface CalibrationData {
+  calibration_curve: CalibrationCurvePoint[];
+  confidence_histogram: ConfidenceHistogramBucket[];
+  /** category → { outcome → count } */
+  outcome_by_category: Record<string, Record<string, number>>;
+  /** stakes level → { outcome → count } */
+  outcome_by_stakes: Record<string, Record<string, number>>;
+  /** reason type → ReasonTypeStat */
+  reason_type_stats: Record<string, ReasonTypeStat>;
+  brier_history: BrierHistoryPoint[];
+  daily_decisions: DailyDecisionPoint[];
+}
+
 // ── /dashboard/graph (F022/F040/F067/F070) ───────────────────────────────
 
 /** One node from get_graph_data(). */
