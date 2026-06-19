@@ -307,7 +307,17 @@ async def test_a2_flag_off_first_turn_titles_only():
 # B: open_threads summarizer dimension (F083 Layer B)
 # ---------------------------------------------------------------------------
 
-from nous.handlers.episode_summarizer import EpisodeSummarizer, _OPEN_THREADS_INSTRUCTION
+from nous.handlers.episode_summarizer import (
+    EpisodeSummarizer,
+    _OPEN_THREADS_INSTRUCTION,
+    _coerce_open_threads,
+)
+
+
+def test_coerce_open_threads_helper():
+    assert _coerce_open_threads(None) == []
+    assert _coerce_open_threads("x") == []
+    assert _coerce_open_threads([1, "a", {"k": 1}]) == ["1", "a"]
 
 
 def _summarizer(open_threads=False):

@@ -177,6 +177,13 @@ and `candidate_facts` (not nested inside them). Return an empty array (or omit)
 when nothing is unfinished. Do NOT invent or pad."""
 
 
+def _coerce_open_threads(value) -> list[str]:
+    """F083: normalize an LLM/merged open_threads value to a clean list[str]."""
+    if not isinstance(value, list):
+        return []
+    return [str(t) for t in value if isinstance(t, (str, int, float))]
+
+
 class EpisodeSummarizer:
     """Generates episode summaries on session end.
 
@@ -622,6 +629,11 @@ class EpisodeSummarizer:
                 type(result).__name__,
             )
             return None
+        # F083: coerce a present open_threads to clean list[str] (write-time
+        # symmetry with _merge_summaries). Guard on presence so flag-off
+        # persists are byte-identical — when B is off the LLM won't emit it.
+        if "open_threads" in result:
+            result["open_threads"] = _coerce_open_threads(result["open_threads"])
         return result
 
     def _chunk_transcript(self, transcript: str, max_chars: int = 16000) -> list[str]:
@@ -671,9 +683,7 @@ class EpisodeSummarizer:
             merged_key_points.extend(s.get("key_points", []))
             merged_candidate_facts.extend(s.get("candidate_facts", []))
             merged_topics.update(s.get("topics", []))
-            v = s.get("open_threads")
-            if isinstance(v, list):
-                merged_open_threads.extend(str(t) for t in v if isinstance(t, (str, int, float)))
+            merged_open_threads.extend(_coerce_open_threads(s.get("open_threads")))
 
         # F075: split dated and stable candidates into separate pools with
         # independent caps. Dated events from later chunks must survive the
@@ -699,7 +709,7 @@ class EpisodeSummarizer:
             "outcome": summaries[-1].get("outcome", "informational"),
             "outcome_rationale": summaries[-1].get("outcome_rationale", ""),
             "topics": sorted(merged_topics),
-            "open_threads": merged_open_threads[:10],
+            "open_threads": merged_open_threads[:10],  # F083 P3: persist up to 10; A2 displays up to 5
         }
 
     def _truncate_transcript(self, transcript: str, max_chars: int = 16000) -> str:
