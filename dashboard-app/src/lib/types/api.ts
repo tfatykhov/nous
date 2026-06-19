@@ -670,6 +670,117 @@ export interface ChunksResponse {
   offset: number;
 }
 
+// ── /dashboard/admission (F023 Memory Admission Control) ─────────────────
+
+export interface AdmissionConfig {
+  enabled: boolean;
+  shadow_mode: boolean;
+  threshold: number;
+  weights: {
+    utility: number;
+    confidence: number;
+    novelty: number;
+    recency: number;
+    type_prior: number;
+  };
+}
+
+export interface AdmissionSummary {
+  total_scored: number;
+  admitted: number;
+  would_reject: number;
+  bypassed: number;
+  avg_composite_score: number;
+  rejection_rate: number;
+  threshold_note: string;
+  _pre_migration_note: string;
+}
+
+/** One 0.05-wide bucket from the histogram. bucket e.g. "0.50-0.55". */
+export interface AdmissionScoreBucket {
+  bucket: string;
+  count: number;
+}
+
+/** Box-plot stats for one dimension × admitted/rejected split. */
+export interface AdmissionDimStats {
+  min: number;
+  q1: number;
+  median: number;
+  q3: number;
+  max: number;
+}
+
+/** Per-dimension breakdown: admitted + rejected box-plot stats. */
+export interface AdmissionDimEntry {
+  admitted: AdmissionDimStats | Record<string, never>;
+  rejected: AdmissionDimStats | Record<string, never>;
+}
+
+export interface AdmissionBySourceEntry {
+  admitted: number;
+  rejected: number;
+  bypassed: number;
+  avg_score: number | null;
+}
+
+export interface AdmissionByCategoryEntry {
+  admitted: number;
+  rejected: number;
+  avg_score: number | null;
+}
+
+export interface AdmissionDailyTrendEntry {
+  date: string;
+  scored: number;
+  admitted: number;
+  rejected: number;
+  bypassed: number;
+  avg_score: number | null;
+}
+
+export interface AdmissionData {
+  config: AdmissionConfig;
+  summary: AdmissionSummary;
+  score_distribution: AdmissionScoreBucket[];
+  /** Keys: utility | confidence | novelty | recency | type_prior + "_note" string. */
+  dimension_stats: Record<string, AdmissionDimEntry | string>;
+  /** source name → stats */
+  by_source: Record<string, AdmissionBySourceEntry>;
+  /** category name → stats */
+  by_category: Record<string, AdmissionByCategoryEntry>;
+  daily_trend: AdmissionDailyTrendEntry[];
+  /** source/reason → count */
+  bypass_breakdown: Record<string, number>;
+}
+
+// ── /dashboard/admission/rejected (paginated) ─────────────────────────────
+
+export interface AdmissionRejectedFact {
+  id: string;
+  /** Truncated to 200 chars. */
+  content_preview: string;
+  content_full: string;
+  category: string | null;
+  source: string | null;
+  composite_score: number;
+  scores: {
+    utility?: number;
+    confidence?: number;
+    novelty?: number;
+    recency?: number;
+    type_prior?: number;
+  };
+  created_at: string | null;
+}
+
+export interface AdmissionRejectedPage {
+  facts: AdmissionRejectedFact[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 // ── /dashboard/calibration (F021 Decision Intelligence) ──────────────────
 
 export interface CalibrationCurvePoint {

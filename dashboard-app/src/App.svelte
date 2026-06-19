@@ -14,6 +14,7 @@
   import Decisions from './views/Decisions.svelte';
   import Activity from './views/Activity.svelte';
   import Health from './views/Health.svelte';
+  import Admission from './views/Admission.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -174,7 +175,7 @@
   {:else if $currentRoute === 'health'}
     <Health />
   {:else if $currentRoute === 'admission'}
-    <Placeholder route={$currentRoute} />
+    <Admission />
   {:else if $currentRoute === 'rubric'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'execution'}
