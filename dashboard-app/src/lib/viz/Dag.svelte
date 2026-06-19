@@ -179,7 +179,7 @@
         onNodeClick?.(d);
       });
 
-    nodeGroups.each(function (d: DagNode) {
+    nodeGroups.each(function (this: SVGGElement, d: DagNode) {
       const g = d3.select(this);
       const color = STATUS_COLORS[d.status] ?? '#6b6b8a';
       const isRunning = d.status === 'running';

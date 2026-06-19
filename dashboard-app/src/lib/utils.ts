@@ -17,7 +17,7 @@ export type WithoutChildren<T> = Omit<T, 'children'>;
 
 export type WithChild<
   T,
-  TChild = Record<never, never>,
+  TChild extends Record<string, any> = Record<string, any>,
 > = Omit<T, 'child' | 'children'> & {
   child?: Component<TChild>;
   children?: never;
