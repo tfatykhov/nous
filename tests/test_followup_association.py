@@ -114,3 +114,25 @@ async def test_recall_before_clarify_absent_when_off():
         frame=_conv_frame(),
     )
     assert "before asking" not in result.system_prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# C1: first-turn-gated deictic follow-up detector (F083)
+# ---------------------------------------------------------------------------
+
+from nous.cognitive.layer import _DEICTIC_FOLLOWUP
+
+
+def test_deictic_matches_cross_session_referents():
+    for s in ["what about the second option you mentioned?",
+              "can you continue what we were doing?",
+              "did that fix work?"]:
+        assert _DEICTIC_FOLLOWUP.search(s), s
+
+
+def test_deictic_does_not_match_same_session_coding():
+    for s in ["continue the loop until done",
+              "use the first argument",
+              "write a python function to reverse a string",
+              "what about performance?"]:
+        assert not _DEICTIC_FOLLOWUP.search(s), s

@@ -64,6 +64,24 @@ _RECAP_PATTERNS = frozenset({
 })
 
 
+# F083 C1: cross-session deictic/continuation follow-up markers. Deliberately
+# narrow — must NOT match same-session coding instructions ("continue the loop",
+# "use the first argument"). Requires a referent tied to prior discussion.
+_DEICTIC_FOLLOWUP = re.compile(
+    r"\b(?:"
+    r"that (?:option|approach|idea|fix|bug) (?:you|we)\b"
+    r"|the (?:second|first|other|previous|last) (?:option|approach|idea) (?:you|we)\b"
+    r"|(?:option|approach|idea) you (?:mentioned|suggested|proposed)\b"
+    r"|you (?:mentioned|suggested|proposed) (?:earlier|before|last time)\b"
+    r"|continue what we (?:were|had been) (?:doing|working)\b"
+    r"|(?:pick up |continue )?where we left off\b"
+    r"|did (?:that|it)(?:\s+\w+){0,2}\s+work\b"
+    r"|as we discussed (?:earlier|before|last time)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _is_recap_query(user_input: str) -> bool:
     """Detect if user is asking for a temporal recap."""
     lower = user_input.lower().strip()
@@ -599,9 +617,26 @@ class CognitiveLayer:
                     and critic_result.skills):
                 _critic_skills = critic_result.skills
 
+        # F083 A2/C1: warm the active-episode map from DB first, so a session that is
+        # ongoing after a process restart is not mis-seen as a first turn.
+        # warm_active_episode is idempotent (returns the cached value if present) and
+        # only restores ongoing (ended_at IS NULL, active=True) episodes — a just-ENDED
+        # session correctly stays first-turn. R15: exclude subtask/background turns.
+        await self.warm_active_episode(session_id)
+        is_first_turn = (session_id not in self._active_episodes) and not is_subtask
+
         # 2b. CLASSIFY — extract intent signals and plan retrieval (005.1)
         signals = self._intent_classifier.classify(user_input, frame)
         plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
+
+        # F083 C1: on the FIRST turn of a new session, a cross-session deictic follow-up
+        # raises recency so episodes are retrieved + temporal_boost fires. Gated on
+        # is_first_turn so same-session references — already in live history — never
+        # pull cross-session episodes.
+        if (is_first_turn and self._settings.followup_deictic_detection_enabled
+                and _DEICTIC_FOLLOWUP.search(user_input)):
+            signals.temporal_recency = max(signals.temporal_recency, 0.6)
+            plan = self._intent_classifier.plan_retrieval(signals, input_text=user_input)
 
         # 008.6: Detect recap queries and set temporal boost
         _is_recap = _is_recap_query(user_input)
