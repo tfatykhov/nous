@@ -759,3 +759,63 @@ export interface GraphData {
   edges: GraphEdgeData[];
   stats: GraphStats;
 }
+
+// ── /dashboard/activity (Task 8 / get_activity_data) ──────────────────────
+
+/** One event row from nous_system.events, ordered DESC by created_at. */
+export interface ActivityEvent {
+  /** event_type aliased to 'type' in the SQL query. */
+  type: string;
+  created_at: string;
+  /** Arbitrary JSONB payload; shape varies by event type. */
+  data: Record<string, unknown>;
+}
+
+/** Top-censor entry from heart.censors ordered by activation_count DESC. */
+export interface ActivityTopCensor {
+  id: string;
+  trigger_pattern: string | null;
+  activations: number;
+}
+
+export interface ActivityCensorStats {
+  total: number;
+  active: number;
+  auto_created: number;
+  manual_created: number;
+  total_activations_7d: number;
+  false_positives_7d: number;
+  top_censors: ActivityTopCensor[];
+}
+
+/** Next upcoming schedule fire. */
+export interface ActivityNextFire {
+  id: string;
+  task: string | null;
+  next_fire_at: string;
+}
+
+export interface ActivityScheduleStats {
+  total: number;
+  active: number;
+  fires_7d: number;
+  next_fires: ActivityNextFire[];
+}
+
+export interface ActivitySleepStats {
+  total_sleeps: number;
+  /** ISO string or null when no sleep has run yet. */
+  last_sleep: string | null;
+  facts_created: number;
+  procedures_created: number;
+  censors_retired: number;
+}
+
+/** Full response from GET /dashboard/activity?hours=168. */
+export interface ActivityData {
+  /** Last 100 events in the window, ordered newest-first. */
+  events: ActivityEvent[];
+  censor_stats: ActivityCensorStats;
+  schedule_stats: ActivityScheduleStats;
+  sleep_stats: ActivitySleepStats;
+}

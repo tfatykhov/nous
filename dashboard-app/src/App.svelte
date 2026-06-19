@@ -12,6 +12,7 @@
   import Overview from './views/Overview.svelte';
   import Browser from './views/Browser.svelte';
   import Decisions from './views/Decisions.svelte';
+  import Activity from './views/Activity.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -164,7 +165,7 @@
   {:else if $currentRoute === 'decisions'}
     <Decisions />
   {:else if $currentRoute === 'activity'}
-    <Placeholder route={$currentRoute} />
+    <Activity />
   {:else if $currentRoute === 'heartbeat'}
     <Heartbeat />
   {:else if $currentRoute === 'observability'}
