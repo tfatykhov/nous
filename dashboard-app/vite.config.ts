@@ -10,6 +10,7 @@ export default defineConfig({
     alias: {
       $lib: resolve(__dirname, 'src/lib'),
     },
+    conditions: ['browser'],
   },
   base: '/dashboard/v2/',
   build: {
