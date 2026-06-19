@@ -949,7 +949,7 @@ class ContextEngine:
                         if inject_full and idx == 0:
                             struct = getattr(e, "structured_summary", None) or {}
                             full_summary = struct.get("summary") or e.summary
-                            if full_summary and full_summary != title:
+                            if full_summary and full_summary != e.title:
                                 trunc = self._settings.recall_parent_episode_truncate
                                 recent_lines.append(f"  {full_summary[:trunc]}")
                             threads = struct.get("open_threads")  # shape-guard: tolerate non-list

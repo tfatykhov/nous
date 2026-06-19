@@ -251,6 +251,30 @@ async def test_a2_not_injected_when_not_first_turn():
 
 
 @pytest.mark.asyncio
+async def test_a2_falls_back_to_summary_when_no_structured():
+    """A2: when structured_summary is None, injection falls back to e.summary."""
+    s = Settings(
+        followup_first_turn_episode=True,
+        temporal_context_enabled=True,
+    )
+    ep = _make_ep(
+        title="Caching architecture discussion",
+        summary="Fallback summary body for the LRU decision.",
+        structured_summary=None,
+    )
+    engine = _make_temporal_engine(s, ep)
+
+    result = await engine.build(
+        "test",
+        "test-session",
+        "continue from where we left off",
+        _conv_frame(),
+        is_first_turn=True,
+    )
+    assert "Fallback summary body for the LRU decision." in result.system_prompt
+
+
+@pytest.mark.asyncio
 async def test_a2_flag_off_first_turn_titles_only():
     """A2: when flag is OFF, first turn behaves identically to pre-F083 (titles-only)."""
     s = Settings(
