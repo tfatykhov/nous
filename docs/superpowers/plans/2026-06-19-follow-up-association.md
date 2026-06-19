@@ -6,7 +6,9 @@
 
 **Architecture:** Three flag-gated layers in the cognitive context-assembly path. **A** = prior-session context reaches the prompt (A1 un-zero the conversation-frame episode budget; A2 inject the most-recent episode's full summary on a **verified first turn** of a new session). **B** = richer summaries via an `open_threads` dimension on the episode summarizer. **C** = detection + behavior (C1 a **first-turn-gated** deictic detector that raises `temporal_recency`; C2 a "recall before clarifying" instruction). A1/C1/C2 ship default-ON behind kill-switches; A2/B land dark (default OFF); the A2/B flag-default is decided from local-instance evidence.
 
-**Tech Stack:** Python 3.12, pydantic-settings, SQLAlchemy async, Starlette, pytest + pytest-asyncio (real Postgres via docker-compose), `urllib` probe script against the live local instance (`192.168.1.141:8383`).
+**Tech Stack:** Python 3.12, pydantic-settings, SQLAlchemy async, Starlette, pytest + pytest-asyncio (real Postgres via docker-compose), `urllib` probe script against a **locally-started full Nous instance** (`uv run python -m nous.main`, REST at `http://localhost:8000`, against the local docker Postgres — NOT prod `192.168.1.141`).
+
+**Local A/B method (per user):** validation runs the FULL local instance (frame selection → intent → context assembly → tool loop), not just the DB layer. For each A/B config, start `python -m nous.main` with the layer's flag env set, run the probe harness, stop, compare. The instance needs `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in env/.env for real turns. Because episode summarization is async (5–30s lag), the probe MUST seed a session, **end it via `DELETE /chat/{session_id}`** (triggers the `session_ended` → summarize pipeline), **wait until the seed episode is summarized** (poll `GET /episodes`), and only THEN send the follow-up as a new session — otherwise A2 has no summarized episode to inject.
 
 **Spec:** `docs/superpowers/specs/2026-06-19-follow-up-association-design.md`
 **FORGE:** analysis `0c76ee32`, spec/plan `ab018bba`, review `b4d94716`
@@ -73,13 +75,12 @@
 git checkout -b feat/F083-follow-up-association
 ```
 
-- [ ] **Step 2: Confirm the local instance is reachable**
+- [ ] **Step 2: Confirm local docker Postgres is up** (the full-instance A/B + DB-backed tests need it)
 
-Run:
 ```bash
-py -c "import urllib.request; r=urllib.request.urlopen('http://192.168.1.141:8383/health',timeout=10); print(r.status)"
+docker compose ps --format "{{.Service}} {{.State}}"   # expect: postgres running
 ```
-Expected: `200` (else fall back to a `POST /chat` smoke per `reports/_nous_consult_recall.py`). If unreachable, STOP and tell the user — the acceptance harness (T7) needs it.
+The full-instance A/B runs a LOCAL Nous (`uv run python -m nous.main`, REST `localhost:8000`) against this DB — see the "Local-instance validation protocol" section. Prod (`192.168.1.141`) is never used.
 
 ---
 
@@ -480,21 +481,10 @@ async def test_flag_off_first_turn_titles_only(context_engine, frame_conv, seed_
 Run: `uv run pytest tests/test_followup_association.py -k "first_turn or titles_only" -v`
 Expected: FAIL (`build()` has no `is_first_turn` kwarg)
 
-- [ ] **Step 3: Capture `is_first_turn` in `pre_turn` + thread to `build()`**
+- [ ] **Step 3: Thread the existing `is_first_turn` into `build()`**
 
-Near the top of `pre_turn` (before the episode-creation block at `layer.py:755`), FIRST warm the active-episode map from DB, THEN capture the signal, AND-ing in `not is_subtask`:
-```python
-        # F083 A2/C1 (R14): warm first so a post-restart ongoing session is not
-        # mis-seen as a first turn. warm_active_episode is idempotent (returns the
-        # cached value if present) and only restores ongoing (ended_at IS NULL,
-        # active=True) episodes — so a just-ENDED session correctly stays first-turn.
-        await self.warm_active_episode(session_id)
-        # First turn iff no active episode exists yet. Survives LRU eviction (this
-        # map is session-lived, cleared only at end_session). R15: exclude
-        # subtask/background turns from follow-up injection entirely.
-        is_first_turn = (session_id not in self._active_episodes) and not is_subtask
-```
-> If `warm_active_episode(session_id)` is already called later in `pre_turn` (it is, ~`layer.py:756`), this early call is a cheap idempotent no-op there; do not remove the later call.
+**NOTE: Task 4 already added the `is_first_turn` capture** (`await self.warm_active_episode(session_id)` + `is_first_turn = (session_id not in self._active_episodes) and not is_subtask`) at the top of `pre_turn` and uses it for C1. Do NOT re-add it — it's already a local in `pre_turn`'s scope. This step ONLY threads it into the build call.
+
 Add `is_first_turn=is_first_turn` to the `self._context.build(...)` call (`layer.py:660-673`):
 ```python
                     temporal_boost=_temporal_boost,  # 008.6
@@ -711,18 +701,27 @@ git commit -m "feat(F083): open_threads summarizer dimension, type-safe, max_tok
 - [ ] **Step 1: Write the harness** (note the hard negatives from the review)
 
 ```python
-"""F083 follow-up association probe — drives the LIVE local Nous instance.
+"""F083 follow-up association probe — drives a LOCAL full Nous instance.
 
-For each probe: send SEED (session A), then the FOLLOW-UP as a NEW session (session B).
-Score recall-precedes-clarification: PASS if the follow-up resolves the referent from
-prior-session context OR calls a recall tool before clarifying; FAIL if it asks the user
-to clarify without recalling first. Negatives SHOULD ask for clarification.
+Targets http://localhost:8000 (NOUS_PROBE_BASE to override). NOT prod.
+
+Per probe, exercises the REAL cross-session timing:
+  1. SEED  — POST /chat on session A (creates an episode).
+  2. END   — DELETE /chat/{A}  (fires session_ended -> async summarize).
+  3. WAIT  — poll GET /episodes until session A's episode has a structured
+             summary (A2 needs a summarized episode to inject), bounded timeout.
+  4. FOLLOW-UP — POST /chat on a NEW session B (this is the turn under test).
+Score recall-precedes-clarification: PASS if the follow-up resolves the referent
+from prior-session context OR calls a recall tool before clarifying; FAIL if it
+asks the user to clarify without recalling. Negatives SHOULD ask for clarification.
 
 Usage: py scripts/diag/followup_probe.py --label baseline
+Env:   NOUS_PROBE_BASE (default http://localhost:8000), NOUS_PROBE_SUMMARY_WAIT (default 45)
 """
-import argparse, json, time, urllib.request
+import argparse, json, os, time, urllib.request
 
-BASE = "http://192.168.1.141:8383"
+BASE = os.environ.get("NOUS_PROBE_BASE", "http://localhost:8000")
+SUMMARY_WAIT = int(os.environ.get("NOUS_PROBE_SUMMARY_WAIT", "45"))
 
 PROBES = [
     {"id": "deictic_option", "seed": "Give me two options for caching: Redis or in-memory LRU.",
@@ -731,7 +730,7 @@ PROBES = [
      "followup": "can you continue what we were doing?", "negative": False},
     {"id": "outcome_check", "seed": "Apply the fix to the retry budget in the worker pool.",
      "followup": "did that work?", "negative": False},
-    # Hard negatives (review R2): same-session-style / fresh inputs that must NOT pull cross-session episodes.
+    # Hard negatives (review R2): must NOT pull cross-session episodes.
     {"id": "neg_ambiguous", "seed": "Tell me about Postgres indexes.",
      "followup": "what about the other thing?", "negative": True},
     {"id": "neg_fresh_task", "seed": "Summarize HNSW indexing.",
@@ -741,11 +740,38 @@ PROBES = [
 ]
 
 
-def chat(message, session_id):
-    body = json.dumps({"message": message, "session_id": session_id,
-                       "user_id": "claude-code", "user_display_name": "F083 probe"}).encode()
-    req = urllib.request.Request(f"{BASE}/chat", data=body, headers={"Content-Type": "application/json"})
+def _req(method, path, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(f"{BASE}{path}", data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
     return json.loads(urllib.request.urlopen(req, timeout=300).read())
+
+
+def chat(message, session_id):
+    return _req("POST", "/chat", {"message": message, "session_id": session_id,
+                                  "user_id": "claude-code", "user_display_name": "F083 probe"})
+
+
+def end_session(session_id):
+    try:
+        _req("DELETE", f"/chat/{session_id}")
+    except Exception as e:
+        print(f"  end_session({session_id}) note: {e}")
+
+
+def wait_for_summary(seed_text, deadline):
+    """Poll GET /episodes until an episode summarizing the seed appears (best-effort)."""
+    while time.time() < deadline:
+        try:
+            eps = _req("GET", "/episodes")
+            rows = eps if isinstance(eps, list) else eps.get("episodes", [])
+            for e in rows:
+                if e.get("structured_summary") or e.get("summary"):
+                    return True
+        except Exception:
+            pass
+        time.sleep(3)
+    return False
 
 
 def main():
@@ -754,15 +780,17 @@ def main():
     args = ap.parse_args()
     results = []
     for p in PROBES:
-        chat(p["seed"], f"f083-seed-{p['id']}-{args.label}")
-        time.sleep(2)
-        r = chat(p["followup"], f"f083-followup-{p['id']}-{args.label}")
+        seed_sid = f"f083-seed-{p['id']}-{args.label}"
+        chat(p["seed"], seed_sid)
+        end_session(seed_sid)                              # trigger async summarize
+        summarized = wait_for_summary(p["seed"], time.time() + SUMMARY_WAIT)
+        r = chat(p["followup"], f"f083-followup-{p['id']}-{args.label}")  # NEW session
         resp = (r.get("response") or "")
         clarify = any(k in resp.lower() for k in
                       ["could you clarify", "which ", "what do you mean", "not sure what you", "can you specify"])
         results.append({"id": p["id"], "negative": p["negative"], "frame": r.get("frame"),
-                        "asked_clarification": clarify, "response": resp[:1200]})
-        print(f"{p['id']}: frame={r.get('frame')} clarify={clarify}")
+                        "summarized": summarized, "asked_clarification": clarify, "response": resp[:1500]})
+        print(f"{p['id']}: frame={r.get('frame')} summarized={summarized} clarify={clarify}")
     out = f"reports/f083_probe_{args.label}.json"
     open(out, "w", encoding="utf-8").write(json.dumps(results, indent=2))
     print("saved", out)
@@ -772,19 +800,14 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 2: Run the BASELINE (HEAD defaults, before enabling any layer)**
-
-Run: `py scripts/diag/followup_probe.py --label baseline`
-Expected: writes `reports/f083_probe_baseline.json`. Read it manually — non-negatives likely show `asked_clarification=true`.
-
-- [ ] **Step 3: Commit**
+- [ ] **Step 2: Commit the harness** (baseline run happens in the coordinated local-instance phase, below)
 
 ```bash
 git add scripts/diag/followup_probe.py
 git commit -m "test(F083): local-instance follow-up probe harness with hard negatives"
 ```
 
-> `asked_clarification` is a coarse signal; the acceptance read is MANUAL (did the follow-up resolve the referent from prior-session context? did the negatives correctly clarify-or-decline rather than confabulate from an unrelated episode?). Each per-layer VERIFY step re-runs this with a distinct `--label` after toggling ONE flag + restart.
+> `asked_clarification` is a coarse signal; the acceptance read is MANUAL (did the follow-up resolve the referent from prior-session context? did the negatives correctly clarify-or-decline rather than confabulate?). `summarized=False` on a probe means the wait timed out — A2 had nothing to inject, so treat that probe as inconclusive for A2 and raise `NOUS_PROBE_SUMMARY_WAIT`.
 
 ---
 
@@ -803,9 +826,30 @@ git commit -m "docs(F083): follow-up association flags + shipped row"
 
 ---
 
+## Local-instance validation protocol (full instance, localhost — NOT prod)
+
+All per-layer "LOCAL-INSTANCE VERIFY" steps and the Decision Gate use this loop. The controller runs it (it starts/stops a live process + makes real LLM calls), not an implementer subagent.
+
+1. Ensure local docker Postgres is up (`docker compose ps`). Ensure `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is in env/.env (real turns).
+2. Start the local instance with the A/B's flag env, e.g. baseline:
+   ```bash
+   # all F083 flags at their code defaults
+   uv run python -m nous.main   # REST on localhost:8000
+   ```
+   For a single-layer A/B, prepend just that layer's flag, e.g. A2:
+   ```bash
+   NOUS_FOLLOWUP_FIRST_TURN_EPISODE=true uv run python -m nous.main
+   ```
+   (On Windows PowerShell: `$env:NOUS_FOLLOWUP_FIRST_TURN_EPISODE="true"; uv run python -m nous.main`.) Run it in the background; wait for the "Uvicorn running" / `GET /health` 200.
+3. `py scripts/diag/followup_probe.py --label <config>` → writes `reports/f083_probe_<config>.json`.
+4. Stop the instance. Change exactly ONE flag. Repeat. (One variable per A/B — apples-to-apples.)
+5. Read the JSON manually + diff against baseline.
+
+Notes: the probe writes test episodes to the LOCAL dev DB (`agent_id` = the instance default) — acceptable; sessions are uniquely labelled per run. Because A2 needs a *summarized* seed episode, the harness ends the seed session and waits (`NOUS_PROBE_SUMMARY_WAIT`) before the follow-up.
+
 ## Decision Gate: A2 + B flag defaults (the user's mandate)
 
-After all per-layer LOCAL-INSTANCE VERIFY steps:
+After all per-layer local-instance verify runs:
 
 1. Compare `reports/f083_probe_baseline.json` vs the A2-on and B-on runs.
 2. **Flip `NOUS_FOLLOWUP_FIRST_TURN_EPISODE` → default `True`** only if A2-on improves recall-precedes-clarification on non-negative probes, with no guard-metric regression AND **zero negative-control false positives** (no confabulation from an unrelated injected episode).
