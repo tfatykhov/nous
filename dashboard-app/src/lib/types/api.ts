@@ -338,3 +338,72 @@ export interface SubtasksData {
   recent_outcomes: SubtaskRecentEntry[];
   daily_trend: SubtaskDailyTrendEntry[];
 }
+
+// ── /dashboard/dag (F038) ─────────────────────────────────────────────────
+
+/** A node inside an active DAG (nested under DagActiveDag.nodes). */
+export interface DagActiveNode {
+  id: string;
+  name: string;
+  description: string;
+  node_type: string;
+  wave: number;
+  status: string;
+  result: string;
+  error: string;
+  tokens_used: number;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+/** An edge inside an active DAG (nested under DagActiveDag.edges). */
+export interface DagActiveEdge {
+  id: string;
+  from_node_id: string;
+  to_node_id: string;
+  edge_type: string | null;
+}
+
+/** One active (pending/running) DAG returned by /dashboard/dag. */
+export interface DagActiveDag {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  source: string;
+  created_at: string | null;
+  started_at: string | null;
+  token_budget: number;
+  tokens_consumed: number;
+  nodes: DagActiveNode[];
+  edges: DagActiveEdge[];
+}
+
+/** One recently completed/failed/cancelled DAG returned by /dashboard/dag. */
+export interface DagRecentDag {
+  id: string;
+  name: string;
+  status: string;
+  source: string;
+  created_at: string | null;
+  completed_at: string | null;
+  token_budget: number;
+  tokens_consumed: number;
+  result_summary: string | null;
+  postmortem: string | null;
+  node_count: number;
+  completed_count: number;
+}
+
+export interface DagStats {
+  active_count: number;
+  nodes_completed_24h: number;
+  success_rate: number;
+  avg_completion_seconds: number;
+}
+
+export interface DagDashboardData {
+  active_dags: DagActiveDag[];
+  recent_dags: DagRecentDag[];
+  stats: DagStats;
+}

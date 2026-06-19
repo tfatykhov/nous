@@ -3,6 +3,7 @@
   import Nav from '$lib/ui/Nav.svelte';
   import Placeholder from '$lib/ui/Placeholder.svelte';
   import Cache from './views/Cache.svelte';
+  import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
   import Subtasks from './views/Subtasks.svelte';
@@ -176,7 +177,7 @@
   {:else if $currentRoute === 'density'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'dag'}
-    <Placeholder route={$currentRoute} />
+    <DagView />
   {:else if $currentRoute === 'subtasks'}
     <Subtasks />
   {/if}
