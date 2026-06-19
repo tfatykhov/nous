@@ -91,6 +91,10 @@ _MEMORY_HINTS = {
 class IntentClassifier:
     """Extract intent signals from user input. No LLM -- pattern matching only."""
 
+    def __init__(self, settings=None):
+        from nous.config import Settings
+        self._settings = settings or Settings()
+
     # F17: Extended greeting patterns with "good afternoon", "good night", "howdy", "greetings"
     _GREETING_PATTERNS = re.compile(
         r"^(hey|hi|hello|sup|yo|good morning|good afternoon|good evening|good night"
@@ -218,11 +222,12 @@ class IntentClassifier:
 
         # Frame-based budget overrides
         if signals.frame_type == "conversation":
+            ep_budget = 600 if self._settings.followup_episode_budget_enabled else 0
             plan.budget_overrides = {
                 "decisions": 500,
                 "facts": 500,
                 "procedures": 0,
-                "episodes": 0,
+                "episodes": ep_budget,
             }
         elif signals.frame_type == "decision":
             plan.budget_overrides = {"decisions": 3500, "procedures": 2000}
@@ -230,7 +235,7 @@ class IntentClassifier:
         # 008.6: Temporal recency boost — ensure episodes are retrieved
         if signals.temporal_recency > 0.5:
             current_ep_budget = plan.budget_overrides.get("episodes", None)
-            if current_ep_budget is not None and current_ep_budget == 0:
+            if current_ep_budget is not None and current_ep_budget < 1000:
                 plan.budget_overrides["episodes"] = 1000
             # Boost episode query limit
             for q in plan.queries:

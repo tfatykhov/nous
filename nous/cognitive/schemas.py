@@ -132,7 +132,7 @@ class ContextBudget(BaseModel):
                 per-frame defaults (e.g. from Settings.context_budget_overrides).
         """
         budgets = {
-            "conversation": cls(total=3000, decisions=500, facts=500, procedures=0, episodes=0, conversation_window=3),
+            "conversation": cls(total=3000, decisions=500, facts=500, procedures=0, episodes=600, conversation_window=3),
             "question": cls(total=6000, decisions=1000, facts=1500, procedures=500, episodes=500, conversation_window=5),
             "task": cls(total=8000, conversation_window=5),
             "decision": cls(total=12000, decisions=3000, facts=2000, procedures=2000, episodes=1000, conversation_window=8),

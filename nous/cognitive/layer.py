@@ -232,7 +232,7 @@ class CognitiveLayer:
         # P1-1: Use brain.db (public), not brain._db
         self._frames = FrameEngine(brain.db, settings)
         # F3: Instantiate IntentClassifier and UsageTracker
-        self._intent_classifier = IntentClassifier()
+        self._intent_classifier = IntentClassifier(settings=settings)
         self._usage_tracker = UsageTracker()
         # F14: Pass EmbeddingProvider from brain.embeddings to deduplicator
         _deduplicator = ConversationDeduplicator(
