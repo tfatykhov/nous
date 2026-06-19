@@ -172,7 +172,9 @@ array, each entry one short actionable phrase:
 
   "open_threads": ["finish wiring the auth callback", "decide on retry budget"]
 
-Return an empty array (or omit) when nothing is unfinished. Do NOT invent or pad."""
+Add `open_threads` as a new top-level key in the JSON object alongside `topics`
+and `candidate_facts` (not nested inside them). Return an empty array (or omit)
+when nothing is unfinished. Do NOT invent or pad."""
 
 
 class EpisodeSummarizer:
@@ -568,13 +570,11 @@ class EpisodeSummarizer:
     def _summary_max_tokens(self) -> int:
         """Return the max_tokens budget for a single summarization LLM call.
 
-        F083 R5: open_threads competes with F075 events for output budget;
-        raise the ceiling so a long transcript's JSON doesn't truncate
-        (losing the whole summary).
+        F083 R5: the extended output schema (coverage facts or open_threads)
+        needs more headroom so a long transcript's JSON doesn't truncate.
         """
-        if getattr(self._settings, "extraction_coverage_broadened", False):
-            return 3000
-        if getattr(self._settings, "episode_open_threads", False):
+        if (getattr(self._settings, "extraction_coverage_broadened", False)
+                or getattr(self._settings, "episode_open_threads", False)):
             return 3000
         return 1500
 
