@@ -301,3 +301,56 @@ async def test_a2_flag_off_first_turn_titles_only():
     # Flag OFF → no full injection regardless of is_first_turn
     assert "We chose the in-memory LRU option" not in result.system_prompt
     assert "Open threads:" not in result.system_prompt
+
+
+# ---------------------------------------------------------------------------
+# B: open_threads summarizer dimension (F083 Layer B)
+# ---------------------------------------------------------------------------
+
+from nous.handlers.episode_summarizer import EpisodeSummarizer, _OPEN_THREADS_INSTRUCTION
+
+
+def _summarizer(open_threads=False):
+    s = EpisodeSummarizer.__new__(EpisodeSummarizer)
+    s._settings = Settings(episode_open_threads=open_threads)
+    return s
+
+
+def test_open_threads_in_prompt_when_enabled():
+    s = _summarizer(open_threads=True)
+    prompt = s._build_summary_prompt("transcript text", "", None)
+    assert "open_threads" in prompt and _OPEN_THREADS_INSTRUCTION in prompt
+
+
+def test_open_threads_absent_when_disabled():
+    s = _summarizer(open_threads=False)
+    prompt = s._build_summary_prompt("transcript text", "", None)
+    assert "open_threads" not in prompt
+
+
+def test_summary_max_tokens_bumped_when_open_threads():
+    assert _summarizer(open_threads=True)._summary_max_tokens() == 3000
+    assert _summarizer(open_threads=False)._summary_max_tokens() == 1500
+
+
+def test_merge_preserves_open_threads_and_required_keys():
+    s = _summarizer()
+    merged = s._merge_summaries([
+        {"title": "p1", "summary": "a", "key_points": [], "outcome": "partial",
+         "outcome_rationale": "r1", "topics": ["t"], "candidate_facts": [], "open_threads": ["finish auth"]},
+        {"title": "p2", "summary": "b", "key_points": [], "outcome": "partial",
+         "outcome_rationale": "r2", "topics": ["u"], "candidate_facts": [], "open_threads": ["write tests"]},
+    ])
+    assert merged["open_threads"] == ["finish auth", "write tests"]
+    for k in ("title", "summary", "key_points", "outcome", "outcome_rationale", "topics", "candidate_facts"):
+        assert k in merged
+
+
+def test_merge_open_threads_typesafe():
+    s = _summarizer()
+    merged = s._merge_summaries([
+        {"summary": "a", "candidate_facts": [], "topics": [], "open_threads": None},
+        {"summary": "b", "candidate_facts": [], "topics": [], "open_threads": "not a list"},
+        {"summary": "c", "candidate_facts": [], "topics": [], "open_threads": ["ok"]},
+    ])
+    assert merged["open_threads"] == ["ok"]
