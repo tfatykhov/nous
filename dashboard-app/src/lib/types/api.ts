@@ -540,6 +540,136 @@ export interface DagDashboardData {
   stats: DagStats;
 }
 
+// ── Memory Browser endpoints (/facts /episodes /decisions /procedures /censors /chunks) ──
+
+export interface BrowserFact {
+  id: string;
+  content: string;
+  category: string | null;
+  subject: string | null;
+  confidence: number;
+  active: boolean;
+  tags: string[];
+  superseded_by: string | null;
+  actionable: boolean | null;
+  event_date: string | null;
+  source: string | null;
+  source_episode_id: string | null;
+  learned_at: string;
+  created_at: string;
+}
+
+export interface FactsResponse {
+  facts: BrowserFact[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BrowserEpisode {
+  id: string;
+  title: string | null;
+  summary: string;
+  outcome: string | null;
+  started_at: string;
+  tags: string[];
+  structured_summary: {
+    key_points?: string[];
+    outcome_rationale?: string;
+    lessons?: string[];
+    [key: string]: unknown;
+  } | null;
+}
+
+export interface EpisodesResponse {
+  episodes: BrowserEpisode[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BrowserDecision {
+  id: string;
+  description: string;
+  category: string;
+  stakes: string;
+  confidence: number;
+  outcome: string;
+  context: string | null;
+  pattern: string | null;
+  tags: string[];
+  reasons: Array<{ type?: string; text?: string; content?: string }>;
+  created_at: string;
+}
+
+export interface DecisionsResponse {
+  decisions: BrowserDecision[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BrowserProcedure {
+  id: string;
+  name: string;
+  domain: string | null;
+  description: string | null;
+  goals: string[];
+  core_patterns: string[];
+  core_tools: string[];
+  activation_count: number;
+  effectiveness: number | null;
+  last_activated: string | null;
+  success_rate: number | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface ProceduresResponse {
+  procedures: BrowserProcedure[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BrowserCensor {
+  id: string;
+  trigger_pattern: string;
+  action: string;
+  reason: string;
+  domain: string | null;
+  provenance: string;
+  activation_count: number;
+  false_positive_count: number;
+  active: boolean;
+  trigger_action: Record<string, unknown> | null;
+  action_instruction: string | null;
+  unblock_pattern: string | null;
+  created_at: string;
+}
+
+export interface CensorsResponse {
+  censors: BrowserCensor[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface BrowserChunk {
+  id: string;
+  episode_id: string;
+  chunk_index: number;
+  content: string;
+  created_at: string;
+}
+
+export interface ChunksResponse {
+  chunks: BrowserChunk[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 // ── /dashboard/graph (F022/F040/F067/F070) ───────────────────────────────
 
 /** One node from get_graph_data(). */

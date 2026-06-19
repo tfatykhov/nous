@@ -10,6 +10,7 @@
   import Subtasks from './views/Subtasks.svelte';
   import GraphView from './views/GraphView.svelte';
   import Overview from './views/Overview.svelte';
+  import Browser from './views/Browser.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -158,7 +159,7 @@
   {:else if $currentRoute === 'graph'}
     <GraphView />
   {:else if $currentRoute === 'browser'}
-    <Placeholder route={$currentRoute} />
+    <Browser />
   {:else if $currentRoute === 'decisions'}
     <Placeholder route={$currentRoute} />
   {:else if $currentRoute === 'activity'}
