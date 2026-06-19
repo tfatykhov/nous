@@ -957,6 +957,8 @@ Reference `density.js`; endpoint `GET /dashboard/density`. (Smallest legacy view
 
 ## Parity Contract (run for every view task)
 
+**How to verify:** run a local Nous instance and drive both UIs with the `claude-in-chrome` browser tools (load schemas via ToolSearch `select:mcp__claude-in-chrome__*`). For each view, open legacy `/dashboard/#/<view>` and v2 `/dashboard/v2/#/<view>` side by side; compare rendered data; exercise filters/expansion; resize the window to 375px (`resize_window`) for the mobile checklist; and for the refresh win, expand a row + scroll, then wait one poll interval and confirm state is intact (read console via `read_console_messages` if anything looks off). Capture a GIF of the refresh-preserves-state behavior per poller view for the review.
+
 - **Data:** every section/field/chart the legacy view shows is present; same endpoint(s) + params.
 - **Behavior:** filters, search, pagination, expansion, chart interactions match legacy.
 - **Refresh (the win):** with a row expanded + a filter active + scrolled down, wait one poll interval → all state preserved. (Pollers: ledger 15s, others 30s.)
