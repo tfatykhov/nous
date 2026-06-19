@@ -630,7 +630,17 @@ class CognitiveLayer:
         # only restores ongoing (ended_at IS NULL, active=True) episodes — a just-ENDED
         # session correctly stays first-turn. R15: exclude subtask/background turns.
         await self.warm_active_episode(session_id)
-        is_first_turn = (session_id not in self._active_episodes) and not is_subtask
+        # First turn iff: (a) no prior in-process turn for this session (turn_count==0 —
+        # robust to the dedup branch below that skips episode creation, which would
+        # otherwise leave _active_episodes empty on turn 2), AND (b) no ongoing episode
+        # in the map after warm (survives LRU eviction / process restart via DB warm),
+        # AND (c) not a subtask/background turn. meta is created by setdefault above.
+        _meta_ft = self._session_metadata.get(session_id)
+        is_first_turn = (
+            (_meta_ft is None or _meta_ft.turn_count == 0)
+            and (session_id not in self._active_episodes)
+            and not is_subtask
+        )
 
         # 2b. CLASSIFY — extract intent signals and plan retrieval (005.1)
         signals = self._intent_classifier.classify(user_input, frame)

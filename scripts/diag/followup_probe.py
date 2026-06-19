@@ -70,16 +70,27 @@ def _summarized_ids():
         return set()
 
 
-def wait_for_new_summary(before, deadline):
-    """Wait until a NEW summarized episode (not in `before`) appears.
+def wait_for_seed_summary(before, deadline):
+    """Wait until the just-ended SEED episode is summarized.
 
-    Scoped to the just-ended seed: capture `before` after the seed chat but
-    before ending it, so a pre-existing summarized episode does not satisfy the
-    wait and let the follow-up run before the seed is actually summarized.
+    /episodes is ordered started_at DESC and only lists ended episodes, so right
+    after the seed session is ended it is the most-recently-started ended episode
+    (rows[0]). Requiring rows[0] to be both summarized AND new (id not in `before`)
+    scopes the wait to the seed — a late-finishing prior summary (an older
+    started_at episode) cannot satisfy it, so the follow-up never runs before the
+    seed's own memory is ready.
     """
     while time.time() < deadline:
-        if _summarized_ids() - before:
-            return True
+        try:
+            eps = _req("GET", "/episodes")
+            rows = eps if isinstance(eps, list) else eps.get("episodes", [])
+            if rows:
+                top = rows[0]
+                tid = str(top.get("id"))
+                if (top.get("structured_summary") or top.get("summary")) and tid not in before:
+                    return True
+        except Exception:
+            pass
         time.sleep(3)
     return False
 
@@ -94,7 +105,7 @@ def main():
         chat(p["seed"], seed_sid)
         before = _summarized_ids()                         # snapshot BEFORE ending the seed
         end_session(seed_sid)                              # trigger async summarize
-        summarized = wait_for_new_summary(before, time.time() + SUMMARY_WAIT)
+        summarized = wait_for_seed_summary(before, time.time() + SUMMARY_WAIT)
         r = chat(p["followup"], f"f083-followup-{p['id']}-{args.label}")  # NEW session
         resp = (r.get("response") or "")
         clarify = any(k in resp.lower() for k in
