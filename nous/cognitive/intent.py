@@ -10,6 +10,10 @@ import re
 from dataclasses import dataclass, field
 
 from nous.cognitive.schemas import FrameSelection
+from nous.config import Settings
+
+# 008.6: Episode budget granted when temporal recency signals a recap/follow-up.
+_TEMPORAL_RECENCY_EPISODE_BUDGET = 1000
 
 
 @dataclass
@@ -91,8 +95,7 @@ _MEMORY_HINTS = {
 class IntentClassifier:
     """Extract intent signals from user input. No LLM -- pattern matching only."""
 
-    def __init__(self, settings=None):
-        from nous.config import Settings
+    def __init__(self, settings: Settings | None = None):
         self._settings = settings or Settings()
 
     # F17: Extended greeting patterns with "good afternoon", "good night", "howdy", "greetings"
@@ -235,8 +238,11 @@ class IntentClassifier:
         # 008.6: Temporal recency boost — ensure episodes are retrieved
         if signals.temporal_recency > 0.5:
             current_ep_budget = plan.budget_overrides.get("episodes", None)
-            if current_ep_budget is not None and current_ep_budget < 1000:
-                plan.budget_overrides["episodes"] = 1000
+            if (
+                current_ep_budget is not None
+                and current_ep_budget < _TEMPORAL_RECENCY_EPISODE_BUDGET
+            ):
+                plan.budget_overrides["episodes"] = _TEMPORAL_RECENCY_EPISODE_BUDGET
             # Boost episode query limit
             for q in plan.queries:
                 if q.memory_type == "episode":

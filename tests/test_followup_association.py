@@ -41,3 +41,11 @@ def test_rescue_lifts_above_a1_floor():
     signals.temporal_recency = 0.6
     plan = clf.plan_retrieval(signals, input_text="x")
     assert plan.budget_overrides.get("episodes") == 1000
+
+
+def test_rescue_does_not_fire_below_threshold():
+    clf = IntentClassifier(settings=Settings())
+    signals = clf.classify("let's keep chatting", _frame())
+    signals.temporal_recency = 0.4
+    plan = clf.plan_retrieval(signals, input_text="x")
+    assert plan.budget_overrides.get("episodes") == 600
