@@ -3,9 +3,11 @@
 
   let {
     currentRoute,
+    navLabel = 'Main navigation',
     onnavigate,
   }: {
     currentRoute: RouteName;
+    navLabel?: string;
     onnavigate?: () => void;
   } = $props();
 
@@ -91,7 +93,7 @@
   ];
 </script>
 
-<nav aria-label="Main navigation">
+<nav aria-label={navLabel}>
   {#each NAV_ITEMS as item (item.id)}
     <a
       href="#{item.id}"
@@ -110,6 +112,7 @@
         </svg>
       {:else}
         <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <!-- icon strings are static SVG path data defined in NAV_ITEMS above; no user input reaches here -->
           {@html item.icon}
         </svg>
       {/if}

@@ -45,9 +45,10 @@ from uuid import UUID, uuid4
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
@@ -2635,7 +2636,7 @@ def create_app(
         ETag is already set, so re-validation is cheap (304 when
         unchanged); we just need to tell the browser to revalidate."""
 
-        async def get_response(self, path, scope):
+        async def get_response(self, path: str, scope: Scope) -> Response:
             response = await super().get_response(path, scope)
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
             return response

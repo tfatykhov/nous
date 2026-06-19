@@ -23,7 +23,7 @@
     // Move focus into the drawer on the next tick, after it's visible
     setTimeout(() => {
       const first = drawerEl?.querySelector<HTMLElement>(
-        'a[href], button, [tabindex]:not([tabindex="-1"])',
+        'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
       );
       first?.focus();
     }, 50);
@@ -65,13 +65,9 @@
     }
   }
 
-  // Close drawer when a nav link is clicked (navigation happened)
-  function handleNavNavigate() {
-    closeDrawer();
-  }
 </script>
 
-<svelte:window bind:innerWidth onkeydown={handleDrawerKeydown} />
+<svelte:window bind:innerWidth />
 
 <!-- Skip-to-content for keyboard users -->
 <a href="#main-content" class="skip-link">Skip to content</a>
@@ -82,7 +78,7 @@
     <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
   </div>
-  <Nav currentRoute={$currentRoute} />
+  <Nav currentRoute={$currentRoute} navLabel="Site navigation" />
 </aside>
 
 <!-- ── Mobile header ─────────────────────────────────────────── -->
@@ -123,6 +119,7 @@
   aria-label="Navigation menu"
   aria-hidden={!drawerOpen}
   inert={!drawerOpen ? true : undefined}
+  onkeydown={handleDrawerKeydown}
 >
   <div class="drawer-header">
     <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
@@ -137,7 +134,7 @@
       </svg>
     </button>
   </div>
-  <Nav currentRoute={$currentRoute} onnavigate={handleNavNavigate} />
+  <Nav currentRoute={$currentRoute} navLabel="Mobile navigation" onnavigate={closeDrawer} />
 </div>
 
 <!-- ── Main content ───────────────────────────────────────────── -->
