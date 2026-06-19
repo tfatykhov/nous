@@ -178,6 +178,116 @@ export interface HeartbeatData {
   };
 }
 
+// ── /dashboard/observability (F035) ───────────────────────────────────────
+
+/** Per-handler stats from EventBusStats.to_dict(). */
+export interface ObsHandlerStat {
+  invocations: number;
+  successes: number;
+  errors: number;
+  error_rate: number;
+  avg_duration_ms: number;
+  /** Seconds since last invocation — absent when never invoked. */
+  last_invoked_ago_s?: number;
+}
+
+export interface ObsEventBus {
+  total_processed: number;
+  total_dropped: number;
+  queue_depth: number;
+  uptime_seconds: number;
+  /** event_type → count */
+  event_counts: Record<string, number>;
+  /** handler fully-qualified name → stats */
+  handlers: Record<string, ObsHandlerStat>;
+}
+
+export interface ObsTrace {
+  trace_id: string;
+  root_type: string;
+  timestamp: string | null;
+  event_count: number;
+  has_modifications: boolean;
+}
+
+export interface ObsModification {
+  event_id: string;
+  type: string;
+  trace_id: string | null;
+  modifies: string | null;
+  timestamp: string | null;
+}
+
+export interface ObsAnomaly {
+  metric: string;
+  severity: string;
+  current: number;
+  direction: string;
+  mean: number;
+  stddev: number;
+}
+
+export interface ObsDriftMetrics {
+  fact_count?: number;
+  fact_count_delta?: number;
+  episode_count?: number;
+  active_censor_count?: number;
+  procedure_count?: number;
+  handler_error_rate?: number;
+}
+
+export interface ObsDrift {
+  timestamp: string;
+  metrics: ObsDriftMetrics;
+  anomalies: ObsAnomaly[];
+}
+
+/** {t: ISO string, v: number} data point for trend sparklines. */
+export interface ObsTrendPoint {
+  t: string;
+  v: number;
+}
+
+export interface ObsContextLogEntry {
+  id: string;
+  session_id: string;
+  turn_number: number | null;
+  timestamp: string;
+  call_type: string;
+  model: string;
+  frame_id: string;
+  trace_id: string | null;
+  /** section name → estimated token count */
+  token_breakdown: Record<string, number>;
+  total_tokens_est: number;
+  context_window_size: number;
+  utilization_pct: number;
+  sections_present: string[];
+  tools_count: number;
+  tool_names: string[];
+  messages_count: number;
+  loaded_facts: number;
+  loaded_decisions: number;
+  loaded_procedures?: number;
+  loaded_episodes?: number;
+  input_tokens_actual: number | null;
+  output_tokens: number | null;
+  /** cache_read_tokens from ContextLogEntry.to_dict() key is "cache_read" */
+  cache_read: number | null;
+  duration_ms: number | null;
+  stop_reason: string | null;
+}
+
+export interface ObservabilityData {
+  event_bus: ObsEventBus;
+  recent_traces: ObsTrace[];
+  recent_modifications: ObsModification[];
+  drift: ObsDrift | null;
+  /** metric key → array of {t, v} points */
+  drift_trends: Record<string, ObsTrendPoint[]>;
+  context_log: ObsContextLogEntry[];
+}
+
 // ── /dashboard/subtasks (F061) ─────────────────────────────────────────────
 
 export interface SubtaskTotals {
