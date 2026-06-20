@@ -1,3 +1,10 @@
+# --- Dashboard build stage (Svelte v2) ---
+FROM node:22-slim AS dashboard
+WORKDIR /build
+COPY dashboard-app/ ./dashboard-app/
+RUN cd dashboard-app && npm ci && npm run build
+# vite.config.ts outDir is ../static/dashboard-v2/dist => /build/static/dashboard-v2/dist
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -39,6 +46,8 @@ RUN pip install --no-cache-dir ".[runtime,agent,rerank]"
 
 COPY sql/ sql/
 COPY static/ static/
+# Built Svelte dashboard (from the dashboard build stage above)
+COPY --from=dashboard /build/static/dashboard-v2/dist ./static/dashboard-v2/dist
 
 # Install Claude Code globally (npm), then create claude-runner user with access to it.
 # runner.sh runs Claude Code as claude-runner to bypass root restriction on
