@@ -40,6 +40,56 @@
     }
   }
 
+  // ── Recent-call drill-down: structured section text + raw payload ──────────
+  // Lazy-loaded from /context/log/{id}/sections and /context/log/{id}/payload
+  // ONLY on button click (never during render). State keyed by entry id:
+  //   ctx*[id] === undefined → not fetched, === null → loading, else → loaded.
+  type CtxView = 'sections' | 'payload';
+  interface CtxSections {
+    sections: Record<string, number>;
+    sections_text: Record<string, string>;
+  }
+  let ctxView = $state<Record<string, CtxView>>({});
+  let ctxSections = $state<Record<string, CtxSections | null>>({});
+  let ctxPayload = $state<Record<string, unknown>>({});
+  let ctxError = $state<Record<string, string>>({});
+
+  async function viewSections(id: string) {
+    ctxError[id] = '';
+    ctxView[id] = 'sections';
+    if (ctxSections[id] === undefined) {
+      ctxSections[id] = null; // loading
+      try {
+        ctxSections[id] = await apiGet<CtxSections>(
+          '/context/log/' + encodeURIComponent(id) + '/sections',
+        );
+      } catch {
+        delete ctxSections[id];
+        ctxError[id] = 'Failed to load context text';
+      }
+    }
+  }
+
+  async function viewPayload(id: string) {
+    ctxError[id] = '';
+    ctxView[id] = 'payload';
+    if (ctxPayload[id] === undefined) {
+      ctxPayload[id] = null; // loading
+      try {
+        ctxPayload[id] = await apiGet<unknown>(
+          '/context/log/' + encodeURIComponent(id) + '/payload',
+        );
+      } catch {
+        delete ctxPayload[id];
+        ctxError[id] = 'Failed to load raw payload';
+      }
+    }
+  }
+
+  function hideCtx(id: string) {
+    delete ctxView[id];
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
 
   function fmtAgo(iso: string | null | undefined): string {
@@ -440,6 +490,55 @@
               {#if row.tool_names.length > 0}
                 <p class="ctx-tags">Tools: {row.tool_names.join(', ')}</p>
               {/if}
+
+              <!-- Structured section text + raw payload (lazy-loaded on click) -->
+              <div class="ctx-actions">
+                <button
+                  type="button"
+                  class="ctx-btn"
+                  class:active={ctxView[row.id] === 'sections'}
+                  onclick={() => viewSections(row.id)}
+                >View Context Text</button>
+                <button
+                  type="button"
+                  class="ctx-btn"
+                  class:active={ctxView[row.id] === 'payload'}
+                  onclick={() => viewPayload(row.id)}
+                >View Raw Payload</button>
+                {#if ctxView[row.id]}
+                  <button type="button" class="ctx-btn ghost" onclick={() => hideCtx(row.id)}>Hide</button>
+                {/if}
+              </div>
+              {#if ctxError[row.id]}
+                <p class="ctx-err">{ctxError[row.id]}</p>
+              {/if}
+
+              {#if ctxView[row.id] === 'sections'}
+                {#if ctxSections[row.id] === null}
+                  <p class="ctx-loading muted">Loading…</p>
+                {:else if ctxSections[row.id]}
+                  {@const sec = ctxSections[row.id]!}
+                  {#if Object.keys(sec.sections_text ?? {}).length > 0}
+                    {#each Object.keys(sec.sections_text) as name}
+                      <details class="ctx-section">
+                        <summary>
+                          <span class="ctx-section-name">{name}</span>
+                          <span class="muted">{fmtNum((sec.sections ?? {})[name] ?? 0)} tokens</span>
+                        </summary>
+                        <pre class="ctx-pre">{sec.sections_text[name]}</pre>
+                      </details>
+                    {/each}
+                  {:else}
+                    <p class="ctx-loading muted">No section text available</p>
+                  {/if}
+                {/if}
+              {:else if ctxView[row.id] === 'payload'}
+                {#if ctxPayload[row.id] === null}
+                  <p class="ctx-loading muted">Loading…</p>
+                {:else if ctxPayload[row.id] !== undefined}
+                  <pre class="ctx-pre ctx-payload">{JSON.stringify(ctxPayload[row.id], null, 2)}</pre>
+                {/if}
+              {/if}
             </div>
           {/snippet}
         </DataTable>
@@ -759,6 +858,55 @@
     margin: 0.25rem 0 0;
     line-height: 1.5;
   }
+
+  /* ── Recent-call drill-down (context text + raw payload) ── */
+  .ctx-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  .ctx-btn {
+    font-size: 0.6875rem;
+    padding: 0.25rem 0.75rem;
+    background: var(--surface-2, var(--border));
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    cursor: pointer;
+    min-height: 28px;
+  }
+  .ctx-btn:hover { border-color: var(--accent); }
+  .ctx-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .ctx-btn.ghost { background: transparent; color: var(--muted); }
+  .ctx-err { color: var(--red); font-size: 0.6875rem; margin: 0.5rem 0 0; }
+  .ctx-loading { font-size: 0.75rem; margin: 0.5rem 0 0; }
+  .ctx-section { margin-top: 0.5rem; }
+  .ctx-section > summary {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    font-size: 0.75rem;
+    padding: 0.25rem 0;
+  }
+  .ctx-section-name { font-weight: 600; color: #38bdf8; }
+  .ctx-pre {
+    max-height: 400px;
+    overflow: auto;
+    font-size: 0.6875rem;
+    line-height: 1.5;
+    padding: 0.5rem 0.75rem;
+    margin: 0.375rem 0 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text);
+    font-family: var(--font-mono, monospace);
+  }
+  .ctx-payload { max-height: 500px; }
 
   /* ── Shared ── */
   .muted { color: var(--muted); }
