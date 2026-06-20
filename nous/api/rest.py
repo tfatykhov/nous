@@ -30,7 +30,7 @@ Endpoints:
   GET  /dashboard/health  - Graph health trends (F021)
   GET  /dashboard/admission - Admission control analytics (F021.1)
   GET  /dashboard/admission/rejected - Paginated rejected facts (F021.1)
-  GET  /dashboard         - Static dashboard SPA (F021)
+  GET  /dashboard         - Redirects to /dashboard/v2/ (Svelte SPA, Phase 4 cutover)
 """
 
 from __future__ import annotations
@@ -45,9 +45,10 @@ from uuid import UUID, uuid4
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, StreamingResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from nous.api.models import Attachment
 from nous.api.runner import AgentRunner
@@ -2521,6 +2522,10 @@ def create_app(
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 
+    async def _dashboard_redirect(request: Request) -> RedirectResponse:
+        """Redirect bare /dashboard and /dashboard/ to the Svelte v2 app."""
+        return RedirectResponse(url="/dashboard/v2/")
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -2612,6 +2617,9 @@ def create_app(
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         Route("/dashboard/subtasks", dashboard_subtasks),
+        # NOTE: the bare /dashboard -> /dashboard/v2/ redirect is registered
+        # below, gated on the v2 build existing (so a source/pip install without
+        # `npm run build` does not redirect to a 404).
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
@@ -2625,29 +2633,56 @@ def create_app(
         Route("/behavior/drift-report", behavior_drift_report, methods=["GET"]),
     ]
 
-    # Static dashboard mount — only add if directory exists (avoids crash during tests)
-    # MUST be LAST in routes list (catch-all for /dashboard/*)
-    dashboard_dir = os.path.join(
+    # Hoisted unconditionally so the v2 static mount can use it even if
+    # the built directory does not yet exist at runtime.
+    # Correct MIME types for assets the browser is strict about. On Windows the
+    # stdlib `mimetypes` maps `.js` -> `text/plain` (registry-driven), and a
+    # browser REFUSES to execute an ES module (`<script type="module">`) unless
+    # it is served with a JavaScript MIME type. That silently breaks the Svelte
+    # v2 SPA (blank page, no console error). Linux prod maps `.js` correctly, but
+    # we force it here so serving is robust cross-platform.
+    _STATIC_MIME_OVERRIDES = {
+        ".js": "text/javascript; charset=utf-8",
+        ".mjs": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".json": "application/json",
+        ".map": "application/json",
+    }
+
+    class _NoCacheStaticFiles(StaticFiles):
+        """StaticFiles wrapper that (1) forces ETag re-validation on every
+        request and (2) corrects the Content-Type for module-script-critical
+        asset types. Every dashboard PR was hitting stale-bundle issues
+        because the default StaticFiles response has no Cache-Control
+        header — browsers cache aggressively via heuristic freshness.
+        ETag is already set, so re-validation is cheap (304 when
+        unchanged); we just need to tell the browser to revalidate."""
+
+        async def get_response(self, path: str, scope: Scope) -> Response:
+            response = await super().get_response(path, scope)
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+            _ext = os.path.splitext(path)[1].lower()
+            _mime = _STATIC_MIME_OVERRIDES.get(_ext)
+            if _mime is not None:
+                response.headers["Content-Type"] = _mime
+            return response
+
+    # Dashboard v2 (Svelte) — appended after the exact-match Route entries above.
+    dashboard_v2_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "static", "dashboard",
+        "static", "dashboard-v2", "dist",
     )
-    if os.path.isdir(dashboard_dir):
-        class _NoCacheStaticFiles(StaticFiles):
-            """StaticFiles wrapper that forces ETag re-validation on every
-            request. Every dashboard PR was hitting stale-bundle issues
-            because the default StaticFiles response has no Cache-Control
-            header — browsers cache aggressively via heuristic freshness.
-            ETag is already set, so re-validation is cheap (304 when
-            unchanged); we just need to tell the browser to revalidate."""
-
-            async def get_response(self, path, scope):
-                response = await super().get_response(path, scope)
-                response.headers["Cache-Control"] = "no-cache, must-revalidate"
-                return response
-
+    if os.path.isdir(dashboard_v2_dir):
         routes.append(
-            Mount("/dashboard", app=_NoCacheStaticFiles(directory=dashboard_dir, html=True)),
+            Mount("/dashboard/v2", app=_NoCacheStaticFiles(directory=dashboard_v2_dir, html=True)),
         )
+        # Redirect bare /dashboard and /dashboard/ to the Svelte v2 app — only
+        # when the build exists (otherwise /dashboard would redirect to a 404).
+        # Exact-match Routes, so they do NOT shadow /dashboard/graph etc.; both
+        # variants listed explicitly to avoid auto-slash-redirect ambiguity.
+        routes.append(Route("/dashboard", _dashboard_redirect))
+        routes.append(Route("/dashboard/", _dashboard_redirect))
 
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:

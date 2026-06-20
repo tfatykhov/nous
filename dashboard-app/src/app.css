@@ -1,0 +1,159 @@
+/* Google Fonts must precede @import tailwindcss */
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+/* ============================================================
+   Nous Dashboard – Dark Token Set
+   Ported from static/dashboard/css/dashboard.css
+   ============================================================ */
+
+@layer base {
+  :root {
+    /* --- Nous dark palette --- */
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface-hover: #181824;
+    --border: #1e1e2e;
+    --accent: #7c6af7;
+    --accent-dim: #4f46a8;
+    --accent-glow: rgba(124, 106, 247, 0.15);
+    --text: #e2e2f0;
+    --muted: #6b6b8a;
+
+    /* Status / type colours */
+    --green: #34d399;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --fact-color: #60a5fa;
+    --episode-color: #34d399;
+    --decision-color: #a78bfa;
+    --procedure-color: #fb923c;
+    --censor-color: #f87171;
+    --heartbeat-color: #22d3ee;
+    --chunk-color: #06b6d4;
+
+    /* Layout */
+    --sidebar-width: 220px;
+    --sidebar-collapsed: 56px;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --transition: 0.2s ease;
+
+    /* Fonts */
+    --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+
+    /* ---- shadcn-svelte CSS variable contract ----
+       Map Nous tokens → shadcn semantic names so components
+       (Button, Card, Dialog, etc.) render correctly in dark mode.
+    ------------------------------------------------ */
+    --background: 222 13% 6%;          /* #0a0a0f */
+    --foreground: 240 33% 92%;         /* #e2e2f0 */
+
+    --card: 240 17% 8%;                /* #12121a */
+    --card-foreground: 240 33% 92%;
+
+    --popover: 240 17% 8%;
+    --popover-foreground: 240 33% 92%;
+
+    --primary: 249 89% 63%;            /* #7c6af7 */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 240 16% 11%;          /* #181824 */
+    --secondary-foreground: 240 33% 92%;
+
+    --muted-token: 240 13% 47%;        /* #6b6b8a  (--muted is taken as a raw hex above) */
+    --muted-foreground: 240 13% 47%;
+
+    --accent-token: 249 89% 63%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 91% 71%;          /* #f87171 */
+    --destructive-foreground: 0 0% 100%;
+
+    --border-token: 237 25% 14%;       /* #1e1e2e */
+    --input: 237 25% 14%;
+    --ring: 249 89% 63%;               /* accent */
+
+    --radius-tw: 0.75rem;              /* 12px = var(--radius) */
+  }
+}
+
+/* ============================================================
+   Tailwind v4 theme extension – expose Nous tokens as
+   utilities so components can use e.g. bg-nous-bg, text-muted
+   ============================================================ */
+@theme {
+  --color-nous-bg:        #0a0a0f;
+  --color-nous-surface:   #12121a;
+  --color-nous-surface-hover: #181824;
+  --color-nous-border:    #1e1e2e;
+  --color-nous-accent:    #7c6af7;
+  --color-nous-accent-dim:#4f46a8;
+  --color-nous-text:      #e2e2f0;
+  --color-nous-muted:     #6b6b8a;
+  --color-nous-green:     #34d399;
+  --color-nous-red:       #f87171;
+  --color-nous-yellow:    #fbbf24;
+  --color-nous-fact:      #60a5fa;
+  --color-nous-episode:   #34d399;
+  --color-nous-decision:  #a78bfa;
+  --color-nous-procedure: #fb923c;
+  --color-nous-censor:    #f87171;
+  --color-nous-heartbeat: #22d3ee;
+  --color-nous-chunk:     #06b6d4;
+
+  --font-ui:   'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+
+  --radius-nous: 12px;
+  --radius-nous-sm: 8px;
+}
+
+/* ============================================================
+   Base resets & body defaults
+   ============================================================ */
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html {
+    height: 100%;
+    color-scheme: dark;
+  }
+
+  body {
+    height: 100%;
+    font-family: var(--font-ui);
+    background: var(--bg);
+    background-image: radial-gradient(
+      ellipse at 50% 0%,
+      rgba(124, 106, 247, 0.03) 0%,
+      transparent 60%
+    );
+    color: var(--text);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* Screen-reader only utility */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}
