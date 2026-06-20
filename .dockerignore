@@ -9,3 +9,15 @@
 # sibling directory; this ignore pattern is belt-and-braces for any future
 # Dockerfile that uses a broader COPY . . pattern.
 /nous_eval/
+
+# Dashboard v2 (Svelte): node_modules is reinstalled by `npm ci` in the
+# Dockerfile's dashboard build stage — never ship the host copy (~170MB).
+# dist is a build artifact produced inside the image, not from the host.
+dashboard-app/node_modules/
+static/dashboard-v2/dist/
+
+# Build-context bloat that no Dockerfile COPYs — excluded to speed builds.
+.git/
+.venv/
+**/__pycache__/
+tools/beam/.venv/
