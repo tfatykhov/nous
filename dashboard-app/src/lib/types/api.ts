@@ -562,8 +562,8 @@ export interface BrowserFact {
 export interface FactsResponse {
   facts: BrowserFact[];
   total: number;
-  limit: number;
-  offset: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface BrowserEpisode {
@@ -595,11 +595,15 @@ export interface BrowserDecision {
   stakes: string;
   confidence: number;
   outcome: string;
-  context: string | null;
   pattern: string | null;
   tags: string[];
-  reasons: Array<{ type?: string; text?: string; content?: string }>;
   created_at: string;
+}
+
+/** Full decision returned by GET /decisions/{id}. */
+export interface DecisionDetail extends BrowserDecision {
+  context: string | null;
+  reasons: Array<{ type?: string; text?: string; content?: string }>;
 }
 
 export interface DecisionsResponse {
@@ -609,20 +613,17 @@ export interface DecisionsResponse {
   offset: number;
 }
 
+/** Matches ProcedureSummary returned by GET /procedures. */
 export interface BrowserProcedure {
   id: string;
   name: string;
   domain: string | null;
   description: string | null;
-  goals: string[];
   core_patterns: string[];
-  core_tools: string[];
+  implementation_notes: string[];
   activation_count: number;
   effectiveness: number | null;
-  last_activated: string | null;
-  success_rate: number | null;
-  active: boolean;
-  created_at: string;
+  score: number | null;
 }
 
 export interface ProceduresResponse {

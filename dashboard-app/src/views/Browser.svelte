@@ -11,6 +11,7 @@
     BrowserFact,
     BrowserEpisode,
     BrowserDecision,
+    DecisionDetail,
     BrowserProcedure,
     BrowserCensor,
     BrowserChunk,
@@ -161,6 +162,22 @@
     const currentPage = Math.floor(off / PAGE_SIZE) + 1;
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
     return { currentPage, totalPages };
+  }
+
+  // ── Decision detail lazy-load ─────────────────────────────────────────────
+
+  // Cache: decision id → fetched detail (null while loading, DecisionDetail when done)
+  let decisionDetails = $state<Record<string, DecisionDetail | null>>({});
+
+  async function loadDecisionDetail(id: string) {
+    if (id in decisionDetails) return; // already fetched or in-flight
+    decisionDetails[id] = null; // mark in-flight
+    try {
+      const detail = await apiGet<DecisionDetail>(`/decisions/${id}`);
+      decisionDetails[id] = detail;
+    } catch {
+      // leave null; detail panel gracefully shows nothing for missing fields
+    }
   }
 
   // ── Censors write interaction ─────────────────────────────────────────────
@@ -387,17 +404,23 @@
           rowKey={(r: BrowserDecision) => r.id}
         >
           {#snippet detail(row: BrowserDecision)}
+            {@const _ = loadDecisionDetail(row.id)}
+            {@const det = decisionDetails[row.id]}
             <div class="detail-grid">
               <span class="dl">Description</span><span>{row.description}</span>
               <span class="dl">Category</span><span>{row.category}</span>
               <span class="dl">Stakes</span><span>{row.stakes}</span>
               <span class="dl">Confidence</span><span>{fmtPct(row.confidence)}</span>
               <span class="dl">Outcome</span><span>{row.outcome}</span>
-              {#if row.context}<span class="dl">Context</span><span>{row.context}</span>{/if}
               {#if row.pattern}<span class="dl">Pattern</span><span>{row.pattern}</span>{/if}
-              {#if row.reasons?.length}
-                <span class="dl">Reasons</span>
-                <span>{row.reasons.map((r) => (r.type ?? 'reason') + ': ' + (r.text ?? r.content ?? '')).join('; ')}</span>
+              {#if det}
+                {#if det.context}<span class="dl">Context</span><span>{det.context}</span>{/if}
+                {#if det.reasons?.length}
+                  <span class="dl">Reasons</span>
+                  <span>{det.reasons.map((r) => (r.type ?? 'reason') + ': ' + (r.text ?? r.content ?? '')).join('; ')}</span>
+                {/if}
+              {:else if !(row.id in decisionDetails)}
+                <span class="dl">Detail</span><span class="muted-text">Loading…</span>
               {/if}
               <span class="dl">ID</span><span class="mono">{row.id}</span>
             </div>
@@ -442,13 +465,11 @@
             { key: 'domain',     label: 'Domain' },
             { key: 'activation_count', label: 'Activations' },
             { key: 'eff_fmt',    label: 'Effectiveness' },
-            { key: 'last_fmt',   label: 'Last Activated' },
           ]}
           rows={dataProcedures.procedures.map((p: BrowserProcedure) => ({
             ...p,
             name_short: trunc(p.name, 40),
             eff_fmt:    fmtPct(p.effectiveness),
-            last_fmt:   fmtDate(p.last_activated),
           }))}
           rowKey={(r: BrowserProcedure) => r.id}
         >
@@ -457,9 +478,9 @@
               <span class="dl">Name</span><span>{row.name}</span>
               <span class="dl">Domain</span><span>{row.domain ?? '—'}</span>
               {#if row.description}<span class="dl">Description</span><span>{row.description}</span>{/if}
-              {#if row.goals?.length}<span class="dl">Goals</span><span>{row.goals.join('; ')}</span>{/if}
               {#if row.core_patterns?.length}<span class="dl">Patterns</span><span>{row.core_patterns.join('; ')}</span>{/if}
-              {#if row.core_tools?.length}<span class="dl">Tools</span><span>{row.core_tools.join(', ')}</span>{/if}
+              {#if row.implementation_notes?.length}<span class="dl">Notes</span><span>{row.implementation_notes.join('; ')}</span>{/if}
+              <span class="dl">Activations</span><span>{row.activation_count}</span>
             </div>
           {/snippet}
         </DataTable>
@@ -793,6 +814,10 @@
   :global(.mono) {
     font-family: monospace;
     font-size: 0.75rem;
+  }
+
+  :global(.muted-text) {
+    color: var(--muted);
   }
 
   /* ── Censor write controls ── */
