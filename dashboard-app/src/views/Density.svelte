@@ -9,7 +9,7 @@
   const store = usePoll(
     makePollStore<DensityData>(
       (signal) => apiGet<DensityData>('/dashboard/density', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 

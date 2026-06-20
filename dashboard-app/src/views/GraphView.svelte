@@ -11,7 +11,7 @@
   const store = usePoll(
     makePollStore<GraphData>(
       (signal) => apiGet<GraphData>('/dashboard/graph?limit=500', { signal }),
-      Number.MAX_SAFE_INTEGER, // load-once; user-triggered refresh only
+      0, // fetch-once; user-triggered refresh only
     ),
   );
 

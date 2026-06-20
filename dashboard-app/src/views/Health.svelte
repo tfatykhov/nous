@@ -11,7 +11,7 @@
   const store = usePoll(
     makePollStore<HealthData>(
       (signal) => apiGet<HealthData>('/dashboard/health?days=30', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 

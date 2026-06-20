@@ -40,6 +40,22 @@ describe('makePollStore', () => {
     s.stop();
   });
 
+  it('fetch-once mode (interval <= 0) does not reschedule', async () => {
+    const fetcher = vi.fn(async () => ({ n: 1 }));
+    const s = makePollStore(fetcher, 0);
+    s.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // advance well past any 32-bit-clamped delay window — must NOT re-fetch
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // manual refresh still works
+    await s.refresh();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    s.stop();
+  });
+
   it('aborts the in-flight fetch on stop()', async () => {
     let seenSignal: AbortSignal | undefined;
     const fetcher = vi.fn((signal?: AbortSignal) => {

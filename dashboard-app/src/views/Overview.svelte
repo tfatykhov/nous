@@ -12,7 +12,7 @@
   const store = usePoll(
     makePollStore<StatusData>(
       (signal) => apiGet<StatusData>('/status?dashboard=true', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 

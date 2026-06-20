@@ -10,7 +10,7 @@
   const store = usePoll(
     makePollStore<ActivityData>(
       (signal) => apiGet<ActivityData>('/dashboard/activity?hours=168', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 

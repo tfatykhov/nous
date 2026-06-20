@@ -11,7 +11,7 @@
   const store = usePoll(
     makePollStore<RubricData>(
       (signal) => apiGet<RubricData>('/dashboard/rubric', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 

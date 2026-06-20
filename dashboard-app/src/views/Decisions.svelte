@@ -11,7 +11,7 @@
   const store = usePoll(
     makePollStore<CalibrationData>(
       (signal) => apiGet<CalibrationData>('/dashboard/calibration', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 

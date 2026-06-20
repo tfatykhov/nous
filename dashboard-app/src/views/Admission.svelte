@@ -12,7 +12,7 @@
   const store = usePoll(
     makePollStore<AdmissionData>(
       (signal) => apiGet<AdmissionData>('/dashboard/admission', { signal }),
-      Number.MAX_SAFE_INTEGER,
+      0, // fetch-once (manual refresh only)
     ),
   );
 
