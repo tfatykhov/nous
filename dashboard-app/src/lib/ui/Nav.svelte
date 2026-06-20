@@ -96,7 +96,7 @@
 <nav aria-label={navLabel}>
   {#each NAV_ITEMS as item (item.id)}
     <a
-      href="#{item.id}"
+      href="#/{item.id}"
       class="nav-link"
       class:active={currentRoute === item.id}
       aria-label={item.label}
