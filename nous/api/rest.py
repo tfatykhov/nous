@@ -30,7 +30,7 @@ Endpoints:
   GET  /dashboard/health  - Graph health trends (F021)
   GET  /dashboard/admission - Admission control analytics (F021.1)
   GET  /dashboard/admission/rejected - Paginated rejected facts (F021.1)
-  GET  /dashboard         - Static dashboard SPA (F021)
+  GET  /dashboard         - Redirects to /dashboard/v2/ (Svelte SPA, Phase 4 cutover)
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from uuid import UUID, uuid4
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
@@ -2522,6 +2522,10 @@ def create_app(
             report = "\n".join(lines)
         return JSONResponse({"report": report, "anomalies": anomalies, "snapshot_time": row.timestamp.isoformat()})
 
+    async def _dashboard_redirect(request: Request) -> RedirectResponse:
+        """Redirect bare /dashboard and /dashboard/ to the Svelte v2 app."""
+        return RedirectResponse(url="/dashboard/v2/")
+
     routes = [
         Route("/chat", chat, methods=["POST"]),
         Route("/chat/stream", chat_stream, methods=["POST"]),
@@ -2613,6 +2617,11 @@ def create_app(
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         Route("/dashboard/subtasks", dashboard_subtasks),
+        # Phase 4 cutover: redirect bare /dashboard and /dashboard/ to the Svelte v2 app.
+        # These are exact-match Routes, so they do NOT shadow /dashboard/graph etc.
+        # Both variants are listed explicitly to avoid auto-slash-redirect ambiguity.
+        Route("/dashboard", _dashboard_redirect),
+        Route("/dashboard/", _dashboard_redirect),
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
@@ -2626,8 +2635,8 @@ def create_app(
         Route("/behavior/drift-report", behavior_drift_report, methods=["GET"]),
     ]
 
-    # Hoisted unconditionally so both v2 and legacy mounts can use it even if
-    # only one of the two static directories exists at runtime.
+    # Hoisted unconditionally so the v2 static mount can use it even if
+    # the built directory does not yet exist at runtime.
     # Correct MIME types for assets the browser is strict about. On Windows the
     # stdlib `mimetypes` maps `.js` -> `text/plain` (registry-driven), and a
     # browser REFUSES to execute an ES module (`<script type="module">`) unless
@@ -2661,7 +2670,7 @@ def create_app(
                 response.headers["Content-Type"] = _mime
             return response
 
-    # Dashboard v2 (Svelte) — registered BEFORE the catch-all /dashboard mount.
+    # Dashboard v2 (Svelte) — appended after the exact-match Route entries above.
     dashboard_v2_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
         "static", "dashboard-v2", "dist",
@@ -2669,17 +2678,6 @@ def create_app(
     if os.path.isdir(dashboard_v2_dir):
         routes.append(
             Mount("/dashboard/v2", app=_NoCacheStaticFiles(directory=dashboard_v2_dir, html=True)),
-        )
-
-    # Static legacy dashboard mount — only add if directory exists (avoids crash during tests)
-    # MUST be LAST in routes list (catch-all for /dashboard/*)
-    dashboard_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-        "static", "dashboard",
-    )
-    if os.path.isdir(dashboard_dir):
-        routes.append(
-            Mount("/dashboard", app=_NoCacheStaticFiles(directory=dashboard_dir, html=True)),
         )
 
     kwargs: dict[str, Any] = {"routes": routes}

@@ -549,6 +549,10 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_FOLLOWUP_FIRST_TURN_EPISODE` | `false` | F083 A2 (**land-dark**, pending local A/B). When true, on a verified first turn of a new session the temporal tier injects the most-recent episode's FULL `structured_summary.summary` (+ `open_threads`, truncated to `recall_parent_episode_truncate`) instead of titles-only. First-turn signal = `session_id not in _active_episodes` (survives LRU eviction). |
 | `NOUS_EPISODE_OPEN_THREADS` | `false` | F083 B (**land-dark**, pending local A/B). When true, the episode summarizer extracts a top-level `open_threads` array (unfinished items / next steps) into `structured_summary`; raises summary `max_tokens` to 3000 so the extra field doesn't truncate the JSON. Consumed by A2. |
 
+### Dashboard (Svelte v2)
+
+The dashboard is a Svelte SPA under `dashboard-app/`. Build with `cd dashboard-app && npm run build` (or via the Docker `dashboard` build stage); output lands in `static/dashboard-v2/dist/` and is served at `/dashboard/v2/`. Visiting `/dashboard` or `/dashboard/` redirects there. The legacy vanilla-JS dashboard (`static/dashboard/js/`, `css/`, `index.html`) was retired 2026-06-19.
+
 ### REST Endpoints
 
 | Method | Path | Description |
