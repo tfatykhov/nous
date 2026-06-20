@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
-  import { apiGet } from '../lib/api';
+  import { apiGet, type ApiError } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import type { ObservabilityData, ObsContextLogEntry } from '../lib/types/api';
@@ -63,9 +63,12 @@
         ctxSections[id] = await apiGet<CtxSections>(
           '/context/log/' + encodeURIComponent(id) + '/sections',
         );
-      } catch {
+      } catch (e) {
         delete ctxSections[id];
-        ctxError[id] = 'Failed to load context text';
+        ctxError[id] =
+          (e as ApiError).status === 404
+            ? 'Context text not available (entry expired or capture disabled).'
+            : 'Failed to load context text';
       }
     }
   }
@@ -79,9 +82,12 @@
         ctxPayload[id] = await apiGet<unknown>(
           '/context/log/' + encodeURIComponent(id) + '/payload',
         );
-      } catch {
+      } catch (e) {
         delete ctxPayload[id];
-        ctxError[id] = 'Failed to load raw payload';
+        ctxError[id] =
+          (e as ApiError).status === 404
+            ? 'Raw payload was not captured (full-payload capture disabled or evicted).'
+            : 'Failed to load raw payload';
       }
     }
   }

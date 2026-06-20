@@ -19,6 +19,15 @@ describe('apiGet', () => {
     expect(f).toHaveBeenCalledTimes(2);
   });
 
+  it('does NOT retry a 4xx and exposes the status', async () => {
+    const f = vi.fn(async () => new Response('', { status: 404 }));
+    vi.stubGlobal('fetch', f);
+    await expect(apiGet('/context/log/x/payload', { retries: 3, backoffMs: 1 })).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(f).toHaveBeenCalledTimes(1); // definitive — no retries
+  });
+
   it('honors an AbortSignal', async () => {
     const ac = new AbortController(); ac.abort();
     vi.stubGlobal('fetch', vi.fn(async (_u, o) => {
