@@ -46,7 +46,10 @@ export function makePollStore<T>(
   }
 
   async function tick() {
-    if (inFlight) { schedule(); return; }
+    // A tick fired (or refresh() was called) while a request is still in
+    // flight. Do NOT schedule here — the in-flight tick's `finally` will
+    // reschedule. Scheduling here too would stack duplicate timers.
+    if (inFlight) return;
     inFlight = true;
     ac = new AbortController();
     update((s) => ({ ...s, loading: true }));

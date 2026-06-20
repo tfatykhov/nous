@@ -2617,11 +2617,9 @@ def create_app(
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         Route("/dashboard/subtasks", dashboard_subtasks),
-        # Phase 4 cutover: redirect bare /dashboard and /dashboard/ to the Svelte v2 app.
-        # These are exact-match Routes, so they do NOT shadow /dashboard/graph etc.
-        # Both variants are listed explicitly to avoid auto-slash-redirect ambiguity.
-        Route("/dashboard", _dashboard_redirect),
-        Route("/dashboard/", _dashboard_redirect),
+        # NOTE: the bare /dashboard -> /dashboard/v2/ redirect is registered
+        # below, gated on the v2 build existing (so a source/pip install without
+        # `npm run build` does not redirect to a 404).
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
@@ -2679,6 +2677,12 @@ def create_app(
         routes.append(
             Mount("/dashboard/v2", app=_NoCacheStaticFiles(directory=dashboard_v2_dir, html=True)),
         )
+        # Redirect bare /dashboard and /dashboard/ to the Svelte v2 app — only
+        # when the build exists (otherwise /dashboard would redirect to a 404).
+        # Exact-match Routes, so they do NOT shadow /dashboard/graph etc.; both
+        # variants listed explicitly to avoid auto-slash-redirect ambiguity.
+        routes.append(Route("/dashboard", _dashboard_redirect))
+        routes.append(Route("/dashboard/", _dashboard_redirect))
 
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:

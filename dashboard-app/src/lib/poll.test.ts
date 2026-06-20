@@ -56,6 +56,23 @@ describe('makePollStore', () => {
     s.stop();
   });
 
+  it('does not stack duplicate timers when refresh races an in-flight poll', async () => {
+    let resolve: ((v: unknown) => void) | null = null;
+    let calls = 0;
+    const fetcher = vi.fn(() => { calls++; return new Promise((r) => { resolve = r; }); });
+    const s = makePollStore(fetcher as any, 1000);
+    s.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(1);                 // tick1 in flight
+    void s.refresh();                      // races in-flight -> early return, no extra fetch/timer
+    expect(calls).toBe(1);
+    resolve!({ n: 1 });                    // tick1 settles -> finally schedules exactly ONE timer
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toBe(2);                 // one timer fired, not two+ (no duplicate)
+    s.stop();
+  });
+
   it('aborts the in-flight fetch on stop()', async () => {
     let seenSignal: AbortSignal | undefined;
     const fetcher = vi.fn((signal?: AbortSignal) => {
