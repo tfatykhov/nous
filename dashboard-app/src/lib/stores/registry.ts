@@ -41,6 +41,10 @@ export function makePollStore<T>(
   let ac: AbortController | null = null;
 
   function schedule() {
+    // Clear any existing timer before arming a new one so that calling
+    // refresh() while a poll timer is already armed doesn't leak the old handle
+    // and cause duplicate recurring polls.
+    if (timer) { clearTimeout(timer); timer = null; }
     // intervalMs <= 0 => fetch-once: do not reschedule after the initial tick.
     if (!stopped && intervalMs > 0) timer = setTimeout(() => void tick(), intervalMs);
   }

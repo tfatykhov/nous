@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
   import type {
@@ -135,8 +136,10 @@
     if (tab === 'chunks'     && !dataChunks     && !loadingChunks)     loadChunks();
   }
 
-  // Load initial tab on mount
-  $effect(() => { loadFacts(); });
+  // Load initial tab on mount — onMount avoids subscribing to search/offset $state
+  // and re-firing on every keystroke. Subsequent fetches go through the explicit
+  // Search / Previous / Next handlers.
+  onMount(() => { loadFacts(); });
 
   // ── Formatters ────────────────────────────────────────────────────────────
 
@@ -402,9 +405,9 @@
             created_fmt: fmtDate(dec.created_at),
           }))}
           rowKey={(r: BrowserDecision) => r.id}
+          onrowclick={(row: BrowserDecision) => loadDecisionDetail(row.id)}
         >
           {#snippet detail(row: BrowserDecision)}
-            {@const _ = loadDecisionDetail(row.id)}
             {@const det = decisionDetails[row.id]}
             <div class="detail-grid">
               <span class="dl">Description</span><span>{row.description}</span>
@@ -526,16 +529,14 @@
             { key: 'activation_count', label: 'Activations' },
             { key: 'active_fmt',    label: 'Active' },
           ]}
-          rows={dataCensors.censors.map((c: BrowserCensor) => {
-            initCensorEdit(c);
-            return {
-              ...c,
-              trigger_short: trunc(c.trigger_pattern, 60),
-              reason_short:  trunc(c.reason, 60),
-              active_fmt:    c.active ? 'Yes' : 'No',
-            };
-          })}
+          rows={dataCensors.censors.map((c: BrowserCensor) => ({
+            ...c,
+            trigger_short: trunc(c.trigger_pattern, 60),
+            reason_short:  trunc(c.reason, 60),
+            active_fmt:    c.active ? 'Yes' : 'No',
+          }))}
           rowKey={(r: BrowserCensor) => r.id}
+          onrowclick={(row: BrowserCensor) => initCensorEdit(row)}
         >
           {#snippet detail(row: BrowserCensor)}
             <div class="detail-grid">
@@ -558,14 +559,28 @@
             >
               <label class="censor-label">
                 Severity
-                <select class="censor-select" bind:value={censorEdits[row.id].action}>
+                <select
+                  class="censor-select"
+                  value={censorEdits[row.id]?.action ?? row.action}
+                  onchange={(e) => {
+                    if (!censorEdits[row.id]) censorEdits[row.id] = { action: row.action, active: row.active };
+                    censorEdits[row.id].action = (e.currentTarget as HTMLSelectElement).value;
+                  }}
+                >
                   <option value="steer">steer</option>
                   <option value="refuse">refuse</option>
                   <option value="abort">abort</option>
                 </select>
               </label>
               <label class="censor-label">
-                <input type="checkbox" bind:checked={censorEdits[row.id].active} />
+                <input
+                  type="checkbox"
+                  checked={censorEdits[row.id]?.active ?? row.active}
+                  onchange={(e) => {
+                    if (!censorEdits[row.id]) censorEdits[row.id] = { action: row.action, active: row.active };
+                    censorEdits[row.id].active = (e.currentTarget as HTMLInputElement).checked;
+                  }}
+                />
                 Active
               </label>
               <button

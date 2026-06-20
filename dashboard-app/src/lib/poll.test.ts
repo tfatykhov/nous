@@ -73,6 +73,22 @@ describe('makePollStore', () => {
     s.stop();
   });
 
+  it('refresh() while a poll timer is armed does NOT cause double-polling', async () => {
+    let calls = 0;
+    const fetcher = vi.fn(async () => { calls++; return { n: calls }; });
+    const s = makePollStore(fetcher, 1000);
+    s.start();
+    await vi.advanceTimersByTimeAsync(0);   // initial fetch settles, one timer armed
+    expect(calls).toBe(1);
+    // Call refresh while the recurring timer is still armed
+    await s.refresh();                      // finishes synchronously (fake timers), arms NEW timer
+    expect(calls).toBe(2);
+    // Advance exactly one interval — only one timer should fire (not two)
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toBe(3);                  // exactly one more, not 4 (which two timers would give)
+    s.stop();
+  });
+
   it('aborts the in-flight fetch on stop()', async () => {
     let seenSignal: AbortSignal | undefined;
     const fetcher = vi.fn((signal?: AbortSignal) => {

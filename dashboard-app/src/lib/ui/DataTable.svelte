@@ -9,18 +9,22 @@
     mode = 'scroll',
     rowKey = (r: any, i: number) => String(i),
     detail,
+    onrowclick,
   }: {
     columns: Col[];
     rows: any[];
     mode?: 'scroll' | 'cards';
     rowKey?: (r: any, i: number) => string;
     detail?: Snippet<[any]>;
+    /** Called when a row is clicked (toggled), with the row value. */
+    onrowclick?: (row: any) => void;
   } = $props();
 
   let expanded = $state<Record<string, boolean>>({});
 
-  const toggle = (k: string) => {
+  const toggle = (k: string, row: any) => {
     expanded[k] = !expanded[k];
+    onrowclick?.(row);
   };
 </script>
 
@@ -36,7 +40,7 @@
     <tbody>
       {#each rows as row, i (rowKey(row, i))}
         <tr
-          onclick={() => toggle(rowKey(row, i))}
+          onclick={() => toggle(rowKey(row, i), row)}
           class:expanded={expanded[rowKey(row, i)]}
         >
           {#each columns as c}
