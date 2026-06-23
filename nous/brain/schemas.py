@@ -98,6 +98,7 @@ class DecisionSummary(BaseModel):
     tags: list[str] = []
     score: float | None = None  # Relevance score from search
     reviewed_at: datetime | None = None
+    superseded_by: UUID | None = None
     created_at: datetime
 
 

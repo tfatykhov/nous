@@ -138,12 +138,20 @@ class TestResolveDecision:
     """Test the resolve_decision / resolve_decisions / list_decisions tools."""
 
     async def _make_decision(self, tools, brain) -> str:
-        await tools["record_decision"](
-            description="Decision to resolve in tool test",
-            confidence=0.7, category="tooling", stakes="low",
-        )
-        decisions, _ = await brain.list_decisions(limit=1)
-        return str(decisions[0].id)
+        """Record a decision and return its UUID string.
+
+        Uses brain.record() to get the ID directly, avoiding the
+        fragile list_decisions(limit=1) pattern which is ambiguous when
+        multiple decisions share the same created_at timestamp (SQLite).
+        """
+        from nous.brain.schemas import RecordInput
+        detail = await brain.record(RecordInput(
+            description=f"Decision to resolve in tool test {uuid.uuid4()}",
+            confidence=0.7,
+            category="tooling",
+            stakes="low",
+        ))
+        return str(detail.id)
 
     @pytest.mark.asyncio
     async def test_resolve_decision_success(self, tools, brain):
@@ -182,6 +190,33 @@ class TestResolveDecision:
         text = result["content"][0]["text"]
         assert "Resolved 1/2" in text
         assert "Failures" in text
+
+    @pytest.mark.asyncio
+    async def test_list_decisions_returns_pending(self, tools, brain):
+        """list_decisions with outcome='pending' returns newly recorded decision."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["list_decisions"](outcome="pending", limit=50)
+        text = result["content"][0]["text"]
+        assert did in text
+
+    @pytest.mark.asyncio
+    async def test_superseded_by_roundtrip_via_tool(self, tools, brain):
+        """resolve_decision with outcome=superseded preserves superseded_by on the summary."""
+        old_id = await self._make_decision(tools, brain)
+        new_id = await self._make_decision(tools, brain)
+        await tools["resolve_decision"](
+            decision_id=old_id,
+            outcome="superseded",
+            superseded_by=new_id,
+        )
+        detail = await brain.get(uuid.UUID(old_id))
+        assert detail.outcome == "superseded"
+        assert str(detail.superseded_by) == new_id
+        # superseded_by propagates to DecisionSummary via list_decisions
+        decisions, _ = await brain.list_decisions(outcome="superseded", limit=10)
+        match = next((d for d in decisions if str(d.id) == old_id), None)
+        assert match is not None
+        assert str(match.superseded_by) == new_id
 
 
 # ---------------------------------------------------------------------------
