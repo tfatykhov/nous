@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 # Type aliases using Literal for compile-time validation
 CategoryType = Literal["architecture", "process", "tooling", "security", "integration"]
 StakesType = Literal["low", "medium", "high", "critical"]
-OutcomeType = Literal["pending", "success", "partial", "failure"]
+OutcomeType = Literal["pending", "success", "partial", "failure", "noise", "superseded"]
 RelationType = Literal[
     "supports", "contradicts", "supersedes", "related_to", "caused_by",
     "informed_by", "evidence_for", "discussed_in", "extracted_from",
@@ -56,11 +56,18 @@ class RecordInput(BaseModel):
 
 
 class ReviewInput(BaseModel):
-    """Input for brain.review(). Validates outcome to prevent opaque DB errors."""
+    """Input for brain.review(). Validates outcome to prevent opaque DB errors.
 
-    outcome: Literal["success", "partial", "failure"]
+    ``noise`` and ``superseded`` are non-prediction resolutions (a sweep artifact
+    and a replaced decision, respectively). They are excluded from the
+    Brier/ECE denominator in ``calibration.py``. ``pending`` is intentionally
+    not accepted: review() resolves a decision, it does not un-resolve one.
+    """
+
+    outcome: Literal["success", "partial", "failure", "noise", "superseded"]
     result: str | None = None
     reviewer: str | None = None
+    superseded_by: UUID | None = None
 
 
 class BridgeInfo(BaseModel):
@@ -110,6 +117,7 @@ class DecisionDetail(BaseModel):
     outcome_result: str | None = None
     reviewed_at: datetime | None = None
     reviewer: str | None = None
+    superseded_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
     tags: list[str] = []

@@ -134,9 +134,10 @@ CREATE TABLE brain.decisions (
     category VARCHAR(50) NOT NULL CHECK (category IN ('architecture', 'process', 'tooling', 'security', 'integration')),
     stakes VARCHAR(20) NOT NULL CHECK (stakes IN ('low', 'medium', 'high', 'critical')),
     quality_score FLOAT,
-    outcome VARCHAR(20) DEFAULT 'pending' CHECK (outcome IN ('pending', 'success', 'partial', 'failure')),
+    outcome VARCHAR(20) DEFAULT 'pending' CHECK (outcome IN ('pending', 'success', 'partial', 'failure', 'noise', 'superseded')),
     outcome_result TEXT,
     reviewed_at TIMESTAMPTZ,
+    superseded_by UUID REFERENCES brain.decisions(id),
     embedding vector(1536),
     search_tsv tsvector GENERATED ALWAYS AS (
         to_tsvector('english', COALESCE(description, '') || ' ' || COALESCE(context, '') || ' ' || COALESCE(pattern, ''))

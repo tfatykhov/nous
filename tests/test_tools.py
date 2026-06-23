@@ -9,15 +9,16 @@ unknown tool handling, error propagation, tool definitions output,
 and frame-gated tool filtering.
 """
 
-import pytest
-import pytest_asyncio
+import uuid
 from unittest.mock import AsyncMock
 
-from nous.api.tools import create_nous_tools, ToolDispatcher
+import pytest
+import pytest_asyncio
+
+from nous.api.tools import ToolDispatcher, create_nous_tools
 from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.heart import Heart
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -60,6 +61,9 @@ class TestCreateNousTools:
             "get_procedure",
             "recall_hubs",  # F065
             "ingest_document",  # F069
+            "resolve_decision",
+            "resolve_decisions",
+            "list_decisions",
         }
         for name, func in tools.items():
             assert callable(func), f"{name} should be callable"
@@ -128,6 +132,56 @@ class TestRecordDecision:
         assert "content" in result
         text = result["content"][0]["text"]
         assert "Error" in text or "error" in text.lower()
+
+
+class TestResolveDecision:
+    """Test the resolve_decision / resolve_decisions / list_decisions tools."""
+
+    async def _make_decision(self, tools, brain) -> str:
+        await tools["record_decision"](
+            description="Decision to resolve in tool test",
+            confidence=0.7, category="tooling", stakes="low",
+        )
+        decisions, _ = await brain.list_decisions(limit=1)
+        return str(decisions[0].id)
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_success(self, tools, brain):
+        """resolve_decision persists outcome + note."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decision"](
+            decision_id=did, outcome="noise", resolution_note="sweep artifact",
+        )
+        assert "resolved" in result["content"][0]["text"]
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.outcome == "noise"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decision_blocked_in_background(self, tools, brain):
+        """Background turns are hard-blocked from resolving decisions."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decision"](
+            decision_id=did, outcome="noise", _is_background=True,
+        )
+        assert result.get("is_error") is True
+        assert "background" in result["content"][0]["text"].lower()
+        # Outcome unchanged
+        detail = await brain.get(uuid.UUID(did))
+        assert detail.outcome == "pending"
+
+    @pytest.mark.asyncio
+    async def test_resolve_decisions_batch_reports_failures(self, tools, brain):
+        """Batch resolve reports per-item failures without aborting."""
+        did = await self._make_decision(tools, brain)
+        result = await tools["resolve_decisions"](
+            resolutions=[
+                {"decision_id": did, "outcome": "success", "resolution_note": "ok"},
+                {"decision_id": str(uuid.uuid4()), "outcome": "success"},
+            ],
+        )
+        text = result["content"][0]["text"]
+        assert "Resolved 1/2" in text
+        assert "Failures" in text
 
 
 # ---------------------------------------------------------------------------

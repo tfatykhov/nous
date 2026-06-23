@@ -47,13 +47,16 @@ class CalibrationEngine:
             else_=0.0,
         )
 
-        # Base filter: reviewed decisions for this agent
+        # Base filter: scorable decisions for this agent. Only the three
+        # prediction outcomes count toward calibration — 'noise' and
+        # 'superseded' are non-predictions (sweep artifact / replaced) and
+        # 'pending'/NULL are unresolved, so all are excluded from the
+        # Brier/ECE denominator (in_() drops NULL too).
         # Exclude abandoned decisions (outcome='failure', confidence=0.0) which
         # contribute (0.0 - 0.0)^2 = 0.0 to Brier score, artificially improving it
         reviewed_filter = (
             (Decision.agent_id == agent_id)
-            & (Decision.outcome != "pending")
-            & (Decision.outcome.is_not(None))
+            & (Decision.outcome.in_(("success", "partial", "failure")))
             & ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
         )
 
@@ -64,8 +67,7 @@ class CalibrationEngine:
             select(
                 func.count().label("total"),
                 func.count().filter(
-                    (Decision.outcome != "pending")
-                    & (Decision.outcome.is_not(None))
+                    (Decision.outcome.in_(("success", "partial", "failure")))
                     & ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
                 ).label("reviewed"),
             ).where(Decision.agent_id == agent_id)

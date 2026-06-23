@@ -18,6 +18,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 from uuid import UUID
@@ -76,16 +77,23 @@ class ToolDispatcher:
 
     async def dispatch(
         self, name: str, args: dict[str, Any], session_id: str | None = None,
+        is_background: bool = False,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
         P0-6 fix: Uses **kwargs unpacking for closures.
         P1-1 fix: Extracts text from MCP-format response.
+
+        is_background: True for heartbeat/subtask turns. Decision-resolution
+        tools read it via the injected _is_background kwarg to hard-block
+        autopilot self-resolution.
         """
         handler = self._handlers.get(name)
         if not handler:
             return f"Unknown tool: {name}", True
         try:
+            if name in ("resolve_decision", "resolve_decisions"):
+                args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
                 args = {**args, "_session_id": session_id}
             if session_id is not None and name == "cache_retrieve":
@@ -1431,6 +1439,117 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             f"target_size={settings.document_chunk_size})."
         )
 
+    # ------------------------------------------------------------------
+    # Decision resolution (closes the calibration loop). resolve_decision /
+    # resolve_decisions persist an outcome on an existing decision via the
+    # pre-existing Brain.review(); list_decisions surfaces the pending set so
+    # a sweep can enumerate what to resolve. Background turns (heartbeat /
+    # subtask, dispatched with _is_background=True) are HARD-BLOCKED so an
+    # autopilot tick can't self-resolve its own noise without interactive
+    # reasoning. Cite: live Nous decision 06d62894 / FORGE a22f4ccc.
+    # ------------------------------------------------------------------
+    _BG_BLOCK_MSG = (
+        "Error: decision resolution is blocked in background/heartbeat turns. "
+        "Resolving a decision requires an interactive reasoning session."
+    )
+
+    async def resolve_decision(
+        decision_id: str,
+        outcome: str,
+        resolution_note: str | None = None,
+        superseded_by: str | None = None,
+        _is_background: bool = False,
+    ) -> dict[str, Any]:
+        """Persist an outcome on an existing decision.
+
+        Args:
+            decision_id: UUID of the decision to resolve.
+            outcome: success, partial, failure, noise, or superseded.
+                noise/superseded are excluded from calibration.
+            resolution_note: Evidence/why — the resolution trail.
+            superseded_by: UUID of the replacing decision (outcome=superseded).
+        """
+        if _is_background:
+            return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+        try:
+            detail = await brain.review(
+                UUID(decision_id),
+                outcome=outcome,
+                result=resolution_note,
+                reviewer="agent",
+                superseded_by=UUID(superseded_by) if superseded_by else None,
+            )
+            text = f"Decision {detail.id} resolved: outcome={detail.outcome}"
+            if detail.superseded_by:
+                text += f", superseded_by={detail.superseded_by}"
+            return {"content": [{"type": "text", "text": text}]}
+        except Exception as e:
+            logger.exception("resolve_decision tool failed")
+            return {"is_error": True, "content": [{"type": "text", "text": f"Error resolving decision: {e}"}]}
+
+    async def resolve_decisions(
+        resolutions: list[dict[str, Any]],
+        _is_background: bool = False,
+    ) -> dict[str, Any]:
+        """Resolve a batch of decisions in one transaction (sweep path).
+
+        Each item: {decision_id, outcome, resolution_note?, superseded_by?}.
+        A per-item failure is reported and does not abort the batch.
+        """
+        if _is_background:
+            return {"is_error": True, "content": [{"type": "text", "text": _BG_BLOCK_MSG}]}
+        try:
+            items = [
+                {
+                    "decision_id": r.get("decision_id"),
+                    "outcome": r.get("outcome"),
+                    "result": r.get("resolution_note"),
+                    "superseded_by": r.get("superseded_by"),
+                }
+                for r in resolutions
+            ]
+            results = await brain.review_many(items, reviewer="agent")
+            ok = sum(1 for r in results if r["ok"])
+            failed = [r for r in results if not r["ok"]]
+            text = f"Resolved {ok}/{len(results)} decisions."
+            if failed:
+                text += "\nFailures:\n" + "\n".join(
+                    f"- {r['decision_id']}: {r['error']}" for r in failed
+                )
+            return {"content": [{"type": "text", "text": text}], "is_error": bool(failed and ok == 0)}
+        except Exception as e:
+            logger.exception("resolve_decisions tool failed")
+            return {"is_error": True, "content": [{"type": "text", "text": f"Error resolving decisions: {e}"}]}
+
+    async def list_decisions(
+        outcome: str | None = None,
+        reviewed: bool | None = None,
+        older_than_days: int | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """List decisions for sweeps (e.g. outcome='pending', reviewed=false).
+
+        older_than_days filters to decisions created before that many days ago.
+        """
+        try:
+            date_to = None
+            if older_than_days is not None:
+                date_to = (datetime.now(UTC) - timedelta(days=older_than_days)).isoformat()
+            decisions, total = await brain.list_decisions(
+                limit=limit, outcome=outcome, reviewed=reviewed, date_to=date_to,
+            )
+            if not decisions:
+                return {"content": [{"type": "text", "text": "No matching decisions."}]}
+            lines = [
+                f"- {d.id} [{d.outcome}] ({d.category}/{d.stakes}, conf={d.confidence:.2f}) {d.description[:120]}"
+                for d in decisions
+            ]
+            header = f"{len(decisions)} of {total} matching decisions:"
+            return {"content": [{"type": "text", "text": header + "\n" + "\n".join(lines)}]}
+        except Exception as e:
+            logger.exception("list_decisions tool failed")
+            return {"is_error": True, "content": [{"type": "text", "text": f"Error listing decisions: {e}"}]}
+
     return {
         "record_decision": record_decision,
         "learn_fact": learn_fact,
@@ -1441,6 +1560,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         "get_procedure": get_procedure,
         "recall_hubs": recall_hubs,
         "ingest_document": ingest_document,
+        "resolve_decision": resolve_decision,
+        "resolve_decisions": resolve_decisions,
+        "list_decisions": list_decisions,
     }
 
 
@@ -1505,6 +1627,74 @@ _RECORD_DECISION_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["description", "confidence", "category", "stakes"],
+}
+
+_RESOLVE_DECISION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Persist an outcome on an existing decision, closing the calibration "
+        "loop. Use 'noise' for sweep/tick artifacts and 'superseded' when a "
+        "later decision replaced this one (both excluded from calibration). "
+        "Always include a resolution_note as the evidence trail."
+    ),
+    "properties": {
+        "decision_id": {"type": "string", "description": "UUID of the decision to resolve"},
+        "outcome": {
+            "type": "string",
+            "description": "Resolution outcome",
+            "enum": ["success", "partial", "failure", "noise", "superseded"],
+        },
+        "resolution_note": {"type": "string", "description": "Evidence / why — the resolution trail"},
+        "superseded_by": {"type": "string", "description": "UUID of the replacing decision (when outcome=superseded)"},
+    },
+    "required": ["decision_id", "outcome"],
+}
+
+_RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Resolve a batch of decisions in one transaction (for sweeps). "
+        "A per-item failure is reported and does not abort the batch."
+    ),
+    "properties": {
+        "resolutions": {
+            "type": "array",
+            "description": "Decisions to resolve",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "decision_id": {"type": "string"},
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["success", "partial", "failure", "noise", "superseded"],
+                    },
+                    "resolution_note": {"type": "string"},
+                    "superseded_by": {"type": "string"},
+                },
+                "required": ["decision_id", "outcome"],
+            },
+        },
+    },
+    "required": ["resolutions"],
+}
+
+_LIST_DECISIONS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "List this agent's decisions for a sweep. Filter by outcome (e.g. "
+        "'pending'), reviewed status, and age to enumerate what to resolve."
+    ),
+    "properties": {
+        "outcome": {
+            "type": "string",
+            "description": "Filter by outcome",
+            "enum": ["pending", "success", "partial", "failure", "noise", "superseded"],
+        },
+        "reviewed": {"type": "boolean", "description": "Filter to reviewed (true) or unreviewed (false) decisions"},
+        "older_than_days": {"type": "integer", "description": "Only decisions created more than this many days ago"},
+        "limit": {"type": "integer", "description": "Max results (default 20)"},
+    },
+    "required": [],
 }
 
 _LEARN_FACT_SCHEMA: dict[str, Any] = {
@@ -1738,6 +1928,10 @@ def register_nous_tools(dispatcher: ToolDispatcher, brain: Brain, heart: Heart, 
     dispatcher.register("get_procedure", closures["get_procedure"], _GET_PROCEDURE_SCHEMA)
     dispatcher.register("recall_hubs", closures["recall_hubs"], _RECALL_HUBS_SCHEMA)
     dispatcher.register("ingest_document", closures["ingest_document"], _INGEST_DOCUMENT_SCHEMA)
+    if settings is None or settings.decision_resolution_enabled:
+        dispatcher.register("resolve_decision", closures["resolve_decision"], _RESOLVE_DECISION_SCHEMA)
+        dispatcher.register("resolve_decisions", closures["resolve_decisions"], _RESOLVE_DECISIONS_SCHEMA)
+        dispatcher.register("list_decisions", closures["list_decisions"], _LIST_DECISIONS_SCHEMA)
 
 
 # ---------------------------------------------------------------------------
