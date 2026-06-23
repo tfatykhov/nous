@@ -889,15 +889,65 @@ class Brain:
         outcome: str,
         result: str | None = None,
         reviewer: str | None = None,
+        superseded_by: UUID | None = None,
         session: AsyncSession | None = None,
     ) -> DecisionDetail:
         """Record outcome for a decision."""
         if session is None:
             async with self.db.session() as session:
-                detail = await self._review(decision_id, outcome, result, reviewer, session)
+                detail = await self._review(
+                    decision_id, outcome, result, reviewer, superseded_by, session
+                )
                 await session.commit()
                 return detail
-        return await self._review(decision_id, outcome, result, reviewer, session)
+        return await self._review(
+            decision_id, outcome, result, reviewer, superseded_by, session
+        )
+
+    async def review_many(
+        self,
+        items: list[dict],
+        reviewer: str | None = None,
+        session: AsyncSession | None = None,
+    ) -> list[dict]:
+        """Resolve a batch of decisions in one transaction.
+
+        Each item is a dict with keys ``decision_id`` (str|UUID, required),
+        ``outcome`` (required), ``result`` (optional), ``superseded_by``
+        (optional). A per-item failure (not-found / invalid outcome) is
+        captured in the returned row and does not abort the batch — the
+        failing item is simply not mutated. Returns one
+        ``{decision_id, ok, error}`` dict per input item, in order.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                results = await self._review_many(items, reviewer, session)
+                await session.commit()
+                return results
+        return await self._review_many(items, reviewer, session)
+
+    async def _review_many(
+        self, items: list[dict], reviewer: str | None, session: AsyncSession,
+    ) -> list[dict]:
+        results: list[dict] = []
+        for item in items:
+            raw_id = item.get("decision_id")
+            try:
+                decision_id = raw_id if isinstance(raw_id, UUID) else UUID(str(raw_id))
+                sup = item.get("superseded_by")
+                sup_uuid = sup if (sup is None or isinstance(sup, UUID)) else UUID(str(sup))
+                await self._review(
+                    decision_id,
+                    item["outcome"],
+                    item.get("result"),
+                    item.get("reviewer", reviewer),
+                    sup_uuid,
+                    session,
+                )
+                results.append({"decision_id": str(raw_id), "ok": True, "error": None})
+            except Exception as e:  # noqa: BLE001 — surface per-item, keep batch alive
+                results.append({"decision_id": str(raw_id), "ok": False, "error": str(e)})
+        return results
 
     async def _review(
         self,
@@ -905,10 +955,16 @@ class Brain:
         outcome: str,
         result_text: str | None,
         reviewer: str | None,
+        superseded_by: UUID | None,
         session: AsyncSession,
     ) -> DecisionDetail:
         # Validate via Pydantic (P2-18)
-        validated = ReviewInput(outcome=outcome, result=result_text, reviewer=reviewer)
+        validated = ReviewInput(
+            outcome=outcome,
+            result=result_text,
+            reviewer=reviewer,
+            superseded_by=superseded_by,
+        )
 
         decision = await self._get_decision_orm(decision_id, session)
         if decision is None:
@@ -918,6 +974,9 @@ class Brain:
         decision.outcome_result = validated.result
         decision.reviewed_at = datetime.now(UTC)
         decision.reviewer = validated.reviewer
+        # Lineage marker only meaningful for a supersession.
+        if validated.outcome == "superseded":
+            decision.superseded_by = validated.superseded_by
 
         await session.flush()
 
@@ -1814,6 +1873,7 @@ class Brain:
             outcome_result=decision.outcome_result,
             reviewed_at=decision.reviewed_at,
             reviewer=decision.reviewer,
+            superseded_by=decision.superseded_by,
             created_at=decision.created_at,
             updated_at=decision.updated_at,
             tags=[t.tag for t in decision.tags],

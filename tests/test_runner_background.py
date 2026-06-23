@@ -278,7 +278,7 @@ async def test_tool_loop_threads_is_background_to_all_iterations():
                 "input_schema": {"type": "object"},
             }]
 
-        async def dispatch(self, name, inp, session_id=None):
+        async def dispatch(self, name, inp, session_id=None, is_background=False):
             return "tool result", False
 
     r.set_dispatcher(_Dispatcher())

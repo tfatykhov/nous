@@ -122,7 +122,7 @@ class Decision(Base):
             name="ck_decisions_stakes",
         ),
         CheckConstraint(
-            "outcome IN ('pending', 'success', 'partial', 'failure')",
+            "outcome IN ('pending', 'success', 'partial', 'failure', 'noise', 'superseded')",
             name="ck_decisions_outcome",
         ),
         {"schema": "brain"},
@@ -144,6 +144,11 @@ class Decision(Base):
     outcome: Mapped[str | None] = mapped_column(String(20), server_default="pending")
     outcome_result: Mapped[str | None] = mapped_column(Text)
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # id of the decision that replaced this one when outcome='superseded'
+    # (lineage marker, not a graph edge). NULL for every other outcome.
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("brain.decisions.id"), nullable=True
+    )
     session_id: Mapped[str | None] = mapped_column(String(100))
     reviewer: Mapped[str | None] = mapped_column(String(50))
     embedding = mapped_column(Vector(1536), nullable=True)

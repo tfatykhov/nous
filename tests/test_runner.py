@@ -1081,7 +1081,7 @@ async def test_tool_loop_preserves_thinking_blocks(mock_cognitive):
         def available_tools(self, frame_id):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object"}}]
 
-        async def dispatch(self, name, input_data, session_id=None):
+        async def dispatch(self, name, input_data, session_id=None, is_background=False):
             return "tool result", False
 
     r.set_dispatcher(MockDispatcher())
@@ -1128,7 +1128,7 @@ async def test_tool_loop_preserves_redacted_thinking(mock_cognitive):
         def available_tools(self, frame_id):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object"}}]
 
-        async def dispatch(self, name, input_data, session_id=None):
+        async def dispatch(self, name, input_data, session_id=None, is_background=False):
             return "ok", False
 
     r.set_dispatcher(MockDispatcher())

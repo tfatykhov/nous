@@ -498,6 +498,12 @@ class Settings(BaseSettings):
     stable_tool_set_enabled: bool = Field(
         default=True, validation_alias="NOUS_STABLE_TOOL_SET_ENABLED"
     )
+    # Kill-switch for the agent-facing decision-resolution tools
+    # (resolve_decision / resolve_decisions / list_decisions). Set False to
+    # un-register them; the migration + calibration filter are unconditional.
+    decision_resolution_enabled: bool = Field(
+        default=True, validation_alias="NOUS_DECISION_RESOLUTION_ENABLED"
+    )
 
     # Compaction: Layer 1 (Tool Pruning)
     tool_pruning_enabled: bool = Field(

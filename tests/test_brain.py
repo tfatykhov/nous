@@ -445,6 +445,71 @@ async def test_review_decision(brain, session):
     assert reviewed.reviewed_at is not None
 
 
+async def test_review_noise_and_superseded(brain, session):
+    """noise/superseded are valid outcomes; superseded_by only sticks on superseded."""
+    noise = await brain.record(_record_input(description="noise decision"), session=session)
+    reviewed = await brain.review(noise.id, "noise", result="sweep artifact", session=session)
+    assert reviewed.outcome == "noise"
+    assert reviewed.superseded_by is None
+
+    old = await brain.record(_record_input(description="old decision"), session=session)
+    new = await brain.record(_record_input(description="new decision"), session=session)
+    reviewed = await brain.review(
+        old.id, "superseded", result="replaced", superseded_by=new.id, session=session
+    )
+    assert reviewed.outcome == "superseded"
+    assert reviewed.superseded_by == new.id
+
+    # superseded_by is ignored for non-supersession outcomes
+    other = await brain.record(_record_input(description="other"), session=session)
+    reviewed = await brain.review(
+        other.id, "success", superseded_by=new.id, session=session
+    )
+    assert reviewed.superseded_by is None
+
+
+async def test_review_many_batch_survives_bad_item(brain, session):
+    """Batch resolve: a not-found id is reported but doesn't abort the batch."""
+    good1 = await brain.record(_record_input(description="b1"), session=session)
+    good2 = await brain.record(_record_input(description="b2"), session=session)
+    bad_id = uuid.uuid4()
+
+    results = await brain.review_many(
+        [
+            {"decision_id": str(good1.id), "outcome": "success", "result": "ok"},
+            {"decision_id": str(bad_id), "outcome": "success"},
+            {"decision_id": str(good2.id), "outcome": "noise"},
+        ],
+        session=session,
+    )
+    assert [r["ok"] for r in results] == [True, False, True]
+    assert "not found" in results[1]["error"].lower()
+
+    detail1 = await brain.get(good1.id, session=session)
+    detail2 = await brain.get(good2.id, session=session)
+    assert detail1.outcome == "success"
+    assert detail2.outcome == "noise"
+
+
+async def test_calibration_excludes_noise_and_superseded(brain, session):
+    """noise/superseded resolutions must not enter the calibration denominator."""
+    baseline = (await brain.get_calibration(session=session)).reviewed_decisions
+    ds = [
+        await brain.record(_record_input(description=f"cal {i}", confidence=0.8), session=session)
+        for i in range(5)
+    ]
+    await brain.review(ds[0].id, "success", session=session)
+    await brain.review(ds[1].id, "failure", session=session)
+    await brain.review(ds[2].id, "noise", session=session)
+    await brain.review(ds[3].id, "superseded", superseded_by=ds[0].id, session=session)
+    # ds[4] left pending
+
+    report = await brain.get_calibration(session=session)
+    # Only the two real predictions (success + failure) are newly scorable;
+    # noise / superseded / pending are excluded from the denominator.
+    assert report.reviewed_decisions - baseline == 2
+
+
 # ---------------------------------------------------------------------------
 # 16. test_calibration_report
 # ---------------------------------------------------------------------------
