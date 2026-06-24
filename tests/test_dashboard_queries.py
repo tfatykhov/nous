@@ -17,6 +17,7 @@ from nous.api.dashboard_queries import (
     get_dashboard_stats,
     get_graph_data,
     get_health_data,
+    get_node_detail,
 )
 
 AGENT_ID = "test-dashboard"
@@ -58,35 +59,38 @@ async def _insert_decision(session, *, category="architecture", stakes="low",
     return did
 
 
-async def _insert_fact(session, *, category="preference", days_ago=0):
+async def _insert_fact(session, *, category="preference", days_ago=0, active=True,
+                       content=None):
     """Insert a test fact and return its id."""
     fid = uuid.uuid4()
     created = datetime.now(timezone.utc) - timedelta(days=days_ago)
     await session.execute(
         text("""
-            INSERT INTO heart.facts (id, agent_id, content, category, created_at)
-            VALUES (:id, :agent_id, :content, :cat, :created)
+            INSERT INTO heart.facts (id, agent_id, content, category, active, created_at)
+            VALUES (:id, :agent_id, :content, :cat, :active, :created)
         """),
         {
             "id": fid, "agent_id": AGENT_ID,
-            "content": f"Test fact {fid}", "cat": category, "created": created,
+            "content": content or f"Test fact {fid}", "cat": category,
+            "active": active, "created": created,
         },
     )
     return fid
 
 
-async def _insert_episode(session, *, frame="task", days_ago=0):
+async def _insert_episode(session, *, frame="task", days_ago=0, active=True):
     """Insert a test episode and return its id."""
     eid = uuid.uuid4()
     created = datetime.now(timezone.utc) - timedelta(days=days_ago)
     await session.execute(
         text("""
-            INSERT INTO heart.episodes (id, agent_id, summary, frame_used, created_at, started_at)
-            VALUES (:id, :agent_id, :summary, :frame, :created, :created)
+            INSERT INTO heart.episodes (id, agent_id, summary, frame_used, active, created_at, started_at)
+            VALUES (:id, :agent_id, :summary, :frame, :active, :created, :created)
         """),
         {
             "id": eid, "agent_id": AGENT_ID,
-            "summary": f"Test episode {eid}", "frame": frame, "created": created,
+            "summary": f"Test episode {eid}", "frame": frame,
+            "active": active, "created": created,
         },
     )
     return eid
@@ -224,6 +228,149 @@ class TestGetGraphData:
         # limit=2, max_edges=8
         assert data["stats"]["displayed_edges"] == 8
         assert data["stats"]["total_edges"] == 10
+
+
+# ── Orphan metric excludes soft-deleted (inactive) nodes ────────────────
+
+
+@pytest.mark.postgres_only
+class TestOrphanActiveFilter:
+    """Soft-deleted facts/episodes/procedures must not inflate orphan counts."""
+
+    @pytest.mark.asyncio
+    async def test_graph_orphans_exclude_inactive_facts(self, session):
+        await _insert_fact(session, active=True)   # active orphan -> counts
+        await _insert_fact(session, active=False)  # inactive orphan -> excluded
+
+        data = await get_graph_data(session, AGENT_ID)
+        assert data["stats"]["orphan_counts"]["facts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_health_orphans_exclude_inactive_episodes(self, session):
+        await _insert_episode(session, active=True)
+        await _insert_episode(session, active=False)
+
+        data = await get_health_data(session, AGENT_ID)
+        # Only the active orphan episode counts.
+        assert data["orphan_counts"]["episodes"] == 1
+
+    @pytest.mark.asyncio
+    async def test_density_excludes_inactive_from_total_and_orphans(self, session):
+        # An inactive episode must drop out of BOTH the total and orphan counts,
+        # keeping orphan_rate honest. (This is the bug: density used 1=1 for episodes.)
+        await _insert_episode(session, active=True)
+        await _insert_episode(session, active=False)
+
+        from nous.api.dashboard_queries import get_density_data
+        data = await get_density_data(session, AGENT_ID)
+        ep = data["density_by_type"]["episode"]
+        assert ep["total"] == 1
+        assert ep["orphan"] == 1
+
+    @pytest.mark.asyncio
+    async def test_decisions_unaffected_no_active_column(self, session):
+        # brain.decisions has no `active` column — all decisions still count.
+        await _insert_decision(session)
+        await _insert_decision(session)
+        data = await get_graph_data(session, AGENT_ID)
+        assert data["stats"]["orphan_counts"]["decisions"] == 2
+
+    @pytest.mark.asyncio
+    async def test_health_trend_last_point_matches_total_orphans(self, session):
+        # The trend's `connected` set must exclude inactive endpoints too, or an
+        # inactive episode WITH an edge deflates orphan_count below the
+        # point-in-time total. Invariant: orphan_trend[-1].count == total_orphans.
+        await _insert_fact(session, active=True)  # active orphan -> counts
+        d1 = await _insert_decision(session)
+        e_inactive = await _insert_episode(session, active=False)
+        # Edge to the inactive episode: endpoint must NOT be counted as connected.
+        await _insert_edge(session, d1, e_inactive,
+                           source_type="decision", target_type="episode")
+
+        data = await get_health_data(session, AGENT_ID)
+        assert data["orphan_trend"][-1]["count"] == data["total_orphans"]
+
+
+# ── get_node_detail (GET /dashboard/graph/node/{id}) ────────────────────
+
+
+@pytest.mark.postgres_only
+class TestGetNodeDetail:
+    @pytest.mark.asyncio
+    async def test_unknown_type_returns_not_found(self, session):
+        data = await get_node_detail(session, AGENT_ID, str(uuid.uuid4()), "bogus")
+        assert data == {"found": False}
+
+    @pytest.mark.asyncio
+    async def test_missing_node_returns_not_found(self, session):
+        data = await get_node_detail(session, AGENT_ID, str(uuid.uuid4()), "fact")
+        assert data == {"found": False}
+
+    @pytest.mark.asyncio
+    async def test_node_with_connection(self, session):
+        d1 = await _insert_decision(session)
+        f1 = await _insert_fact(session, content="A long fact body that should not be truncated in the node payload.")
+        await _insert_edge(session, d1, f1, source_type="decision", target_type="fact",
+                           relation="related_to")
+
+        data = await get_node_detail(session, AGENT_ID, str(d1), "decision")
+        assert data["found"] is True
+        assert data["node"]["type"] == "decision"
+        assert data["node"]["content"]  # full content present
+        assert data["connection_count"] == 1
+        c = data["connections"][0]
+        assert c["neighbor_id"] == str(f1)
+        assert c["neighbor_type"] == "fact"
+        assert c["relation"] == "related_to"
+        assert c["direction"] == "out"
+        assert c["neighbor_active"] is True
+        assert c["neighbor_label"]  # neighbor label hydrated
+
+    @pytest.mark.asyncio
+    async def test_incoming_edge_direction(self, session):
+        d1 = await _insert_decision(session)
+        f1 = await _insert_fact(session)
+        await _insert_edge(session, d1, f1, source_type="decision", target_type="fact")
+
+        # From the fact's perspective the edge is incoming.
+        data = await get_node_detail(session, AGENT_ID, str(f1), "fact")
+        assert data["connection_count"] == 1
+        assert data["connections"][0]["direction"] == "in"
+        assert data["connections"][0]["neighbor_id"] == str(d1)
+
+    @pytest.mark.asyncio
+    async def test_surfaces_contradicts_edge(self, session):
+        # brain.neighbors() hides 'contradicts'; the dashboard detail must show it.
+        f1 = await _insert_fact(session)
+        f2 = await _insert_fact(session)
+        await _insert_edge(session, f1, f2, source_type="fact", target_type="fact",
+                           relation="contradicts")
+
+        data = await get_node_detail(session, AGENT_ID, str(f1), "fact")
+        relations = {c["relation"] for c in data["connections"]}
+        assert "contradicts" in relations
+
+    @pytest.mark.asyncio
+    async def test_episode_returns_full_summary_not_just_title(self, session):
+        # Node content for an episode must be the summary body, not a label.
+        e1 = await _insert_episode(session)  # helper sets summary="Test episode <id>"
+        d1 = await _insert_decision(session)
+        await _insert_edge(session, d1, e1, source_type="decision", target_type="episode")
+
+        data = await get_node_detail(session, AGENT_ID, str(e1), "episode")
+        assert data["found"] is True
+        assert data["node"]["content"].startswith("Test episode")
+
+    @pytest.mark.asyncio
+    async def test_inactive_neighbor_flagged(self, session):
+        d1 = await _insert_decision(session)
+        f_inactive = await _insert_fact(session, active=False)
+        await _insert_edge(session, d1, f_inactive, source_type="decision",
+                           target_type="fact")
+
+        data = await get_node_detail(session, AGENT_ID, str(d1), "decision")
+        assert data["connection_count"] == 1
+        assert data["connections"][0]["neighbor_active"] is False
 
 
 # ── Task 7: get_calibration_data ────────────────────────────────────────

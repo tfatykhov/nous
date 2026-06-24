@@ -872,6 +872,46 @@ export interface GraphData {
   stats: GraphStats;
 }
 
+/** One connection from GET /dashboard/graph/node/{id} — includes lineage
+ *  (supersedes) and conflict (contradicts) edges that recall paths hide. */
+export interface GraphConnection {
+  edge_id: string;
+  neighbor_id: string;
+  neighbor_type: string;
+  /** Truncated (≤120 char) label of the connected node. */
+  neighbor_label: string;
+  /** false when the neighbor is soft-deleted or dangling (hard-deleted). */
+  neighbor_active: boolean;
+  relation: string;
+  /** 'out' = this node → neighbor; 'in' = neighbor → this node. */
+  direction: 'out' | 'in';
+  weight: number | null;
+  /** 'deterministic' | 'heuristic' | 'inferred' | null */
+  extraction_method: string | null;
+  auto_linked: boolean;
+}
+
+/** The hydrated node returned inside GraphNodeDetail (full, untruncated content). */
+export interface GraphNodeDetailNode {
+  id: string;
+  type: string;
+  content: string;
+  category: string | null;
+  created_at: string | null;
+}
+
+/** Full response from GET /dashboard/graph/node/{id}?type=. found=false when the
+ *  node id/type is unknown (404). */
+export interface GraphNodeDetail {
+  found: boolean;
+  node?: GraphNodeDetailNode;
+  connections?: GraphConnection[];
+  connection_count?: number;
+  /** true when the node has more edges than the server cap (200); list is the
+   *  strongest-weight subset. */
+  connections_truncated?: boolean;
+}
+
 // ── /dashboard/health (get_health_data) ──────────────────────────────────
 
 /** One day of edge creation data (30-day window, hardcoded in backend). */

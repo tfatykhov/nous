@@ -20,6 +20,22 @@ from nous.brain.spreading_activation import compute_graph_density
 logger = logging.getLogger(__name__)
 
 
+# ── Soft-delete-aware orphan counting ────────────────────────────────────
+#
+# facts/episodes/procedures soft-delete via an `active` boolean; decisions and
+# episode_chunks have no such column. Orphan metrics must exclude soft-deleted
+# nodes so the orphan rate reflects the LIVE graph — retired raw episode
+# transcripts and pruned reflection facts are orphans by design (the backfill
+# only links active nodes), not coverage gaps. Single source of truth so the
+# three orphan call-sites (graph / health / density) can never drift apart.
+_ACTIVE_FILTER_TABLES = {"heart.facts", "heart.episodes", "heart.procedures"}
+
+
+def _active_clause(table: str, alias: str = "t") -> str:
+    """Return ` AND <alias>.active = true` for soft-deletable tables, else ''."""
+    return f" AND {alias}.active = true" if table in _ACTIVE_FILTER_TABLES else ""
+
+
 # ── Task 5: Dashboard stats (used by GET /status?dashboard=true) ─────────
 
 
@@ -242,7 +258,7 @@ async def get_graph_data(
             text(f"""
                 SELECT COUNT(*) AS cnt
                 FROM {table} t
-                WHERE t.agent_id = :agent_id
+                WHERE t.agent_id = :agent_id{_active_clause(table)}
                   AND NOT EXISTS (
                       SELECT 1 FROM brain.graph_edges e
                       WHERE e.agent_id = :agent_id
@@ -269,6 +285,144 @@ async def get_graph_data(
             "node_count": len(nodes),
             "orphan_counts": orphan_counts,
         },
+    }
+
+
+# ── Node detail (GET /dashboard/graph/node/{node_id}) ────────────────────
+#
+# Per-type source table + (content_expr, label_expr, category_expr). The
+# node itself is hydrated with content_expr (the full body — summary for
+# episodes, description for procedures); neighbors are labelled with the
+# concise label_expr (title/name), truncated to 120 chars.
+_NODE_DETAIL_SOURCES: dict[str, tuple[str, str, str, str]] = {
+    "decision": ("brain.decisions", "description", "description", "category"),
+    "fact": ("heart.facts", "content", "content", "category"),
+    "episode": ("heart.episodes", "COALESCE(summary, title)", "COALESCE(title, summary)", "frame_used"),
+    "procedure": ("heart.procedures", "COALESCE(description, name)", "name", "domain"),
+    "chunk": ("heart.episode_chunks", "content", "content", "chunk_index::text"),
+}
+
+# Cap connections returned for a single node so a dense hub can't produce a
+# multi-MB payload. The strongest-weight edges are kept (ORDER BY weight DESC).
+_NODE_DETAIL_EDGE_LIMIT = 200
+
+
+async def get_node_detail(
+    session: AsyncSession, agent_id: str, node_id: str, node_type: str
+) -> dict:
+    """Return one graph node's full content + ALL its connections.
+
+    Unlike ``brain.neighbors()`` (retrieval-flavored — it hides ``supersedes``,
+    ``contradicts``, and inactive neighbors), this surfaces every edge in both
+    directions so a human inspecting the graph can see lineage and conflicts.
+
+    Returns ``{found: False}`` when the node id/type is unknown (e.g. a
+    hard-deleted node still referenced by a stale edge), else
+    ``{found: True, node, connections, connection_count}``.
+    """
+    src = _NODE_DETAIL_SOURCES.get(node_type)
+    if src is None:
+        return {"found": False}
+    table, content_expr, _label_expr, cat_expr = src
+
+    # Hydrate the node itself with full, untruncated content.
+    row = (
+        await session.execute(
+            text(f"""
+                SELECT id::text AS id, {content_expr} AS content,
+                       ({cat_expr})::text AS category, created_at
+                FROM {table}
+                WHERE agent_id = :agent_id AND id = CAST(:node_id AS uuid)
+            """),
+            {"agent_id": agent_id, "node_id": node_id},
+        )
+    ).first()
+    if row is None:
+        return {"found": False}
+
+    node = {
+        "id": row.id,
+        "type": node_type,
+        "content": row.content or "",
+        "category": row.category,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+    # Every edge touching this node, either direction, strongest first. Fetch
+    # one over the cap to detect (and flag) truncation on dense hub nodes.
+    edges = (
+        await session.execute(
+            text("""
+                SELECT id::text AS edge_id,
+                       source_id::text AS source_id, target_id::text AS target_id,
+                       source_type, target_type, relation, weight,
+                       extraction_method, auto_linked
+                FROM brain.graph_edges
+                WHERE agent_id = :agent_id
+                  AND (source_id = CAST(:node_id AS uuid)
+                       OR target_id = CAST(:node_id AS uuid))
+                ORDER BY weight DESC NULLS LAST, relation
+                LIMIT :edge_limit
+            """),
+            {"agent_id": agent_id, "node_id": node_id,
+             "edge_limit": _NODE_DETAIL_EDGE_LIMIT + 1},
+        )
+    ).fetchall()
+    truncated = len(edges) > _NODE_DETAIL_EDGE_LIMIT
+    edges = edges[:_NODE_DETAIL_EDGE_LIMIT]
+
+    nid = node["id"]
+    connections: list[dict] = []
+    neighbor_ids_by_type: dict[str, set[str]] = defaultdict(set)
+    for e in edges:
+        if e.source_id == nid:
+            direction, neighbor_id, neighbor_type = "out", e.target_id, e.target_type
+        else:
+            direction, neighbor_id, neighbor_type = "in", e.source_id, e.source_type
+        connections.append({
+            "edge_id": e.edge_id,
+            "neighbor_id": neighbor_id,
+            "neighbor_type": neighbor_type,
+            "relation": e.relation,
+            "direction": direction,
+            "weight": e.weight,
+            "extraction_method": e.extraction_method,
+            "auto_linked": e.auto_linked,
+        })
+        if neighbor_type in _NODE_DETAIL_SOURCES:
+            neighbor_ids_by_type[neighbor_type].add(neighbor_id)
+
+    # Hydrate neighbor labels (truncated) + active flag, one query per type.
+    labels: dict[str, str] = {}
+    active_flags: dict[str, bool] = {}
+    for ntype, ids in neighbor_ids_by_type.items():
+        table_n, _content_n, label_expr_n, _cat_n = _NODE_DETAIL_SOURCES[ntype]
+        active_sel = (
+            "active" if table_n in _ACTIVE_FILTER_TABLES else "true AS active"
+        )
+        res = await session.execute(
+            text(f"""
+                SELECT id::text AS id, LEFT({label_expr_n}, 120) AS label, {active_sel}
+                FROM {table_n}
+                WHERE agent_id = :agent_id AND id = ANY(CAST(:ids AS uuid[]))
+            """),
+            {"agent_id": agent_id, "ids": list(ids)},
+        )
+        for r in res:
+            labels[r.id] = r.label or ""
+            active_flags[r.id] = bool(r.active)
+
+    for c in connections:
+        c["neighbor_label"] = labels.get(c["neighbor_id"], "")
+        # A neighbor missing from the label lookup is hard-deleted/dangling.
+        c["neighbor_active"] = active_flags.get(c["neighbor_id"], False)
+
+    return {
+        "found": True,
+        "node": node,
+        "connections": connections,
+        "connection_count": len(connections),
+        "connections_truncated": truncated,
     }
 
 
@@ -688,7 +842,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
             text(f"""
                 SELECT COUNT(*) AS cnt
                 FROM {table} t
-                WHERE t.agent_id = :agent_id
+                WHERE t.agent_id = :agent_id{_active_clause(table)}
                   AND NOT EXISTS (
                       SELECT 1 FROM brain.graph_edges e
                       WHERE e.agent_id = :agent_id
@@ -795,7 +949,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                 UNION ALL
                 SELECT id, created_at FROM heart.facts WHERE agent_id = :agent_id AND active = true
                 UNION ALL
-                SELECT id, created_at FROM heart.episodes WHERE agent_id = :agent_id
+                SELECT id, created_at FROM heart.episodes WHERE agent_id = :agent_id AND active = true
                 UNION ALL
                 SELECT id, created_at FROM heart.procedures WHERE agent_id = :agent_id AND active = true
                 UNION ALL
@@ -823,6 +977,11 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                         SELECT target_id AS node_id, created_at
                         FROM brain.graph_edges WHERE agent_id = :agent_id
                     ) all_endpoints
+                    -- Only count endpoints that are themselves active nodes, so
+                    -- `connected` is over the same set as `total` (all_nodes).
+                    -- Otherwise an inactive episode WITH an edge inflates the
+                    -- connected running-sum past total and deflates orphan_count.
+                    WHERE node_id IN (SELECT id FROM all_nodes)
                     GROUP BY node_id
                 ) first_seen
                 GROUP BY first_connected_day
@@ -836,7 +995,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                         UNION
                         SELECT target_id AS node_id FROM brain.graph_edges
                         WHERE agent_id = :agent_id AND created_at < :since
-                    ) n) AS connected_base
+                    ) n WHERE node_id IN (SELECT id FROM all_nodes)) AS connected_base
             ),
             joined AS (
                 SELECT d.day,
@@ -1684,28 +1843,33 @@ async def get_density_data(session: AsyncSession, agent_id: str) -> dict:
     now = datetime.now(timezone.utc)
     seven_days_ago = now - timedelta(days=7)
 
-    # Per-type orphan and total counts
+    # Per-type orphan and total counts. The active-filter is derived from the
+    # shared _ACTIVE_FILTER_TABLES set (not hardcoded per row) so total and
+    # orphan denominators stay consistent and never drift from the graph/health
+    # orphan sites. Excludes soft-deleted nodes — notably deactivated raw
+    # episode transcripts, the dominant orphan class.
     type_configs = [
-        ("fact", "heart.facts", "fact", "active = true"),
-        ("decision", "brain.decisions", "decision", "1=1"),
-        ("episode", "heart.episodes", "episode", "1=1"),
-        ("procedure", "heart.procedures", "procedure", "active = true"),
+        ("fact", "heart.facts", "fact"),
+        ("decision", "brain.decisions", "decision"),
+        ("episode", "heart.episodes", "episode"),
+        ("procedure", "heart.procedures", "procedure"),
         # F067: chunks are matched via source/target_type = 'chunk' on
         # F070's part_of / summarized_by / related_to edges.
-        ("chunk", "heart.episode_chunks", "chunk", "1=1"),
+        ("chunk", "heart.episode_chunks", "chunk"),
     ]
 
     total_nodes = 0
     total_orphans = 0
     density_by_type: dict[str, dict[str, Any]] = {}
 
-    for type_name, table, edge_type, filter_clause in type_configs:
+    for type_name, table, edge_type in type_configs:
+        active = _active_clause(table)
         # Total count for this type
         result = await session.execute(
             text(f"""
                 SELECT COUNT(*) AS cnt
-                FROM {table}
-                WHERE agent_id = :agent_id AND {filter_clause}
+                FROM {table} t
+                WHERE t.agent_id = :agent_id{active}
             """),
             {"agent_id": agent_id},
         )
@@ -1716,7 +1880,7 @@ async def get_density_data(session: AsyncSession, agent_id: str) -> dict:
             text(f"""
                 SELECT COUNT(*) AS cnt
                 FROM {table} t
-                WHERE t.agent_id = :agent_id AND {filter_clause}
+                WHERE t.agent_id = :agent_id{active}
                   AND NOT EXISTS (
                       SELECT 1 FROM brain.graph_edges e
                       WHERE e.agent_id = :agent_id

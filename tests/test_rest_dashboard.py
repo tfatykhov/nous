@@ -216,3 +216,17 @@ async def test_procedures_list(client, db):
     data = resp.json()
     assert "procedures" in data
     assert "total" in data
+
+
+async def test_graph_node_rejects_bad_uuid(client):
+    """GET /dashboard/graph/node/{id} returns 400 for a non-UUID id (no DB hit)."""
+    resp = await client.get("/dashboard/graph/node/not-a-uuid?type=fact")
+    assert resp.status_code == 400
+    assert "error" in resp.json()
+
+
+async def test_graph_node_rejects_unknown_type(client):
+    """GET /dashboard/graph/node/{id} returns 400 for an unknown ?type= (no DB hit)."""
+    resp = await client.get(f"/dashboard/graph/node/{uuid.uuid4()}?type=bogus")
+    assert resp.status_code == 400
+    assert "type must be one of" in resp.json()["error"]
