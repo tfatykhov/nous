@@ -710,6 +710,17 @@ class Settings(BaseSettings):
     spreading_activation_beta: float = 0.3
     spreading_activation_gamma: float = 0.2
 
+    # F082: PPR recall leg (default OFF — ppr_weight=0.0 is completely inert)
+    ppr_recall_enabled: str = "auto"  # "auto" | "true" | "false"
+    ppr_weight: float = Field(default=0.0, ge=0.0, le=1.0)
+    ppr_damping: float = Field(default=0.5, gt=0.0, lt=1.0)
+    ppr_tolerance: float = Field(default=1e-4, gt=0.0)
+    ppr_max_iter: int = Field(default=30, ge=1)
+    ppr_leg_limit: int = Field(default=20, ge=1)
+    # Reuses spreading_activation_density_threshold when 0; set >0 to override.
+    ppr_min_density: float = Field(default=0.0, ge=0.0)
+    ppr_seed_top_k: int = Field(default=50, ge=1)
+
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).
     # Master switch (default OFF): gates both the reinforcement hooks and the

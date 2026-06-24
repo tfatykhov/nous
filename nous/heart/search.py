@@ -351,6 +351,77 @@ def _rrf_merge_n(
     return scored[:limit]
 
 
+def _rrf_merge_n_weighted(
+    weighted_lists: list[tuple[list[tuple[UUID, float]], float]],
+    k: int,
+    limit: int,
+) -> list[tuple[UUID, float]]:
+    """N-leg Reciprocal Rank Fusion with explicit per-leg weights (F082).
+
+    Generalises ``_rrf_merge`` to N legs with arbitrary weights:
+
+        rrf_score(doc) = Σ_legs  w_leg / (k + rank_leg(doc))
+
+    ``weighted_lists`` is a list of ``(ranked_list, weight)`` pairs.
+    Docs absent from a leg receive the penalty rank ``limit + 1``.
+
+    Normalisation matches ``_rrf_merge``: divide by theoretical maximum
+    (Σ w_leg) / k, so the returned scores live in ``[0, 1]``.
+
+    Back-compat guarantee: when called with exactly two legs whose weights
+    sum to 1.0 and the same ``k`` / ``limit`` as ``_rrf_merge``, the output
+    is **bit-identical** to ``_rrf_merge``.  See ``test_ppr_recall.py`` for
+    the regression test.
+
+    Args:
+        weighted_lists: ``[(ranked_list, weight), ...]``.  Empty lists are
+            allowed (contribute only penalty ranks for their weight).
+        k: RRF smoothing constant.
+        limit: Maximum results to return (also sets the penalty rank to
+            ``limit + 1`` for docs absent from a leg).
+
+    Returns:
+        ``(id, score)`` pairs sorted descending, length ``<= limit``.
+    """
+    if not weighted_lists:
+        return []
+
+    total_weight = sum(w for _, w in weighted_lists)
+    if total_weight <= 0.0:
+        return []
+
+    penalty_rank = limit + 1
+
+    rank_maps: list[tuple[dict[UUID, int], float]] = [
+        ({doc_id: i for i, (doc_id, _) in enumerate(rl)}, w)
+        for rl, w in weighted_lists
+    ]
+
+    all_ids: set[UUID] = set()
+    for rm, _ in rank_maps:
+        all_ids.update(rm)
+
+    if not all_ids:
+        return []
+
+    scored: list[tuple[UUID, float]] = []
+    for doc_id in all_ids:
+        score = 0.0
+        for rm, w in rank_maps:
+            r = rm.get(doc_id, penalty_rank)
+            score += w / (k + r)
+        scored.append((doc_id, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # Normalise: max possible score = Σ w_leg / k (each leg ranks the doc #0)
+    max_score = total_weight / k
+    if max_score > 0.0 and scored:
+        scored = [(doc_id, s / max_score) for doc_id, s in scored]
+
+    return scored[:limit]
+
+
 async def hybrid_search_multi(
     session: AsyncSession,
     table: str,

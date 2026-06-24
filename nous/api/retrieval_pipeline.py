@@ -63,7 +63,7 @@ class PipelineResult:
     description: str
     score: float
     source: Literal[
-        "heart", "brain", "graph_expanded", "spreading_activation"
+        "heart", "brain", "graph_expanded", "spreading_activation", "ppr_recall"
     ] = "heart"
     edge_relation: str | None = None
     contradicts: list[UUID] = field(default_factory=list)
@@ -112,6 +112,9 @@ class PipelineStats:
     # procedures excluded from the ranked pool). Observability only — not
     # formatted into recall_deep text, so it does not affect the snapshot.
     coherent_ranking_applied: bool = False
+    # F082: True iff the PPR recall leg ran (density gate passed AND
+    # ppr_weight > 0).  False when the feature is off / weight is 0.
+    ppr_recall_used: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +160,9 @@ class _PipelineAccumulator:
     # Shape: (id, content, score, episode_id) — see _search_episode_chunks.
     chunk_results: list[tuple[UUID, str, float, UUID]] = field(default_factory=list)
 
+    # F082: PPR recall results — (node_id, node_type, ppr_score) triples
+    ppr_results: list[tuple[UUID, str, float]] = field(default_factory=list)
+
     # Flags
     searched_decisions: bool = False
     searched_heart: bool = False
@@ -165,6 +171,7 @@ class _PipelineAccumulator:
     graph_expansion_used: bool = False
     contradiction_checks_ran: bool = False
     chunks_searched: bool = False
+    ppr_recall_used: bool = False  # F082
 
     # Per-stage error counter — incremented when a try/except around a stage
     # call catches an exception. Surfaced via PipelineStats.n_stage_errors.
@@ -306,6 +313,14 @@ async def run_recall_pipeline(
     ):
         await _record_recall_reactivation(brain, results)
 
+    # F082: PPR recall leg fusion.
+    # Inert when ppr_weight=0.0 (default) — no ranking change, no cost.
+    # When ppr_weight>0 and PPR ran, apply N-leg weighted RRF to merge PPR
+    # scores with the existing pipeline ranking.
+    ppr_weight = float(getattr(settings, "ppr_weight", 0.0))
+    if acc.ppr_recall_used and acc.ppr_results and ppr_weight > 0.0:
+        results = _apply_ppr_fusion(results, acc.ppr_results, ppr_weight, settings)
+
     stats = PipelineStats(
         ce_reranked=False,  # CE rerank happens inside heart.recall already
         mmr_applied=False,  # MMR happens inside heart.recall already
@@ -319,7 +334,8 @@ async def run_recall_pipeline(
         n_stage_errors=dict(acc.stage_errors),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
-        coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
+        coherent_ranking_applied=acc.coherent_ranking_applied,  # F080
+        ppr_recall_used=acc.ppr_recall_used,  # F082
     )
     return results, stats
 
@@ -680,6 +696,51 @@ async def _run_stages(
 
     acc.decision_results = decision_results
     acc.graph_expanded = graph_expanded
+
+    # ------------------------------------------------------------------
+    # Stage F082: PPR recall leg (parallel to spreading activation)
+    # Seeded by Stage-1 heart results. Completely inert when
+    # ppr_weight=0.0 (default) — no DB query, no ranking change.
+    # ------------------------------------------------------------------
+    ppr_weight = float(getattr(settings, "ppr_weight", 0.0))
+    if ppr_weight > 0.0 and settings.graph_recall_enabled and acc.heart_results:
+        _ppr_enabled_mode = str(getattr(settings, "ppr_recall_enabled", "auto")).lower()
+        if _ppr_enabled_mode != "false":
+            try:
+                from nous.brain.ppr_recall import (
+                    compute_graph_density as _ppr_density,
+                    ppr_recall as _ppr_recall,
+                    should_use_ppr as _should_use_ppr,
+                )
+
+                async with brain.db.session() as ppr_session:
+                    _density = await _ppr_density(ppr_session, brain.agent_id)
+                    _use_ppr = _should_use_ppr(settings, _density)
+
+                if _use_ppr:
+                    seed_top_k = int(getattr(settings, "ppr_seed_top_k", 50))
+                    ppr_seeds = [
+                        (hr.id, hr.type, hr.score or 0.0)
+                        for hr in acc.heart_results[:seed_top_k]
+                    ]
+                    async with brain.db.session() as ppr_session:
+                        acc.ppr_results = await _ppr_recall(
+                            ppr_session, brain.agent_id, ppr_seeds, settings,
+                        )
+                    if acc.ppr_results:
+                        acc.ppr_recall_used = True
+                        logger.debug(
+                            "F082 PPR: %d results for agent=%s query=%r",
+                            len(acc.ppr_results), brain.agent_id, query[:80],
+                        )
+            except Exception:
+                logger.warning(
+                    "F082 PPR recall failed for agent=%s query=%r (non-fatal)",
+                    brain.agent_id, query[:80], exc_info=True,
+                )
+                acc.stage_errors["ppr_recall"] = (
+                    acc.stage_errors.get("ppr_recall", 0) + 1
+                )
 
     # ------------------------------------------------------------------
     # Stage 5: F022 Phase 3 contradiction detection
@@ -1304,3 +1365,71 @@ def _attach_contradictions(
                 contradicts=new_contradicts,
                 metadata=cur.metadata,
             )
+
+
+# ---------------------------------------------------------------------------
+# F082: PPR fusion helper
+# ---------------------------------------------------------------------------
+
+
+def _apply_ppr_fusion(
+    results: list[PipelineResult],
+    ppr_results: list[tuple[UUID, str, float]],
+    ppr_weight: float,
+    settings: "Settings",
+) -> list[PipelineResult]:
+    """Merge existing pipeline results with the PPR ranked list via N-leg RRF.
+
+    Existing results form leg 1 (weight = 1 - ppr_weight).
+    PPR results form leg 2 (weight = ppr_weight).
+
+    Nodes that appear only in the PPR leg (not in the existing results) are
+    added as new PipelineResult items with source="ppr_recall" and a
+    placeholder description.  Nodes already present get their scores updated
+    by the fused RRF score.
+
+    Called only when ppr_weight > 0.0 and PPR produced results.
+    """
+    from nous.heart.search import _rrf_merge_n_weighted
+    from nous.runtime_config import RuntimeConfig
+
+    rrf_k = RuntimeConfig.get().get_rrf_k(settings)
+    limit = max(len(results), len(ppr_results))
+
+    # Build ranked lists: (id, score) ordered by descending score
+    existing_ranked: list[tuple[UUID, float]] = [
+        (r.id, r.score or 0.0) for r in results
+    ]
+    ppr_ranked: list[tuple[UUID, float]] = [
+        (nid, score) for nid, _, score in ppr_results
+    ]
+
+    existing_weight = max(0.0, 1.0 - ppr_weight)
+    fused = _rrf_merge_n_weighted(
+        [(existing_ranked, existing_weight), (ppr_ranked, ppr_weight)],
+        k=rrf_k,
+        limit=limit + len(ppr_results),
+    )
+
+    # Build score map from fused result
+    fused_scores: dict[UUID, float] = {doc_id: score for doc_id, score in fused}
+
+    # Update existing result scores
+    existing_ids: set[UUID] = {r.id for r in results}
+    updated = [replace(r, score=fused_scores.get(r.id, r.score or 0.0)) for r in results]
+
+    # Add new nodes surfaced only by PPR (net-new associative recall)
+    for nid, ntype, _ in ppr_results:
+        if nid not in existing_ids and nid in fused_scores:
+            updated.append(PipelineResult(
+                id=nid,
+                type=ntype,
+                description=f"[{ntype}] {str(nid)[:8]}",
+                score=fused_scores[nid],
+                source="ppr_recall",
+                edge_relation="ppr_recall",
+                metadata={"stage_origin": "ppr_recall"},
+            ))
+
+    updated.sort(key=lambda r: r.score or 0.0, reverse=True)
+    return updated
