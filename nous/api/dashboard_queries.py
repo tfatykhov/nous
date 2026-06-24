@@ -290,14 +290,16 @@ async def get_graph_data(
 
 # ── Node detail (GET /dashboard/graph/node/{node_id}) ────────────────────
 #
-# Per-type source table + full-content/category expressions. Reused to hydrate
-# a single node (untruncated) and to label its neighbors (LEFT(.,120)).
-_NODE_DETAIL_SOURCES: dict[str, tuple[str, str, str]] = {
-    "decision": ("brain.decisions", "description", "category"),
-    "fact": ("heart.facts", "content", "category"),
-    "episode": ("heart.episodes", "COALESCE(title, summary)", "frame_used"),
-    "procedure": ("heart.procedures", "name", "domain"),
-    "chunk": ("heart.episode_chunks", "content", "chunk_index::text"),
+# Per-type source table + (content_expr, label_expr, category_expr). The
+# node itself is hydrated with content_expr (the full body — summary for
+# episodes, description for procedures); neighbors are labelled with the
+# concise label_expr (title/name), truncated to 120 chars.
+_NODE_DETAIL_SOURCES: dict[str, tuple[str, str, str, str]] = {
+    "decision": ("brain.decisions", "description", "description", "category"),
+    "fact": ("heart.facts", "content", "content", "category"),
+    "episode": ("heart.episodes", "COALESCE(summary, title)", "COALESCE(title, summary)", "frame_used"),
+    "procedure": ("heart.procedures", "COALESCE(description, name)", "name", "domain"),
+    "chunk": ("heart.episode_chunks", "content", "content", "chunk_index::text"),
 }
 
 # Cap connections returned for a single node so a dense hub can't produce a
@@ -321,7 +323,7 @@ async def get_node_detail(
     src = _NODE_DETAIL_SOURCES.get(node_type)
     if src is None:
         return {"found": False}
-    table, content_expr, cat_expr = src
+    table, content_expr, _label_expr, cat_expr = src
 
     # Hydrate the node itself with full, untruncated content.
     row = (
@@ -394,13 +396,13 @@ async def get_node_detail(
     labels: dict[str, str] = {}
     active_flags: dict[str, bool] = {}
     for ntype, ids in neighbor_ids_by_type.items():
-        table_n, content_expr_n, _ = _NODE_DETAIL_SOURCES[ntype]
+        table_n, _content_n, label_expr_n, _cat_n = _NODE_DETAIL_SOURCES[ntype]
         active_sel = (
             "active" if table_n in _ACTIVE_FILTER_TABLES else "true AS active"
         )
         res = await session.execute(
             text(f"""
-                SELECT id::text AS id, LEFT({content_expr_n}, 120) AS label, {active_sel}
+                SELECT id::text AS id, LEFT({label_expr_n}, 120) AS label, {active_sel}
                 FROM {table_n}
                 WHERE agent_id = :agent_id AND id = ANY(CAST(:ids AS uuid[]))
             """),
@@ -975,6 +977,11 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                         SELECT target_id AS node_id, created_at
                         FROM brain.graph_edges WHERE agent_id = :agent_id
                     ) all_endpoints
+                    -- Only count endpoints that are themselves active nodes, so
+                    -- `connected` is over the same set as `total` (all_nodes).
+                    -- Otherwise an inactive episode WITH an edge inflates the
+                    -- connected running-sum past total and deflates orphan_count.
+                    WHERE node_id IN (SELECT id FROM all_nodes)
                     GROUP BY node_id
                 ) first_seen
                 GROUP BY first_connected_day
@@ -988,7 +995,7 @@ async def get_health_data(session: AsyncSession, agent_id: str) -> dict:
                         UNION
                         SELECT target_id AS node_id FROM brain.graph_edges
                         WHERE agent_id = :agent_id AND created_at < :since
-                    ) n) AS connected_base
+                    ) n WHERE node_id IN (SELECT id FROM all_nodes)) AS connected_base
             ),
             joined AS (
                 SELECT d.day,

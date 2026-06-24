@@ -275,6 +275,21 @@ class TestOrphanActiveFilter:
         data = await get_graph_data(session, AGENT_ID)
         assert data["stats"]["orphan_counts"]["decisions"] == 2
 
+    @pytest.mark.asyncio
+    async def test_health_trend_last_point_matches_total_orphans(self, session):
+        # The trend's `connected` set must exclude inactive endpoints too, or an
+        # inactive episode WITH an edge deflates orphan_count below the
+        # point-in-time total. Invariant: orphan_trend[-1].count == total_orphans.
+        await _insert_fact(session, active=True)  # active orphan -> counts
+        d1 = await _insert_decision(session)
+        e_inactive = await _insert_episode(session, active=False)
+        # Edge to the inactive episode: endpoint must NOT be counted as connected.
+        await _insert_edge(session, d1, e_inactive,
+                           source_type="decision", target_type="episode")
+
+        data = await get_health_data(session, AGENT_ID)
+        assert data["orphan_trend"][-1]["count"] == data["total_orphans"]
+
 
 # ── get_node_detail (GET /dashboard/graph/node/{id}) ────────────────────
 
@@ -334,6 +349,17 @@ class TestGetNodeDetail:
         data = await get_node_detail(session, AGENT_ID, str(f1), "fact")
         relations = {c["relation"] for c in data["connections"]}
         assert "contradicts" in relations
+
+    @pytest.mark.asyncio
+    async def test_episode_returns_full_summary_not_just_title(self, session):
+        # Node content for an episode must be the summary body, not a label.
+        e1 = await _insert_episode(session)  # helper sets summary="Test episode <id>"
+        d1 = await _insert_decision(session)
+        await _insert_edge(session, d1, e1, source_type="decision", target_type="episode")
+
+        data = await get_node_detail(session, AGENT_ID, str(e1), "episode")
+        assert data["found"] is True
+        assert data["node"]["content"].startswith("Test episode")
 
     @pytest.mark.asyncio
     async def test_inactive_neighbor_flagged(self, session):
