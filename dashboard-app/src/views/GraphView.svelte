@@ -2,7 +2,13 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { GraphData, GraphEdgeData, GraphNodeData } from '../lib/types/api';
+  import type {
+    GraphData,
+    GraphEdgeData,
+    GraphNodeData,
+    GraphConnection,
+    GraphNodeDetail,
+  } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import BottomSheet from '../lib/ui/BottomSheet.svelte';
@@ -30,13 +36,70 @@
   let searchQuery = $state('');
 
   // ── Node detail (BottomSheet) ────────────────────────────────────────────
-  let selectedNode = $state<GraphNode | null>(null);
+  // The sheet shows full content + ALL connections, fetched lazily from
+  // /dashboard/graph/node/{id}. selectedHead holds the lightweight {id,type,label}
+  // picked from either a Cytoscape tap or a connection drill-through, so the
+  // header renders instantly while the detail loads.
+  type NodeHead = { id: string; type: string; label: string };
+  let selectedHead = $state<NodeHead | null>(null);
   let sheetOpen = $state(false);
+  let detail = $state<GraphNodeDetail | null>(null);
+  let detailLoading = $state(false);
+  let detailError = $state(false);
+
+  let detailReq = 0; // monotonic guard against out-of-order responses
+  let detailAbort: AbortController | null = null;
+
+  async function loadDetail(head: NodeHead) {
+    selectedHead = head;
+    sheetOpen = true;
+    detail = null;
+    detailError = false;
+    detailLoading = true;
+
+    detailAbort?.abort();
+    const ac = new AbortController();
+    detailAbort = ac;
+    const req = ++detailReq;
+    try {
+      const data = await apiGet<GraphNodeDetail>(
+        `/dashboard/graph/node/${encodeURIComponent(head.id)}?type=${encodeURIComponent(head.type)}`,
+        { signal: ac.signal, retries: 1 },
+      );
+      if (req !== detailReq) return; // a newer request superseded this one
+      detail = data;
+    } catch (err) {
+      if (req !== detailReq) return;
+      // 404 = node hard-deleted but still edge-referenced; treat as "not found".
+      detail = { found: false };
+      detailError = (err as { status?: number }).status !== 404;
+    } finally {
+      if (req === detailReq) detailLoading = false;
+    }
+  }
 
   function onNodeClick(node: GraphNode) {
-    selectedNode = node;
-    sheetOpen = true;
+    loadDetail({ id: node.id, type: node.type, label: node.label });
   }
+
+  function drillTo(c: GraphConnection) {
+    loadDetail({ id: c.neighbor_id, type: c.neighbor_type, label: c.neighbor_label });
+  }
+
+  // Connections grouped by relation, largest group first; items keep the
+  // backend's weight-desc order within each group.
+  let groupedConnections = $derived.by(() => {
+    const conns = detail?.connections ?? [];
+    const groups = new Map<string, GraphConnection[]>();
+    for (const c of conns) {
+      const arr = groups.get(c.relation);
+      if (arr) arr.push(c);
+      else groups.set(c.relation, [c]);
+    }
+    return [...groups.entries()]
+      .map(([relation, items]) => ({ relation, items }))
+      .sort((a, b) => b.items.length - a.items.length);
+  });
 
   // ── Derived: hiddenTypes set ─────────────────────────────────────────────
   let hiddenTypes = $derived(
@@ -222,6 +285,14 @@
   function capitalize(s: string): string {
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
+
+  function fmtWeight(w: number | null): string {
+    return w == null ? '--' : w.toFixed(2);
+  }
+
+  function fmtRelation(r: string): string {
+    return r.replace(/_/g, ' ');
+  }
 </script>
 
 <div class="view-head">
@@ -305,42 +376,93 @@
 {/if}
 
 <!-- Node detail bottom sheet -->
-<BottomSheet bind:open={sheetOpen} title={selectedNode ? capitalize(selectedNode.type) + ' Detail' : 'Node Detail'}>
-  {#if selectedNode}
-    {@const n = selectedNode}
+<BottomSheet bind:open={sheetOpen} title={selectedHead ? capitalize(selectedHead.type) + ' Detail' : 'Node Detail'}>
+  {#if selectedHead}
+    {@const head = selectedHead}
     <div class="node-detail">
+      <!-- Meta rows: render from detail when loaded, else from the head -->
       <div class="node-row">
         <span class="detail-label">Type</span>
-        <span class="type-badge" style:background="{typeColor(n.type)}20" style:color={typeColor(n.type)}>
-          {n.type}
+        <span class="type-badge" style:background="{typeColor(head.type)}20" style:color={typeColor(head.type)}>
+          {head.type}
         </span>
       </div>
-      {#if n.category}
+      {#if detail?.node?.category}
         <div class="node-row">
           <span class="detail-label">Category</span>
-          <span>{n.category}</span>
+          <span>{detail.node.category}</span>
         </div>
       {/if}
       <div class="node-row">
         <span class="detail-label">ID</span>
-        <span class="mono">{n.id.slice(0, 8)}…</span>
+        <span class="mono">{head.id.slice(0, 8)}…</span>
       </div>
-      <div class="node-row">
-        <span class="detail-label">Edges</span>
-        <span>{n.edge_count}</span>
-      </div>
-      {#if n.created_at}
+      {#if detail?.node?.created_at}
         <div class="node-row">
           <span class="detail-label">Created</span>
-          <span>{fmtDate(n.created_at)}</span>
+          <span>{fmtDate(detail.node.created_at)}</span>
         </div>
       {/if}
-      {#if n.label}
-        <div class="detail-section">
-          <div class="detail-label">Label</div>
-          <div class="detail-text">{n.label}</div>
+
+      <!-- Full content -->
+      <div class="detail-section">
+        <div class="detail-label">Content</div>
+        {#if detailLoading && !detail}
+          <div class="detail-text muted-text">Loading…</div>
+        {:else if detail?.found && detail.node}
+          <div class="detail-text">{detail.node.content || head.label || '(empty)'}</div>
+        {:else if detailError}
+          <div class="detail-text muted-text">Failed to load — <button class="link-btn" onclick={() => loadDetail(head)}>retry</button></div>
+        {:else}
+          <!-- 404 / not found: fall back to the truncated graph label -->
+          <div class="detail-text">{head.label || '(node not found)'}</div>
+        {/if}
+      </div>
+
+      <!-- Connections -->
+      <div class="detail-section">
+        <div class="detail-label">
+          Connections{#if detail?.found}<span class="conn-count"> · {detail.connection_count}{#if detail.connections_truncated}+{/if}</span>{/if}
         </div>
-      {/if}
+        {#if detail?.connections_truncated}
+          <div class="detail-text muted-text">Showing the 200 strongest connections.</div>
+        {/if}
+
+        {#if detailLoading && !detail}
+          <div class="detail-text muted-text">Loading connections…</div>
+        {:else if detail?.found && (detail.connection_count ?? 0) === 0}
+          <div class="detail-text muted-text">No connections. This node is an orphan — still retrievable via vector + keyword search, just not graph-linked.</div>
+        {:else if detail?.found}
+          {#each groupedConnections as group (group.relation)}
+            <div class="conn-group">
+              <div class="conn-group-head">
+                <span class="rel-dot" style:background={relationColor(group.relation)}></span>
+                <span class="rel-name">{fmtRelation(group.relation)}</span>
+                <span class="rel-count">{group.items.length}</span>
+              </div>
+              {#each group.items as c (c.edge_id)}
+                <button
+                  class="conn-item"
+                  class:inactive={!c.neighbor_active}
+                  onclick={() => drillTo(c)}
+                  title="Open {c.neighbor_type}: {c.neighbor_label}"
+                >
+                  <span class="conn-dir" title={c.direction === 'out' ? 'this → neighbor' : 'neighbor → this'}>
+                    {c.direction === 'out' ? '→' : '←'}
+                  </span>
+                  <span class="conn-type-dot" style:background={typeColor(c.neighbor_type)}></span>
+                  <span class="conn-label">{c.neighbor_label || '(empty)'}</span>
+                  {#if !c.neighbor_active}<span class="conn-flag">inactive</span>{/if}
+                  <span class="conn-meta">
+                    {#if c.extraction_method}<span class="conn-method">{c.extraction_method}</span>{/if}
+                    <span class="conn-weight">{fmtWeight(c.weight)}</span>
+                  </span>
+                </button>
+              {/each}
+            </div>
+          {/each}
+        {/if}
+      </div>
     </div>
   {/if}
 </BottomSheet>
@@ -559,5 +681,119 @@
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.5;
+  }
+
+  .muted-text {
+    color: var(--muted);
+  }
+
+  /* ── Connections ── */
+  .conn-count {
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  .conn-group {
+    margin-top: 0.5rem;
+  }
+
+  .conn-group-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.5rem 0 0.25rem;
+    font-size: 0.75rem;
+    color: var(--text);
+  }
+
+  .rel-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex-shrink: 0;
+  }
+
+  .rel-name {
+    font-weight: 600;
+  }
+
+  .rel-count {
+    color: var(--muted);
+    font-size: 0.6875rem;
+    background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+    border-radius: 999px;
+    padding: 0 0.4rem;
+    line-height: 1.4;
+  }
+
+  .conn-item {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm, 6px);
+    padding: 0.3rem 0.4rem;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 0.8125rem;
+  }
+
+  .conn-item:hover {
+    background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+  }
+
+  .conn-item.inactive {
+    opacity: 0.55;
+  }
+
+  .conn-dir {
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+    flex-shrink: 0;
+  }
+
+  .conn-type-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .conn-label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .conn-flag {
+    font-size: 0.625rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--red, #f87171);
+    border: 1px solid var(--red, #f87171);
+    border-radius: 3px;
+    padding: 0 0.25rem;
+    flex-shrink: 0;
+  }
+
+  .conn-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+    color: var(--muted);
+    font-size: 0.6875rem;
+  }
+
+  .conn-method {
+    font-style: italic;
+  }
+
+  .conn-weight {
+    font-family: ui-monospace, monospace;
   }
 </style>

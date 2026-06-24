@@ -1164,6 +1164,37 @@ def create_app(
             logger.error("Dashboard graph error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_graph_node(request: Request) -> JSONResponse:
+        """GET /dashboard/graph/node/{node_id}?type= - Single node detail + connections."""
+        node_id = request.path_params["node_id"]
+        node_type = request.query_params.get("type", "")
+        try:
+            UUID(node_id)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "node_id must be a UUID"}, status_code=400)
+        try:
+            from nous.api.dashboard_queries import (
+                _NODE_DETAIL_SOURCES,
+                get_node_detail,
+            )
+
+            if node_type not in _NODE_DETAIL_SOURCES:
+                valid = ", ".join(sorted(_NODE_DETAIL_SOURCES))
+                return JSONResponse(
+                    {"error": f"type must be one of: {valid}"}, status_code=400
+                )
+
+            async with database.session() as session:
+                data = await get_node_detail(
+                    session, settings.agent_id, node_id, node_type
+                )
+            if not data.get("found"):
+                return JSONResponse(data, status_code=404)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard graph node error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_calibration(request: Request) -> JSONResponse:
         """GET /dashboard/calibration - Calibration dashboard data."""
         try:
@@ -2597,6 +2628,7 @@ def create_app(
         Route("/rubric", get_rubric),
         # Dashboard API endpoints (F021) — MUST be before static Mount
         Route("/dashboard/graph", dashboard_graph),
+        Route("/dashboard/graph/node/{node_id}", dashboard_graph_node),
         Route("/dashboard/calibration", dashboard_calibration),
         Route("/dashboard/activity", dashboard_activity),
         Route("/dashboard/health", dashboard_health),
