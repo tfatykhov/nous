@@ -208,6 +208,7 @@ class Brain:
                 pattern=d.pattern,
                 tags=tags_by_id.get(d.id, []),
                 reviewed_at=d.reviewed_at,
+                superseded_by=d.superseded_by,
                 created_at=d.created_at,
             )
             for d in decisions
@@ -265,6 +266,7 @@ class Brain:
                 outcome=d.outcome or "pending",
                 pattern=d.pattern,
                 tags=[],
+                superseded_by=d.superseded_by,
                 created_at=d.created_at,
             )
             for d in decisions
@@ -819,6 +821,7 @@ class Brain:
                     pattern=d.pattern,
                     tags=tags_by_id.get(d.id, []),
                     score=scores_by_id.get(d.id),
+                    superseded_by=d.superseded_by,
                     created_at=d.created_at,
                 )
             )
@@ -1894,5 +1897,6 @@ class Brain:
             pattern=decision.pattern,
             tags=[],
             reviewed_at=decision.reviewed_at,
+            superseded_by=decision.superseded_by,
             created_at=decision.created_at,
         )
