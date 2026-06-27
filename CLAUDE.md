@@ -483,6 +483,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_STABLE_TOOL_SET_ENABLED` | `true` | Send a STABLE tool superset across all non-`initiation` frames instead of frame-scoped tool arrays. Tools sit at the front of the Anthropic cacheable prefix, so frame-scoped tools busted the whole prefix on every frame change (~10% of prod cache-creation tokens, measured 2026-06-14). Collapses conversational frames to the `task` (`*`) superset; `initiation` keeps its distinct minimal set; `store_identity`/`complete_initiation` are excluded from the superset. `FRAME_TOOLS` still drives the textual frame instructions. Set `false` to restore per-frame tool gating. |
 | `NOUS_DAG_ENABLED` | `true` | Enable DAG orchestration (F038) |
 | `NOUS_CORRECTION_EXTRACTION_ENABLED` | `true` | Enable correction learning pipeline (F039) |
+| `NOUS_CONSOLIDATION_AUDIT_ENABLED` | `false` | F035.6 master kill-switch. When true, each sleep cycle persists a reviewable changelog to `nous_system.consolidation_cycles` + `consolidation_actions` (migration 063). Default off = sleep behaves byte-for-byte as today (no envelope, no action emits, no retention phase). Fact-mutation phases (reflect/stale_scan/F031/F027) record per-action; graph/episode phases record one per-phase summary. |
+| `NOUS_CONSOLIDATION_AUDIT_RETENTION_DAYS` | `30` | F035.6 days to retain `consolidation_actions` rows (the per-night `consolidation_cycles` totals are kept indefinitely as the F035.3 drift time-series). `_phase_prune_consolidation_actions` runs last each cycle; `0` disables the sweep. |
+| `NOUS_CONSOLIDATION_AUDIT_MAX_INFLIGHT` | `32` | F035.6 soft cap on in-flight batched action-insert tasks; the next batch is awaited inline once exceeded (backpressure). |
 | `NOUS_GRAPH_BACKFILL_ENABLED` | `true` | Enable graph densification backfill during sleep (F040) |
 | `NOUS_GRAPH_BACKFILL_MAX_FACTS` | `50` | Max orphan facts to process per sleep cycle |
 | `NOUS_GRAPH_BACKFILL_MAX_DECISIONS` | `30` | Max orphan decisions to process per sleep cycle |
@@ -603,6 +606,8 @@ The dashboard is a Svelte SPA under `dashboard-app/`. Build with `cd dashboard-a
 | GET | `/dashboard/ledger` | Execution ledger dashboard data |
 | GET | `/dashboard/heartbeat` | Heartbeat dashboard data |
 | GET | `/dashboard/density` | Graph density dashboard data (F040) |
+| GET | `/dashboard/consolidation` | F035.6 recent consolidation cycles (sleep audit diff) |
+| GET | `/dashboard/consolidation/{cycle_id}` | F035.6 one cycle's per-action diffs |
 | GET | `/heartbeat/status` | Heartbeat status, checks, budget |
 | POST | `/heartbeat/trigger` | Force immediate heartbeat tick |
 | PUT | `/heartbeat/config` | Update heartbeat intervals/budget at runtime |

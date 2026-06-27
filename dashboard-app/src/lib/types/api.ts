@@ -1133,3 +1133,41 @@ export interface DensityData {
   edge_distribution: Record<string, number>;
   backfill_progress: DensityBackfillRow[];
 }
+
+// ── F035.6: Consolidation Audit Diff ──────────────────────────────────────
+
+/** One persisted sleep-cycle consolidation audit (GET /dashboard/consolidation). */
+export interface ConsolidationCycle {
+  cycle_id: string;
+  trace_id: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  status: string;
+  phases_run: string[];
+  /** Per-op tallies recorded for the cycle (e.g. { merged: 1, superseded: 2 }). */
+  totals: Record<string, number>;
+  action_count: number;
+}
+
+/** Full response from GET /dashboard/consolidation. */
+export interface ConsolidationData {
+  cycles: ConsolidationCycle[];
+}
+
+/** One diff-style action row within a cycle. */
+export interface ConsolidationAction {
+  action_id: string;
+  phase: string;
+  op: string;
+  target_ids: string[];
+  before: Record<string, unknown> | null;
+  after: Record<string, unknown> | null;
+  rationale: string | null;
+  created_at: string | null;
+}
+
+/** Full response from GET /dashboard/consolidation/{cycle_id}. */
+export interface ConsolidationCycleDetail {
+  cycle: ConsolidationCycle | null;
+  actions: ConsolidationAction[];
+}

@@ -17,6 +17,7 @@
   import Admission from './views/Admission.svelte';
   import Rubric from './views/Rubric.svelte';
   import Density from './views/Density.svelte';
+  import Consolidation from './views/Consolidation.svelte';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -186,6 +187,8 @@
     <Cache />
   {:else if $currentRoute === 'density'}
     <Density />
+  {:else if $currentRoute === 'consolidation'}
+    <Consolidation />
   {:else if $currentRoute === 'dag'}
     <DagView />
   {:else if $currentRoute === 'subtasks'}

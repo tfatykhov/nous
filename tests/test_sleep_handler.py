@@ -47,6 +47,11 @@ def _mock_settings(**overrides) -> MagicMock:
     s.anthropic_auth_token = ""
     s.agent_id = "test-agent"
     s.sleep_enabled = True
+    # F035.6: default the audit kill-switch OFF so _run_sleep tests don't
+    # spin up an auditor against the AsyncMock db (matches the real default).
+    s.consolidation_audit_enabled = False
+    s.consolidation_audit_retention_days = 30
+    s.consolidation_audit_max_inflight = 32
     for k, v in overrides.items():
         setattr(s, k, v)
     return s

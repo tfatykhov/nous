@@ -105,6 +105,60 @@ class Event(Base):
     caused_by: Mapped[str | None] = mapped_column(String(12), nullable=True)
 
 
+class ConsolidationCycle(Base):
+    """F035.6: one envelope row per sleep/consolidation cycle."""
+
+    __tablename__ = "consolidation_cycles"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'completed', 'failed')",
+            name="ck_consolidation_cycles_status",
+        ),
+        {"schema": "nous_system"},
+    )
+
+    cycle_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    trace_id: Mapped[str | None] = mapped_column(String(12))
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="running")
+    phases_run = mapped_column(ARRAY(Text), nullable=True)
+    totals: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+
+class ConsolidationAction(Base):
+    """F035.6: per-mutation changelog row, grouped by ``cycle_id``."""
+
+    __tablename__ = "consolidation_actions"
+    __table_args__ = {"schema": "nous_system"}
+
+    action_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    # Nullable: orphan rows survive an envelope-write failure (recoverable by trace_id).
+    cycle_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("nous_system.consolidation_cycles.cycle_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    trace_id: Mapped[str | None] = mapped_column(String(12))
+    agent_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    op: Mapped[str] = mapped_column(Text, nullable=False)
+    target_ids = mapped_column(ARRAY(UUID(as_uuid=True)), nullable=True)
+    before: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    after: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 # =============================================================================
 # BRAIN SCHEMA (8 tables)
 # =============================================================================

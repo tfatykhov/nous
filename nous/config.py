@@ -652,6 +652,24 @@ class Settings(BaseSettings):
         description="F065: days to retain brain.graph_hub_snapshots rows. Sleep handler prunes older rows. 0 disables the prune phase.",
     )
 
+    # F035.6: Consolidation Audit Diff — reviewable per-sleep-cycle changelog.
+    # Master kill-switch. Default OFF: sleep runs byte-for-byte as today (no
+    # envelope opened, no cycle_id threaded, no action emits, no retention phase).
+    consolidation_audit_enabled: bool = Field(
+        default=False,
+        description="F035.6: persist a per-sleep-cycle consolidation audit diff to nous_system.consolidation_cycles/actions. Default off = zero behavior change.",
+    )
+    consolidation_audit_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description="F035.6: days to retain consolidation_actions rows (the per-night cycle totals are kept indefinitely). 0 disables the retention sweep.",
+    )
+    consolidation_audit_max_inflight: int = Field(
+        default=32,
+        ge=1,
+        description="F035.6: soft cap on in-flight batched action-insert tasks; the next batch is awaited inline once exceeded (backpressure).",
+    )
+
     # F065: top-N hubs the autosurface tracks.
     graph_hub_autosurface_top_n: int = Field(
         default=10,

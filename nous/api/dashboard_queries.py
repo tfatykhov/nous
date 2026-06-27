@@ -2197,3 +2197,146 @@ async def get_subtask_dashboard_data(
         "recent_outcomes": recent_outcomes,
         "daily_trend": daily_trend,
     }
+
+
+# ── F035.6: Consolidation Audit Diff Dashboard ─────────────────────────────
+
+
+def _consolidation_iso(val: Any) -> str | None:
+    """Coerce a timestamp value to ISO-8601 text (or None)."""
+    if val is None:
+        return None
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
+    return str(val)
+
+
+def _consolidation_cycle_row(row: Any, action_count: int) -> dict[str, Any]:
+    """Shape one consolidation_cycles row into the dashboard dict.
+
+    ``totals`` and ``phases_run`` are stored as JSONB / text[] respectively;
+    coerce defensively so a NULL column never breaks JSON serialisation.
+    """
+    return {
+        "cycle_id": str(row.cycle_id),
+        "trace_id": row.trace_id,
+        "started_at": _consolidation_iso(row.started_at),
+        "finished_at": _consolidation_iso(row.finished_at),
+        "status": row.status,
+        "phases_run": list(row.phases_run) if row.phases_run else [],
+        "totals": row.totals if isinstance(row.totals, dict) else {},
+        "action_count": action_count,
+    }
+
+
+async def get_consolidation_data(
+    session: AsyncSession, agent_id: str, *, limit: int = 30
+) -> dict:
+    """F035.6: Return recent consolidation cycles with per-cycle action counts.
+
+    Each cycle carries its audit ``totals`` (jsonb), ``phases_run`` (text[]),
+    status, and a COUNT of its persisted ``consolidation_actions`` rows. Ordered
+    by ``started_at`` DESC, agent-scoped.
+    """
+    result = await session.execute(
+        text("""
+            SELECT
+                c.cycle_id,
+                c.trace_id,
+                c.started_at,
+                c.finished_at,
+                c.status,
+                c.phases_run,
+                c.totals,
+                (
+                    SELECT COUNT(*)
+                    FROM nous_system.consolidation_actions a
+                    WHERE a.cycle_id = c.cycle_id
+                      AND a.agent_id = :agent_id
+                ) AS action_count
+            FROM nous_system.consolidation_cycles c
+            WHERE c.agent_id = :agent_id
+            ORDER BY c.started_at DESC
+            LIMIT :limit
+        """),
+        {"agent_id": agent_id, "limit": limit},
+    )
+    cycles = [
+        _consolidation_cycle_row(row, int(row.action_count or 0))
+        for row in result
+    ]
+    return {"cycles": cycles}
+
+
+async def get_consolidation_cycle_detail(
+    session: AsyncSession, agent_id: str, cycle_id: str
+) -> dict:
+    """F035.6: Return one consolidation cycle plus its ordered action diffs.
+
+    Returns ``{"cycle": None, "actions": []}`` when the cycle id is unknown for
+    this agent. Actions are ordered by ``created_at`` ASC so the diff reads in
+    execution order.
+    """
+    cycle_row = (
+        await session.execute(
+            text("""
+                SELECT
+                    c.cycle_id,
+                    c.trace_id,
+                    c.started_at,
+                    c.finished_at,
+                    c.status,
+                    c.phases_run,
+                    c.totals,
+                    (
+                        SELECT COUNT(*)
+                        FROM nous_system.consolidation_actions a
+                        WHERE a.cycle_id = c.cycle_id
+                          AND a.agent_id = :agent_id
+                    ) AS action_count
+                FROM nous_system.consolidation_cycles c
+                WHERE c.agent_id = :agent_id
+                  AND c.cycle_id = CAST(:cycle_id AS uuid)
+            """),
+            {"agent_id": agent_id, "cycle_id": cycle_id},
+        )
+    ).first()
+
+    if cycle_row is None:
+        return {"cycle": None, "actions": []}
+
+    cycle = _consolidation_cycle_row(cycle_row, int(cycle_row.action_count or 0))
+
+    actions_result = await session.execute(
+        text("""
+            SELECT
+                action_id,
+                phase,
+                op,
+                target_ids,
+                before,
+                after,
+                rationale,
+                created_at
+            FROM nous_system.consolidation_actions
+            WHERE agent_id = :agent_id
+              AND cycle_id = CAST(:cycle_id AS uuid)
+            ORDER BY created_at ASC
+        """),
+        {"agent_id": agent_id, "cycle_id": cycle_id},
+    )
+    actions = [
+        {
+            "action_id": str(row.action_id),
+            "phase": row.phase,
+            "op": row.op,
+            "target_ids": [str(t) for t in row.target_ids] if row.target_ids else [],
+            "before": row.before,
+            "after": row.after,
+            "rationale": row.rationale,
+            "created_at": _consolidation_iso(row.created_at),
+        }
+        for row in actions_result
+    ]
+
+    return {"cycle": cycle, "actions": actions}
