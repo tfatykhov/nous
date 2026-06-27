@@ -74,6 +74,8 @@ Minsky's Chapter 6 ("Self-Knowledge is Dangerous") warns that unrestricted self-
 | F035.2 | Autonomous Action Audit Trail | P1 | F035.1 |
 | F035.3 | Behavioral Drift Detection | P2 | F035.2 |
 | F035.4 | Context Visibility | P1 | F035 (umbrella) |
+| F035.5 | Retrieval Audit (Recall Explainability) | P3 | F035 (umbrella) |
+| F035.6 | Consolidation Audit Diff | P2 | F035.1 |
 
 **Sequencing rationale:** F035.1 gives us the infrastructure (stats collection, endpoints). F035.2 adds causal metadata to events. F035.3 builds on both to detect trends. F035.4 is independent — it hooks into the runner pipeline, not the event bus — and can be built in parallel with F035.1-3. Each sub-spec is independently useful.
 
