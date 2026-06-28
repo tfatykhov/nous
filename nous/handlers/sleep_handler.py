@@ -947,16 +947,21 @@ class SleepHandler:
             logger.warning("UPDATES prefix handling failed", exc_info=True)
             return False
 
-    async def _apply_supersede(self, winner_id, loser_id) -> None:
+    async def _apply_supersede(self, winner_id, loser_id) -> bool:
         """2a (2026-06-13 audit): deactivate the loser AND preserve the supersede
         chain — set ``loser.superseded_by = winner`` and write the supersedes
         edge — all in one session+commit, mirroring the F031 MERGE atomicity and
         clobber guard. The SUPERSEDE_A/B branches previously called
-        ``deactivate_fact`` alone, severing lineage (no column, no edge)."""
+        ``deactivate_fact`` alone, severing lineage (no column, no edge).
+
+        Returns ``True`` iff a real supersede was committed, ``False`` on either
+        no-op guard (loser gone / already superseded by a concurrent path). The
+        caller gates ``contradictions_resolved`` + the F035.6 audit row on this,
+        so a raced no-op never reports a supersession that did not occur."""
         async with self._heart.db.session() as session:
             orm = await session.get(Fact, loser_id)
             if orm is None:
-                return
+                return False
             # codex P1 (PR #520): if a concurrent path already superseded this
             # fact, skip EVERYTHING — writing a winner->loser edge now would
             # record a second, conflicting winner while the column still names
@@ -967,11 +972,12 @@ class SleepHandler:
                     "F031 supersede: skip %s — already superseded by %s",
                     loser_id, orm.superseded_by,
                 )
-                return
+                return False
             orm.superseded_by = winner_id
             orm.active = False
             await self._heart.link_facts(winner_id, loser_id, "supersedes", 1.0, session)
             await session.commit()
+            return True
 
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""
@@ -1090,20 +1096,22 @@ class SleepHandler:
                     if action == "SUPERSEDE_A":
                         # loser=fact1, winner=fact2 (already active). 2a: preserve
                         # the chain (superseded_by + edge), not a bare deactivate.
-                        await self._apply_supersede(winner_id=fact2_id, loser_id=fact1_id)
-                        sleep_stats["contradictions_resolved"] += 1
-                        logger.info(
-                            "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
-                            action, fact1_id, fact2_id, confidence,
-                        )
+                        # Gate the counter/audit on a real commit — a raced no-op
+                        # supersede must not report a resolution (codex P2).
+                        if await self._apply_supersede(winner_id=fact2_id, loser_id=fact1_id):
+                            sleep_stats["contradictions_resolved"] += 1
+                            logger.info(
+                                "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
+                                action, fact1_id, fact2_id, confidence,
+                            )
                     elif action == "SUPERSEDE_B":
                         # loser=fact2, winner=fact1 (inverted from SUPERSEDE_A).
-                        await self._apply_supersede(winner_id=fact1_id, loser_id=fact2_id)
-                        sleep_stats["contradictions_resolved"] += 1
-                        logger.info(
-                            "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
-                            action, fact2_id, fact1_id, confidence,
-                        )
+                        if await self._apply_supersede(winner_id=fact1_id, loser_id=fact2_id):
+                            sleep_stats["contradictions_resolved"] += 1
+                            logger.info(
+                                "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
+                                action, fact2_id, fact1_id, confidence,
+                            )
                     elif action == "MERGE":
                         # merged_content is guaranteed non-empty here (the
                         # downgrade-to-KEEP_BOTH guard above catches the empty
