@@ -39,6 +39,7 @@ def _mock_settings(**overrides) -> MagicMock:
     s.anthropic_auth_token = ""
     s.agent_id = "test-agent"
     s.sleep_enabled = True
+    s.consolidation_audit_enabled = False  # F035.6: match real default
     for k, v in overrides.items():
         setattr(s, k, v)
     return s

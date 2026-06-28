@@ -32,6 +32,7 @@ from nous.brain.brain import Brain
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm_structured
+from nous.handlers.consolidation_audit import ConsolidationAuditor, preview
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput, FactRejected
 from nous.storage.models import Fact
@@ -353,6 +354,10 @@ class SleepHandler:
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
         self._episode_summarizer = None  # F060: Set externally if enabled
+        # F035.6: per-cycle consolidation auditor. Set at _run_sleep start when
+        # settings.consolidation_audit_enabled; None otherwise (= no audit, no
+        # behavior change). Phases read self._auditor directly.
+        self._auditor: ConsolidationAuditor | None = None
         # F035.1: Observability tracking
         self._total_sleeps: int = 0
         self._last_sleep_at: datetime | None = None
@@ -408,6 +413,42 @@ class SleepHandler:
             logger.debug("%s persistence failed (suppressed)",
                          event_type, exc_info=True)
 
+    async def _run_audited_phase(self, label, op, coro_factory, sleep_stats, count_keys):
+        """F035.6: run a phase and record ONE summary action from its mutation delta.
+
+        Used for the graph/episode phases that delegate to other modules and only
+        return aggregate counts (no per-mutation ids). The per-cycle ``totals`` on
+        the envelope already carries the absolute counts; this summary row records
+        *which phase* produced *which* counts (the F035.3 drift attribution).
+        Per-edge/per-episode action rows are a scoped follow-up (Phase 1c). The
+        fact-mutation phases (reflect/stale_scan/F031/F027) record per-action and
+        are NOT wrapped here, so there is no double-counting.
+
+        ``count_keys`` is the EXPLICIT allowlist of memory-mutation counters for
+        this phase — diagnostic counters (``*_error``, ``*_skipped_*``) are never
+        in it, so a cycle that only bumped an error counter records no action
+        (codex P2). The delta is recorded regardless of the phase's final success
+        flag, because a phase can commit part of its work and then return False
+        (e.g. densification commits edges before a later cluster step fails) — the
+        committed mutations must still appear in the changelog (codex P2). Bool
+        flags (e.g. ``rubric_evolved``) record only on a False->True flip.
+        """
+        before = {k: sleep_stats.get(k, 0) for k in count_keys}
+        success = await coro_factory()
+        if self._auditor is not None:
+            delta: dict = {}
+            for k in count_keys:
+                cur = sleep_stats.get(k, 0)
+                prev = before.get(k, 0)
+                if isinstance(cur, bool):
+                    if cur and not prev:
+                        delta[k] = True
+                elif isinstance(cur, int) and (cur - (prev if isinstance(prev, int) else 0)) > 0:
+                    delta[k] = cur - (prev if isinstance(prev, int) else 0)
+            if delta:
+                self._auditor.record(label, op, after={"counts": delta}, rationale=f"{label} phase summary")
+        return success
+
     def get_stats(self) -> dict:
         """F035.1: Return sleep handler statistics."""
         return {
@@ -424,6 +465,29 @@ class SleepHandler:
         self._currently_sleeping = True
         phases_completed: list[str] = []
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+
+        # F035.6: open the consolidation-audit envelope (default-off kill-switch).
+        # When disabled, self._auditor stays None and every phase's audit guard
+        # is a no-op — sleep behaves byte-for-byte as before.
+        self._auditor = None
+        if self._settings.consolidation_audit_enabled:
+            try:
+                # Use the CONFIGURED agent id (== settings.agent_id, the id the
+                # dashboard queries), NOT event.agent_id — the scheduler emits
+                # sleep_started with agent_id="system" (session_monitor.py:347),
+                # which would hide scheduled-sleep audit rows from the dashboard.
+                # parent_trace_id still links to the triggering event causally.
+                self._auditor = ConsolidationAuditor(
+                    self._heart.db,
+                    self._heart.agent_id,
+                    max_inflight=self._settings.consolidation_audit_max_inflight,
+                    parent_trace_id=event.trace_id,
+                )
+                await self._auditor.open()
+            except Exception:
+                logger.warning("F035.6: auditor init failed; continuing without audit", exc_info=True)
+                self._auditor = None
+        audit_status = "completed"
 
         try:
             logger.info("Sleep mode started — beginning consolidation")
@@ -469,12 +533,18 @@ class SleepHandler:
             # F040 picks up the freshly-populated structured_summary instead
             # of falling through F058's plain-summary fallback.
             if not self._interrupted:
-                success = await self._phase_recover_abandoned_episodes(sleep_stats)
+                success = await self._run_audited_phase(
+                    "recover_episode", "recover",
+                    lambda: self._phase_recover_abandoned_episodes(sleep_stats), sleep_stats,
+                    ("episodes_recovered", "episodes_marked_abandoned"))
                 if success:
                     phases_completed.append("recover_abandoned_episodes")
 
             if not self._interrupted:
-                success = await self._phase_graph_densification(sleep_stats)
+                success = await self._run_audited_phase(
+                    "graph_densify", "edge_add",
+                    lambda: self._phase_graph_densification(sleep_stats), sleep_stats,
+                    ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created"))
                 if success:
                     phases_completed.append("graph_densification")
 
@@ -484,7 +554,10 @@ class SleepHandler:
             # so the new edges (active→active endpoints) won't be touched
             # by F053 on this cycle.
             if not self._interrupted:
-                success = await self._phase_relink_open_episodes(sleep_stats)
+                success = await self._run_audited_phase(
+                    "relink_episode", "relink",
+                    lambda: self._phase_relink_open_episodes(sleep_stats), sleep_stats,
+                    ("episodes_relinked", "episode_relink_edges"))
                 if success:
                     phases_completed.append("relink_open_episodes")
 
@@ -492,12 +565,18 @@ class SleepHandler:
             # after densification/relink (count this cycle's re-derivations)
             # and before dead-edge prune. No-op unless tinyhippo_lite_enabled.
             if not self._interrupted:
-                success = await self._phase_stc_consolidation(sleep_stats)
+                success = await self._run_audited_phase(
+                    "stc_consolidate", "consolidate",
+                    lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats,
+                    ("f044_downscaled",))
                 if success:
                     phases_completed.append("stc_consolidation")
 
             if not self._interrupted:
-                success = await self._phase_prune_dead_edges(sleep_stats)
+                success = await self._run_audited_phase(
+                    "prune_dead_edges", "edge_prune",
+                    lambda: self._phase_prune_dead_edges(sleep_stats), sleep_stats,
+                    ("dead_edges_pruned",))
                 if success:
                     phases_completed.append("prune_dead_edges")
 
@@ -510,12 +589,18 @@ class SleepHandler:
                     phases_completed.append("prune_hub_snapshots")
 
             if not self._interrupted:
-                success = await self._phase_generalize(sleep_stats)
+                success = await self._run_audited_phase(
+                    "generalize", "create_proc",
+                    lambda: self._phase_generalize(sleep_stats), sleep_stats,
+                    ("procedures_created",))
                 if success:
                     phases_completed.append("generalize")
 
             if not self._interrupted:
-                success = await self._phase_evolve_rubric(sleep_stats)
+                success = await self._run_audited_phase(
+                    "evolve_rubric", "evolve",
+                    lambda: self._phase_evolve_rubric(sleep_stats), sleep_stats,
+                    ("rubric_evolved",))
                 if success:
                     phases_completed.append("evolve_rubric")
 
@@ -539,7 +624,21 @@ class SleepHandler:
 
         except Exception:
             logger.exception("Sleep handler error")
+            audit_status = "failed"
         finally:
+            # F035.6: drain pending action batches, write the terminal envelope
+            # (status + totals + phases), then sweep old action rows. The drain
+            # inside close() guarantees no `completed` row is observable before
+            # its action rows (A9). All failures are suppressed inside the
+            # auditor — a broken audit can never break a sleep cycle.
+            if self._auditor is not None:
+                try:
+                    await self._auditor.close(audit_status, phases_completed, sleep_stats)
+                    await self._phase_prune_consolidation_actions(sleep_stats)
+                except Exception:
+                    logger.warning("F035.6: audit finalize failed (suppressed)", exc_info=True)
+                finally:
+                    self._auditor = None
             self._sleeping = False
             self._currently_sleeping = False
             self._sleep_task = None
@@ -659,6 +758,14 @@ class SleepHandler:
                         continue
                     stored += 1
                     sleep_stats["facts_created"] += 1
+                    if self._auditor is not None:
+                        _fid = getattr(result, "id", None)
+                        self._auditor.record(
+                            "reflect", "learn",
+                            target_ids=[_fid] if _fid else None,
+                            after={"subject": subject, "content_preview": preview(fact["content"])},
+                            rationale="sleep_reflection fact",
+                        )
 
             # Fallback: if LLM didn't return structured facts, store summary + lessons
             if not structured_facts:
@@ -675,6 +782,14 @@ class SleepHandler:
                     else:
                         stored += 1
                         sleep_stats["facts_created"] += 1
+                        if self._auditor is not None:
+                            _fid = getattr(result, "id", None)
+                            self._auditor.record(
+                                "reflect", "learn",
+                                target_ids=[_fid] if _fid else None,
+                                after={"subject": "daily_reflection", "content_preview": preview(reflection["summary"])},
+                                rationale="sleep_reflection summary",
+                            )
 
                 for lesson in reflection.get("lessons", [])[:3]:
                     if self._interrupted:
@@ -691,6 +806,14 @@ class SleepHandler:
                         continue
                     stored += 1
                     sleep_stats["facts_created"] += 1
+                    if self._auditor is not None:
+                        _fid = getattr(result, "id", None)
+                        self._auditor.record(
+                            "reflect", "learn",
+                            target_ids=[_fid] if _fid else None,
+                            after={"subject": "lesson_learned", "content_preview": preview(lesson)},
+                            rationale="sleep_reflection lesson",
+                        )
 
             # Issue #233 fix: 0 stored from non-empty reflection is anomalous
             patterns = reflection.get("patterns", [])
@@ -751,6 +874,18 @@ class SleepHandler:
             f'include it with a note: "UPDATES: <existing fact content>" in the fact\'s subject field.\n'
         )
 
+    def _record_reflect_learn(self, result, subject: str, content: str, rationale: str) -> None:
+        """F035.6: record a reflect-phase fact creation (guarded no-op when audit off)."""
+        if self._auditor is None:
+            return
+        _fid = getattr(result, "id", None)
+        self._auditor.record(
+            "reflect", "learn",
+            target_ids=[_fid] if _fid else None,
+            after={"subject": subject, "content_preview": preview(content)},
+            rationale=rationale,
+        )
+
     async def _handle_updates_prefix(
         self, subject: str, fact: dict, sleep_stats: dict
     ) -> bool:
@@ -782,6 +917,7 @@ class SleepHandler:
                 ))
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
+                    self._record_reflect_learn(result, referenced_content, fact["content"], "UPDATES: no match")
                     return True
                 return False
 
@@ -801,6 +937,7 @@ class SleepHandler:
                 ))
                 if not isinstance(result, FactRejected):
                     sleep_stats["facts_created"] += 1
+                    self._record_reflect_learn(result, referenced_content, fact["content"], "UPDATES: low score")
                     return True
                 return False
 
@@ -816,21 +953,34 @@ class SleepHandler:
             )
             sleep_stats["facts_created"] += 1
             logger.info("F031 orient: superseded fact %s with updated content", best_match.id)
+            if self._auditor is not None:
+                self._auditor.record(
+                    "reflect", "supersede",
+                    target_ids=[best_match.id],
+                    before={"content_preview": preview(getattr(best_match, "content", ""))},
+                    after={"content_preview": preview(fact["content"])},
+                    rationale=f"UPDATES: prefix (score {getattr(best_match, 'score', None)})",
+                )
             return True
         except Exception:
             logger.warning("UPDATES prefix handling failed", exc_info=True)
             return False
 
-    async def _apply_supersede(self, winner_id, loser_id) -> None:
+    async def _apply_supersede(self, winner_id, loser_id) -> bool:
         """2a (2026-06-13 audit): deactivate the loser AND preserve the supersede
         chain — set ``loser.superseded_by = winner`` and write the supersedes
         edge — all in one session+commit, mirroring the F031 MERGE atomicity and
         clobber guard. The SUPERSEDE_A/B branches previously called
-        ``deactivate_fact`` alone, severing lineage (no column, no edge)."""
+        ``deactivate_fact`` alone, severing lineage (no column, no edge).
+
+        Returns ``True`` iff a real supersede was committed, ``False`` on either
+        no-op guard (loser gone / already superseded by a concurrent path). The
+        caller gates ``contradictions_resolved`` + the F035.6 audit row on this,
+        so a raced no-op never reports a supersession that did not occur."""
         async with self._heart.db.session() as session:
             orm = await session.get(Fact, loser_id)
             if orm is None:
-                return
+                return False
             # codex P1 (PR #520): if a concurrent path already superseded this
             # fact, skip EVERYTHING — writing a winner->loser edge now would
             # record a second, conflicting winner while the column still names
@@ -841,11 +991,12 @@ class SleepHandler:
                     "F031 supersede: skip %s — already superseded by %s",
                     loser_id, orm.superseded_by,
                 )
-                return
+                return False
             orm.superseded_by = winner_id
             orm.active = False
             await self._heart.link_facts(winner_id, loser_id, "supersedes", 1.0, session)
             await session.commit()
+            return True
 
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""
@@ -955,24 +1106,31 @@ class SleepHandler:
                 except Exception:
                     logger.debug("F031 persistence failed (suppressed)", exc_info=True)
 
+                # F035.6: snapshot the resolved counter so we can emit the audit
+                # row only AFTER a verdict's mutation actually commits (codex P2 —
+                # a rolled-back apply must not leave a phantom audit row).
+                _resolved_before = sleep_stats.get("contradictions_resolved", 0)
+
                 try:
                     if action == "SUPERSEDE_A":
                         # loser=fact1, winner=fact2 (already active). 2a: preserve
                         # the chain (superseded_by + edge), not a bare deactivate.
-                        await self._apply_supersede(winner_id=fact2_id, loser_id=fact1_id)
-                        sleep_stats["contradictions_resolved"] += 1
-                        logger.info(
-                            "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
-                            action, fact1_id, fact2_id, confidence,
-                        )
+                        # Gate the counter/audit on a real commit — a raced no-op
+                        # supersede must not report a resolution (codex P2).
+                        if await self._apply_supersede(winner_id=fact2_id, loser_id=fact1_id):
+                            sleep_stats["contradictions_resolved"] += 1
+                            logger.info(
+                                "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
+                                action, fact1_id, fact2_id, confidence,
+                            )
                     elif action == "SUPERSEDE_B":
                         # loser=fact2, winner=fact1 (inverted from SUPERSEDE_A).
-                        await self._apply_supersede(winner_id=fact1_id, loser_id=fact2_id)
-                        sleep_stats["contradictions_resolved"] += 1
-                        logger.info(
-                            "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
-                            action, fact2_id, fact1_id, confidence,
-                        )
+                        if await self._apply_supersede(winner_id=fact1_id, loser_id=fact2_id):
+                            sleep_stats["contradictions_resolved"] += 1
+                            logger.info(
+                                "F031 resolve: %s — superseded %s by %s (%.2f confidence)",
+                                action, fact2_id, fact1_id, confidence,
+                            )
                     elif action == "MERGE":
                         # merged_content is guaranteed non-empty here (the
                         # downgrade-to-KEEP_BOTH guard above catches the empty
@@ -1111,6 +1269,25 @@ class SleepHandler:
                         action, fact1_id, fact2_id, exc_info=True,
                     )
 
+                # F035.6: emit the unified action only if the verdict actually
+                # mutated (contradictions_resolved advanced). KEEP_BOTH/downgraded/
+                # unknown and any failed-apply path leave the counter unchanged.
+                if (
+                    self._auditor is not None
+                    and sleep_stats.get("contradictions_resolved", 0) > _resolved_before
+                    and action in ("SUPERSEDE_A", "SUPERSEDE_B", "MERGE", "REMOVE_A", "REMOVE_B")
+                ):
+                    _op = {"SUPERSEDE_A": "supersede", "SUPERSEDE_B": "supersede",
+                           "MERGE": "merge", "REMOVE_A": "deactivate",
+                           "REMOVE_B": "deactivate"}[action]
+                    self._auditor.record(
+                        "f031_contradiction", _op,
+                        target_ids=[fact1_id, fact2_id],
+                        before=[{"id": str(fact1_id)}, {"id": str(fact2_id)}],
+                        after=({"content_preview": preview(merged_content)} if action == "MERGE" and merged_content else None),
+                        rationale=f"{action} (conf {confidence:.2f}): {str(resolution.get('reason', ''))[:160]}",
+                    )
+
             logger.info(
                 "Contradiction resolution: %d found, %d resolved",
                 sleep_stats.get("contradictions_found", 0),
@@ -1177,12 +1354,28 @@ class SleepHandler:
                 stale_facts = result.scalars().all()
 
                 count = 0
+                # Buffer the (id, subject, content) of each deactivated fact and
+                # only emit audit rows AFTER the commit succeeds — a rolled-back
+                # transaction must not leave the audit reporting deactivations
+                # that never landed (codex P2).
+                _deactivated: list[tuple] = []
                 for fact in stale_facts:
                     fact.active = False
                     count += 1
+                    if self._auditor is not None:
+                        _deactivated.append((fact.id, fact.subject, fact.content))
 
                 if count > 0:
                     await session.commit()
+
+                if self._auditor is not None:
+                    for _fid, _subj, _content in _deactivated:
+                        self._auditor.record(
+                            "stale_scan", "deactivate",
+                            target_ids=[_fid],
+                            before={"subject": _subj, "content_preview": preview(_content)},
+                            rationale=f"stale: aged > {settings.stale_scan_age_days}d, no recall in window",
+                        )
 
                 sleep_stats["stale_deactivated"] = count
                 logger.info(
@@ -1428,6 +1621,15 @@ class SleepHandler:
                     },
                 )
 
+                if self._auditor is not None:
+                    self._auditor.record(
+                        "f027_consolidate", "merge",
+                        target_ids=[f.id for f in facts] + [merged_detail.id],
+                        before=[{"id": str(f.id), "content_preview": preview(f.content)} for f in facts],
+                        after={"id": merged_fact_id, "content_preview": preview(merge_result.get("merged_content", ""))},
+                        rationale=f"cluster merge of {len(facts)} facts on '{str(subject)[:80]}'",
+                    )
+
                 merged_count += 1
                 sleep_stats.setdefault("facts_created", 0)
                 sleep_stats["facts_created"] += 1
@@ -1661,6 +1863,32 @@ class SleepHandler:
         except Exception as exc:
             sleep_stats["hub_snapshot_prune_error"] = type(exc).__name__
             logger.warning("F065 hub-snapshot prune failed", exc_info=True)
+            return False
+
+    async def _phase_prune_consolidation_actions(self, sleep_stats: dict) -> bool:
+        """F035.6: retention sweep for consolidation_actions rows.
+
+        Runs LAST, after the envelope close/drain, so it can only ever delete
+        rows from *prior* cycles (never the current cycle's still-emitting rows).
+        The per-night ``consolidation_cycles`` totals are retained indefinitely;
+        only the verbose per-action rows are swept. Gated by
+        ``consolidation_audit_retention_days`` (0 disables). Errors are caught and
+        never abort the sleep cycle.
+        """
+        if self._auditor is None:
+            return True
+        try:
+            days = int(self._settings.consolidation_audit_retention_days)
+            deleted = await self._auditor.prune_old_actions(days)
+            if deleted:
+                sleep_stats["consolidation_actions_pruned"] = deleted
+                logger.info(
+                    "F035.6: pruned %d consolidation_action rows older than %d days",
+                    deleted, days,
+                )
+            return True
+        except Exception:
+            logger.warning("F035.6 consolidation-action retention sweep failed", exc_info=True)
             return False
 
     async def _phase_recover_abandoned_episodes(self, sleep_stats: dict) -> bool:

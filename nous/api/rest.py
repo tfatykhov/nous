@@ -1719,6 +1719,49 @@ def create_app(
             logger.error("Dashboard density error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # --- F035.6: Consolidation audit diff dashboard ---
+
+    async def dashboard_consolidation(request: Request) -> JSONResponse:
+        """GET /dashboard/consolidation - Recent consolidation cycles."""
+        try:
+            limit = max(1, min(int(request.query_params.get("limit", "30")), 200))
+        except ValueError:
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_consolidation_data
+
+            async with database.session() as session:
+                data = await get_consolidation_data(
+                    session, settings.agent_id, limit=limit,
+                )
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard consolidation error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_consolidation_detail(request: Request) -> JSONResponse:
+        """GET /dashboard/consolidation/{cycle_id} - One cycle's action diffs."""
+        cycle_id = request.path_params["cycle_id"]
+        try:
+            UUID(cycle_id)
+        except (ValueError, TypeError):
+            return JSONResponse({"error": "cycle_id must be a UUID"}, status_code=400)
+
+        try:
+            from nous.api.dashboard_queries import get_consolidation_cycle_detail
+
+            async with database.session() as session:
+                data = await get_consolidation_cycle_detail(
+                    session, settings.agent_id, cycle_id,
+                )
+            if data.get("cycle") is None:
+                return JSONResponse(data, status_code=404)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard consolidation detail error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     # --- F061: Subtask hardening dashboard ---
 
     async def dashboard_subtasks(request: Request) -> JSONResponse:
@@ -2648,6 +2691,10 @@ def create_app(
         Route("/dashboard/dag", dashboard_dag),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
+        # F035.6: Consolidation audit diff dashboard — detail (path param) MUST
+        # be before the list route for Starlette top-down matching.
+        Route("/dashboard/consolidation/{cycle_id}", dashboard_consolidation_detail),
+        Route("/dashboard/consolidation", dashboard_consolidation),
         Route("/dashboard/subtasks", dashboard_subtasks),
         # NOTE: the bare /dashboard -> /dashboard/v2/ redirect is registered
         # below, gated on the v2 build existing (so a source/pip install without
