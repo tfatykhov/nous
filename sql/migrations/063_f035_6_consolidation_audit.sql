@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS nous_system.consolidation_actions (
     phase        text NOT NULL,            -- f031_contradiction | f027_consolidate | reflect | stale_scan | ...
     op           text NOT NULL,            -- merge | supersede | deactivate | edge_add | edge_reweight | ...
     target_ids   uuid[],                   -- fact/episode/edge ids touched
-    before       jsonb,                    -- list of {id, content_preview} for multi-source merge; null when N/A
-    after        jsonb,                    -- post-op snapshot; null for prune/deactivate/tombstone
+    before       jsonb,                    -- list of {id, content_preview} for multi-source merge (null when N/A)
+    after        jsonb,                    -- post-op snapshot (null for prune/deactivate/tombstone)
     rationale    text,
     seq          integer,                  -- monotonic per-cycle recording order (created_at ties on batch inserts)
     created_at   timestamptz NOT NULL DEFAULT now()

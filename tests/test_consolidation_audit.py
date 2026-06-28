@@ -275,6 +275,68 @@ async def test_killswitch_off_opens_no_cycle():
 
 
 @pytest.mark.asyncio
+async def test_audited_phase_records_on_partial_commit_even_if_phase_fails():
+    # codex P2: a phase that commits a mutation then returns False must still
+    # produce its summary row.
+    db = _FakeDB()
+    handler = _make_handler(db, audit_enabled=True)
+    handler._auditor = _auditor(db)
+    await handler._auditor.open()
+    stats = {}
+
+    async def _phase():
+        stats["dead_edges_pruned"] = 3  # committed
+        return False  # later step failed
+
+    ok = await handler._run_audited_phase("prune_dead_edges", "edge_prune", _phase, stats, ("dead_edges_pruned",))
+    await handler._auditor.close("completed", ["prune_dead_edges"], stats)
+    assert ok is False
+    assert len(db.actions) == 1
+    assert db.actions[0]["phase"] == "prune_dead_edges"
+
+
+@pytest.mark.asyncio
+async def test_audited_phase_ignores_diagnostic_counters():
+    # codex P2: a cycle that only bumped an error/skip counter records nothing.
+    db = _FakeDB()
+    handler = _make_handler(db, audit_enabled=True)
+    handler._auditor = _auditor(db)
+    await handler._auditor.open()
+    stats = {}
+
+    async def _phase():
+        stats["abandoned_recovery_skipped_no_data"] = 5
+        stats["abandoned_recovery_errors"] = 2
+        return True
+
+    await handler._run_audited_phase(
+        "recover_episode", "recover", _phase, stats,
+        ("episodes_recovered", "episodes_marked_abandoned"),
+    )
+    await handler._auditor.close("completed", ["recover_episode"], stats)
+    assert db.actions == []  # no mutation counter advanced
+
+
+@pytest.mark.asyncio
+async def test_audited_phase_records_bool_flip():
+    db = _FakeDB()
+    handler = _make_handler(db, audit_enabled=True)
+    handler._auditor = _auditor(db)
+    await handler._auditor.open()
+    stats = {}
+
+    async def _phase():
+        stats["rubric_evolved"] = True
+        return True
+
+    await handler._run_audited_phase("evolve_rubric", "evolve", _phase, stats, ("rubric_evolved",))
+    await handler._auditor.close("completed", ["evolve_rubric"], stats)
+    assert len(db.actions) == 1
+    import json
+    assert json.loads(db.actions[0]["after"]) == {"counts": {"rubric_evolved": True}}
+
+
+@pytest.mark.asyncio
 async def test_killswitch_on_opens_and_closes_cycle():
     db = _FakeDB()
     handler = _make_handler(db, audit_enabled=True)

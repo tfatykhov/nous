@@ -413,8 +413,8 @@ class SleepHandler:
             logger.debug("%s persistence failed (suppressed)",
                          event_type, exc_info=True)
 
-    async def _run_audited_phase(self, label, op, coro_factory, sleep_stats):
-        """F035.6: run a phase and record ONE summary action from its sleep_stats delta.
+    async def _run_audited_phase(self, label, op, coro_factory, sleep_stats, count_keys):
+        """F035.6: run a phase and record ONE summary action from its mutation delta.
 
         Used for the graph/episode phases that delegate to other modules and only
         return aggregate counts (no per-mutation ids). The per-cycle ``totals`` on
@@ -423,16 +423,28 @@ class SleepHandler:
         Per-edge/per-episode action rows are a scoped follow-up (Phase 1c). The
         fact-mutation phases (reflect/stale_scan/F031/F027) record per-action and
         are NOT wrapped here, so there is no double-counting.
+
+        ``count_keys`` is the EXPLICIT allowlist of memory-mutation counters for
+        this phase — diagnostic counters (``*_error``, ``*_skipped_*``) are never
+        in it, so a cycle that only bumped an error counter records no action
+        (codex P2). The delta is recorded regardless of the phase's final success
+        flag, because a phase can commit part of its work and then return False
+        (e.g. densification commits edges before a later cluster step fails) — the
+        committed mutations must still appear in the changelog (codex P2). Bool
+        flags (e.g. ``rubric_evolved``) record only on a False->True flip.
         """
-        before = {k: v for k, v in sleep_stats.items() if isinstance(v, int) and not isinstance(v, bool)}
+        before = {k: sleep_stats.get(k, 0) for k in count_keys}
         success = await coro_factory()
-        if success and self._auditor is not None:
-            delta = {
-                k: sleep_stats[k] - before.get(k, 0)
-                for k, v in sleep_stats.items()
-                if isinstance(v, int) and not isinstance(v, bool)
-                and (sleep_stats[k] - before.get(k, 0)) > 0
-            }
+        if self._auditor is not None:
+            delta: dict = {}
+            for k in count_keys:
+                cur = sleep_stats.get(k, 0)
+                prev = before.get(k, 0)
+                if isinstance(cur, bool):
+                    if cur and not prev:
+                        delta[k] = True
+                elif isinstance(cur, int) and (cur - (prev if isinstance(prev, int) else 0)) > 0:
+                    delta[k] = cur - (prev if isinstance(prev, int) else 0)
             if delta:
                 self._auditor.record(label, op, after={"counts": delta}, rationale=f"{label} phase summary")
         return success
@@ -523,14 +535,16 @@ class SleepHandler:
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "recover_episode", "recover",
-                    lambda: self._phase_recover_abandoned_episodes(sleep_stats), sleep_stats)
+                    lambda: self._phase_recover_abandoned_episodes(sleep_stats), sleep_stats,
+                    ("episodes_recovered", "episodes_marked_abandoned"))
                 if success:
                     phases_completed.append("recover_abandoned_episodes")
 
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "graph_densify", "edge_add",
-                    lambda: self._phase_graph_densification(sleep_stats), sleep_stats)
+                    lambda: self._phase_graph_densification(sleep_stats), sleep_stats,
+                    ("orphan_edges_created", "temporal_chain_edges", "comention_edges", "bridge_edges_created"))
                 if success:
                     phases_completed.append("graph_densification")
 
@@ -542,7 +556,8 @@ class SleepHandler:
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "relink_episode", "relink",
-                    lambda: self._phase_relink_open_episodes(sleep_stats), sleep_stats)
+                    lambda: self._phase_relink_open_episodes(sleep_stats), sleep_stats,
+                    ("episodes_relinked", "episode_relink_edges"))
                 if success:
                     phases_completed.append("relink_open_episodes")
 
@@ -552,14 +567,16 @@ class SleepHandler:
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "stc_consolidate", "consolidate",
-                    lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats)
+                    lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats,
+                    ("f044_downscaled",))
                 if success:
                     phases_completed.append("stc_consolidation")
 
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "prune_dead_edges", "edge_prune",
-                    lambda: self._phase_prune_dead_edges(sleep_stats), sleep_stats)
+                    lambda: self._phase_prune_dead_edges(sleep_stats), sleep_stats,
+                    ("dead_edges_pruned",))
                 if success:
                     phases_completed.append("prune_dead_edges")
 
@@ -574,14 +591,16 @@ class SleepHandler:
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "generalize", "create_proc",
-                    lambda: self._phase_generalize(sleep_stats), sleep_stats)
+                    lambda: self._phase_generalize(sleep_stats), sleep_stats,
+                    ("procedures_created",))
                 if success:
                     phases_completed.append("generalize")
 
             if not self._interrupted:
                 success = await self._run_audited_phase(
                     "evolve_rubric", "evolve",
-                    lambda: self._phase_evolve_rubric(sleep_stats), sleep_stats)
+                    lambda: self._phase_evolve_rubric(sleep_stats), sleep_stats,
+                    ("rubric_evolved",))
                 if success:
                     phases_completed.append("evolve_rubric")
 
