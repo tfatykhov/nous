@@ -290,8 +290,13 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
             "reporting flush count only, promotion retries next cycle",
             touched, exc_info=True,
         )
-        for k in _STC_PROMOTE_KEYS:
-            stats.setdefault(k, 0)
+        # Zero-fill ONLY the committed-mutation counter (nothing was promoted —
+        # accurate). The telemetry SNAPSHOTS (f044_n_edges/n_tagged/n_consolidated/
+        # ltp_ge*/reinforced_24h) are deliberately OMITTED, not zeroed: fabricating
+        # "0 edges" for a cycle whose telemetry SELECT never ran (or rolled back)
+        # would corrupt the F035.3 drift time-series (codex P2). The phase returns
+        # before its telemetry logger.info on this path, so omission can't KeyError.
+        stats.setdefault("f044_promoted", 0)
         # Failure signal so the caller can mark the phase unsuccessful even
         # though the (durable) flush count is surfaced (codex P2). A BOOL, not an
         # int: it rides into the cycle totals, and ConsolidationAuditor._sum_totals

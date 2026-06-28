@@ -64,10 +64,14 @@ async def test_run_stc_preserves_flush_count_on_promotion_failure(monkeypatch):
     stats = await run_stc_consolidation(_NoopDB(), _AGENT, prp_threshold=3)
 
     assert stats["f044_recall_touches_flushed"] == 7  # durable count preserved
-    assert stats["f044_promoted"] == 0                # rolled-back promotion
+    assert stats["f044_promoted"] == 0                # committed-mutation counter zero-filled
     assert stats["f044_stc_error"] is True              # failure signal for the phase
-    # every promote/telemetry key present (so the phase logger.info can't KeyError)
-    assert set(_STC_PROMOTE_KEYS).issubset(stats)
+    # telemetry SNAPSHOTS are OMITTED (not fake-zeroed) so the drift series isn't
+    # corrupted with "0 edges" for an unmeasured cycle (codex P2).
+    assert "f044_n_edges" not in stats
+    assert "f044_n_tagged" not in stats
+    assert "f044_ltp_ge1" not in stats
+    assert "f044_reinforced_24h" not in stats
 
 
 @pytest.mark.asyncio
@@ -104,6 +108,7 @@ async def test_run_stc_does_not_audit_promotion_when_commit_fails(monkeypatch):
     assert stats["f044_recall_touches_flushed"] == 5  # durable flush preserved
     assert stats["f044_promoted"] == 0                # rolled-back promotion zero-filled
     assert stats["f044_stc_error"] is True
+    assert "f044_n_edges" not in stats               # rolled-back telemetry omitted
 
 
 @pytest.mark.asyncio
