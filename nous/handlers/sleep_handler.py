@@ -568,7 +568,12 @@ class SleepHandler:
                 success = await self._run_audited_phase(
                     "stc_consolidate", "consolidate",
                     lambda: self._phase_stc_consolidation(sleep_stats), sleep_stats,
-                    ("f044_downscaled",))
+                    # F044 per-cycle MUTATION counters only (UPDATE rowcounts):
+                    # promotions (consolidation_state), recall-buffer ltp writes,
+                    # and weight downscale. The f044_n_*/ltp_ge*/reinforced_24h
+                    # keys are STATE/WINDOW snapshots, not this-cycle mutations —
+                    # excluding them avoids recording a bogus 15k-edge "delta".
+                    ("f044_promoted", "f044_recall_touches_flushed", "f044_downscaled"))
                 if success:
                     phases_completed.append("stc_consolidation")
 
