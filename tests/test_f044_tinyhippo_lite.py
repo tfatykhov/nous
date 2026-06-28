@@ -65,6 +65,7 @@ async def test_run_stc_preserves_flush_count_on_promotion_failure(monkeypatch):
 
     assert stats["f044_recall_touches_flushed"] == 7  # durable count preserved
     assert stats["f044_promoted"] == 0                # rolled-back promotion
+    assert stats["f044_stc_error"] == 1              # failure signal for the phase
     # every promote/telemetry key present (so the phase logger.info can't KeyError)
     assert set(_STC_PROMOTE_KEYS).issubset(stats)
 
@@ -83,6 +84,7 @@ async def test_run_stc_success_path_merges_flush_and_promotion(monkeypatch):
     stats = await run_stc_consolidation(_NoopDB(), _AGENT, prp_threshold=3)
     assert stats["f044_recall_touches_flushed"] == 4
     assert stats["f044_promoted"] == 2
+    assert "f044_stc_error" not in stats  # no failure signal on the happy path
 
 
 # ---------------------------------------------------------------------------

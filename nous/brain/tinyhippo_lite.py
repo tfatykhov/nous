@@ -282,4 +282,8 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
         )
         for k in _STC_PROMOTE_KEYS:
             stats.setdefault(k, 0)
+        # Failure signal so the caller can mark the phase unsuccessful even
+        # though the (durable) flush count is surfaced (codex P2). Excluded from
+        # the F035.6 audit allowlist like other diagnostic ``*_error`` keys.
+        stats["f044_stc_error"] = 1
     return stats

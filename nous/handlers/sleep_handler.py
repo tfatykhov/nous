@@ -1707,6 +1707,13 @@ class SleepHandler:
                 self._settings.tinyhippo_prp_threshold,
             )
             sleep_stats.update(stats)
+            # Promotion/telemetry failed after the durable recall flush: the
+            # flush count is in sleep_stats (so the F035.6 audit still records the
+            # reinforcement via _run_audited_phase, which fires regardless of this
+            # return), but the phase did NOT fully run — report failure so
+            # phases_completed doesn't claim stc_consolidation succeeded (codex P2).
+            if stats.get("f044_stc_error"):
+                return False
             # F044 Phase 8d (spec): homeostatic α-downscale of TAGGED edge
             # weights (consolidated exempt). Runs AFTER promotion (8c) so
             # freshly-promoted edges aren't penalized this cycle. Opt-in
