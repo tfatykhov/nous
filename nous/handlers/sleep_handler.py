@@ -1076,23 +1076,10 @@ class SleepHandler:
                 except Exception:
                     logger.debug("F031 persistence failed (suppressed)", exc_info=True)
 
-                # F035.6: record the unified consolidation action for mutating
-                # verdicts only (KEEP_BOTH / downgraded / unknown mutate nothing).
-                # Granularity matches the existing f031 event: one action per
-                # resolved contradiction.
-                if self._auditor is not None and action in (
-                    "SUPERSEDE_A", "SUPERSEDE_B", "MERGE", "REMOVE_A", "REMOVE_B"
-                ):
-                    _op = {"SUPERSEDE_A": "supersede", "SUPERSEDE_B": "supersede",
-                           "MERGE": "merge", "REMOVE_A": "deactivate",
-                           "REMOVE_B": "deactivate"}[action]
-                    self._auditor.record(
-                        "f031_contradiction", _op,
-                        target_ids=[fact1_id, fact2_id],
-                        before=[{"id": str(fact1_id)}, {"id": str(fact2_id)}],
-                        after=({"content_preview": preview(merged_content)} if action == "MERGE" and merged_content else None),
-                        rationale=f"{action} (conf {confidence:.2f}): {str(resolution.get('reason', ''))[:160]}",
-                    )
+                # F035.6: snapshot the resolved counter so we can emit the audit
+                # row only AFTER a verdict's mutation actually commits (codex P2 —
+                # a rolled-back apply must not leave a phantom audit row).
+                _resolved_before = sleep_stats.get("contradictions_resolved", 0)
 
                 try:
                     if action == "SUPERSEDE_A":
@@ -1250,6 +1237,25 @@ class SleepHandler:
                         action, fact1_id, fact2_id, exc_info=True,
                     )
 
+                # F035.6: emit the unified action only if the verdict actually
+                # mutated (contradictions_resolved advanced). KEEP_BOTH/downgraded/
+                # unknown and any failed-apply path leave the counter unchanged.
+                if (
+                    self._auditor is not None
+                    and sleep_stats.get("contradictions_resolved", 0) > _resolved_before
+                    and action in ("SUPERSEDE_A", "SUPERSEDE_B", "MERGE", "REMOVE_A", "REMOVE_B")
+                ):
+                    _op = {"SUPERSEDE_A": "supersede", "SUPERSEDE_B": "supersede",
+                           "MERGE": "merge", "REMOVE_A": "deactivate",
+                           "REMOVE_B": "deactivate"}[action]
+                    self._auditor.record(
+                        "f031_contradiction", _op,
+                        target_ids=[fact1_id, fact2_id],
+                        before=[{"id": str(fact1_id)}, {"id": str(fact2_id)}],
+                        after=({"content_preview": preview(merged_content)} if action == "MERGE" and merged_content else None),
+                        rationale=f"{action} (conf {confidence:.2f}): {str(resolution.get('reason', ''))[:160]}",
+                    )
+
             logger.info(
                 "Contradiction resolution: %d found, %d resolved",
                 sleep_stats.get("contradictions_found", 0),
@@ -1316,19 +1322,28 @@ class SleepHandler:
                 stale_facts = result.scalars().all()
 
                 count = 0
+                # Buffer the (id, subject, content) of each deactivated fact and
+                # only emit audit rows AFTER the commit succeeds — a rolled-back
+                # transaction must not leave the audit reporting deactivations
+                # that never landed (codex P2).
+                _deactivated: list[tuple] = []
                 for fact in stale_facts:
                     fact.active = False
                     count += 1
                     if self._auditor is not None:
-                        self._auditor.record(
-                            "stale_scan", "deactivate",
-                            target_ids=[fact.id],
-                            before={"subject": fact.subject, "content_preview": preview(fact.content)},
-                            rationale=f"stale: aged > {settings.stale_scan_age_days}d, no recall in window",
-                        )
+                        _deactivated.append((fact.id, fact.subject, fact.content))
 
                 if count > 0:
                     await session.commit()
+
+                if self._auditor is not None:
+                    for _fid, _subj, _content in _deactivated:
+                        self._auditor.record(
+                            "stale_scan", "deactivate",
+                            target_ids=[_fid],
+                            before={"subject": _subj, "content_preview": preview(_content)},
+                            rationale=f"stale: aged > {settings.stale_scan_age_days}d, no recall in window",
+                        )
 
                 sleep_stats["stale_deactivated"] = count
                 logger.info(

@@ -135,6 +135,8 @@ class ConsolidationAuditor:
                 "before": before,
                 "after": after,
                 "rationale": rationale,
+                # Monotonic per-cycle ordering — created_at ties within a batch.
+                "seq": self.actions_recorded,
             }
         )
         self.actions_recorded += 1
@@ -251,9 +253,9 @@ class ConsolidationAuditor:
                     sa_text(
                         "INSERT INTO nous_system.consolidation_actions "
                         "(action_id, cycle_id, trace_id, agent_id, phase, op, "
-                        " target_ids, before, after, rationale) VALUES "
+                        " target_ids, before, after, rationale, seq) VALUES "
                         "(:action_id, :cycle_id, :trace_id, :agent_id, :phase, :op, "
-                        " :target_ids, CAST(:before AS jsonb), CAST(:after AS jsonb), :rationale) "
+                        " :target_ids, CAST(:before AS jsonb), CAST(:after AS jsonb), :rationale, :seq) "
                         "ON CONFLICT (action_id) DO NOTHING"
                     ),
                     params,

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS nous_system.consolidation_actions (
     before       jsonb,                    -- list of {id, content_preview} for multi-source merge; null when N/A
     after        jsonb,                    -- post-op snapshot; null for prune/deactivate/tombstone
     rationale    text,
+    seq          integer,                  -- monotonic per-cycle recording order (created_at ties on batch inserts)
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 

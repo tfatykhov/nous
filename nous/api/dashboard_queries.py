@@ -2317,11 +2317,12 @@ async def get_consolidation_cycle_detail(
                 before,
                 after,
                 rationale,
+                seq,
                 created_at
             FROM nous_system.consolidation_actions
             WHERE agent_id = :agent_id
               AND cycle_id = CAST(:cycle_id AS uuid)
-            ORDER BY created_at ASC
+            ORDER BY seq ASC NULLS LAST, created_at ASC
         """),
         {"agent_id": agent_id, "cycle_id": cycle_id},
     )

@@ -50,6 +50,9 @@ async def test_all_tables_exist(db):
         ("nous_system", "eval_runs"),
         # F064.6: work-queue ingress
         ("nous_system", "work_queue_items"),
+        # F035.6: consolidation audit diff
+        ("nous_system", "consolidation_cycles"),
+        ("nous_system", "consolidation_actions"),
         # brain (8)
         ("brain", "decisions"),
         ("brain", "decision_tags"),

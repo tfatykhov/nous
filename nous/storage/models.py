@@ -154,6 +154,8 @@ class ConsolidationAction(Base):
     before: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     after: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     rationale: Mapped[str | None] = mapped_column(Text)
+    # Monotonic per-cycle recording order; created_at alone ties on batch inserts.
+    seq: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
