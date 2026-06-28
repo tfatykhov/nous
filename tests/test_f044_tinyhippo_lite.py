@@ -14,16 +14,75 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
+import nous.brain.tinyhippo_lite as _th
 from nous.brain.tinyhippo_lite import (
     _RECALL_TOUCH_BUFFER,
+    _STC_PROMOTE_KEYS,
     flush_recall_touches,
     homeostatic_downscale,
     increment_ltp_on_rederivation,
     record_recall_touches,
+    run_stc_consolidation,
     stc_promote_and_measure,
 )
 
 _AGENT = "f044-test-agent"
+
+
+class _NoopSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def commit(self):
+        return None
+
+
+class _NoopDB:
+    def session(self):
+        return _NoopSession()
+
+
+@pytest.mark.asyncio
+async def test_run_stc_preserves_flush_count_on_promotion_failure(monkeypatch):
+    """codex P2: if promotion/telemetry raises after the (durable) recall flush,
+    run_stc_consolidation must still surface f044_recall_touches_flushed (with the
+    rolled-back promotion keys zero-filled) rather than discarding the committed
+    reinforcement count by propagating the exception."""
+
+    async def _fake_flush(session, agent_id):
+        return 7
+
+    async def _fake_promote(session, agent_id, prp):
+        raise RuntimeError("promotion blew up after flush committed")
+
+    monkeypatch.setattr(_th, "flush_recall_touches", _fake_flush)
+    monkeypatch.setattr(_th, "stc_promote_and_measure", _fake_promote)
+
+    stats = await run_stc_consolidation(_NoopDB(), _AGENT, prp_threshold=3)
+
+    assert stats["f044_recall_touches_flushed"] == 7  # durable count preserved
+    assert stats["f044_promoted"] == 0                # rolled-back promotion
+    # every promote/telemetry key present (so the phase logger.info can't KeyError)
+    assert set(_STC_PROMOTE_KEYS).issubset(stats)
+
+
+@pytest.mark.asyncio
+async def test_run_stc_success_path_merges_flush_and_promotion(monkeypatch):
+    async def _fake_flush(session, agent_id):
+        return 4
+
+    async def _fake_promote(session, agent_id, prp):
+        return {k: 0 for k in _STC_PROMOTE_KEYS} | {"f044_promoted": 2}
+
+    monkeypatch.setattr(_th, "flush_recall_touches", _fake_flush)
+    monkeypatch.setattr(_th, "stc_promote_and_measure", _fake_promote)
+
+    stats = await run_stc_consolidation(_NoopDB(), _AGENT, prp_threshold=3)
+    assert stats["f044_recall_touches_flushed"] == 4
+    assert stats["f044_promoted"] == 2
 
 
 # ---------------------------------------------------------------------------

@@ -18,10 +18,26 @@ downstream consumer reads yet) and reports counts.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from typing import Any
 
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+# Keys produced by ``stc_promote_and_measure``; used to zero-fill a partial
+# result when promotion/telemetry fails after the (durable) recall flush.
+_STC_PROMOTE_KEYS = (
+    "f044_promoted",
+    "f044_n_edges",
+    "f044_n_tagged",
+    "f044_n_consolidated",
+    "f044_ltp_ge1",
+    "f044_ltp_ge2",
+    "f044_ltp_ge3",
+    "f044_reinforced_24h",
+)
 
 # F044 v1.1 — buffered recall-touch reinforcement. Edges among co-retrieved
 # results are "reactivated" by a recall (retrieval == STC reactivation). We
@@ -249,8 +265,21 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
     """
     async with db.session() as session:
         touched = await flush_recall_touches(session, agent_id)
-    async with db.session() as session:
-        stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
-        await session.commit()
-    stats["f044_recall_touches_flushed"] = touched
+    # Capture the (already-committed, durable) flush count FIRST so a later
+    # promotion/telemetry failure can't discard it from the returned stats —
+    # otherwise the committed ltp writes would get no audit summary (codex P2).
+    # Promotion is idempotent and simply re-runs next cycle if it aborts here.
+    stats: dict[str, int] = {"f044_recall_touches_flushed": touched}
+    try:
+        async with db.session() as session:
+            stats.update(await stc_promote_and_measure(session, agent_id, prp_threshold))
+            await session.commit()
+    except Exception:
+        logger.warning(
+            "F044 STC promotion/telemetry failed after recall flush (touched=%d); "
+            "reporting flush count only, promotion retries next cycle",
+            touched, exc_info=True,
+        )
+        for k in _STC_PROMOTE_KEYS:
+            stats.setdefault(k, 0)
     return stats
