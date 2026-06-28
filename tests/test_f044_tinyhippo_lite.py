@@ -277,6 +277,23 @@ async def test_recall_touch_buffer_flushes_to_ltp(session):
 
 
 @pytest.mark.postgres_only
+async def test_flush_counts_only_matched_rows(session):
+    """codex P2: a buffered touch whose edge was deleted between recall and sleep
+    matches no row, so the audited flush count must exclude it (rowcount, not the
+    drained buffer size)."""
+    _RECALL_TOUCH_BUFFER.clear()
+    a, b = await _insert_edge(session, ltp=0, relation="related_to")
+    gone_src, gone_tgt = uuid4(), uuid4()  # never inserted
+    record_recall_touches([
+        (str(a), str(b), "related_to"),
+        (str(gone_src), str(gone_tgt), "related_to"),  # no live edge
+    ], _AGENT)
+    applied = await flush_recall_touches(session, _AGENT, commit=False)
+    assert applied == 1  # only the real edge was updated, not the 2 buffered
+    assert len(_RECALL_TOUCH_BUFFER) == 0
+
+
+@pytest.mark.postgres_only
 async def test_three_rederivations_then_gate_promotes(session):
     """End-to-end: an edge re-derived to the PRP threshold consolidates."""
     src, tgt = await _insert_edge(session, ltp=0)

@@ -84,7 +84,10 @@ async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = Tr
     Called at sleep (before the promotion gate). Each distinct edge is bumped by
     its buffered touch count. Only the sleeping agent's keys are drained — other
     agents' buffered touches survive for their own flush. Returns the number of
-    distinct edges reinforced.
+    edge rows the UPDATEs actually matched (a buffered edge deleted between recall
+    and sleep no longer matches, so it is NOT counted) — this is an audited F035.6
+    mutation counter, so it must reflect committed ``ltp_count`` writes, not the
+    drained buffer size.
 
     The buffer drain is in-process and only valid if the writes commit durably,
     so the commit lives INSIDE the restore-guarded block: any failure (an
@@ -105,13 +108,15 @@ async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = Tr
         _RECALL_TOUCH_BUFFER[key] -= n
         if _RECALL_TOUCH_BUFFER[key] <= 0:
             del _RECALL_TOUCH_BUFFER[key]
+    applied = 0
     try:
         for (agent, source_id, target_id, relation), n in items:
-            await session.execute(
+            result = await session.execute(
                 _LTP_INCREMENT_BY_SQL,
                 {"agent": agent, "source_id": source_id, "target_id": target_id,
                  "relation": relation, "n": int(n)},
             )
+            applied += result.rowcount or 0
         if commit:
             await session.commit()
     except BaseException:
@@ -121,7 +126,7 @@ async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = Tr
         for key, n in items:
             _RECALL_TOUCH_BUFFER[key] += n
         raise
-    return len(items)
+    return applied
 
 # Cumulative-reinforcement histogram buckets reported each cycle. The whole
 # bet hinges on this distribution shifting right over cycles; if edges stay at
