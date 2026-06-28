@@ -65,7 +65,7 @@ async def test_run_stc_preserves_flush_count_on_promotion_failure(monkeypatch):
 
     assert stats["f044_recall_touches_flushed"] == 7  # durable count preserved
     assert stats["f044_promoted"] == 0                # rolled-back promotion
-    assert stats["f044_stc_error"] == 1              # failure signal for the phase
+    assert stats["f044_stc_error"] is True              # failure signal for the phase
     # every promote/telemetry key present (so the phase logger.info can't KeyError)
     assert set(_STC_PROMOTE_KEYS).issubset(stats)
 
@@ -103,7 +103,7 @@ async def test_run_stc_does_not_audit_promotion_when_commit_fails(monkeypatch):
     stats = await run_stc_consolidation(_CommitFailsDB(), _AGENT, prp_threshold=3)
     assert stats["f044_recall_touches_flushed"] == 5  # durable flush preserved
     assert stats["f044_promoted"] == 0                # rolled-back promotion zero-filled
-    assert stats["f044_stc_error"] == 1
+    assert stats["f044_stc_error"] is True
 
 
 @pytest.mark.asyncio
