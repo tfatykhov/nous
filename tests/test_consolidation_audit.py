@@ -318,6 +318,42 @@ async def test_audited_phase_ignores_diagnostic_counters():
 
 
 @pytest.mark.asyncio
+async def test_stc_phase_records_only_f044_mutations_not_telemetry():
+    # The stc_consolidate phase mixes per-cycle mutation rowcounts (promoted,
+    # recall_touches_flushed, downscaled) with large STATE/WINDOW snapshots
+    # (n_edges/n_tagged/ltp_ge*/reinforced_24h). Only the mutations belong in
+    # the audit summary; the snapshots would otherwise record a bogus delta.
+    db = _FakeDB()
+    handler = _make_handler(db, audit_enabled=True)
+    handler._auditor = _auditor(db)
+    await handler._auditor.open()
+    stats = {}
+
+    async def _phase():
+        stats.update({
+            "f044_promoted": 3,
+            "f044_recall_touches_flushed": 7,
+            "f044_downscaled": 0,            # no downscale this cycle
+            "f044_n_edges": 15381,           # snapshot — must be ignored
+            "f044_n_tagged": 14479,          # snapshot — must be ignored
+            "f044_ltp_ge1": 2688,            # snapshot — must be ignored
+            "f044_reinforced_24h": 436,      # 24h window — must be ignored
+        })
+        return True
+
+    await handler._run_audited_phase(
+        "stc_consolidate", "consolidate", _phase, stats,
+        ("f044_promoted", "f044_recall_touches_flushed", "f044_downscaled"),
+    )
+    await handler._auditor.close("completed", ["stc_consolidate"], stats)
+    assert len(db.actions) == 1
+    import json
+    assert json.loads(db.actions[0]["after"]) == {
+        "counts": {"f044_promoted": 3, "f044_recall_touches_flushed": 7}
+    }
+
+
+@pytest.mark.asyncio
 async def test_audited_phase_records_bool_flip():
     db = _FakeDB()
     handler = _make_handler(db, audit_enabled=True)

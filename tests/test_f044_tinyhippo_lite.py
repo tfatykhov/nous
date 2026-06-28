@@ -14,16 +14,118 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import text
 
+import nous.brain.tinyhippo_lite as _th
 from nous.brain.tinyhippo_lite import (
     _RECALL_TOUCH_BUFFER,
+    _STC_PROMOTE_KEYS,
     flush_recall_touches,
     homeostatic_downscale,
     increment_ltp_on_rederivation,
     record_recall_touches,
+    run_stc_consolidation,
     stc_promote_and_measure,
 )
 
 _AGENT = "f044-test-agent"
+
+
+class _NoopSession:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def commit(self):
+        return None
+
+
+class _NoopDB:
+    def session(self):
+        return _NoopSession()
+
+
+@pytest.mark.asyncio
+async def test_run_stc_preserves_flush_count_on_promotion_failure(monkeypatch):
+    """codex P2: if promotion/telemetry raises after the (durable) recall flush,
+    run_stc_consolidation must still surface f044_recall_touches_flushed (with the
+    rolled-back promotion keys zero-filled) rather than discarding the committed
+    reinforcement count by propagating the exception."""
+
+    async def _fake_flush(session, agent_id):
+        return 7
+
+    async def _fake_promote(session, agent_id, prp):
+        raise RuntimeError("promotion blew up after flush committed")
+
+    monkeypatch.setattr(_th, "flush_recall_touches", _fake_flush)
+    monkeypatch.setattr(_th, "stc_promote_and_measure", _fake_promote)
+
+    stats = await run_stc_consolidation(_NoopDB(), _AGENT, prp_threshold=3)
+
+    assert stats["f044_recall_touches_flushed"] == 7  # durable count preserved
+    assert stats["f044_promoted"] == 0                # committed-mutation counter zero-filled
+    assert stats["f044_stc_error"] is True              # failure signal for the phase
+    # telemetry SNAPSHOTS are OMITTED (not fake-zeroed) so the drift series isn't
+    # corrupted with "0 edges" for an unmeasured cycle (codex P2).
+    assert "f044_n_edges" not in stats
+    assert "f044_n_tagged" not in stats
+    assert "f044_ltp_ge1" not in stats
+    assert "f044_reinforced_24h" not in stats
+
+
+@pytest.mark.asyncio
+async def test_run_stc_does_not_audit_promotion_when_commit_fails(monkeypatch):
+    """codex P2: if stc_promote_and_measure() succeeds but session.commit() raises,
+    the promotion rowcounts belong to a rolled-back txn and must be zero-filled —
+    never surfaced as committed mutations."""
+
+    class _CommitFailsSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def commit(self):
+            raise RuntimeError("serialization failure on commit")
+
+    class _CommitFailsDB:
+        def session(self):
+            return _CommitFailsSession()
+
+    async def _fake_flush(session, agent_id):
+        return 5
+
+    async def _fake_promote(session, agent_id, prp):
+        # rolled back by the failing commit — must NOT appear in audited stats
+        return {k: 0 for k in _STC_PROMOTE_KEYS} | {"f044_promoted": 9}
+
+    monkeypatch.setattr(_th, "flush_recall_touches", _fake_flush)
+    monkeypatch.setattr(_th, "stc_promote_and_measure", _fake_promote)
+
+    stats = await run_stc_consolidation(_CommitFailsDB(), _AGENT, prp_threshold=3)
+    assert stats["f044_recall_touches_flushed"] == 5  # durable flush preserved
+    assert stats["f044_promoted"] == 0                # rolled-back promotion zero-filled
+    assert stats["f044_stc_error"] is True
+    assert "f044_n_edges" not in stats               # rolled-back telemetry omitted
+
+
+@pytest.mark.asyncio
+async def test_run_stc_success_path_merges_flush_and_promotion(monkeypatch):
+    async def _fake_flush(session, agent_id):
+        return 4
+
+    async def _fake_promote(session, agent_id, prp):
+        return {k: 0 for k in _STC_PROMOTE_KEYS} | {"f044_promoted": 2}
+
+    monkeypatch.setattr(_th, "flush_recall_touches", _fake_flush)
+    monkeypatch.setattr(_th, "stc_promote_and_measure", _fake_promote)
+
+    stats = await run_stc_consolidation(_NoopDB(), _AGENT, prp_threshold=3)
+    assert stats["f044_recall_touches_flushed"] == 4
+    assert stats["f044_promoted"] == 2
+    assert "f044_stc_error" not in stats  # no failure signal on the happy path
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +279,23 @@ async def test_recall_touch_buffer_flushes_to_ltp(session):
         {"s": c, "t": d})).scalar()
     assert ab == 2
     assert cd == 1
+
+
+@pytest.mark.postgres_only
+async def test_flush_counts_only_matched_rows(session):
+    """codex P2: a buffered touch whose edge was deleted between recall and sleep
+    matches no row, so the audited flush count must exclude it (rowcount, not the
+    drained buffer size)."""
+    _RECALL_TOUCH_BUFFER.clear()
+    a, b = await _insert_edge(session, ltp=0, relation="related_to")
+    gone_src, gone_tgt = uuid4(), uuid4()  # never inserted
+    record_recall_touches([
+        (str(a), str(b), "related_to"),
+        (str(gone_src), str(gone_tgt), "related_to"),  # no live edge
+    ], _AGENT)
+    applied = await flush_recall_touches(session, _AGENT, commit=False)
+    assert applied == 1  # only the real edge was updated, not the 2 buffered
+    assert len(_RECALL_TOUCH_BUFFER) == 0
 
 
 @pytest.mark.postgres_only

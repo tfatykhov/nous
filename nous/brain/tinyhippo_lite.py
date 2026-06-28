@@ -18,10 +18,26 @@ downstream consumer reads yet) and reports counts.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from typing import Any
 
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+# Keys produced by ``stc_promote_and_measure``; used to zero-fill a partial
+# result when promotion/telemetry fails after the (durable) recall flush.
+_STC_PROMOTE_KEYS = (
+    "f044_promoted",
+    "f044_n_edges",
+    "f044_n_tagged",
+    "f044_n_consolidated",
+    "f044_ltp_ge1",
+    "f044_ltp_ge2",
+    "f044_ltp_ge3",
+    "f044_reinforced_24h",
+)
 
 # F044 v1.1 — buffered recall-touch reinforcement. Edges among co-retrieved
 # results are "reactivated" by a recall (retrieval == STC reactivation). We
@@ -68,7 +84,10 @@ async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = Tr
     Called at sleep (before the promotion gate). Each distinct edge is bumped by
     its buffered touch count. Only the sleeping agent's keys are drained — other
     agents' buffered touches survive for their own flush. Returns the number of
-    distinct edges reinforced.
+    edge rows the UPDATEs actually matched (a buffered edge deleted between recall
+    and sleep no longer matches, so it is NOT counted) — this is an audited F035.6
+    mutation counter, so it must reflect committed ``ltp_count`` writes, not the
+    drained buffer size.
 
     The buffer drain is in-process and only valid if the writes commit durably,
     so the commit lives INSIDE the restore-guarded block: any failure (an
@@ -89,13 +108,15 @@ async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = Tr
         _RECALL_TOUCH_BUFFER[key] -= n
         if _RECALL_TOUCH_BUFFER[key] <= 0:
             del _RECALL_TOUCH_BUFFER[key]
+    applied = 0
     try:
         for (agent, source_id, target_id, relation), n in items:
-            await session.execute(
+            result = await session.execute(
                 _LTP_INCREMENT_BY_SQL,
                 {"agent": agent, "source_id": source_id, "target_id": target_id,
                  "relation": relation, "n": int(n)},
             )
+            applied += result.rowcount or 0
         if commit:
             await session.commit()
     except BaseException:
@@ -105,7 +126,7 @@ async def flush_recall_touches(session: Any, agent_id: str, *, commit: bool = Tr
         for key, n in items:
             _RECALL_TOUCH_BUFFER[key] += n
         raise
-    return len(items)
+    return applied
 
 # Cumulative-reinforcement histogram buckets reported each cycle. The whole
 # bet hinges on this distribution shifting right over cycles; if edges stay at
@@ -249,8 +270,37 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
     """
     async with db.session() as session:
         touched = await flush_recall_touches(session, agent_id)
-    async with db.session() as session:
-        stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
-        await session.commit()
-    stats["f044_recall_touches_flushed"] = touched
+    # Capture the (already-committed, durable) flush count FIRST so a later
+    # promotion/telemetry failure can't discard it from the returned stats —
+    # otherwise the committed ltp writes would get no audit summary (codex P2).
+    # Promotion is idempotent and simply re-runs next cycle if it aborts here.
+    stats: dict[str, int] = {"f044_recall_touches_flushed": touched}
+    try:
+        async with db.session() as session:
+            promote_stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
+            await session.commit()
+        # Merge ONLY after the commit succeeds — if commit() raises, the promotion
+        # rowcounts/telemetry belong to a rolled-back transaction and must NOT be
+        # audited as committed mutations (codex P2). Keeping them in a local until
+        # here means the except path zero-fills instead of preserving stale values.
+        stats.update(promote_stats)
+    except Exception:
+        logger.warning(
+            "F044 STC promotion/telemetry failed after recall flush (touched=%d); "
+            "reporting flush count only, promotion retries next cycle",
+            touched, exc_info=True,
+        )
+        # Zero-fill ONLY the committed-mutation counter (nothing was promoted —
+        # accurate). The telemetry SNAPSHOTS (f044_n_edges/n_tagged/n_consolidated/
+        # ltp_ge*/reinforced_24h) are deliberately OMITTED, not zeroed: fabricating
+        # "0 edges" for a cycle whose telemetry SELECT never ran (or rolled back)
+        # would corrupt the F035.3 drift time-series (codex P2). The phase returns
+        # before its telemetry logger.info on this path, so omission can't KeyError.
+        stats.setdefault("f044_promoted", 0)
+        # Failure signal so the caller can mark the phase unsuccessful even
+        # though the (durable) flush count is surfaced (codex P2). A BOOL, not an
+        # int: it rides into the cycle totals, and ConsolidationAuditor._sum_totals
+        # sums every non-bool int for `_attempted` — an int flag would be miscounted
+        # as an attempted mutation. Excluded from the STC audit allowlist regardless.
+        stats["f044_stc_error"] = True
     return stats
