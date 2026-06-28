@@ -71,6 +71,42 @@ async def test_run_stc_preserves_flush_count_on_promotion_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_stc_does_not_audit_promotion_when_commit_fails(monkeypatch):
+    """codex P2: if stc_promote_and_measure() succeeds but session.commit() raises,
+    the promotion rowcounts belong to a rolled-back txn and must be zero-filled —
+    never surfaced as committed mutations."""
+
+    class _CommitFailsSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def commit(self):
+            raise RuntimeError("serialization failure on commit")
+
+    class _CommitFailsDB:
+        def session(self):
+            return _CommitFailsSession()
+
+    async def _fake_flush(session, agent_id):
+        return 5
+
+    async def _fake_promote(session, agent_id, prp):
+        # rolled back by the failing commit — must NOT appear in audited stats
+        return {k: 0 for k in _STC_PROMOTE_KEYS} | {"f044_promoted": 9}
+
+    monkeypatch.setattr(_th, "flush_recall_touches", _fake_flush)
+    monkeypatch.setattr(_th, "stc_promote_and_measure", _fake_promote)
+
+    stats = await run_stc_consolidation(_CommitFailsDB(), _AGENT, prp_threshold=3)
+    assert stats["f044_recall_touches_flushed"] == 5  # durable flush preserved
+    assert stats["f044_promoted"] == 0                # rolled-back promotion zero-filled
+    assert stats["f044_stc_error"] == 1
+
+
+@pytest.mark.asyncio
 async def test_run_stc_success_path_merges_flush_and_promotion(monkeypatch):
     async def _fake_flush(session, agent_id):
         return 4

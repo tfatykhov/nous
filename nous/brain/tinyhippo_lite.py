@@ -272,8 +272,13 @@ async def run_stc_consolidation(db: Any, agent_id: str, prp_threshold: int) -> d
     stats: dict[str, int] = {"f044_recall_touches_flushed": touched}
     try:
         async with db.session() as session:
-            stats.update(await stc_promote_and_measure(session, agent_id, prp_threshold))
+            promote_stats = await stc_promote_and_measure(session, agent_id, prp_threshold)
             await session.commit()
+        # Merge ONLY after the commit succeeds — if commit() raises, the promotion
+        # rowcounts/telemetry belong to a rolled-back transaction and must NOT be
+        # audited as committed mutations (codex P2). Keeping them in a local until
+        # here means the except path zero-fills instead of preserving stale values.
+        stats.update(promote_stats)
     except Exception:
         logger.warning(
             "F044 STC promotion/telemetry failed after recall flush (touched=%d); "
