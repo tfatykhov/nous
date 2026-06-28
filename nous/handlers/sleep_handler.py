@@ -460,9 +460,14 @@ class SleepHandler:
         self._auditor = None
         if self._settings.consolidation_audit_enabled:
             try:
+                # Use the CONFIGURED agent id (== settings.agent_id, the id the
+                # dashboard queries), NOT event.agent_id — the scheduler emits
+                # sleep_started with agent_id="system" (session_monitor.py:347),
+                # which would hide scheduled-sleep audit rows from the dashboard.
+                # parent_trace_id still links to the triggering event causally.
                 self._auditor = ConsolidationAuditor(
                     self._heart.db,
-                    event.agent_id,
+                    self._heart.agent_id,
                     max_inflight=self._settings.consolidation_audit_max_inflight,
                     parent_trace_id=event.trace_id,
                 )

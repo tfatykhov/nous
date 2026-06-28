@@ -245,6 +245,7 @@ def _make_handler(db, audit_enabled: bool):
     brain = AsyncMock()
     heart = AsyncMock()
     heart.db = db
+    heart.agent_id = "test-agent"
     settings = MagicMock()
     settings.agent_id = "test-agent"
     settings.consolidation_audit_enabled = audit_enabled
