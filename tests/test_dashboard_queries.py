@@ -116,6 +116,79 @@ async def _insert_edge(session, source_id, target_id, *,
     )
 
 
+# Real prod content (hex) of the chunk row that made GET /dashboard/graph 500
+# with SQLSTATE 22021 "invalid byte sequence 0xe2 0x80". The bytes are valid
+# UTF-8; the crash only happens when `content` is stored pglz-COMPRESSED and a
+# length-limited LEFT()/substring() slice-detoasts it, mis-walking a multibyte
+# boundary. The 1536-dim embedding in _insert_compressed_chunk forces the tuple
+# over the TOAST threshold so PG compresses `content`, reproducing prod exactly.
+_COMPRESSED_CHUNK_HEX = (
+    "6e6f746963656420736f6d657468696e67207768696c65206275696c64696e67206c6f6e672d0a"
+    "72756e6e696e67206167656e74732e2041736b20616e206167656e7420746f206576616c756174"
+    "652077686174206974206a7573742070726f64756365642c20616e642069742070726169736573"
+    "20697420e2809420636f6e666964656e746c7920e28094200a6576656e207768656e2061206875"
+    "6d616e2063616e2073656520746865207175616c697479206973206d6564696f6372652e200a54"
+    "686973206973206e6f74206120736d617274732070726f626c656d2e204974e280997320612063"
+    "6f6e746578742070726f626c656d20e28094207468652073616d65206f6e652061732074686520"
+    "666f72676f7474656e2073657373696f6e2c200a6a757374207475726e656420757020746f2066"
+    "756c6c20766f6c756d652e200a5768656e20616e206167656e742066696e697368657320777269"
+    "74696e6720636f64652c2069747320636f6e746578742077696e646f7720697320736174757261"
+    "746564207769746820657665727920726561736f6e2069742077726f7465200a74686520636f64"
+    "652074686174207761792e20457665727920617373756d7074696f6e2c20657665727920747261"
+    "64652d6f66662c20657665727920e2809c49e280996c6c2068616e646c652074686174206c6174"
+    "65722ee2809d20536f207768656e20796f75200a61736b207468652073616d65206167656e742c"
+    "20696e207468652073616d652077696e646f772c20746f2072657669657720697473206f776e20"
+    "776f726b2c2069742069736ee280997420726576696577696e672074686520636f646520617420"
+    "0a616c6c2e204974e28099732072652d72656164696e6720697473206f776e20617267756d656e"
+    "7420666f722074686520636f64652e20416e642074686520617267756d656e7420697320616972"
+    "746967687420e28094206974206275696c742069742c206c696e65206279200a6c696e652c2074"
+    "6f2062652061697274696768742e200a596f752063616e6e6f7420676574206120667265736820"
+    "6f70696e696f6e2066726f6d206120636f6e7465787420746861742069736ee280997420667265"
+    "73682e2054686520726576696577657220616e642074686520617574686f7220617265200a6c6f"
+    "6f6b696e672061742074776f20646966666572656e74207468696e67733a207468652061757468"
+    "6f7220736565732074686520726561736f6e696e672c2074686520726576696577657220697320"
+    "737570706f73656420746f20736565200a74686520726573756c742e20507574207468656d2069"
+    "6e207468652073616d652077696e646f7720616e64207468657265206973206e6f207265766965"
+    "7765722e205468657265e2809973206a7573742074686520617574686f722c200a6e6f6464696e"
+    "672e200a4e6f772064726f70207468617420666c617720696e746f2061206c6f6f702074686174"
+    "2072756e73206f6e20697473206f776e2e204561636820726f756e642c20746865206167656e74"
+    "206e6f647320617420697473656c662e20546865200a6e65787420726f756e64206275696c6473"
+    "206f6e20746865206c6173742e20546865206c6f6e6765722069742072756e7320756e73757065"
+    "7276697365642c207468652066757274686572206974206472696674732066726f6d20616e7974"
+    "68696e67200a6120706572736f6e20776f756c642063616c6c20676f6f6420e2809420616e6420"
+    "746865206d6f726520636f6e76696e63656420697420697320746861742065766572797468696e"
+    "672069732066696e652e20497420646f65736ee2809974206661696c200a6c6f75646c792e2049"
+    "742073756363656564732071756965746c792c20696e207468652077726f6e6720646972656374"
+    "696f6e2c20616c6c206e696768742e200a54686520696e7374696e637420697320746f20666978"
+    "207468652070726f6d70742e2054656c6c20746865206167656e7420746f206265206d6f726520"
+    "637269746963616c2e2041646420e2809c626520736b6570746963616c206f6620796f7572206f"
+    "776e200a"
+)
+
+
+async def _insert_compressed_chunk(session, episode_id):
+    """Insert an episode_chunk whose `content` stores as pglz-compressed.
+
+    The real 1536-dim embedding pushes the tuple over the TOAST threshold so PG
+    compresses the text column — the precondition for the slice-detoast crash.
+    """
+    cid = uuid.uuid4()
+    emb = "[" + ",".join(["0.013"] * 1536) + "]"
+    await session.execute(
+        text("""
+            INSERT INTO heart.episode_chunks
+                (id, agent_id, episode_id, chunk_index, content, embedding,
+                 source_kind, source_ref)
+            VALUES (:id, :agent_id, :eid, 0,
+                    convert_from(decode(:hex, 'hex'), 'UTF8'),
+                    CAST(:emb AS vector), 'document', 'x.pdf')
+        """),
+        {"id": cid, "agent_id": AGENT_ID, "eid": episode_id,
+         "hex": _COMPRESSED_CHUNK_HEX, "emb": emb},
+    )
+    return cid
+
+
 async def _insert_event(session, event_type="turn_completed", days_ago=0, data=None):
     """Insert an event."""
     import json as _json
@@ -228,6 +301,60 @@ class TestGetGraphData:
         # limit=2, max_edges=8
         assert data["stats"]["displayed_edges"] == 8
         assert data["stats"]["total_edges"] == 10
+
+
+# ── Compressed-chunk labels must not crash LEFT()-based truncation ──────
+
+
+@pytest.mark.postgres_only
+class TestCompressedChunkLabel:
+    """Regression for the GET /dashboard/graph 500 (SQLSTATE 22021).
+
+    When a chunk's `content` is pglz-COMPRESSED, PG's slice-detoast of a
+    length-limited LEFT()/substring() can mis-walk a multibyte UTF-8 boundary
+    and raise "invalid byte sequence". get_graph_data + get_node_detail force a
+    full detoast (col || '') before truncating, so valid compressed content is
+    safe. These tests fail against the un-fixed query.
+    """
+
+    @pytest.mark.asyncio
+    async def test_content_is_actually_compressed(self, session):
+        # Guard the repro precondition: if PG ever stops compressing this row,
+        # the other two tests would pass vacuously.
+        eid = await _insert_episode(session)
+        cid = await _insert_compressed_chunk(session, eid)
+        comp = (await session.execute(
+            text("SELECT pg_column_compression(content) FROM heart.episode_chunks WHERE id = :id"),
+            {"id": cid},
+        )).scalar()
+        assert comp == "pglz", f"expected pglz-compressed content, got {comp!r}"
+
+    @pytest.mark.asyncio
+    async def test_graph_data_handles_compressed_chunk(self, session):
+        eid = await _insert_episode(session)
+        cid = await _insert_compressed_chunk(session, eid)
+        # Nodes are sourced from edge endpoints — link the chunk to its episode.
+        await _insert_edge(session, eid, cid, source_type="episode",
+                           target_type="chunk", relation="part_of")
+
+        data = await get_graph_data(session, AGENT_ID)  # must not raise
+        chunk = next(n for n in data["nodes"] if n["type"] == "chunk")
+        assert chunk["id"] == str(cid)
+        assert chunk["label"]              # label hydrated, not dropped
+        assert len(chunk["label"]) <= 120
+
+    @pytest.mark.asyncio
+    async def test_node_detail_handles_compressed_chunk_neighbor(self, session):
+        eid = await _insert_episode(session)
+        cid = await _insert_compressed_chunk(session, eid)
+        await _insert_edge(session, eid, cid, source_type="episode",
+                           target_type="chunk", relation="part_of")
+
+        # Neighbor labels go through LEFT(content, 120); from the episode the
+        # chunk is the neighbor.
+        data = await get_node_detail(session, AGENT_ID, str(eid), "episode")
+        labels = {c["neighbor_id"]: c["neighbor_label"] for c in data["connections"]}
+        assert labels.get(str(cid))        # neighbor chunk label hydrated
 
 
 # ── Orphan metric excludes soft-deleted (inactive) nodes ────────────────
