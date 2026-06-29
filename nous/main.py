@@ -1062,6 +1062,15 @@ class _LazyProxy:
     def __getattr__(self, name):
         return getattr(self._resolve(), name)
 
+    def __bool__(self):
+        # Truthiness reflects whether the component is initialized. Without
+        # this, Python falls back to __len__, which raises on components that
+        # are not sized (e.g. SessionTimeoutMonitor) — breaking `if proxy`
+        # guards such as the one in /events/stats.
+        components = object.__getattribute__(self, "_components")
+        key = object.__getattribute__(self, "_key")
+        return components.get(key) is not None
+
     def __len__(self):
         return len(self._resolve())
 
