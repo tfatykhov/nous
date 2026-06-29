@@ -36,6 +36,20 @@ def _active_clause(table: str, alias: str = "t") -> str:
     return f" AND {alias}.active = true" if table in _ACTIVE_FILTER_TABLES else ""
 
 
+def _safe_left(expr: str, n: int = 120) -> str:
+    """`LEFT(expr, n)` that survives pglz-COMPRESSED multibyte text.
+
+    A length-limited LEFT()/substring() slice-detoasts a *compressed* text value
+    and can mis-walk a multibyte UTF-8 boundary, raising SQLSTATE 22021
+    ("invalid byte sequence ..."). This bit GET /dashboard/graph on a chunk whose
+    raw-transcript `content` compressed (its 6KB embedding pushed the tuple over
+    the TOAST threshold). Concatenating `''` forces a full in-memory detoast
+    first, so LEFT then truncates the decompressed value. Full-value reads (the
+    node body, recall hydration) are unaffected and need no wrapping.
+    """
+    return f"LEFT(({expr}) || '', {n})"
+
+
 # ── Task 5: Dashboard stats (used by GET /status?dashboard=true) ─────────
 
 
@@ -194,22 +208,25 @@ async def get_graph_data(
 
     # Build nodes from source tables
     nodes: list[dict] = []
+    # _safe_left wraps every label truncation: any of these text columns can be
+    # stored pglz-compressed (the rows carry embeddings), and LEFT() on a
+    # compressed multibyte value can raise SQLSTATE 22021. See _safe_left.
     type_queries = {
         "decision": (
             "brain.decisions",
-            "LEFT(description, 120) AS label, category",
+            f"{_safe_left('description')} AS label, category",
         ),
         "fact": (
             "heart.facts",
-            "LEFT(content, 120) AS label, category",
+            f"{_safe_left('content')} AS label, category",
         ),
         "episode": (
             "heart.episodes",
-            "LEFT(COALESCE(title, summary), 120) AS label, frame_used AS category",
+            f"{_safe_left('COALESCE(title, summary)')} AS label, frame_used AS category",
         ),
         "procedure": (
             "heart.procedures",
-            "LEFT(name, 120) AS label, domain AS category",
+            f"{_safe_left('name')} AS label, domain AS category",
         ),
         # F067: chunked raw transcripts. No category column on the table —
         # surface chunk_index instead so the detail panel has something
@@ -217,7 +234,7 @@ async def get_graph_data(
         # uniform across types.
         "chunk": (
             "heart.episode_chunks",
-            "LEFT(content, 120) AS label, chunk_index::text AS category",
+            f"{_safe_left('content')} AS label, chunk_index::text AS category",
         ),
     }
 
@@ -402,7 +419,7 @@ async def get_node_detail(
         )
         res = await session.execute(
             text(f"""
-                SELECT id::text AS id, LEFT({label_expr_n}, 120) AS label, {active_sel}
+                SELECT id::text AS id, {_safe_left(label_expr_n)} AS label, {active_sel}
                 FROM {table_n}
                 WHERE agent_id = :agent_id AND id = ANY(CAST(:ids AS uuid[]))
             """),
