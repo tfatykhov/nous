@@ -16,6 +16,7 @@ from uuid import UUID
 from sqlalchemy import select
 
 if TYPE_CHECKING:
+    from nous.heart.date_window import DateWindow
     from nous.heart.query_expansion import QueryExpander
     from nous.heart.residual_activation import ResidualActivator
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -137,6 +138,10 @@ class Heart:
         # Wired via set_residual_activator() in main.py. None when flag is off;
         # _recall handles None as a no-op (boost branch skipped).
         self._residual_activator: "ResidualActivator | None" = None
+
+        # F075 L3: date-window parser, wired in main.py (reuses the shared api_client).
+        # None when flag is off or test fixture skipped wiring; recall handles None as a no-op.
+        self.date_window_parser = None
 
     # ------------------------------------------------------------------
     # Lifecycle (P2-2)
@@ -840,6 +845,7 @@ class Heart:
         session: AsyncSession | None = None,
         residual_activations: dict[UUID, float] | None = None,
         apply_mmr: bool | None = None,
+        date_window: "DateWindow | None" = None,
     ) -> list[RecallResult]:
         """Search across ALL memory types, return ranked results.
 
@@ -870,6 +876,7 @@ class Heart:
                     query, limit, types, session, residual_activations,
                     owns_session=True,
                     apply_mmr=apply_mmr,
+                    date_window=date_window,
                 )
         # Caller-provided session: caller owns transaction recovery. We do
         # NOT rollback after a sub-search failure (would silently discard
@@ -878,6 +885,7 @@ class Heart:
             query, limit, types, session, residual_activations,
             owns_session=False,
             apply_mmr=apply_mmr,
+            date_window=date_window,
         )
 
     def set_residual_activator(self, activator: "ResidualActivator | None") -> None:
@@ -922,6 +930,7 @@ class Heart:
         residual_activations: dict[UUID, float] | None = None,
         owns_session: bool = True,
         apply_mmr: bool | None = None,
+        date_window: "DateWindow | None" = None,
     ) -> list[RecallResult]:
         search_types = types or ["episode", "fact", "procedure", "censor"]
         fetch_limit = limit * 2  # Fetch more for merging
@@ -979,7 +988,8 @@ class Heart:
                     )
                 elif memory_type == "fact":
                     result = await self.facts.search(
-                        query, fetch_limit, session=session, variant_pairs=variant_pairs,
+                        query, fetch_limit, session=session,
+                        variant_pairs=variant_pairs, date_window=date_window,
                     )
                 elif memory_type == "procedure":
                     result = await self.procedures.search(

@@ -211,6 +211,10 @@ async def create_components(settings: Settings) -> dict:
     # F027: Wire supersession classifier LLM client
     heart.facts.set_llm_client(api_client, model=settings.contradiction_model)
 
+    # F075 L3: Wire the date-window parser (reuses the shared api_client)
+    from nous.heart.date_window import DateWindowParser
+    heart.date_window_parser = DateWindowParser(api_client, settings)
+
     # F047: Wire actionability classifier + schedule backfill for NULL rows
     if settings.actionability_enabled:
         from nous.heart.actionability import ActionabilityClassifier
