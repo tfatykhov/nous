@@ -94,3 +94,30 @@ async def test_none_result_is_cached():
     assert await p.parse(q, TODAY) is None
     assert await p.parse(q, TODAY) is None
     assert len(client.calls) == 1  # second call served from cache, no LLM
+
+
+# ---------------------------------------------------------------------------
+# I-1: bounded cache + TTL flag
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_cache_size_bounded(monkeypatch):
+    """Cache must not grow past _CACHE_MAX_ENTRIES; oldest entry is evicted."""
+    import nous.heart.date_window as dw_mod
+    monkeypatch.setattr(dw_mod, "_CACHE_MAX_ENTRIES", 2)
+    client = _FakeClient({"has_date": True, "start_date": "2026-04-20", "end_date": "2026-04-30"})
+    p = DateWindowParser(client, _settings())
+    await p.parse("events in April 2026", TODAY)
+    await p.parse("events in May 2026", TODAY)
+    await p.parse("events in June 2026", TODAY)  # should evict oldest
+    assert len(p._cache) <= 2
+
+
+@pytest.mark.asyncio
+async def test_ttl_zero_disables_caching():
+    """date_leg_cache_ttl_days=0 means never cache; same query hits LLM every time."""
+    client = _FakeClient({"has_date": True, "start_date": "2026-04-20", "end_date": "2026-04-30"})
+    p = DateWindowParser(client, _settings(date_leg_cache_ttl_days=0))
+    q = "events in April 2026"
+    await p.parse(q, TODAY)
+    await p.parse(q, TODAY)
+    assert len(client.calls) == 2  # no cache hit when ttl=0
