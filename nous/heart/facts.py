@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from nous.config import Settings
     from nous.handlers import LLMClient
     from nous.heart.actionability import ActionabilityClassifier
+    from nous.heart.date_window import DateWindow
 
 logger = logging.getLogger(__name__)
 
@@ -1823,6 +1824,36 @@ class FactManager:
         summaries = self.apply_supersession_filter(summaries)
         self._fire_track_access([s.id for s in summaries])
         return summaries
+
+    async def _date_window_leg(
+        self,
+        session: "AsyncSession",
+        embedding: list[float],
+        window: "DateWindow",
+        limit: int,
+    ) -> list[tuple["UUID", float]]:
+        """F075 L3: in-window active dated facts, ranked by cosine to the query.
+
+        Returns (id, cosine) tuples ordered best-first. Ranking is cosine-to-query
+        (relevance within the window), never date-distance alone.
+        """
+        qvec = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        sql = text("""
+            SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
+            FROM heart.facts t
+            WHERE t.agent_id = :agent_id
+              AND t.active = true
+              AND t.event_date IS NOT NULL
+              AND t.event_date BETWEEN :lo AND :hi
+              AND t.embedding IS NOT NULL
+            ORDER BY t.embedding <=> CAST(:qvec AS vector)
+            LIMIT :limit
+        """)
+        result = await session.execute(sql, {
+            "agent_id": self.agent_id, "qvec": qvec,
+            "lo": window.start, "hi": window.end, "limit": limit,
+        })
+        return [(row.id, float(row.score)) for row in result.all()]
 
     # ------------------------------------------------------------------
     # list_all() — F021 dashboard browse mode
