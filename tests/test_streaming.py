@@ -337,6 +337,7 @@ def _make_mock_settings():
     settings.tool_timeout = 120
     settings.keepalive_interval = 10
     settings.recall_exclude_context_ids = False  # F071: bare MagicMock truthy by default
+    settings.date_leg_enabled = False  # F075 L3: bare MagicMock truthy by default
     return settings
 
 
