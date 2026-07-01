@@ -25,9 +25,16 @@
 - **Modify** `nous/config.py` — 7 `date_leg_*` settings.
 - **Modify** `nous/heart/facts.py` — `_date_window_leg()` SQL helper; thread `date_window` into `search`/`_search`; fuse via `_rrf_merge_n`.
 - **Modify** `nous/heart/heart.py` — thread `date_window` through `recall` and the fact dispatch.
-- **Modify** `nous/api/retrieval_pipeline.py` — parse the window once (flag-gated) and pass into `heart.recall`.
+- **Modify** `nous/api/retrieval_pipeline.py` — parse the window once (flag-gated, via `heart.date_window_parser`) and pass into `heart.recall`.
+- **Modify** `nous/heart/heart.py` — `self.date_window_parser = None` in `__init__`.
+- **Modify** `nous/main.py` — construct `heart.date_window_parser = DateWindowParser(api_client, settings)` right after the `heart.facts.set_llm_client(...)` wiring at `main.py:212`.
 - **Create** `nous_eval/date_leg_rescue.py` — the rescue-metric dev harness.
-- **Tests:** `tests/heart/test_date_window.py`, `tests/heart/test_date_window_leg.py`, `tests/api/test_date_leg_pipeline.py`.
+- **Tests:** `tests/heart/test_date_window.py`, `tests/heart/test_date_window_leg.py`, `tests/test_date_leg_pipeline.py`, `tests/eval/test_date_leg_rescue.py`.
+
+**Pre-flight corrections applied (verified against code 2026-07-01):**
+- `FactStore` stores `self._settings` (optional, may be `None`) — NOT `self.settings`. All leg code guards `None`.
+- The heart-layer Haiku idiom is `nous.handlers.call_background_llm_structured(client, model, system_prompt, user_message, tool_name, tool_description, output_schema, max_tokens)` → returns the tool-input dict or `None` (fail-open built in). The shared client is the `api_client` (`LLMClient`) wired via `heart.facts.set_llm_client` at `main.py:212`. The parser reuses that same client, wrapped in `asyncio.wait_for` for the timeout.
+- Test layout is mostly flat (`tests/test_*.py`); `tests/heart/` and `tests/eval/` exist; `tests/api/` and `tests/nous_eval/` do NOT.
 
 ---
 
@@ -290,19 +297,15 @@ import time
 
 logger = logging.getLogger(__name__)
 
-_TOOL = {
-    "name": "emit_window",
-    "description": "Extract the time period a question asks about.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "has_date": {"type": "boolean"},
-            "start_date": {"type": "string", "description": "YYYY-MM-DD or empty"},
-            "end_date": {"type": "string", "description": "YYYY-MM-DD or empty"},
-        },
-        "required": ["has_date"],
-        "additionalProperties": False,
+_WINDOW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "has_date": {"type": "boolean"},
+        "start_date": {"type": "string", "description": "YYYY-MM-DD or empty"},
+        "end_date": {"type": "string", "description": "YYYY-MM-DD or empty"},
     },
+    "required": ["has_date"],
+    "additionalProperties": False,
 }
 
 
@@ -358,28 +361,28 @@ class DateWindowParser:
         return window
 
     async def _parse_llm(self, query: str, today: datetime.date) -> DateWindow | None:
-        payload = {
-            "model": self._settings.date_leg_model,
-            "max_tokens": 256,
-            "system": "",
-            "tools": [_TOOL],
-            "tool_choice": {"type": "tool", "name": "emit_window"},
-            "messages": [{"role": "user", "content": _prompt(query, today)}],
-        }
+        # Reuse the heart-layer structured-call helper (adds the Claude Code
+        # preamble + cache_control, extracts the tool_use block, and returns
+        # None on any client error). Wrap in wait_for for the timeout.
+        from nous.handlers import call_background_llm_structured
         try:
-            resp = await asyncio.wait_for(
-                self._client.call(payload),
+            data = await asyncio.wait_for(
+                call_background_llm_structured(
+                    client=self._client,
+                    model=self._settings.date_leg_model,
+                    system_prompt="",
+                    user_message=_prompt(query, today),
+                    tool_name="emit_window",
+                    tool_description="Extract the time period a question asks about.",
+                    output_schema=_WINDOW_SCHEMA,
+                    max_tokens=256,
+                ),
                 timeout=float(self._settings.date_leg_timeout_seconds),
             )
-        except (asyncio.TimeoutError, Exception):  # fail-open on any error
+        except (asyncio.TimeoutError, Exception):  # fail-open on timeout/any error
             logger.warning("date-leg parse failed; failing open", exc_info=True)
             return None
-        data: dict = {}
-        for block in (getattr(resp, "content", None) or []):
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                data = block.get("input") or {}
-                break
-        if not data.get("has_date"):
+        if not data or not data.get("has_date"):
             return None
         start, end = _parse_iso(data.get("start_date")), _parse_iso(data.get("end_date"))
         if start is None or end is None or start > end:
@@ -549,7 +552,8 @@ In `nous/heart/facts.py`:
         # no-op, so this preserves today's ordering when the window finds nothing.
         if date_window is not None and embedding is not None:
             from nous.heart.search import _rrf_merge_n, _resolve_rrf_k
-            date_leg = await self._date_window_leg(session, embedding, date_window, self.settings.date_leg_k)
+            k_leg = self._settings.date_leg_k if self._settings else 15
+            date_leg = await self._date_window_leg(session, embedding, date_window, k_leg)
             if date_leg:
                 results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
 ```
@@ -571,9 +575,10 @@ git commit -m "feat(heart): fuse date-window leg into fact search via _rrf_merge
 ## Task 6: Thread through `heart.recall` and wire the parser into `run_recall_pipeline`
 
 **Files:**
-- Modify: `nous/heart/heart.py` (`recall`, and the fact dispatch at ~:981)
-- Modify: `nous/api/retrieval_pipeline.py` (parse the window, pass into `heart.recall`)
-- Test: `tests/api/test_date_leg_pipeline.py`
+- Modify: `nous/heart/heart.py` (`__init__` adds `self.date_window_parser = None`; `recall`, and the fact dispatch at ~:981)
+- Modify: `nous/main.py` (construct `heart.date_window_parser` after `main.py:212`)
+- Modify: `nous/api/retrieval_pipeline.py` (parse the window via `heart.date_window_parser`, pass into the fact recall)
+- Test: `tests/test_date_leg_pipeline.py`
 
 **Interfaces:**
 - Consumes: `DateWindowParser`, `Heart.recall`, `run_recall_pipeline`.
@@ -582,7 +587,7 @@ git commit -m "feat(heart): fuse date-window leg into fact search via _rrf_merge
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/api/test_date_leg_pipeline.py
+# tests/test_date_leg_pipeline.py
 import datetime
 import pytest
 
@@ -608,7 +613,7 @@ async def test_pipeline_flag_on_parses_and_passes_window(pipeline_env, monkeypat
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/api/test_date_leg_pipeline.py -v`
+Run: `uv run pytest tests/test_date_leg_pipeline.py -v`
 Expected: FAIL — `recall()` got an unexpected keyword `date_window` (and pipeline doesn't parse).
 
 - [ ] **Step 3: Thread `date_window` through `Heart.recall`**
@@ -622,39 +627,46 @@ In `nous/heart/heart.py`, add `date_window: "DateWindow | None" = None` to `reca
                     )
 ```
 
-- [ ] **Step 4: Parse + pass in `run_recall_pipeline`**
+- [ ] **Step 4: Add the parser attribute to `Heart.__init__` and wire it in `main.py`**
 
-In `nous/api/retrieval_pipeline.py`, near the top of `run_recall_pipeline` (before stage execution), parse the window once and thread it into `heart.recall`. The parser needs an LLM client and settings; construct/reuse the background LLM client already available to the pipeline (mirror how contradiction detection obtains its Haiku client). Add:
+In `nous/heart/heart.py` `__init__`, add (near the other component attributes):
+```python
+        # F075 L3: date-window parser, wired in main.py (reuses the shared api_client).
+        self.date_window_parser = None
+```
+In `nous/main.py`, immediately after the F027 wiring line `heart.facts.set_llm_client(api_client, model=settings.contradiction_model)` (~line 212), add:
+```python
+    # F075 L3: Wire the date-window parser (reuses the shared api_client)
+    from nous.heart.date_window import DateWindowParser
+    heart.date_window_parser = DateWindowParser(api_client, settings)
+```
+
+- [ ] **Step 5: Parse + pass in `run_recall_pipeline`**
+
+In `nous/api/retrieval_pipeline.py`, near the top of `run_recall_pipeline` (before stage execution), parse the window once via the wired parser and thread it into the fact recall:
 ```python
     date_window = None
-    if getattr(settings, "date_leg_enabled", False):
-        try:
-            from nous.heart.date_window import DateWindowParser
-            import datetime as _dt
-            parser = DateWindowParser(_get_background_llm_client(settings), settings)
-            date_window = await parser.parse(query, _dt.date.today())
-        except Exception:
-            logger.warning("date-leg parse errored in pipeline; continuing without", exc_info=True)
-            date_window = None
+    parser = getattr(heart, "date_window_parser", None)
+    if getattr(settings, "date_leg_enabled", False) and parser is not None:
+        import datetime as _dt
+        date_window = await parser.parse(query, _dt.date.today())  # parser is fail-open
 ```
-Then, at every `heart.recall(...)` call inside `_run_stages` for the fact path, pass `date_window=date_window`. (Thread `date_window` as a param of `_run_stages`, defaulting `None`, and forward it to `heart.recall`.)
+Thread `date_window` as a param of `_run_stages` (default `None`) and forward it to the fact-branch `heart.recall(...)` call as `date_window=date_window`. The parser is fail-open (returns `None` on any error), so no try/except is needed here; `None` → no leg → today's behavior.
 
-> Implementation note: `_get_background_llm_client` is the existing helper the pipeline/heart uses for Haiku calls (contradiction detection at `retrieval_pipeline.py` uses one — reuse that exact accessor; do not create a second client). If the pipeline holds the client differently, pass it in from the caller rather than constructing a new one.
+- [ ] **Step 6: Run tests to verify they pass**
 
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `uv run pytest tests/api/test_date_leg_pipeline.py -v`
+Run: `uv run pytest tests/test_date_leg_pipeline.py -v`
 Expected: PASS (flag off = identical; flag on = window parsed + passed).
 
-- [ ] **Step 6: Run the recall snapshot test**
+- [ ] **Step 7: Run the recall snapshot test**
 
-Run: `uv run pytest tests/api/ -k "recall and snapshot" -v`
+Run: `uv run pytest tests/ -k "recall and snapshot" -v`
 Expected: PASS — `date_leg_enabled=False` default keeps `recall_deep` output byte-identical.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add nous/heart/heart.py nous/api/retrieval_pipeline.py tests/api/test_date_leg_pipeline.py
+git add nous/heart/heart.py nous/main.py nous/api/retrieval_pipeline.py tests/test_date_leg_pipeline.py
 git commit -m "feat(api): wire date-window parser into run_recall_pipeline, flag-gated (F075 L3)"
 ```
 
@@ -664,7 +676,7 @@ git commit -m "feat(api): wire date-window parser into run_recall_pipeline, flag
 
 **Files:**
 - Create: `nous_eval/date_leg_rescue.py`
-- Test: `tests/nous_eval/test_date_leg_rescue.py`
+- Test: `tests/eval/test_date_leg_rescue.py`
 
 **Interfaces:**
 - Produces: `python -m nous_eval.date_leg_rescue --sample N` — samples dated facts, generates time-framed queries, compares vanilla vs vanilla+leg top-K, prints `rescued` / `lost` / `fused_top_k` counts. This is the dev instrument behind the A/B gate; it is NOT shipped in the prod image (lives under `nous_eval/`).
@@ -672,7 +684,7 @@ git commit -m "feat(api): wire date-window parser into run_recall_pipeline, flag
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/nous_eval/test_date_leg_rescue.py
+# tests/eval/test_date_leg_rescue.py
 from nous_eval.date_leg_rescue import rrf_fuse
 
 def test_rrf_fuse_is_position_based():
@@ -685,7 +697,7 @@ def test_rrf_fuse_is_position_based():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `uv run pytest tests/nous_eval/test_date_leg_rescue.py -v`
+Run: `uv run pytest tests/eval/test_date_leg_rescue.py -v`
 Expected: FAIL — module does not exist.
 
 - [ ] **Step 3: Implement the harness**
@@ -703,13 +715,13 @@ def rrf_fuse(vanilla_ids, leg_ids, k=60):
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `uv run pytest tests/nous_eval/test_date_leg_rescue.py -v`
+Run: `uv run pytest tests/eval/test_date_leg_rescue.py -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add nous_eval/date_leg_rescue.py tests/nous_eval/test_date_leg_rescue.py
+git add nous_eval/date_leg_rescue.py tests/eval/test_date_leg_rescue.py
 git commit -m "feat(eval): date-leg rescue-metric dev harness (F075 L3)"
 ```
 
