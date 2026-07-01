@@ -1,9 +1,14 @@
 """F075 Layer 3: parse a date window from a query for the date-window retrieval leg."""
 from __future__ import annotations
 
+import asyncio
 import datetime
+import logging
 import re
+import time
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 # Month names, 4-digit years, ISO dates, and vague-period words. A hit means the
 # query is worth a Haiku parse; a miss skips the LLM entirely (hot-path guard).
@@ -29,12 +34,6 @@ def has_temporal_signal(query: str) -> bool:
     """Cheap pre-gate: True when the query plausibly references a time period."""
     return bool(_TEMPORAL_RE.search(query or ""))
 
-
-import asyncio
-import logging
-import time
-
-logger = logging.getLogger(__name__)
 
 _WINDOW_SCHEMA = {
     "type": "object",
@@ -127,4 +126,7 @@ class DateWindowParser:
         if start is None or end is None or start > end:
             return None
         pad = datetime.timedelta(days=int(getattr(self._settings, "date_leg_pad_days", 2)))
-        return DateWindow(start=start - pad, end=end + pad)
+        try:
+            return DateWindow(start=start - pad, end=end + pad)
+        except OverflowError:
+            return None

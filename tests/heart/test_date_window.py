@@ -79,3 +79,18 @@ async def test_budget_cap_fails_open():
     p = DateWindowParser(client, _settings(date_leg_max_per_hour=1))
     await p.parse("events in April 2026", TODAY)          # uses the 1 budget
     assert await p.parse("events in May 2026", TODAY) is None  # budget exhausted -> fail open
+
+@pytest.mark.asyncio
+async def test_inverted_dates_return_none():
+    client = _FakeClient({"has_date": True, "start_date": "2026-04-30", "end_date": "2026-04-20"})
+    p = DateWindowParser(client, _settings())
+    assert await p.parse("events in April 2026", TODAY) is None
+
+@pytest.mark.asyncio
+async def test_none_result_is_cached():
+    client = _FakeClient({"has_date": False})
+    p = DateWindowParser(client, _settings())
+    q = "some vague temporal-ish query mentioning last quarter"
+    assert await p.parse(q, TODAY) is None
+    assert await p.parse(q, TODAY) is None
+    assert len(client.calls) == 1  # second call served from cache, no LLM
