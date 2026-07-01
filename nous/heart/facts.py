@@ -1619,6 +1619,7 @@ class FactManager:
         exclude_categories: list[str] | None = None,
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        date_window: "DateWindow | None" = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -1626,11 +1627,13 @@ class FactManager:
             variant_pairs: F050 — when set with len > 1, routes through
                 hybrid_search_multi for RRF fusion across query variants.
                 Defaults to None (single-query path; backwards compatible).
+            date_window: F075 L3 — when set, fuses the date-window retrieval
+                leg into the results via _rrf_merge_n.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
 
     async def _search(
         self,
@@ -1641,6 +1644,7 @@ class FactManager:
         exclude_categories: list[str] | None,
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        date_window: "DateWindow | None" = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -1694,6 +1698,16 @@ class FactManager:
                 extra_params=extra_params,
                 limit=limit,
             )
+
+        # F075 L3: fuse the date-window leg (position-based RRF). Present only when
+        # the caller parsed a window and we have a query embedding. Empty leg is a
+        # no-op, so this preserves today's ordering when the window finds nothing.
+        if date_window is not None and embedding is not None:
+            from nous.heart.search import _rrf_merge_n, _resolve_rrf_k
+            k_leg = self._settings.date_leg_k if self._settings else 15
+            date_leg = await self._date_window_leg(session, embedding, date_window, k_leg)
+            if date_leg:
+                results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
 
         if not results:
             return []

@@ -98,3 +98,96 @@ async def test_date_window_leg_returns_in_window_ranked(
     assert seed_dated_facts["F_in"] in ids           # in window → included
     assert seed_dated_facts["F_out"] not in ids      # June → excluded
     assert seed_dated_facts["F_undated"] not in ids  # NULL event_date → excluded
+
+
+# ---------------------------------------------------------------------------
+# Task 5 fixtures + tests — fusion via _rrf_merge_n
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_rescue_case(session, heart):
+    """Seed a scenario where vanilla search misses the gold fact but fusion rescues it.
+
+    Strategy:
+    - 6 crowder facts: embedding == query embedding (cosine = 1.0), no event_date.
+      This pushes them all into vanilla top-6, leaving gold at rank 6 (outside limit=5).
+    - 1 gold fact: embedding from different text (cosine ≈ 0), event_date in the window.
+      The date-window leg returns gold at rank 0; RRF fusion brings it into fused top-5.
+    - Both embedding AND content avoid FTS matches on the query so keyword results
+      are empty — pure vector ranking, fully deterministic.
+
+    Verified analytically:
+    - Vanilla _rrf_merge (empty keyword): crowder ranks 0-4 score 0.0162..0.0155,
+      crowder rank 5 scores 0.0153, gold at rank 6 scores 0.0152 → gold excluded.
+    - Fused _rrf_merge_n (vanilla list ++ date-leg): gold and c0 both score 0.01591
+      (tied), so all of {c0, gold, c1, c2, c3} appear in the fused top-5. ✓
+    """
+    agent_id = heart.facts.agent_id
+    embeddings = heart.facts.embeddings
+
+    query = "april window rescue query"
+    q_emb = await embeddings.embed(query)
+    gold_emb = await embeddings.embed("database initialization sequence")
+
+    from nous.storage.models import Fact
+
+    crowders = []
+    for i in range(6):
+        f = Fact(
+            id=uuid4(),
+            agent_id=agent_id,
+            content=f"background heartbeat check step {i}",
+            event_date=None,
+            embedding=q_emb,
+            active=True,
+            category="technical",
+        )
+        session.add(f)
+        crowders.append(f)
+
+    gold = Fact(
+        id=uuid4(),
+        agent_id=agent_id,
+        content="database initialization sequence",
+        event_date=datetime.date(2026, 4, 25),
+        embedding=gold_emb,
+        active=True,
+        category="technical",
+    )
+    session.add(gold)
+    await session.flush()
+
+    window = DateWindow(start=datetime.date(2026, 4, 20), end=datetime.date(2026, 4, 30))
+    return {"query": query, "window": window, "gold": gold.id}
+
+
+async def test_date_window_fusion_rescues_missed_fact(
+    fact_store, seed_rescue_case, session
+):
+    """Fusion of the date-window leg rescues a gold fact crowded out of vanilla top-5.
+
+    Passes session explicitly so that both search calls see the uncommitted seeded data.
+    Asserts the rescue mechanism is genuinely exercised (gold NOT in vanilla, IN fused).
+    """
+    q = seed_rescue_case["query"]
+    window = seed_rescue_case["window"]
+    gold = seed_rescue_case["gold"]
+
+    vanilla = await fact_store.search(q, limit=5, session=session)
+    fused = await fact_store.search(q, limit=5, date_window=window, session=session)
+
+    assert gold not in [f.id for f in vanilla], (
+        "gold should be crowded out of vanilla top-5 by the 6 crowders with cosine=1.0"
+    )
+    assert gold in [f.id for f in fused], (
+        "fusion of the date-window leg must lift gold into the fused top-5"
+    )
+
+
+async def test_no_window_is_unchanged(fact_store, seed_rescue_case, session):
+    """date_window=None leaves results byte-identical to no date_window argument."""
+    q = seed_rescue_case["query"]
+    a = await fact_store.search(q, limit=5, session=session)
+    b = await fact_store.search(q, limit=5, date_window=None, session=session)
+    assert [f.id for f in a] == [f.id for f in b]
