@@ -21,8 +21,9 @@ _TEMPORAL_RE = re.compile(
     r"\b(" + _MONTHS + r")\b"
     r"|\b(19|20)\d{2}\b"                 # 4-digit year
     r"|\d{4}-\d{2}-\d{2}"                # ISO date
-    r"|\b(yesterday|today|tomorrow|last|recent(ly)?|ago|"
-    r"early|mid|late|around|when|during|after|before|since)\b",
+    r"|\b(yesterday|today|tomorrow|last|this|next|recent(ly)?|ago|"
+    r"early|mid|late|around|when|during|after|before|since|"
+    r"week|month|quarter)\b",  # this/next + period nouns: "this week", "next month" (codex P2)
     re.IGNORECASE,
 )
 

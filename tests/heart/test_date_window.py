@@ -8,6 +8,12 @@ def test_temporal_signal_detects_month_year():
     assert has_temporal_signal("changes around mid-May") is True
     assert has_temporal_signal("events on 2026-06-24") is True
 
+def test_temporal_signal_detects_this_next_period_phrases():
+    # codex P2: this/next determiners + bare period nouns must reach the parser.
+    assert has_temporal_signal("what happened this week?") is True
+    assert has_temporal_signal("what changed next month?") is True
+    assert has_temporal_signal("summarize this quarter") is True
+
 def test_temporal_signal_rejects_non_temporal():
     assert has_temporal_signal("How does the calibration gate work?") is False
     assert has_temporal_signal("summarize the trading bot design") is False
