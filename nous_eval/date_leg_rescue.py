@@ -179,7 +179,6 @@ async def main() -> None:
             lost = 0
             vanilla_hits = 0
             fused_hits = 0
-            today = datetime.date.today()
 
             print(f"Sampling {n} dated facts, top_k={args.top_k} …\n")
 
@@ -208,24 +207,20 @@ async def main() -> None:
                 )
                 vanilla_ids = [r.id for r in vanilla_results]
 
-                # Date-window leg: parse window then retrieve in-window facts
-                date_window = await heart.date_window_parser.parse(query, today)
-                leg_ids: list[UUID] = []
-                if date_window is not None and embedding_provider is not None:
-                    embedding = await embedding_provider.embed(query)
-                    async with db.session() as session:
-                        leg_rows = await heart.facts._date_window_leg(
-                            session,
-                            embedding,
-                            date_window,
-                            limit=fused_settings.date_leg_k
-                            if hasattr(fused_settings, "date_leg_k") else 15,
-                        )
-                    leg_ids = [row[0] for row in leg_rows]
-
-                # Fuse
-                fused_ids = rrf_fuse(vanilla_ids, leg_ids)
-                top_fused = fused_ids[: args.top_k]
+                # Fused run through the REAL production path: fused_settings has
+                # date_leg_enabled=True, so run_recall_pipeline parses the window and
+                # FactManager._search fuses the date leg via _rrf_merge_n over the same
+                # fetch_limit*2 candidate pool production uses. Measuring the actual
+                # path (not a manual top-K rrf_fuse) keeps the A/B gate honest (codex P2).
+                fused_results, _ = await run_recall_pipeline(
+                    query=query,
+                    heart=heart,
+                    brain=brain,
+                    settings=fused_settings,
+                    limit=args.top_k,
+                    memory_types=["fact"],
+                )
+                top_fused = [r.id for r in fused_results]
 
                 in_vanilla = gold_id in vanilla_ids
                 in_fused = gold_id in top_fused

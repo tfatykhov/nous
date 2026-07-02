@@ -225,6 +225,30 @@ async def test_pipeline_skips_parse_when_facts_not_in_scope():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_empty_memory_types_still_parses():
+    """codex P2: memory_types=[] defaults to 'all' in _run_stages (facts searched),
+    so the parser must still run — the gate must treat [] like None."""
+    stub_parser = _StubParser(return_value=DateWindow(
+        start=datetime.date(2026, 4, 18),
+        end=datetime.date(2026, 5, 2),
+    ))
+    heart = _make_heart(parser=stub_parser)
+    brain = _make_brain()
+    settings = _make_settings(date_leg_enabled=True)
+
+    await run_recall_pipeline(
+        query="what happened in late April 2026?",
+        heart=heart,
+        brain=brain,
+        settings=settings,
+        limit=10,
+        memory_types=[],
+    )
+
+    assert stub_parser.call_count == 1, "empty memory_types should still parse (facts default in scope)"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_flag_on_parser_returns_none_passes_none():
     """When the parser fails open (returns None), heart.recall gets date_window=None."""
     stub_parser = _StubParser(return_value=None)  # fail-open scenario

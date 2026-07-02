@@ -79,6 +79,17 @@ async def test_cache_key_includes_today_for_relative_queries():
     assert len(client.calls) == 2
 
 @pytest.mark.asyncio
+async def test_transient_failure_is_not_cached():
+    # codex P2: a client error (transient) must NOT be cached as no-date — the same
+    # query must re-parse once the LLM recovers, not be suppressed until TTL.
+    client = _FakeClient(None, raises=True, calls=[])
+    p = DateWindowParser(client, _settings())
+    q = "events in April 2026"
+    assert await p.parse(q, TODAY) is None
+    assert await p.parse(q, TODAY) is None
+    assert len(client.calls) == 2  # transient failure not cached -> re-invoked
+
+@pytest.mark.asyncio
 async def test_has_date_false_returns_none():
     client = _FakeClient({"has_date": False})
     p = DateWindowParser(client, _settings())

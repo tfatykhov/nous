@@ -138,11 +138,17 @@ class DateWindowParser:
         if not await self._within_budget():
             logger.warning("date-leg parser budget exhausted; failing open")
             return None
-        window = await self._parse_llm(query, today)
-        self._cache_put(cache_key, window)
+        cacheable, window = await self._parse_llm(query, today)
+        # Only cache CONFIRMED parses (a window, or a genuine has_date=false /
+        # malformed response). A transient timeout/client error must NOT be cached,
+        # or one blip suppresses the leg for this query/day until the TTL (codex P2).
+        if cacheable:
+            self._cache_put(cache_key, window)
         return window
 
-    async def _parse_llm(self, query: str, today: datetime.date) -> DateWindow | None:
+    async def _parse_llm(self, query: str, today: datetime.date) -> tuple[bool, DateWindow | None]:
+        """Returns (cacheable, window). cacheable=False signals a transient
+        failure (timeout / client error) that must not be cached."""
         # Reuse the heart-layer structured-call helper (adds the Claude Code
         # preamble + cache_control, extracts the tool_use block, and returns
         # None on any client error). Wrap in wait_for for the timeout.
@@ -166,14 +172,17 @@ class DateWindowParser:
             )
         except (asyncio.TimeoutError, Exception):  # fail-open on timeout/any error
             logger.warning("date-leg parse failed; failing open", exc_info=True)
-            return None
-        if not data or not data.get("has_date"):
-            return None
+            return False, None  # transient — do not cache
+        if data is None:
+            # Helper returned None = client/helper failure (transient) — do not cache.
+            return False, None
+        if not data.get("has_date"):
+            return True, None  # confirmed no-date — cacheable
         start, end = _parse_iso(data.get("start_date")), _parse_iso(data.get("end_date"))
         if start is None or end is None or start > end:
-            return None
+            return True, None  # confirmed but malformed dates — cacheable
         try:
             pad = datetime.timedelta(days=int(getattr(self._settings, "date_leg_pad_days", 2)))
-            return DateWindow(start=start - pad, end=end + pad)
+            return True, DateWindow(start=start - pad, end=end + pad)
         except OverflowError:
-            return None
+            return True, None  # confirmed but unusable — cacheable
