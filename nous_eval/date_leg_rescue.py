@@ -82,22 +82,42 @@ async def _sample_dated_facts(
 
 
 async def _generate_temporal_query(
-    client: Any, model: str, content: str, event_date: datetime.date
+    client: Any, model: str, content: str, event_date: datetime.date,
+    adversarial: bool = False,
 ) -> str:
-    """Ask Haiku to write a time-framed question about a fact."""
-    from nous.api.anthropic_client import create_client  # noqa: F401 (type hint only)
+    """Ask Haiku to write a time-framed question about a fact.
 
-    prompt = (
-        f"The following fact was recorded on {event_date.isoformat()}:\n\n"
-        f"{content}\n\n"
-        "Write a short question (one sentence) that a user would ask when trying "
-        "to recall this fact. The question MUST mention a specific date, month, "
-        "or time period so it has a clear temporal anchor. Do not use the word "
-        "'fact'. Reply with only the question, no preamble."
-    )
+    adversarial=False (default): a natural question (topic + date) — realistic.
+    adversarial=True: strips the topic so vanilla vector/keyword search cannot
+    find the gold from the wording, isolating the date leg's ceiling value on
+    pure-temporal queries.
+    """
+    if adversarial:
+        prompt = (
+            f"The following fact was recorded on {event_date.isoformat()}:\n\n"
+            f"{content}\n\n"
+            "Write a short question (one sentence) whose answer is this fact, but "
+            "that references ONLY the TIME PERIOD (e.g. 'in late June 2026', "
+            "'around mid-April 2026') and does NOT mention the fact's specific "
+            "topic, nouns, entities, or keywords. Phrase it so a keyword or vector "
+            "search on the question's wording would NOT surface the fact directly. "
+            "Reply with only the question, no preamble."
+        )
+    else:
+        prompt = (
+            f"The following fact was recorded on {event_date.isoformat()}:\n\n"
+            f"{content}\n\n"
+            "Write a short question (one sentence) that a user would ask when trying "
+            "to recall this fact. The question MUST mention a specific date, month, "
+            "or time period so it has a clear temporal anchor. Do not use the word "
+            "'fact'. Reply with only the question, no preamble."
+        )
     payload = {
         "model": model,
         "max_tokens": 128,
+        # The real anthropic client requires a "system" key; omitting it raised
+        # KeyError and silently degraded every query to the content-leaking fallback.
+        "system": "You write concise, time-anchored recall questions.",
         "messages": [{"role": "user", "content": prompt}],
     }
     try:
@@ -110,8 +130,9 @@ async def _generate_temporal_query(
                 return block.text.strip()
     except Exception:
         logger.warning("query generation failed for content %r", content[:40], exc_info=True)
-    # Fallback: construct a simple query from content + date
-    return f"What happened around {event_date.strftime('%B %Y')}? ({content[:60]})"
+    # Fallback: a purely time-anchored query. MUST NOT leak the fact content, or
+    # vanilla retrieval finds the gold trivially and rescue headroom collapses.
+    return f"What happened in {event_date.strftime('%B %Y')}?"
 
 
 async def main() -> None:
@@ -119,6 +140,9 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Date-leg rescue-metric harness (F075 L3)")
     parser.add_argument("--sample", type=int, default=20, help="Dated facts to sample")
     parser.add_argument("--top-k", type=int, default=10, help="Retrieval top-K for comparison")
+    parser.add_argument("--adversarial", action="store_true",
+                        help="Strip the fact's topic from generated queries so vanilla "
+                             "misses — measures the date leg's ceiling on pure-temporal queries")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.WARNING)
@@ -194,6 +218,7 @@ async def main() -> None:
                     else "claude-haiku-4-5-20251001",
                     content,
                     event_date,
+                    adversarial=args.adversarial,
                 )
 
                 # Vanilla run (date_leg_enabled=False — leg-free baseline)
