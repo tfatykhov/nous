@@ -73,6 +73,7 @@ def _mock_settings(**overrides) -> MagicMock:
     s.tool_hard_clear_after = 6
     s.keep_last_tool_results = 2
     s.event_bus_enabled = True
+    s.knowledge_extractor_max_chars = 24000
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -672,6 +673,129 @@ class TestKnowledgeExtractor:
 
         # Max 5 facts stored
         assert heart.learn.call_count == 5
+
+    @pytest.mark.asyncio
+    async def test_snapshot_truncated_to_custom_max_chars(self):
+        """Text sent to LLM is capped at knowledge_extractor_max_chars when set to 100."""
+        captured_prompt: list[str] = []
+
+        async def fake_call(payload, **kwargs):
+            msgs = payload.get("messages", [])
+            if msgs:
+                content = msgs[0]["content"]
+                if isinstance(content, list):
+                    captured_prompt.append(content[0]["text"])
+                else:
+                    captured_prompt.append(content)
+            response = MagicMock()
+            response.content = [{"type": "text", "text": "[]"}]
+            return response
+
+        client = MagicMock()
+        client.call = AsyncMock(side_effect=fake_call)
+
+        heart = MagicMock()
+        heart.learn = AsyncMock()
+        heart.find_similar_facts = AsyncMock(return_value=[])
+        settings = _mock_settings(knowledge_extractor_max_chars=100)
+        bus = EventBus()
+
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=client)
+
+        # Build a snapshot whose serialized text is well above 100 chars
+        long_content = "A" * 500
+        event = Event(
+            type="conversation_compacting",
+            agent_id=TEST_AGENT,
+            data={
+                "message_snapshot": [
+                    {"role": "user", "content": long_content},
+                    {"role": "assistant", "content": long_content},
+                ],
+            },
+        )
+
+        await extractor.handle(event)
+
+        assert captured_prompt, "LLM was not called"
+        # The prompt contains the conversation_text snippet — verify it was capped
+        prompt_text = captured_prompt[0]
+        # Extract the conversation portion (between "Conversation:\n" and the closing "\n\nReturn")
+        conv_start = prompt_text.find("Conversation:\n") + len("Conversation:\n")
+        conv_end = prompt_text.find("\n\nReturn ONLY")
+        conversation_in_prompt = prompt_text[conv_start:conv_end]
+        # Strip truncation marker if present, then check content length <= 100
+        _TRUNCATION_MARKER = "\n\n[...truncated...]"
+        if conversation_in_prompt.endswith(_TRUNCATION_MARKER):
+            content_only = conversation_in_prompt[: -len(_TRUNCATION_MARKER)]
+        else:
+            content_only = conversation_in_prompt
+        assert len(content_only) <= 100, (
+            f"Conversation text in prompt was {len(content_only)} chars, expected ≤ 100"
+        )
+
+    @pytest.mark.asyncio
+    async def test_snapshot_truncated_to_default_max_chars_at_24000(self):
+        """With default settings and a 30k-char conversation, LLM sees exactly 24000 chars."""
+        captured_prompt: list[str] = []
+
+        async def fake_call(payload, **kwargs):
+            msgs = payload.get("messages", [])
+            if msgs:
+                content = msgs[0]["content"]
+                if isinstance(content, list):
+                    captured_prompt.append(content[0]["text"])
+                else:
+                    captured_prompt.append(content)
+            response = MagicMock()
+            response.content = [{"type": "text", "text": "[]"}]
+            return response
+
+        client = MagicMock()
+        client.call = AsyncMock(side_effect=fake_call)
+
+        heart = MagicMock()
+        heart.learn = AsyncMock()
+        heart.find_similar_facts = AsyncMock(return_value=[])
+        # Default settings — knowledge_extractor_max_chars = 24000
+        settings = _mock_settings()
+        settings.knowledge_extractor_max_chars = 24000
+        bus = EventBus()
+
+        extractor = KnowledgeExtractor(heart, settings, bus, llm_client=client)
+
+        # Build a snapshot whose serialized text exceeds 24000 chars.
+        # Each message is capped at 2000 chars by _serialize_messages, so we need
+        # enough messages so that the joined total exceeds 24000 chars.
+        # Each serialized message is ~2007 chars ("User: " + 2000 + "\n\n").
+        # 12 messages × ~2007 = ~24084 chars — just over the cap.
+        long_content = "B" * 2000
+        snapshot_msgs = []
+        for i in range(12):
+            role = "user" if i % 2 == 0 else "assistant"
+            snapshot_msgs.append({"role": role, "content": long_content})
+        event = Event(
+            type="conversation_compacting",
+            agent_id=TEST_AGENT,
+            data={"message_snapshot": snapshot_msgs},
+        )
+
+        await extractor.handle(event)
+
+        assert captured_prompt, "LLM was not called"
+        prompt_text = captured_prompt[0]
+        conv_start = prompt_text.find("Conversation:\n") + len("Conversation:\n")
+        conv_end = prompt_text.find("\n\nReturn ONLY")
+        conversation_in_prompt = prompt_text[conv_start:conv_end]
+        # Conversation text is capped at 24000 then the truncation marker appended
+        _TRUNCATION_MARKER = "\n\n[...truncated...]"
+        assert conversation_in_prompt.endswith(_TRUNCATION_MARKER), (
+            "Expected truncation marker to be present"
+        )
+        content_len = len(conversation_in_prompt) - len(_TRUNCATION_MARKER)
+        assert content_len == 24000, (
+            f"Expected exactly 24000 chars before marker, got {content_len}"
+        )
 
 
 # ===========================================================================

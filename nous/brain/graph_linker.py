@@ -191,7 +191,11 @@ class GraphLinker:
 
         embedding_str = "[" + ",".join(str(float(v)) for v in fact_embedding) + "]"
 
-        cutoff = datetime.now(UTC) - timedelta(days=30)
+        window_days = self.settings.graph_link_candidate_window_days
+        if window_days > 0:
+            cutoff = datetime.now(UTC) - timedelta(days=window_days)
+        else:
+            cutoff = datetime.min.replace(tzinfo=UTC)  # no cutoff — keeps SQL shape identical
         # F022 audit fix: gate candidate decisions on description length so
         # rows with empty/near-empty bodies never enter the link set.
         sql = text("""

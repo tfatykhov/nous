@@ -288,6 +288,18 @@ class EpisodeSummarizer:
         if not chunks:
             return 0
 
+        chunk_cap = self._settings.episode_chunk_max_per_episode
+        if chunk_cap > 0 and len(chunks) > chunk_cap:
+            logger.warning(
+                "F067: episode %s produced %d chunks; embedding first %d "
+                "(episode_chunk_max_per_episode). Tail remains in episodes.transcript.",
+                episode_id, len(chunks), chunk_cap,
+            )
+            chunks = chunks[:chunk_cap]
+
+        if not chunks:
+            return 0
+
         # Embed all chunks in one batched call. If the embedder fails or
         # isn't wired, we ABORT the insert entirely rather than persist
         # NULL-embedding rows — those rows would never appear in retrieval
@@ -531,6 +543,7 @@ class EpisodeSummarizer:
 
         max_chars = self._settings.transcript_max_chars
         chunks = self._chunk_transcript(transcript, max_chars=max_chars)
+        chunks = self._select_chunks(chunks)
 
         if len(chunks) == 1:
             # Single chunk: truncate and summarize directly (original path)
@@ -579,11 +592,32 @@ class EpisodeSummarizer:
 
         F083 R5: the extended output schema (coverage facts or open_threads)
         needs more headroom so a long transcript's JSON doesn't truncate.
+        2026-07-02: operator override via episode_summary_max_tokens (0 = auto).
         """
+        override = getattr(self._settings, "episode_summary_max_tokens", 0)
+        if override:
+            return override
         if (getattr(self._settings, "extraction_coverage_broadened", False)
                 or getattr(self._settings, "episode_open_threads", False)):
             return 3000
         return 1500
+
+    def _select_chunks(self, chunks: list[str]) -> list[str]:
+        """Bound summarizer LLM call count per episode (2026-07-02 lossless-capture).
+
+        Head+tail selection — first cap-1 chunks plus the FINAL chunk, matching
+        the first-title/last-outcome strategy of _merge_summaries (F025 P3-B).
+        Dropped chunks stay raw in episodes.transcript for re-derivation.
+        """
+        cap = self._settings.episode_summary_max_chunks
+        if cap <= 0 or len(chunks) <= cap:
+            return chunks
+        logger.warning(
+            "Episode transcript spans %d chunks; summarizing %d (first %d + final). "
+            "Raw transcript is preserved; raise episode_summary_max_chunks to widen.",
+            len(chunks), cap, cap - 1,
+        )
+        return chunks[: cap - 1] + [chunks[-1]]
 
     async def _summarize_single(
         self,

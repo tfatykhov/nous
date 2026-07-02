@@ -431,10 +431,11 @@ class FactManager:
         # before W-1. Moving the call ahead of an injected caller's transaction
         # is that caller's responsibility.
         utility_override: float | None = None
+        _min_chars_gate = self._settings.fact_min_content_chars if self._settings else 30
         if (
             session is None
             and self._admission_controller is not None
-            and len(input.content.strip()) >= 30
+            and (_min_chars_gate == 0 or len(input.content.strip()) >= _min_chars_gate)
         ):
             utility_override = await self._admission_controller.precompute_utility(input)
 
@@ -502,14 +503,20 @@ class FactManager:
         encoded_censors: list[str] | None = None,
         utility_override: float | None = None,
     ) -> FactDetail | FactRejected:
-        # F038-1.2: Reject facts with content < 30 characters
-        if len(input.content.strip()) < 30:
+        # F038-1.2: Reject facts with content < fact_min_content_chars characters.
+        # 0 disables the gate entirely (useful for testing / low-noise corpora).
+        min_chars = self._settings.fact_min_content_chars if self._settings else 30
+        if min_chars and len(input.content.strip()) < min_chars:
+            logger.info(
+                "Fact rejected by min-content floor (%d < %d): %.60s",
+                len(input.content.strip()), min_chars, input.content,
+            )
             return FactRejected(
                 content=input.content,
                 composite_score=0.0,
                 threshold=0.0,
                 scores={},
-                explanation="Content too short (< 30 chars)",
+                explanation=f"Content too short (< {min_chars} chars)",
             )
 
         # W-8: serialize concurrent learns of identical content for this agent so
@@ -904,10 +911,11 @@ class FactManager:
 
         Only supersedes when both conditions are met:
         1. Same subject (case-insensitive exact match)
-        2. Cosine similarity > 0.80 (content about same aspect)
+        2. Cosine similarity > ``fact_supersession_threshold`` setting (default 0.80)
 
-        F027: For ambiguous range (0.80-0.95) with LLM available, use classifier
-        to disambiguate UNRELATED/REFINEMENT/UPDATE before superseding.
+        F027: For ambiguous range (``fact_supersession_threshold``–``fact_native_cosine_threshold``,
+        default 0.80–0.95) with LLM available, use classifier to disambiguate
+        UNRELATED/REFINEMENT/UPDATE before superseding.
 
         F075: when ``new_event_date`` is non-NULL and a candidate's
         ``event_date`` differs, skip supersession — same subject on different
@@ -926,6 +934,9 @@ class FactManager:
             )
         )
         excluded = set(exclude_ids or [])
+        _supersession_threshold = (
+            self._settings.fact_supersession_threshold if self._settings else 0.80
+        )
         for old in result.scalars().all():
             # Audit S11: a fact the F377 tiebreaker (or the S3 band
             # classifier) just ruled DISTINCT must not be superseded —
@@ -942,7 +953,7 @@ class FactManager:
                 continue
             if old.embedding is not None:
                 similarity = self._cosine_similarity(embedding, old.embedding)
-                if similarity > 0.80:
+                if similarity > _supersession_threshold:
                     # F027: LLM disambiguation for ambiguous range
                     if similarity <= 0.95 and self._llm is not None and new_content:
                         classification = await self._classify_fact_pair(

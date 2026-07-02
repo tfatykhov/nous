@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 _LEARNED_PATTERN = re.compile(r"^\s*[-*]?\s*learned:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 
 # Significance threshold constants (005.5 Phase A)
-_MIN_CONTENT_LENGTH = 200  # Combined user+assistant chars
+# NOTE: _MIN_CONTENT_LENGTH removed — now read from settings.episode_min_content_length
 _MIN_TURNS_WITHOUT_TOOLS = 1  # R: off-by-one fix — turn_count is incremented in post_turn,
                                # so during turn 2's pre_turn, turn_count==1
 
@@ -459,7 +459,7 @@ class CognitiveLayer:
             meta.has_explicit_remember = True
 
         # 006: Transcript capture
-        meta.transcript.append(f"User: {user_input[:500]}")
+        meta.transcript.append(f"User: {user_input[:self._settings.transcript_message_max_chars]}")
 
         # 007.4: Update agents.last_active timestamp
         try:
@@ -818,11 +818,12 @@ class CognitiveLayer:
                     # B1: Check for duplicate — skip creation if found
                     # R-P0-2: Do NOT store existing episode IDs in _active_episodes
                     # because end_session would corrupt the original episode.
-                    if await self._is_duplicate_episode(user_input[:200], session=session):
+                    seed = user_input[:self._settings.episode_seed_summary_chars]
+                    if await self._is_duplicate_episode(seed, session=session):
                         logger.debug("Skipping episode creation — duplicate found")
                     else:
                         episode_input = EpisodeInput(
-                            summary=user_input[:200],
+                            summary=seed,
                             frame_used=frame.frame_id,
                             trigger="user_message",
                             user_id=user_id,
@@ -1284,7 +1285,7 @@ class CognitiveLayer:
             meta.tools_used.add(tr.tool_name)
 
         # 006: Transcript capture
-        meta.transcript.append(f"Assistant: {turn_result.response_text[:500]}")
+        meta.transcript.append(f"Assistant: {turn_result.response_text[:self._settings.transcript_message_max_chars]}")
 
         # 6b. WORKING MEMORY — manage open threads based on tool results
         try:
@@ -1740,7 +1741,7 @@ class CognitiveLayer:
         # Content threshold (need at least 1 prior turn)
         # R-P1-1: Don't add len(user_input) — already in meta.total_user_chars
         total_chars = meta.total_user_chars + meta.total_assistant_chars
-        if total_chars >= _MIN_CONTENT_LENGTH and meta.turn_count >= 1:
+        if total_chars >= self._settings.episode_min_content_length and meta.turn_count >= 1:
             return True
 
         return False
@@ -1769,6 +1770,8 @@ class CognitiveLayer:
         if not self._heart.episodes.embeddings:
             return False  # No embeddings available — skip dedup
 
+        dedup_window_hours = self._settings.episode_dedup_window_hours
+        dedup_threshold = self._settings.episode_dedup_threshold
         try:
             # Generate embedding for current input
             query_embedding = await self._heart.episodes.embeddings.embed(summary)
@@ -1776,11 +1779,11 @@ class CognitiveLayer:
             # Search recent episodes with direct cosine similarity
             results = await self._heart.search_recent_episodes_by_embedding(
                 query_embedding,
-                hours=48,
+                hours=dedup_window_hours,
                 limit=1,
                 session=session,
             )
-            if results and results[0][1] > 0.85:
+            if results and results[0][1] > dedup_threshold:
                 logger.debug(
                     "Found duplicate episode (%.2f cosine similarity), skipping creation",
                     results[0][1],
@@ -1855,13 +1858,15 @@ class CognitiveLayer:
         transcript_text = "\n\n".join(meta.transcript) if meta else ""
 
         if episode_id:
+            episode_min_content_length = self._settings.episode_min_content_length
+            episode_lessons_max_chars = self._settings.episode_lessons_max_chars
             try:
                 # Discard trivial episodes: single turn, no tools, short content
                 is_trivial = (
                     meta is not None
                     and meta.turn_count <= 1
                     and not meta.tools_used
-                    and (meta.total_user_chars + meta.total_assistant_chars) < _MIN_CONTENT_LENGTH
+                    and (meta.total_user_chars + meta.total_assistant_chars) < episode_min_content_length
                 )
 
                 if is_trivial:
@@ -1871,7 +1876,7 @@ class CognitiveLayer:
                 else:
                     lessons = None
                     if reflection:
-                        lessons = [reflection[:500]]
+                        lessons = [reflection[:episode_lessons_max_chars]]
                     await self._heart.end_episode(
                         UUID(episode_id),
                         outcome="success",

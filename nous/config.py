@@ -330,6 +330,86 @@ class Settings(BaseSettings):
     # F025 P2-C: Transcript truncation limit for episode summarization
     transcript_max_chars: int = 16000
 
+    # ── Memory fidelity caps (2026-07-02 non-configurable-constants scan) ──
+    # Lossless-capture model: capture-side caps are SANITY BOUNDS (paste-bomb
+    # protection), never fidelity rations — episodes.transcript keeps raw text
+    # for re-derivation. Processing cost is bounded at its own seams:
+    # episode_summary_max_chunks (LLM call count) and
+    # episode_chunk_max_per_episode (F067 embedding volume). Destructive and
+    # admission gates keep their prior literals.
+    transcript_message_max_chars: int = Field(
+        default=8000, ge=50,
+        description="SANITY per-message bound when capturing User:/Assistant: lines into the episode transcript (layer.py capture seam — sole source for stored transcript, summary, facts, F067 chunks). Was hardcoded 500. Tune cost via episode_summary_max_chunks / episode_chunk_max_per_episode, not this.",
+    )
+    episode_lessons_max_chars: int = Field(
+        default=8000, ge=50,
+        description="SANITY bound on the end-of-session reflection stored as episodes.lessons_learned. Was hardcoded 500.",
+    )
+    episode_summary_max_chunks: int = Field(
+        default=4, ge=0,
+        description="Max transcript chunks (each <= transcript_max_chars) summarized per episode — bounds summarizer LLM call count. Selection is head+tail (first N-1 + final chunk); dropped chunks are logged and remain raw in episodes.transcript. 0 = unlimited (pre-2026-07-02 behavior).",
+    )
+    episode_chunk_max_per_episode: int = Field(
+        default=100, ge=0,
+        description="F067: max chunks embedded into heart.episode_chunks per episode — bounds embedding volume. Tail beyond the cap stays raw in episodes.transcript. 0 = unlimited (pre-2026-07-02 behavior).",
+    )
+    episode_seed_summary_chars: int = Field(
+        default=500, ge=50,
+        description="Chars of the first user message used as the episode's seed summary AND its dedup embedding probe. Was hardcoded 200.",
+    )
+    episode_dedup_threshold: float = Field(
+        default=0.85, ge=0.0, le=1.0,
+        description="Cosine threshold above which a new episode is treated as a duplicate and not created.",
+    )
+    episode_dedup_window_hours: int = Field(
+        default=48, ge=1,
+        description="Lookback window for episode-duplicate detection.",
+    )
+    episode_min_content_length: int = Field(
+        default=200, ge=0,
+        description="Min combined user+assistant chars for a single-turn no-tool session to keep its episode (below = soft-deleted as trivial).",
+    )
+    correction_input_max_chars: int = Field(
+        default=2000, ge=100,
+        description="F039: chars of the user message and AI response shown to the correction-extraction LLM. Was hardcoded 1000.",
+    )
+    correction_max_tokens: int = Field(
+        default=1024, ge=256,
+        description="F039: output budget for correction extraction. Raised from hardcoded 512 (F031 bug class: truncated JSON silently drops the correction).",
+    )
+    correction_min_principle_chars: int = Field(
+        default=20, ge=0,
+        description="F039: min length of an extracted principle before it is stored as a fact (below = silently dropped). Was hardcoded 30, which dropped terse corrections like 'Always use uv, not pip.' (24 chars).",
+    )
+    episode_summary_max_tokens: int = Field(
+        default=0, ge=0,
+        description="Override for the episode-summarization LLM max_tokens. 0 = auto (3000 when coverage/open-threads prompts are on, else 1500).",
+    )
+    knowledge_extractor_max_chars: int = Field(
+        default=24000, ge=1000,
+        description="Pre-compaction fact extraction: total chars of the doomed-message snapshot shown to the LLM (head-truncated). Was hardcoded 12000; fires once per compaction, under-capture is permanent loss.",
+    )
+    sleep_reflection_summary_chars: int = Field(
+        default=500, ge=50,
+        description="Per-episode summary chars fed to the sleep reflection LLM. Was hardcoded 200 (~28% of a typical summary).",
+    )
+    sleep_contradiction_fact_chars: int = Field(
+        default=1000, ge=100,
+        description="Per-fact chars shown to the contradiction-resolution LLM (verdicts are destructive: SUPERSEDE/REMOVE/MERGE). Was hardcoded 500; 1000 matches the call's max_tokens.",
+    )
+    fact_min_content_chars: int = Field(
+        default=30, ge=0,
+        description="F038-1.2 hard floor: facts shorter than this are rejected before dedup/admission on every write path.",
+    )
+    fact_supersession_threshold: float = Field(
+        default=0.80, ge=0.0, le=1.0,
+        description="Same-subject supersession cosine gate in _supersede_same_subject (deactivates the old fact). Sibling of fact_native_cosine_threshold.",
+    )
+    graph_link_candidate_window_days: int = Field(
+        default=60, ge=0,
+        description="Recency window for graph-link candidates (fact→decision evidence_for at learn time; decision→fact/episode at record time). Was hardcoded 30; 60 doubles coverage with bounded candidate growth (evidence_for precision 0.70, 2026-06-13 audit). 0 = no time cutoff.",
+    )
+
     # F025 P2-D: Fact extractor dedup threshold (raised from 0.85)
     # Leg 1 (hybrid-search RRF pre-check) at fact_extractor.py:243-248
     fact_dedup_threshold: float = 0.92

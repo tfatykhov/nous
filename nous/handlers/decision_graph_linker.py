@@ -84,7 +84,11 @@ class DecisionGraphLinker:
 
                 # 1. Find facts related to this decision
                 fact_threshold = self._settings.graph_threshold_fact_decision
-                cutoff = datetime.now(UTC) - timedelta(days=30)
+                _window_days = self._settings.graph_link_candidate_window_days
+                if _window_days > 0:
+                    cutoff = datetime.now(UTC) - timedelta(days=_window_days)
+                else:
+                    cutoff = datetime.min.replace(tzinfo=UTC)  # no cutoff — keeps SQL shape identical
                 fact_sql = text("""
                     SELECT id, content,
                            1 - (embedding <=> CAST(:embedding AS vector)) AS similarity

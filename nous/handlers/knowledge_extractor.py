@@ -199,8 +199,9 @@ class KnowledgeExtractor:
             return []
 
         # Truncate conversation to avoid exceeding context
-        if len(conversation_text) > 12000:
-            conversation_text = conversation_text[:12000] + "\n\n[...truncated...]"
+        max_chars = self._settings.knowledge_extractor_max_chars
+        if len(conversation_text) > max_chars:
+            conversation_text = conversation_text[:max_chars] + "\n\n[...truncated...]"
 
         prompt = _EXTRACT_PROMPT.format(conversation_text=conversation_text)
 

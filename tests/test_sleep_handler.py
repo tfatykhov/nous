@@ -52,6 +52,11 @@ def _mock_settings(**overrides) -> MagicMock:
     s.consolidation_audit_enabled = False
     s.consolidation_audit_retention_days = 30
     s.consolidation_audit_max_inflight = 32
+    # Task 6: pin the LLM input caps to their real defaults so tests that
+    # drive _phase_reflect / _phase_resolve_contradictions without overrides
+    # slice with an int, not a MagicMock attribute.
+    s.sleep_reflection_summary_chars = 500
+    s.sleep_contradiction_fact_chars = 1000
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -1139,3 +1144,144 @@ class TestStructuredContradictionResolution:
             "F027 cluster consolidation must write the supersedes edge "
             "(link_facts(..., 'supersedes', ...)) alongside superseded_by"
         )
+
+
+# ===========================================================================
+# TestSleepLLMInputCaps (Task 6: configurable reflection/contradiction caps)
+# ===========================================================================
+
+
+class TestSleepLLMInputCaps:
+    """sleep_reflection_summary_chars and sleep_contradiction_fact_chars are
+    wired from Settings into the LLM prompt construction instead of being
+    hardcoded literals."""
+
+    @staticmethod
+    def _extract_user_text(payload: dict) -> str:
+        """Return all user-message text from a call() payload.
+
+        The LLM client receives a payload dict with a 'messages' list.
+        Each message has 'role' and 'content'; content may be a plain str
+        or a list of content-block dicts (with 'type'/'text' keys).
+        """
+        parts: list[str] = []
+        for msg in payload.get("messages", []):
+            if msg.get("role") != "user":
+                continue
+            content = msg["content"]
+            if isinstance(content, str):
+                parts.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        parts.append(block.get("text", ""))
+        return " ".join(parts)
+
+    @pytest.mark.asyncio
+    async def test_reflection_prompt_uses_settings_summary_chars(self):
+        """episode summary is sliced to sleep_reflection_summary_chars, not the
+        old hardcoded 200."""
+        captured_texts: list[str] = []
+
+        def _capture_call(payload):
+            captured_texts.append(self._extract_user_text(payload))
+            response = MagicMock()
+            response.content = [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_mock",
+                    "name": "store_reflection",
+                    "input": {
+                        "patterns": [],
+                        "lessons": [],
+                        "connections": [],
+                        "gaps": [],
+                        "summary": "ok",
+                        "facts": [],
+                    },
+                }
+            ]
+            return response
+
+        settings = _mock_settings(sleep_reflection_summary_chars=400)
+        handler, _, heart, _, llm_client = _make_sleep_handler(settings=settings)
+        llm_client.call = AsyncMock(side_effect=_capture_call)
+
+        ep1 = MagicMock()
+        ep1.summary = "x" * 600  # 600 chars — only 400 should reach the prompt
+        ep2 = MagicMock()
+        ep2.summary = "y" * 600
+        heart.list_episodes = AsyncMock(return_value=[ep1, ep2])
+        heart.search_facts = AsyncMock(return_value=[])
+
+        sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
+        result = await handler._phase_reflect(sleep_stats)
+
+        assert result is True
+        assert captured_texts, "LLM call must have been made"
+        prompt_text = captured_texts[0]
+        # The prompt must contain exactly 400 x's (not 200 and not 600)
+        assert "x" * 400 in prompt_text
+        assert "x" * 401 not in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_contradiction_prompt_uses_settings_fact_chars(self):
+        """Both facts in a contradiction pair are sliced to
+        sleep_contradiction_fact_chars, not the old hardcoded 500."""
+        captured_texts: list[str] = []
+
+        def _capture_call(payload):
+            captured_texts.append(self._extract_user_text(payload))
+            response = MagicMock()
+            response.content = [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_mock",
+                    "name": "resolve_contradiction",
+                    "input": {
+                        "action": "KEEP_BOTH",
+                        "confidence": 0.9,
+                        "reason": "different contexts",
+                        "winner_id": None,
+                        "loser_id": None,
+                        "merged_content": None,
+                    },
+                }
+            ]
+            return response
+
+        settings = _mock_settings(sleep_contradiction_fact_chars=1000)
+        handler, _, heart, _, llm_client = _make_sleep_handler(settings=settings)
+        llm_client.call = AsyncMock(side_effect=_capture_call)
+
+        # Build a candidate pair where each fact is 1200 chars — only 1000 should appear
+        long_content_a = "a" * 1200
+        long_content_b = "b" * 1200
+        pair = {
+            "fact1_id": "id-1",
+            "fact2_id": "id-2",
+            "content1": long_content_a,
+            "content2": long_content_b,
+            "date1": "2024-01-01",
+            "date2": "2024-01-02",
+        }
+        heart.find_contradiction_candidates = AsyncMock(return_value=[pair])
+
+        sleep_stats = {
+            "facts_created": 0,
+            "procedures_created": 0,
+            "censors_retired": 0,
+            "contradictions_found": 0,
+            "contradictions_resolved": 0,
+        }
+        result = await handler._phase_resolve_contradictions(sleep_stats)
+
+        assert result is True
+        assert captured_texts, "LLM call must have been made"
+        prompt_text = captured_texts[0]
+        # fact_a: 1000 a's in prompt, not 1200
+        assert "a" * 1000 in prompt_text
+        assert "a" * 1001 not in prompt_text
+        # fact_b: 1000 b's in prompt, not 1200
+        assert "b" * 1000 in prompt_text
+        assert "b" * 1001 not in prompt_text

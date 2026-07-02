@@ -11,12 +11,14 @@ Key plan adjustments applied:
 - P2-4: censor deduplication before creating
 """
 
+import pytest
 import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.monitor import MonitorEngine
 from nous.cognitive.schemas import Assessment, FrameSelection, ToolResult, TurnResult
+from nous.config import Settings
 from nous.heart import EpisodeInput
 
 # ---------------------------------------------------------------------------
@@ -287,3 +289,135 @@ async def test_is_transient_error(monitor):
     # Non-transient
     assert monitor._is_transient_error("Permission denied") is False
     assert monitor._is_transient_error("File not found") is False
+
+
+# ---------------------------------------------------------------------------
+# 10. F039 correction-extraction caps wired to Settings
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_correction_prompt_uses_input_max_chars(heart, brain, monkeypatch, session):
+    """(a) prompt sent to LLM contains chars past position 1000 when correction_input_max_chars=5000."""
+    captured: dict = {}
+
+    async def fake_call_background_llm(client, model, system_prompt, user_message, max_tokens=800):
+        captured["user_message"] = user_message
+        captured["max_tokens"] = max_tokens
+        return '{"principle": "Always use uv, not pip when managing deps.", "subject": "tooling", "is_censor": false, "censor_pattern": "", "confidence": 0.9}'
+
+    import nous.handlers as handlers_mod
+    monkeypatch.setattr(handlers_mod, "call_background_llm", fake_call_background_llm)
+
+    custom_settings = Settings(
+        correction_input_max_chars=5000,
+        correction_max_tokens=1024,
+        correction_min_principle_chars=20,
+    )
+    engine = MonitorEngine(brain, heart, custom_settings)
+    engine._llm_client = object()  # truthy sentinel — actual call is patched
+
+    # Craft a user message longer than 1000 chars (old hardcoded cap)
+    long_message = "no, actually " + "x" * 2000  # 2013 chars total
+
+    await engine.detect_and_extract_correction(
+        user_message=long_message,
+        ai_response="short response",
+        session_id="test-session",
+        session=session,
+    )
+
+    # The fake LLM is called before the fact store — captured is populated regardless.
+    assert "user_message" in captured, (
+        "fake LLM was never called — correction pattern was not detected"
+    )
+    msg = captured["user_message"]
+    # The prompt must include chars beyond position 1000
+    assert len(msg) > 1000 + len("The user corrected the AI in this exchange:\n\nUser: "), (
+        "prompt was truncated at 1000 chars — correction_input_max_chars was NOT wired"
+    )
+    # More specifically: the long_message starts with "no, actually " + 2000 x's;
+    # chars past position 1000 should appear in the prompt.
+    assert "x" * 100 in msg, "chars past position 1000 not present in prompt"
+
+
+@pytest.mark.asyncio
+async def test_correction_max_tokens_from_settings(heart, brain, monkeypatch):
+    """(b) max_tokens kwarg passed to call_background_llm equals settings.correction_max_tokens."""
+    captured: dict = {}
+
+    async def fake_call_background_llm(client, model, system_prompt, user_message, max_tokens=800):
+        captured["max_tokens"] = max_tokens
+        return '{"principle": "Always use uv, not pip when managing deps.", "subject": "tooling", "is_censor": false, "censor_pattern": "", "confidence": 0.9}'
+
+    import nous.handlers as handlers_mod
+    monkeypatch.setattr(handlers_mod, "call_background_llm", fake_call_background_llm)
+
+    custom_settings = Settings(correction_max_tokens=768)
+    engine = MonitorEngine(brain, heart, custom_settings)
+    engine._llm_client = object()
+
+    await engine.detect_and_extract_correction(
+        user_message="no, actually that's wrong",
+        ai_response="some response",
+        session_id="test-session",
+    )
+
+    assert captured.get("max_tokens") == 768, (
+        f"Expected max_tokens=768 from settings, got {captured.get('max_tokens')} — "
+        "correction_max_tokens was NOT wired"
+    )
+
+
+@pytest.mark.asyncio
+async def test_correction_min_principle_chars_from_settings(heart, brain, monkeypatch, session):
+    """(c) 25-char principle is stored at default min=20; 15-char principle is dropped."""
+    PRINCIPLE_25 = "Always use uv, not pip."   # 23 chars — below old hardcoded 30, above new 20
+    PRINCIPLE_15 = "Use uv always."            # 14 chars — below new default 20
+
+    async def fake_llm_25(client, model, system_prompt, user_message, max_tokens=800):
+        return (
+            f'{{"principle": "{PRINCIPLE_25}", "subject": "tooling", '
+            f'"is_censor": false, "censor_pattern": "", "confidence": 0.9}}'
+        )
+
+    async def fake_llm_15(client, model, system_prompt, user_message, max_tokens=800):
+        return (
+            f'{{"principle": "{PRINCIPLE_15}", "subject": "tooling", '
+            f'"is_censor": false, "censor_pattern": "", "confidence": 0.9}}'
+        )
+
+    import nous.handlers as handlers_mod
+
+    # --- 25-char principle at default min=20 → should be stored ---
+    monkeypatch.setattr(handlers_mod, "call_background_llm", fake_llm_25)
+    default_settings = Settings()  # correction_min_principle_chars=20
+    engine = MonitorEngine(brain, heart, default_settings)
+    engine._llm_client = object()
+
+    result_25 = await engine.detect_and_extract_correction(
+        user_message="no, actually that's wrong",
+        ai_response="some response",
+        session_id="test-session",
+        session=session,
+    )
+    assert result_25 is not None, (
+        f"Expected {len(PRINCIPLE_25)}-char principle to pass min=20, but got None — "
+        "correction_min_principle_chars was NOT wired (still hardcoded 30)"
+    )
+
+    # --- 15-char principle at default min=20 → should be dropped ---
+    monkeypatch.setattr(handlers_mod, "call_background_llm", fake_llm_15)
+    engine2 = MonitorEngine(brain, heart, default_settings)
+    engine2._llm_client = object()
+
+    result_15 = await engine2.detect_and_extract_correction(
+        user_message="no, actually that's wrong",
+        ai_response="some response",
+        session_id="test-session",
+        session=session,
+    )
+    assert result_15 is None, (
+        f"Expected {len(PRINCIPLE_15)}-char principle to be dropped at min=20, but got a result — "
+        "correction_min_principle_chars was NOT wired"
+    )

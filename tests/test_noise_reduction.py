@@ -31,7 +31,6 @@ from nous.cognitive.schemas import SessionMetadata
 # Constants from the spec (module-level in layer.py)
 # ---------------------------------------------------------------------------
 
-_MIN_CONTENT_LENGTH = 200
 _MIN_TURNS_WITHOUT_TOOLS = 1
 
 
@@ -66,6 +65,14 @@ def _make_cognitive_layer():
 
     mock_settings = MagicMock()
     mock_settings.agent_id = "test-agent"
+    # Numeric settings consumed by _should_create_episode / end_session trivial gate
+    # after _MIN_CONTENT_LENGTH was removed from module scope (Task 2 wiring).
+    mock_settings.episode_min_content_length = 200
+    mock_settings.episode_lessons_max_chars = 500
+    mock_settings.transcript_message_max_chars = 500
+    mock_settings.episode_seed_summary_chars = 200
+    mock_settings.episode_dedup_threshold = 0.85
+    mock_settings.episode_dedup_window_hours = 48
 
     with (
         patch("nous.cognitive.layer.FrameEngine"),

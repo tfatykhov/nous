@@ -323,10 +323,11 @@ class MonitorEngine:
 
         from nous.handlers import call_background_llm, parse_llm_json
 
+        cap = self._settings.correction_input_max_chars
         prompt = (
             "The user corrected the AI in this exchange:\n\n"
-            f"User: {user_message[:1000]}\n"
-            f"AI response: {ai_response[:1000]}\n\n"
+            f"User: {user_message[:cap]}\n"
+            f"AI response: {ai_response[:cap]}\n\n"
             "Extract:\n"
             '1. principle: A generalizable rule the AI should follow (1-2 sentences)\n'
             '2. subject: What topic/domain this rule applies to\n'
@@ -336,13 +337,15 @@ class MonitorEngine:
             "Return ONLY valid JSON."
         )
 
+        correction_max_tokens = self._settings.correction_max_tokens
+        correction_min_principle_chars = self._settings.correction_min_principle_chars
         try:
             raw = await call_background_llm(
                 self._llm_client,
                 self._settings.background_model,
                 "You are a correction analysis system. Respond only with JSON.",
                 prompt,
-                max_tokens=512,
+                max_tokens=correction_max_tokens,
             )
             if not raw:
                 return None
@@ -350,7 +353,7 @@ class MonitorEngine:
             extraction = parse_llm_json(raw)
 
             principle = extraction.get("principle", "")
-            if not principle or len(principle) < 30:
+            if not principle or len(principle) < correction_min_principle_chars:
                 return None
 
             # Store as fact

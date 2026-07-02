@@ -71,6 +71,11 @@ def _mock_settings(**overrides) -> MagicMock:
     s.extraction_coverage_broadened = False
     s.candidate_facts_event_limit = 30
     s.candidate_facts_stable_limit = 15
+    # episode_summary_max_chunks=0 deliberately preserves pre-cap (unlimited)
+    # behavior for these bus-handler tests.  The real prod default is 4; the
+    # cap itself is tested in test_f025_chunked.py::TestSelectChunks.
+    s.episode_summary_max_chunks = 0
+    s.episode_summary_max_tokens = 0  # 0 = auto
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
