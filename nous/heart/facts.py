@@ -1852,6 +1852,11 @@ class FactManager:
         (relevance within the window), never date-distance alone.
         """
         qvec = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        # Raise HNSW ef_search well above :limit: the agent/date/active predicates
+        # are post-applied to the approximate walk, so a selective date window can
+        # otherwise evict the in-window rows from the candidate set (codex P2).
+        # Mirrors _find_duplicate (facts.py:1200) and censor probe (censors.py:409).
+        await set_local_ef_search(session, 200)
         sql = text("""
             SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
             FROM heart.facts t

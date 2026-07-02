@@ -152,7 +152,10 @@ class DateWindowParser:
                 call_background_llm_structured(
                     client=self._client,
                     model=self._settings.date_leg_model,
-                    system_prompt="",
+                    # Non-empty system prompt: the helper wraps this in a cached
+                    # text block, and Anthropic rejects empty cached blocks (400),
+                    # which would fail every parse open to None (codex P1).
+                    system_prompt="You extract the specific time period a natural-language question refers to.",
                     user_message=_prompt(query, today),
                     tool_name="emit_window",
                     tool_description="Extract the time period a question asks about.",

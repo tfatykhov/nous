@@ -54,6 +54,18 @@ async def test_pregate_skips_llm_for_non_temporal():
     assert client.calls == []  # no LLM call
 
 @pytest.mark.asyncio
+async def test_parser_system_prompt_is_non_empty():
+    # codex P1: an empty system text block is rejected by Anthropic's prompt cache
+    # (400), which would fail every parse open to None. Assert no system block is blank.
+    client = _FakeClient({"has_date": True, "start_date": "2026-04-20", "end_date": "2026-04-30"})
+    p = DateWindowParser(client, _settings())
+    await p.parse("what happened in late April 2026?", TODAY)
+    assert client.calls, "LLM was not called"
+    sys_blocks = client.calls[-1]["system"]
+    assert sys_blocks and all(b["text"].strip() for b in sys_blocks), \
+        "an empty system block would 400 on Anthropic's prompt cache"
+
+@pytest.mark.asyncio
 async def test_cache_key_includes_today_for_relative_queries():
     # codex P2: a relative query cached on one day must re-parse on the next —
     # "yesterday" resolves to a different window per `today`. Cache key includes today.

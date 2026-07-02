@@ -139,6 +139,10 @@ async def main() -> None:
 
     # Enable the date leg for the fused run
     fused_settings = settings.model_copy(update={"date_leg_enabled": True})
+    # Force the vanilla baseline leg-free even when NOUS_DATE_LEG_ENABLED=true in
+    # the env (exactly the A/B case): otherwise the "vanilla" run_recall_pipeline
+    # would fire the leg itself and underreport rescues (codex P2).
+    baseline_settings = settings.model_copy(update={"date_leg_enabled": False})
 
     # ── Connect to eval DB ──────────────────────────────────────────────────
     db = Database(settings=settings)
@@ -193,12 +197,12 @@ async def main() -> None:
                     event_date,
                 )
 
-                # Vanilla run (date_leg_enabled=False)
+                # Vanilla run (date_leg_enabled=False — leg-free baseline)
                 vanilla_results, _ = await run_recall_pipeline(
                     query=query,
                     heart=heart,
                     brain=brain,
-                    settings=settings,
+                    settings=baseline_settings,
                     limit=args.top_k,
                     memory_types=["fact"],
                 )
