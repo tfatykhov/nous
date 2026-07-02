@@ -236,6 +236,19 @@ class Settings(BaseSettings):
                 )
         return v
 
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _normalize_effort_alias(cls, v: object) -> object:
+        """Map the human alias `extra` to the real Claude API tier `xhigh`.
+
+        The API has no `extra` effort value; operators reaching for
+        "extra high" set NOUS_EFFORT=extra. Resolve it here so the rest of
+        the code (and the API payload) only ever sees a valid tier.
+        """
+        if isinstance(v, str) and v.strip().lower() == "extra":
+            return "xhigh"
+        return v
+
     # F017: Staleness penalty
     staleness_penalty_enabled: bool = True
     staleness_half_life_days: int = 30
@@ -401,7 +414,12 @@ class Settings(BaseSettings):
     # Extended thinking
     thinking_mode: Literal["off", "adaptive", "manual"] = "off"
     thinking_budget: int = 10000  # budget_tokens for manual mode (min 1024)
-    effort: Literal["low", "medium", "high", "max"] = "high"
+    # Claude API effort tiers (output_config.effort). `xhigh` was added in
+    # Opus 4.7 (between high and max) and is the recommended tier for coding /
+    # agentic work on Opus 4.7/4.8. `extra` is not a real API value — it's a
+    # human-facing alias for "extra high" that we normalize to `xhigh` below
+    # so an operator's NOUS_EFFORT=extra loads instead of crashing startup.
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
 
     # Context window override (0 = auto-detect from model name)
     context_window: int = Field(
@@ -1483,6 +1501,31 @@ class Settings(BaseSettings):
     date_aware_boost_window_pad_days: int = Field(
         default=30,
         description="F075 Layer 3: pad days around the inferred query date window.",
+    )
+    # F075 Layer 3 — Date-window retrieval leg (land-dark; flip after A/B gate)
+    date_leg_enabled: bool = Field(
+        default=False,
+        description="F075 Layer 3: enable the date-window retrieval leg. "
+        "Off = byte-identical to today. Land-dark; flip after the A/B gate.",
+    )
+    date_leg_model: str = Field(
+        default="claude-haiku-4-5-20251001",
+        description="F075 L3: Haiku model for parsing the query's date window.",
+    )
+    date_leg_k: int = Field(
+        default=15, description="F075 L3: date-leg retrieval depth (validated).",
+    )
+    date_leg_pad_days: int = Field(
+        default=2, description="F075 L3: +/- days padding on the parsed window (validated).",
+    )
+    date_leg_timeout_seconds: float = Field(
+        default=2.0, description="F075 L3: parser timeout; breach fails open to no-date.",
+    )
+    date_leg_max_per_hour: int = Field(
+        default=500, description="F075 L3: per-hour Haiku budget cap on the parser.",
+    )
+    date_leg_cache_ttl_days: int = Field(
+        default=30, description="F075 L3: parsed-window in-process cache retention.",
     )
     heart_graph_all_types_enabled: bool = Field(
         default=False,

@@ -215,9 +215,23 @@ async def run_recall_pipeline(
         fired. Contradiction edges are surfaced via ``stats.contradiction_checks_ran``
         plus the per-result ``contradicts`` field.
     """
+    # F075 L3: parse the date window once per query when the leg is enabled.
+    # The parser is fail-open (returns None on timeout/error/no-date), so
+    # no try/except is needed; None → no leg → byte-identical to today.
+    date_window = None
+    parser = getattr(heart, "date_window_parser", None)
+    # Only the fact leg consumes the window, so skip the Haiku parse (latency +
+    # budget) when facts aren't in scope, e.g. memory_types=["decision"] (codex P2).
+    # `not memory_types` covers None AND [] — both default to "all" in _run_stages
+    # (`memory_types or ["all"]`), so facts are searched and the parse must run.
+    _facts_in_scope = not memory_types or "all" in memory_types or "fact" in memory_types
+    if getattr(settings, "date_leg_enabled", False) and parser is not None and _facts_in_scope:
+        import datetime as _dt
+        date_window = await parser.parse(query, _dt.date.today())
+
     acc = await _run_stages(
         query, heart, brain, settings, limit, memory_types,
-        residual_activations, apply_mmr=apply_mmr,
+        residual_activations, apply_mmr=apply_mmr, date_window=date_window,
     )
 
     # Build flat PipelineResult list in stage order
@@ -338,6 +352,7 @@ async def _run_stages(
     memory_types: list[str] | None,
     residual_activations: dict[UUID, float] | None = None,
     apply_mmr: bool | None = None,
+    date_window: "object | None" = None,
 ) -> _PipelineAccumulator:
     acc = _PipelineAccumulator()
 
@@ -380,6 +395,7 @@ async def _run_stages(
                 query, limit=limit, types=heart_types,
                 residual_activations=residual_activations,  # F055
                 apply_mmr=apply_mmr,  # F030.2
+                date_window=date_window,  # F075 L3
             )
             acc.heart_results = list(heart_results or [])
 

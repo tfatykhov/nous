@@ -32,6 +32,33 @@ class TestDAGTimeoutValidation:
         assert s.dag_node_max_timeout == 7200
 
 
+class TestEffortValidation:
+    """NOUS_EFFORT accepts the real Claude API tiers plus the `extra` alias."""
+
+    def test_xhigh_is_accepted(self, monkeypatch):
+        monkeypatch.setenv("NOUS_EFFORT", "xhigh")
+        s = Settings(_env_file=None)
+        assert s.effort == "xhigh"
+
+    def test_extra_alias_normalizes_to_xhigh(self, monkeypatch):
+        # `extra` was set in prod .env intending the extra-high tier; the
+        # Claude API has no `extra`, so it must resolve to `xhigh` at load
+        # time rather than crash startup or 400 at runtime.
+        monkeypatch.setenv("NOUS_EFFORT", "extra")
+        s = Settings(_env_file=None)
+        assert s.effort == "xhigh"
+
+    def test_invalid_effort_still_rejected(self, monkeypatch):
+        monkeypatch.setenv("NOUS_EFFORT", "bogus")
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)
+
+    def test_default_is_high(self, monkeypatch):
+        monkeypatch.delenv("NOUS_EFFORT", raising=False)
+        s = Settings(_env_file=None)
+        assert s.effort == "high"
+
+
 class TestContextBudgetOverridesParsing:
     """Audit ST-1: empty/blank NOUS_CONTEXT_BUDGET_OVERRIDES must not crash boot.
 
@@ -73,3 +100,15 @@ class TestContextBudgetOverridesParsing:
         monkeypatch.setenv("NOUS_CONTEXT_BUDGET_OVERRIDES", '{"total": -1}')
         with pytest.raises(ValidationError):
             Settings(_env_file=None)
+
+
+def test_date_leg_settings_defaults():
+    from nous.config import Settings
+    s = Settings()
+    assert s.date_leg_enabled is False
+    assert s.date_leg_model == "claude-haiku-4-5-20251001"
+    assert s.date_leg_k == 15
+    assert s.date_leg_pad_days == 2
+    assert s.date_leg_timeout_seconds == 2.0
+    assert s.date_leg_max_per_hour == 500
+    assert s.date_leg_cache_ttl_days == 30

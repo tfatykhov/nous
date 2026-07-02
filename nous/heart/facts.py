@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from nous.config import Settings
     from nous.handlers import LLMClient
     from nous.heart.actionability import ActionabilityClassifier
+    from nous.heart.date_window import DateWindow
 
 logger = logging.getLogger(__name__)
 
@@ -1618,6 +1619,7 @@ class FactManager:
         exclude_categories: list[str] | None = None,
         session: AsyncSession | None = None,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        date_window: "DateWindow | None" = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -1625,11 +1627,13 @@ class FactManager:
             variant_pairs: F050 — when set with len > 1, routes through
                 hybrid_search_multi for RRF fusion across query variants.
                 Defaults to None (single-query path; backwards compatible).
+            date_window: F075 L3 — when set, fuses the date-window retrieval
+                leg into the results via _rrf_merge_n.
         """
         if session is None:
             async with self.db.session() as session:
-                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs)
-        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs)
+                return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
+        return await self._search(query, limit, category, active_only, exclude_categories, session, variant_pairs, date_window)
 
     async def _search(
         self,
@@ -1640,6 +1644,7 @@ class FactManager:
         exclude_categories: list[str] | None,
         session: AsyncSession,
         variant_pairs: list[tuple[str, list[float] | None]] | None = None,
+        date_window: "DateWindow | None" = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -1693,6 +1698,16 @@ class FactManager:
                 extra_params=extra_params,
                 limit=limit,
             )
+
+        # F075 L3: fuse the date-window leg (position-based RRF). Present only when
+        # the caller parsed a window and we have a query embedding. Empty leg is a
+        # no-op, so this preserves today's ordering when the window finds nothing.
+        if date_window is not None and embedding is not None:
+            from nous.heart.search import _rrf_merge_n, _resolve_rrf_k
+            k_leg = self._settings.date_leg_k if self._settings else 15
+            date_leg = await self._date_window_leg(session, embedding, date_window, k_leg)
+            if date_leg:
+                results = _rrf_merge_n([results, date_leg], _resolve_rrf_k(), limit)
 
         if not results:
             return []
@@ -1823,6 +1838,41 @@ class FactManager:
         summaries = self.apply_supersession_filter(summaries)
         self._fire_track_access([s.id for s in summaries])
         return summaries
+
+    async def _date_window_leg(
+        self,
+        session: "AsyncSession",
+        embedding: list[float],
+        window: "DateWindow",
+        limit: int,
+    ) -> list[tuple["UUID", float]]:
+        """F075 L3: in-window active dated facts, ranked by cosine to the query.
+
+        Returns (id, cosine) tuples ordered best-first. Ranking is cosine-to-query
+        (relevance within the window), never date-distance alone.
+        """
+        qvec = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+        # Raise HNSW ef_search well above :limit: the agent/date/active predicates
+        # are post-applied to the approximate walk, so a selective date window can
+        # otherwise evict the in-window rows from the candidate set (codex P2).
+        # Mirrors _find_duplicate (facts.py:1200) and censor probe (censors.py:409).
+        await set_local_ef_search(session, 200)
+        sql = text("""
+            SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
+            FROM heart.facts t
+            WHERE t.agent_id = :agent_id
+              AND t.active = true
+              AND t.event_date IS NOT NULL
+              AND t.event_date BETWEEN :lo AND :hi
+              AND t.embedding IS NOT NULL
+            ORDER BY t.embedding <=> CAST(:qvec AS vector)
+            LIMIT :limit
+        """)
+        result = await session.execute(sql, {
+            "agent_id": self.agent_id, "qvec": qvec,
+            "lo": window.start, "hi": window.end, "limit": limit,
+        })
+        return [(row.id, float(row.score)) for row in result.all()]
 
     # ------------------------------------------------------------------
     # list_all() — F021 dashboard browse mode
