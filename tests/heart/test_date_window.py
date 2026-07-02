@@ -54,6 +54,19 @@ async def test_pregate_skips_llm_for_non_temporal():
     assert client.calls == []  # no LLM call
 
 @pytest.mark.asyncio
+async def test_cache_key_includes_today_for_relative_queries():
+    # codex P2: a relative query cached on one day must re-parse on the next —
+    # "yesterday" resolves to a different window per `today`. Cache key includes today.
+    client = _FakeClient({"has_date": True, "start_date": "2026-07-01", "end_date": "2026-07-01"})
+    p = DateWindowParser(client, _settings())
+    q = "what happened yesterday?"
+    await p.parse(q, datetime.date(2026, 7, 2))
+    await p.parse(q, datetime.date(2026, 7, 2))   # same day -> cache hit, no new call
+    assert len(client.calls) == 1
+    await p.parse(q, datetime.date(2026, 7, 3))   # next day -> different key -> re-parse
+    assert len(client.calls) == 2
+
+@pytest.mark.asyncio
 async def test_has_date_false_returns_none():
     client = _FakeClient({"has_date": False})
     p = DateWindowParser(client, _settings())

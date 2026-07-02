@@ -95,24 +95,24 @@ class DateWindowParser:
             self._calls.append(now)
             return True
 
-    def _cache_get(self, query: str) -> tuple[bool, DateWindow | None]:
+    def _cache_get(self, key: str) -> tuple[bool, DateWindow | None]:
         """Return (hit, value). Treats expired entries as misses (fail-open)."""
         try:
             ttl_days = int(getattr(self._settings, "date_leg_cache_ttl_days", 30))
             if ttl_days <= 0:
                 return False, None  # "never cache" mode
-            entry = self._cache.get(query)
+            entry = self._cache.get(key)
             if entry is None:
                 return False, None
             inserted_at, value = entry
             if time.monotonic() - inserted_at > ttl_days * 86400:
-                del self._cache[query]
+                del self._cache[key]
                 return False, None
             return True, value
         except Exception:
             return False, None
 
-    def _cache_put(self, query: str, value: DateWindow | None) -> None:
+    def _cache_put(self, key: str, value: DateWindow | None) -> None:
         """Insert into cache, evicting oldest when at cap (fail-open on error)."""
         try:
             ttl_days = int(getattr(self._settings, "date_leg_cache_ttl_days", 30))
@@ -121,21 +121,25 @@ class DateWindowParser:
             cap = _CACHE_MAX_ENTRIES
             while len(self._cache) >= cap:
                 self._cache.popitem(last=False)  # evict oldest-inserted entry
-            self._cache[query] = (time.monotonic(), value)
+            self._cache[key] = (time.monotonic(), value)
         except Exception:
             pass
 
     async def parse(self, query: str, today: datetime.date) -> DateWindow | None:
         if not query or not has_temporal_signal(query):
             return None
-        hit, cached_value = self._cache_get(query)
+        # Cache key includes `today` so relative-date queries ("yesterday",
+        # "last week") don't return a stale window across day boundaries (codex P2):
+        # the same phrase resolves to a different window on a different day.
+        cache_key = f"{today.isoformat()}\x00{query}"
+        hit, cached_value = self._cache_get(cache_key)
         if hit:
             return cached_value
         if not await self._within_budget():
             logger.warning("date-leg parser budget exhausted; failing open")
             return None
         window = await self._parse_llm(query, today)
-        self._cache_put(query, window)
+        self._cache_put(cache_key, window)
         return window
 
     async def _parse_llm(self, query: str, today: datetime.date) -> DateWindow | None:

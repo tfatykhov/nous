@@ -220,7 +220,11 @@ async def run_recall_pipeline(
     # no try/except is needed; None → no leg → byte-identical to today.
     date_window = None
     parser = getattr(heart, "date_window_parser", None)
-    if getattr(settings, "date_leg_enabled", False) and parser is not None:
+    # Only the fact leg consumes the window, so skip the Haiku parse (latency +
+    # budget) when facts aren't in scope, e.g. memory_types=["decision"] (codex P2).
+    # memory_types is None → "all" default → facts included.
+    _facts_in_scope = memory_types is None or "all" in memory_types or "fact" in memory_types
+    if getattr(settings, "date_leg_enabled", False) and parser is not None and _facts_in_scope:
         import datetime as _dt
         date_window = await parser.parse(query, _dt.date.today())
 

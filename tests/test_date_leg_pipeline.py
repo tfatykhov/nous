@@ -199,6 +199,32 @@ async def test_pipeline_flag_on_no_parser_attribute_is_safe():
 
 
 @pytest.mark.asyncio
+async def test_pipeline_skips_parse_when_facts_not_in_scope():
+    """codex P2: date_leg_enabled=True but memory_types=['decision'] → parser skipped.
+
+    The date leg only feeds fact search, so a decision-only recall must not pay the
+    Haiku parse latency/budget."""
+    stub_parser = _StubParser(return_value=DateWindow(
+        start=datetime.date(2026, 4, 18),
+        end=datetime.date(2026, 5, 2),
+    ))
+    heart = _make_heart(parser=stub_parser)
+    brain = _make_brain()
+    settings = _make_settings(date_leg_enabled=True)
+
+    await run_recall_pipeline(
+        query="what happened in late April 2026?",
+        heart=heart,
+        brain=brain,
+        settings=settings,
+        limit=10,
+        memory_types=["decision"],
+    )
+
+    assert stub_parser.call_count == 0, "parser ran for a decision-only recall (facts not in scope)"
+
+
+@pytest.mark.asyncio
 async def test_pipeline_flag_on_parser_returns_none_passes_none():
     """When the parser fails open (returns None), heart.recall gets date_window=None."""
     stub_parser = _StubParser(return_value=None)  # fail-open scenario
