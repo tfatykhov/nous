@@ -225,6 +225,7 @@ class KnowledgeExtractor:
             conversation_text = conversation_text[:max_chars] + "\n\n[...truncated...]"
 
         hardened = getattr(self._settings, "extraction_input_hardening_enabled", False)
+        raw_conversation = conversation_text
         if hardened:
             conversation_text = f"<conversation>\n{conversation_text}\n</conversation>"
         prompt = _EXTRACT_PROMPT.format(conversation_text=conversation_text)
@@ -247,9 +248,15 @@ class KnowledgeExtractor:
         except json.JSONDecodeError:
             return []
         # S2: verbatim prompt-echo backstop (guard only what we can evaluate —
-        # a non-list parse is handled by the caller as before).
+        # a non-list parse is handled by the caller as before). Screens the
+        # hardening guard too (codex P2: appended last = most likely echoed);
+        # the raw conversation is the allowlist for user-stated rules that
+        # mirror template wording.
         if hardened and isinstance(parsed, list):
             parsed = drop_prompt_echo_facts(
-                parsed, (_EXTRACT_PROMPT,), source="knowledge_extractor"
+                parsed,
+                (_EXTRACT_PROMPT, _INPUT_HARDENING_GUARD),
+                source="knowledge_extractor",
+                transcript=raw_conversation,
             )
         return parsed

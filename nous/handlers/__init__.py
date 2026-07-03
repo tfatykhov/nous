@@ -248,7 +248,10 @@ def _is_prompt_echo(content: str, normalized_prompts: list[str]) -> bool:
 
 
 def drop_prompt_echo_facts(
-    candidates: list, prompt_templates: tuple[str, ...] | list[str], source: str = ""
+    candidates: list,
+    prompt_templates: tuple[str, ...] | list[str],
+    source: str = "",
+    transcript: str | None = None,
 ) -> list:
     """S2 (2026-07-02 MAB audit): drop candidate facts that echo the extraction
     prompt itself.
@@ -262,14 +265,23 @@ def drop_prompt_echo_facts(
     formatted prompt — that contains the transcript, and transcript-derived
     facts must not be dropped). Precision-first: a 6-word verbatim run is the
     drop criterion because false drops are permanent data loss.
+
+    ``transcript`` allowlist (codex P2): a user-stated rule can legitimately
+    mirror template wording ("return only valid JSON, no markdown..."). Real
+    echoes come from the prompt, not the conversation — DB-verified: 0/528
+    stored chunks contained the echoed phrases. So a prompt-matching fact that
+    ALSO shares a verbatim run with the transcript is transcript-derived and
+    kept.
     """
     normalized = [_normalize_for_echo(t) for t in prompt_templates if t]
+    norm_transcript = [_normalize_for_echo(transcript)] if transcript else []
     kept = []
-    dropped = 0
     for cand in candidates:
         content = cand.get("content", "") if isinstance(cand, dict) else ""
         if content and _is_prompt_echo(content, normalized):
-            dropped += 1
+            if norm_transcript and _is_prompt_echo(content, norm_transcript):
+                kept.append(cand)  # present in the conversation itself
+                continue
             logger.warning(
                 "S2 echo guard (%s): dropped prompt-echo candidate fact: %.80s",
                 source, content,

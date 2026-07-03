@@ -209,14 +209,17 @@ prefer the most distinctive, queryable items — and keep the summary brief
 enough that the JSON object always completes."""
 
 
-# S2: static templates the echo guard screens candidate facts against. The
-# formatted prompt must NEVER be used here — it contains the transcript, and
-# transcript-derived facts must not be dropped.
+# S2: static templates the echo guard screens candidate facts against —
+# including the hardening guard itself (codex P2: it's appended LAST, the
+# most salient position for an echo). The formatted prompt must NEVER be
+# used here — it contains the transcript, and transcript-derived facts must
+# not be dropped.
 _ECHO_GUARD_TEMPLATES = (
     _SUMMARY_PROMPT,
     _F075_TEMPORAL_INSTRUCTION,
     _COVERAGE_EXPANSION_INSTRUCTION,
     _OPEN_THREADS_INSTRUCTION,
+    _INPUT_HARDENING_GUARD,
 )
 
 
@@ -749,6 +752,7 @@ class EpisodeSummarizer:
                 result["candidate_facts"],
                 _ECHO_GUARD_TEMPLATES,
                 source="episode_summarizer",
+                transcript=transcript,
             )
         return result
 
