@@ -18,6 +18,11 @@ class TestCorrectionPatternMatching:
         settings = MagicMock()
         settings.correction_extraction_enabled = True
         settings.background_model = "test-model"
+        # 282626c memory-fidelity settings: monitor.py slices with these ints;
+        # bare MagicMock attrs raise TypeError and kill the extraction.
+        settings.correction_input_max_chars = 2000
+        settings.correction_max_tokens = 1024
+        settings.correction_min_principle_chars = 20
 
         monitor = MonitorEngine(brain, heart, settings)
         monitor._llm_client = AsyncMock()
@@ -45,6 +50,11 @@ class TestCorrectionPatternMatching:
         settings = MagicMock()
         settings.correction_extraction_enabled = True
         settings.background_model = "test-model"
+        # 282626c memory-fidelity settings: monitor.py slices with these ints;
+        # bare MagicMock attrs raise TypeError and kill the extraction.
+        settings.correction_input_max_chars = 2000
+        settings.correction_max_tokens = 1024
+        settings.correction_min_principle_chars = 20
 
         monitor = MonitorEngine(brain, heart, settings)
         monitor._llm_client = AsyncMock()
@@ -137,6 +147,11 @@ class TestCorrectionPatternMatching:
         settings = MagicMock()
         settings.correction_extraction_enabled = True
         settings.background_model = "test-model"
+        # 282626c memory-fidelity settings: monitor.py slices with these ints;
+        # bare MagicMock attrs raise TypeError and kill the extraction.
+        settings.correction_input_max_chars = 2000
+        settings.correction_max_tokens = 1024
+        settings.correction_min_principle_chars = 20
 
         monitor = MonitorEngine(brain, heart, settings)
         monitor._llm_client = AsyncMock()
@@ -167,6 +182,11 @@ class TestCorrectionPatternMatching:
         settings = MagicMock()
         settings.correction_extraction_enabled = True
         settings.background_model = "test-model"
+        # 282626c memory-fidelity settings: monitor.py slices with these ints;
+        # bare MagicMock attrs raise TypeError and kill the extraction.
+        settings.correction_input_max_chars = 2000
+        settings.correction_max_tokens = 1024
+        settings.correction_min_principle_chars = 20
 
         monitor = MonitorEngine(brain, heart, settings)
         monitor._llm_client = AsyncMock()
@@ -193,6 +213,11 @@ class TestCorrectionPatternMatching:
         settings = MagicMock()
         settings.correction_extraction_enabled = True
         settings.background_model = "test-model"
+        # 282626c memory-fidelity settings: monitor.py slices with these ints;
+        # bare MagicMock attrs raise TypeError and kill the extraction.
+        settings.correction_input_max_chars = 2000
+        settings.correction_max_tokens = 1024
+        settings.correction_min_principle_chars = 20
 
         monitor = MonitorEngine(brain, heart, settings)
         monitor._llm_client = AsyncMock()
@@ -219,6 +244,11 @@ class TestCorrectionPatternMatching:
         settings = MagicMock()
         settings.correction_extraction_enabled = True
         settings.background_model = "test-model"
+        # 282626c memory-fidelity settings: monitor.py slices with these ints;
+        # bare MagicMock attrs raise TypeError and kill the extraction.
+        settings.correction_input_max_chars = 2000
+        settings.correction_max_tokens = 1024
+        settings.correction_min_principle_chars = 20
 
         monitor = MonitorEngine(brain, heart, settings)
         monitor._llm_client = AsyncMock()

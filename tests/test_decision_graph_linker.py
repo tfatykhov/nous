@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -24,6 +24,8 @@ def _mock_settings(**overrides):
     s.cross_type_linking_enabled = overrides.get("cross_type_linking_enabled", True)
     s.graph_threshold_fact_decision = overrides.get("graph_threshold_fact_decision", 0.72)
     s.graph_threshold_fact_episode = overrides.get("graph_threshold_fact_episode", 0.70)
+    s.graph_link_candidate_window_days = overrides.get("graph_link_candidate_window_days", 60)
+    s.tinyhippo_lite_enabled = overrides.get("tinyhippo_lite_enabled", False)
     return s
 
 
@@ -379,3 +381,82 @@ class TestDecisionGraphLinker:
         await handler.handle(_make_event(decision_id=decision_id))
         graph_linker.create_edge.assert_not_called()
         mock_session.commit.assert_not_called()
+
+
+class TestDecisionGraphLinkerCandidateWindow:
+    """graph_link_candidate_window_days wiring in DecisionGraphLinker.handle."""
+
+    def _make_handler_with_session(self, **setting_overrides):
+        decision_id = uuid4()
+        decision = _fake_decision_detail(id=decision_id, description="Use PostgreSQL")
+
+        brain = AsyncMock(spec=Brain)
+        brain.get = AsyncMock(return_value=decision)
+
+        embedder = AsyncMock(spec=EmbeddingProvider)
+        embedder.embed = AsyncMock(return_value=[0.1] * 1536)
+
+        graph_linker = AsyncMock(spec=GraphLinker)
+        graph_linker.agent_id = "test-agent"
+
+        mock_session = AsyncMock()
+        empty_result = MagicMock()
+        empty_result.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=empty_result)
+
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_cm.__aexit__ = AsyncMock(return_value=False)
+        graph_linker.db = MagicMock()
+        graph_linker.db.session.return_value = mock_cm
+
+        settings = _mock_settings(**setting_overrides)
+        bus = MagicMock(spec=EventBus)
+        bus.on = MagicMock()
+
+        handler = DecisionGraphLinker(brain, graph_linker, embedder, settings, bus)
+        return handler, decision_id, mock_session
+
+    @pytest.mark.asyncio
+    async def test_window_days_positive_bounds_cutoff(self):
+        """With window_days=7, cutoff passed to SQL is approximately 7 days ago."""
+        handler, decision_id, mock_session = self._make_handler_with_session(
+            graph_link_candidate_window_days=7
+        )
+
+        before = datetime.now(UTC) - timedelta(days=7, seconds=2)
+        await handler.handle(_make_event(decision_id=decision_id))
+        after = datetime.now(UTC) - timedelta(days=7)
+
+        # Both fact SQL and episode SQL share the same cutoff param
+        first_call_kwargs = mock_session.execute.call_args_list[0][0][1]
+        cutoff = first_call_kwargs["cutoff"]
+        assert before <= cutoff <= after, f"Expected cutoff ~7 days ago, got {cutoff}"
+
+    @pytest.mark.asyncio
+    async def test_window_days_zero_uses_far_past(self):
+        """With window_days=0, cutoff is far-past (no effective time filter)."""
+        handler, decision_id, mock_session = self._make_handler_with_session(
+            graph_link_candidate_window_days=0
+        )
+
+        await handler.handle(_make_event(decision_id=decision_id))
+
+        first_call_kwargs = mock_session.execute.call_args_list[0][0][1]
+        cutoff = first_call_kwargs["cutoff"]
+        assert cutoff <= datetime(2000, 1, 1, tzinfo=UTC), f"Expected far-past cutoff, got {cutoff}"
+
+    @pytest.mark.asyncio
+    async def test_default_window_is_sixty_days(self):
+        """Default window_days=60 produces cutoff ~60 days ago."""
+        handler, decision_id, mock_session = self._make_handler_with_session(
+            graph_link_candidate_window_days=60
+        )
+
+        before = datetime.now(UTC) - timedelta(days=60, seconds=2)
+        await handler.handle(_make_event(decision_id=decision_id))
+        after = datetime.now(UTC) - timedelta(days=60)
+
+        first_call_kwargs = mock_session.execute.call_args_list[0][0][1]
+        cutoff = first_call_kwargs["cutoff"]
+        assert before <= cutoff <= after, f"Expected cutoff ~60 days ago, got {cutoff}"

@@ -16,6 +16,7 @@ Key plan adjustments applied:
 """
 
 import uuid
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -917,3 +918,279 @@ async def test_cr4_sweep_is_rate_limited(cognitive):
     cognitive._sweep_stale_sessions()
 
     assert "old" in cognitive._session_metadata  # rate-limited, not yet swept
+
+
+# ---------------------------------------------------------------------------
+# TestMemoryFidelityCaps — 2026-07-02: capture-time truncations honour Settings
+# These tests use fully-mocked dependencies (no real DB) following the same
+# pattern as test_noise_reduction.py::_make_cognitive_layer().
+# ---------------------------------------------------------------------------
+
+
+def _make_layer_with_settings(**setting_overrides):
+    """Build a CognitiveLayer with mocked deps + specific Settings values.
+
+    Follows the _make_cognitive_layer() pattern from test_noise_reduction.py.
+    Returns (layer, mock_heart) so callers can inspect call args.
+    """
+    mock_brain = MagicMock()
+    mock_brain.db = MagicMock()
+    mock_brain.embeddings = None
+    mock_brain.agent_id = "test-agent"
+
+    mock_heart = MagicMock()
+    mock_heart.episodes = MagicMock()
+    mock_heart.episodes.embeddings = None
+    mock_heart.start_episode = AsyncMock()
+    mock_heart.end_episode = AsyncMock()
+    mock_heart.deactivate_episode = AsyncMock()
+    mock_heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
+    mock_heart.list_censors = AsyncMock(return_value=[])
+    mock_heart.get_or_create_working_memory = AsyncMock()
+    mock_heart.focus = AsyncMock()
+
+    # Build a real Settings with default values, then apply overrides as
+    # attribute mutations (Settings has no extra="forbid" on model_config).
+    from nous.config import Settings as _Settings
+
+    settings = _Settings()
+    for key, val in setting_overrides.items():
+        object.__setattr__(settings, key, val)
+
+    with (
+        patch("nous.cognitive.layer.FrameEngine"),
+        patch("nous.cognitive.layer.IntentClassifier"),
+        patch("nous.cognitive.layer.UsageTracker"),
+        patch("nous.cognitive.layer.ConversationDeduplicator"),
+        patch("nous.cognitive.layer.ContextEngine"),
+        patch("nous.cognitive.layer.DeliberationEngine"),
+        patch("nous.cognitive.layer.MonitorEngine"),
+    ):
+        from nous.cognitive.layer import CognitiveLayer
+
+        layer = CognitiveLayer(
+            mock_brain, mock_heart, settings, identity_prompt="Test."
+        )
+
+    layer._heart = mock_heart
+    layer._brain = mock_brain
+    return layer, mock_heart
+
+
+@pytest.mark.asyncio
+class TestMemoryFidelityCaps:
+    """2026-07-02 scan: capture-time truncations honour Settings."""
+
+    async def test_pre_turn_transcript_capture_honors_message_cap(self):
+        """pre_turn appends 'User: <input[:cap]>' respecting transcript_message_max_chars.
+
+        Covers the User-line seam at layer.py:462. pre_turn is invoked with
+        fully-mocked dependencies; it may raise later in the loop (mocked frame
+        engine etc.), which is fine — the transcript append happens early, and
+        the assertion below only holds if the REAL code at the capture seam ran
+        with the Settings-driven cap. If someone re-hardcodes [:500] there, the
+        assertion fails.
+        """
+        from nous.cognitive.schemas import SessionMetadata
+
+        layer, _ = _make_layer_with_settings(transcript_message_max_chars=2000)
+        sid = "s-preturn-transcript-cap"
+        long_input = "x" * 3000
+
+        try:
+            await layer.pre_turn("test-agent", sid, long_input)
+        except Exception:
+            # Later pipeline stages (frame selection, context build) run against
+            # MagicMocks and may raise — the capture seam under test has already
+            # executed by then.
+            pass
+
+        meta = layer._session_metadata[sid]
+        assert meta.transcript, "pre_turn did not reach the transcript capture seam"
+        assert meta.transcript[0] == f"User: {'x' * 2000}", (
+            f"Expected 2000-char cap on User line, got {len(meta.transcript[0]) - 6} chars"
+        )
+
+    async def test_post_turn_transcript_capture_honors_message_cap(self):
+        """post_turn appends 'Assistant: <text[:cap]>' respecting transcript_message_max_chars.
+
+        Covers the Assistant-line seam at layer.py:1287. post_turn can be driven
+        end-to-end with mocked async dependencies since every async step before
+        the transcript append is guarded by try/except.
+        """
+        from nous.cognitive.schemas import SessionMetadata, TurnContext, TurnResult, ToolResult
+
+        layer, _ = _make_layer_with_settings(transcript_message_max_chars=2000)
+        sid = "s-transcript-cap"
+
+        # Provide a session-level metadata so the setdefault path is populated
+        layer._session_metadata[sid] = SessionMetadata()
+
+        # Mock all async sub-engines so their await calls don't raise
+        layer._monitor = MagicMock()
+        layer._monitor.assess = AsyncMock(
+            return_value=MagicMock(surprise_level=0.0, actual="")
+        )
+        layer._monitor.learn = AsyncMock(
+            return_value=MagicMock(surprise_level=0.0, actual="")
+        )
+        layer._monitor.detect_and_extract_correction = AsyncMock(return_value=None)
+        layer._deliberation = MagicMock()
+        layer._usage_tracker = None  # skip usage tracking
+        layer._brain.emit_event = AsyncMock()
+
+        from nous.cognitive.schemas import FrameSelection
+
+        long_response = "a" * 3000
+        turn_result = TurnResult(response_text=long_response, tool_results=[])
+        turn_context = TurnContext(
+            system_prompt="",
+            frame=FrameSelection(
+                frame_id="conversation",
+                frame_name="Conversation",
+                confidence=1.0,
+                match_method="default",
+            ),
+            decision_id=None,
+        )
+
+        await layer.post_turn("test-agent", sid, turn_result, turn_context)
+
+        meta = layer._session_metadata[sid]
+        last_transcript = meta.transcript[-1]
+        assert last_transcript == f"Assistant: {'a' * 2000}", (
+            f"Expected 2000-char cap, got {len(last_transcript) - 11} chars"
+        )
+
+    async def test_lessons_cap_honored(self):
+        """end_session passes reflection[:episode_lessons_max_chars] to heart.end_episode."""
+        import uuid as _uuid
+
+        layer, mock_heart = _make_layer_with_settings(episode_lessons_max_chars=1000)
+
+        sid = "s-lessons-cap"
+        episode_id = str(_uuid.uuid4())
+        from nous.cognitive.schemas import SessionMetadata
+
+        # Non-trivial session so is_trivial=False and end_episode fires
+        layer._active_episodes[sid] = episode_id
+        layer._session_metadata[sid] = SessionMetadata(
+            turn_count=2,
+            tools_used={"bash"},
+            total_user_chars=300,
+            total_assistant_chars=300,
+        )
+        layer._brain.emit_event = AsyncMock()
+        layer._monitor = MagicMock()
+        layer._monitor._session_censor_counts = {}
+
+        long_reflection = "r" * 1500  # exceeds 1000-char cap
+        await layer.end_session("test-agent", sid, reflection=long_reflection)
+
+        mock_heart.end_episode.assert_called_once()
+        call_kwargs = mock_heart.end_episode.call_args.kwargs
+        lessons = call_kwargs.get("lessons_learned")
+        assert lessons is not None, "lessons_learned should not be None when reflection given"
+        assert lessons == ["r" * 1000], (
+            f"Expected lesson truncated to 1000 chars, got {len(lessons[0])}"
+        )
+
+    async def test_trivial_gate_uses_setting(self):
+        """With episode_min_content_length=0, a tiny single-turn session is NOT soft-deleted."""
+        import uuid as _uuid
+
+        layer, mock_heart = _make_layer_with_settings(episode_min_content_length=0)
+
+        sid = "s-trivial-gate"
+        episode_id = str(_uuid.uuid4())
+        from nous.cognitive.schemas import SessionMetadata
+
+        # Single turn, no tools, tiny content — would normally be trivial at default 200
+        layer._active_episodes[sid] = episode_id
+        layer._session_metadata[sid] = SessionMetadata(
+            turn_count=1,
+            tools_used=set(),
+            total_user_chars=5,
+            total_assistant_chars=10,  # total=15, well below default 200
+        )
+        layer._brain.emit_event = AsyncMock()
+        layer._monitor = MagicMock()
+        layer._monitor._session_censor_counts = {}
+
+        await layer.end_session("test-agent", sid)
+
+        # With gate=0: 15 >= 0, so NOT trivial → end_episode called, deactivate NOT called
+        mock_heart.deactivate_episode.assert_not_called()
+        mock_heart.end_episode.assert_called_once()
+
+    async def test_episode_seed_truncated_to_setting(self):
+        """EpisodeInput.summary passed to heart.start_episode is capped at
+        episode_seed_summary_chars — regression guard for layer.py:~821.
+
+        We set the cap to 300 and pass a 500-char user_input.  The episode
+        creation branch runs when no active episode exists AND the session
+        passes _should_create_episode.  We mock _is_duplicate_episode to
+        return False so the creation branch always fires, then inspect the
+        EpisodeInput.summary captured by heart.start_episode.
+
+        pre_turn runs through MagicMock-backed intent/context/deliberation
+        engines that may raise; those are all wrapped in except blocks in
+        the real code, so the episode seam (line ~821) is reachable.
+        The IntentClassifier mock must return a real IntentSignals so the
+        temporal_recency comparison at line ~664 doesn't TypeError first.
+        """
+        import uuid as _uuid
+        from nous.cognitive.intent import IntentSignals, RetrievalPlan
+
+        layer, mock_heart = _make_layer_with_settings(episode_seed_summary_chars=300)
+
+        sid = "s-seed-cap"
+        long_input = "z" * 500  # exceeds the 300-char cap
+
+        # start_episode returns an object with .id; wire it up
+        fake_episode = MagicMock()
+        fake_episode.id = _uuid.uuid4()
+        mock_heart.start_episode = AsyncMock(return_value=fake_episode)
+
+        # Wire intent classifier to return real objects so temporal_recency
+        # comparison (line ~664) doesn't crash with MagicMock > float TypeError.
+        fake_signals = IntentSignals(frame_type="conversation")
+        fake_plan = RetrievalPlan()
+        layer._intent_classifier.classify = MagicMock(return_value=fake_signals)
+        layer._intent_classifier.plan_retrieval = MagicMock(return_value=fake_plan)
+
+        # Wire frame engine to return a real FrameSelection so EpisodeInput's
+        # frame_used field gets a str rather than a MagicMock (which fails
+        # Pydantic validation and causes the episode try/except to swallow it).
+        from nous.cognitive.schemas import FrameSelection as _FS
+        fake_frame = _FS(
+            frame_id="conversation",
+            frame_name="Conversation",
+            confidence=1.0,
+            match_method="default",
+        )
+        layer._frames._default_selection = MagicMock(return_value=fake_frame)
+
+        # No pre-existing active episode → creation branch fires
+        assert sid not in layer._active_episodes
+
+        # Patch _is_duplicate_episode to return False (no duplicate)
+        layer._is_duplicate_episode = AsyncMock(return_value=False)
+        try:
+            await layer.pre_turn("test-agent", sid, long_input)
+        except Exception:
+            # Later pipeline stages (context build, deliberation, working memory)
+            # run against MagicMocks and may raise — the episode creation seam
+            # at ~821 is protected by its own try/except, so start_episode
+            # fires regardless of those later failures.
+            pass
+
+        # start_episode MUST have been called with the truncated seed
+        mock_heart.start_episode.assert_called_once()
+        call_args = mock_heart.start_episode.call_args
+        # First positional arg is EpisodeInput
+        episode_input = call_args.args[0] if call_args.args else call_args.kwargs.get("episode_input")
+        assert episode_input is not None, "start_episode was not called with an EpisodeInput"
+        assert len(episode_input.summary) == 300, (
+            f"Expected seed truncated to 300 chars, got {len(episode_input.summary)}"
+        )

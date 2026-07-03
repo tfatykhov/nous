@@ -4,6 +4,12 @@ All tests use real Postgres via the SAVEPOINT fixture from conftest.py.
 Heart methods receive the test session via the session parameter (P1-1).
 """
 
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+from uuid import uuid4
+
 import pytest
 
 from nous.heart import (
@@ -343,3 +349,195 @@ async def test_supersede_creates_graph_edge(heart, session):
     assert edge is not None
     assert edge.source_type == "fact"
     assert edge.target_type == "fact"
+
+
+# ---------------------------------------------------------------------------
+# Task 7: configurable fact_min_content_chars + fact_supersession_threshold
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedSessionT7:
+    """Minimal fake session for unit tests that don't need Postgres."""
+
+    bind = None  # signals non-Postgres to W-8 advisory-lock guard
+
+    def __init__(self, results=()):
+        self._results = list(results)
+
+    async def execute(self, statement=None, *_a, **_k):
+        if self._results:
+            return self._results.pop(0)
+        return _ScalarsResultT7([])
+
+    def add(self, obj):
+        pass
+
+    async def flush(self):
+        pass
+
+    async def commit(self):
+        pass
+
+    async def refresh(self, obj, attribute_names=None):
+        pass
+
+
+class _ScalarsResultT7:
+    def __init__(self, objs=()):
+        self._objs = list(objs)
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._objs
+
+
+def _orm_fact_t7(content="some fact", subject="subj", embedding=None):
+    return SimpleNamespace(
+        id=uuid4(), content=content, subject=subject, confidence=1.0,
+        superseded_by=None, active=True, contradiction_of=None,
+        embedding=embedding, event_date=None, event_date_classified_at=None,
+    )
+
+
+# (a) fact_min_content_chars — unit tests (no Postgres needed)
+
+class TestFactMinContentCharsConfigurable:
+    """Task 7a: fact_min_content_chars drives the rejection floor."""
+
+    def _fm(self, min_chars):
+        from nous.heart.facts import FactManager
+        return FactManager(
+            db=MagicMock(), embeddings=None, agent_id="test",
+            settings=SimpleNamespace(
+                fact_min_content_chars=min_chars,
+                fact_native_cosine_threshold=0.95,
+                fact_supersession_threshold=0.80,
+                fact_band_classification_max_per_hour=1000,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_30_rejects_short_fact(self):
+        """Default floor=30 rejects a 15-char fact with 'too short' explanation."""
+        from nous.heart.schemas import FactRejected
+        fm = self._fm(30)
+        result = await fm._learn(
+            FactInput(content="fifteen chars!!"),  # 15 chars
+            exclude_ids=[],
+            check_contradictions=False,
+            session=_ScriptedSessionT7(),  # type: ignore[arg-type]
+        )
+        assert isinstance(result, FactRejected)
+        assert "too short" in result.explanation.lower()
+        assert "30" in result.explanation
+
+    @pytest.mark.asyncio
+    async def test_floor_10_passes_15_char_fact(self):
+        """With floor=10, a 15-char fact is NOT rejected by the floor (reaches dedup).
+
+        The fake session can't satisfy all of _learn's DB calls, so _learn may
+        raise or return an error deeper in the pipeline — that's fine.  We only
+        assert the early-exit FactRejected with "too short" does NOT fire.
+        """
+        from nous.heart.schemas import FactRejected
+        fm = self._fm(10)
+        try:
+            result = await fm._learn(
+                FactInput(content="fifteen chars!!"),  # 15 chars, passes floor=10
+                exclude_ids=[],
+                check_contradictions=False,
+                session=_ScriptedSessionT7(),  # type: ignore[arg-type]
+            )
+        except (AttributeError, TypeError) as exc:
+            pytest.fail(
+                f"Wiring crash in _learn before the floor gate (AttributeError/TypeError): {exc}"
+            )
+        except Exception:
+            # Any other exception deeper in _learn means the floor gate did NOT reject.
+            return
+        # If it returned a FactRejected it must NOT be the "too short" one.
+        if isinstance(result, FactRejected):
+            assert "too short" not in result.explanation.lower(), (
+                f"Floor=10 should not reject 15-char fact; got: {result.explanation}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_floor_0_disables_check(self):
+        """floor=0 disables the length gate entirely (0-disables semantics)."""
+        from nous.heart.schemas import FactRejected
+        fm = self._fm(0)
+        try:
+            result = await fm._learn(
+                FactInput(content="x"),  # 1 char — would be rejected if gate active
+                exclude_ids=[],
+                check_contradictions=False,
+                session=_ScriptedSessionT7(),  # type: ignore[arg-type]
+            )
+        except (AttributeError, TypeError) as exc:
+            pytest.fail(
+                f"Wiring crash in _learn before the floor gate (AttributeError/TypeError): {exc}"
+            )
+        except Exception:
+            # Any other exception deeper in _learn means the floor gate did NOT reject.
+            return
+        if isinstance(result, FactRejected):
+            assert "too short" not in result.explanation.lower(), (
+                f"floor=0 should disable the gate; got: {result.explanation}"
+            )
+
+
+# (b) fact_supersession_threshold — unit tests (mocked embeddings, no Postgres)
+
+class TestFactSupersessionThresholdConfigurable:
+    """Task 7b: fact_supersession_threshold drives the supersession cosine gate."""
+
+    def _fm(self, threshold):
+        from nous.heart.facts import FactManager
+        return FactManager(
+            db=MagicMock(), embeddings=None, agent_id="test",
+            settings=SimpleNamespace(
+                fact_min_content_chars=30,
+                fact_native_cosine_threshold=0.95,
+                fact_supersession_threshold=threshold,
+                fact_band_classification_max_per_hour=1000,
+            ),
+        )
+
+    @staticmethod
+    def _embedding_at_similarity(target_sim: float) -> list[float]:
+        """Return a 3-d unit vector with cosine similarity target_sim vs [1,0,0]."""
+        import math
+        perp = math.sqrt(max(0.0, 1.0 - target_sim ** 2))
+        return [target_sim, perp, 0.0]
+
+    @pytest.mark.asyncio
+    async def test_default_threshold_triggers_at_0_82(self):
+        """Default threshold=0.80 → similarity 0.82 triggers supersession."""
+        fm = self._fm(0.80)
+        anchor = [1.0, 0.0, 0.0]
+        candidate = self._embedding_at_similarity(0.82)
+        fact = _orm_fact_t7(content="old fact about subject", embedding=list(anchor))
+        session = _ScriptedSessionT7([_ScalarsResultT7([fact])])
+        new_id = uuid4()
+
+        await fm._supersede_by_subject(new_id, "subj", candidate, session)
+
+        assert fact.active is False
+        assert fact.superseded_by == new_id
+
+    @pytest.mark.asyncio
+    async def test_higher_threshold_skips_supersession_at_0_82(self):
+        """With threshold=0.90 → similarity 0.82 does NOT trigger supersession."""
+        fm = self._fm(0.90)
+        anchor = [1.0, 0.0, 0.0]
+        candidate = self._embedding_at_similarity(0.82)
+        fact = _orm_fact_t7(content="old fact about subject", embedding=list(anchor))
+        session = _ScriptedSessionT7([_ScalarsResultT7([fact])])
+        new_id = uuid4()
+
+        await fm._supersede_by_subject(new_id, "subj", candidate, session)
+
+        assert fact.active is True, "Similarity 0.82 < threshold 0.90 should NOT supersede"
+        assert fact.superseded_by is None

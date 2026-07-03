@@ -40,6 +40,10 @@ def _mock_settings(**overrides) -> MagicMock:
     s.agent_id = "test-agent"
     s.sleep_enabled = True
     s.consolidation_audit_enabled = False  # F035.6: match real default
+    # 282626c memory-fidelity settings: sleep_handler slices with these ints;
+    # bare MagicMock attrs raise TypeError and kill the phase.
+    s.sleep_reflection_summary_chars = 500
+    s.sleep_contradiction_fact_chars = 1000
     for k, v in overrides.items():
         setattr(s, k, v)
     return s

@@ -2,8 +2,48 @@
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
 import pytest
 from nous.handlers.episode_summarizer import EpisodeSummarizer
+
+
+# ---------------------------------------------------------------------------
+# Factory fixture (Task 4): builds uninitialized EpisodeSummarizer instances
+# with SimpleNamespace settings containing only the overrides needed per test.
+# Uses EpisodeSummarizer.__new__() pattern matching the existing test class
+# above (no Heart/Brain/LLM needed for pure-method tests).
+# ---------------------------------------------------------------------------
+
+_SETTINGS_DEFAULTS = {
+    # Fields consumed by _summary_max_tokens
+    "episode_summary_max_tokens": 0,
+    "extraction_coverage_broadened": False,
+    "episode_open_threads": False,
+    # Fields consumed by _select_chunks
+    "episode_summary_max_chunks": 4,
+    # Fields consumed by _chunk_and_store_transcript
+    "episode_chunk_max_per_episode": 100,
+    "episode_chunks_enabled": False,
+    "episode_chunk_size": 600,
+    "episode_chunk_overlap": 80,
+    "episode_chunk_min_transcript_chars": 50,
+    "agent_id": "test-agent",
+}
+
+
+@pytest.fixture()
+def summarizer_factory():
+    """Return a factory that builds a settings-patched EpisodeSummarizer.__new__ instance."""
+    def _make(settings_overrides: dict | None = None) -> EpisodeSummarizer:
+        s = EpisodeSummarizer.__new__(EpisodeSummarizer)
+        merged = {**_SETTINGS_DEFAULTS, **(settings_overrides or {})}
+        s._settings = SimpleNamespace(**merged)
+        return s
+    return _make
 
 
 class TestChunkTranscript:
@@ -181,3 +221,153 @@ def test_cap_candidate_facts_single_source_of_truth():
     # None settings (test __new__ paths) → legacy defaults
     r = cap_candidate_facts(cands, None)
     assert sum(1 for c in r if not c.get("event_date")) == 5
+
+
+# ---------------------------------------------------------------------------
+# Task 4: _summary_max_tokens + _select_chunks + F067 chunk-count cap
+# ---------------------------------------------------------------------------
+
+
+class TestSummaryMaxTokens:
+    def test_override_respected(self, summarizer_factory):
+        s = summarizer_factory(settings_overrides={"episode_summary_max_tokens": 5000})
+        assert s._summary_max_tokens() == 5000
+
+    def test_auto_broadened_returns_3000(self, summarizer_factory):
+        s = summarizer_factory(settings_overrides={
+            "episode_summary_max_tokens": 0,
+            "extraction_coverage_broadened": True,
+        })
+        assert s._summary_max_tokens() == 3000
+
+    def test_auto_open_threads_returns_3000(self, summarizer_factory):
+        s = summarizer_factory(settings_overrides={
+            "episode_summary_max_tokens": 0,
+            "extraction_coverage_broadened": False,
+            "episode_open_threads": True,
+        })
+        assert s._summary_max_tokens() == 3000
+
+    def test_auto_neither_flag_returns_1500(self, summarizer_factory):
+        s = summarizer_factory(settings_overrides={
+            "episode_summary_max_tokens": 0,
+            "extraction_coverage_broadened": False,
+            "episode_open_threads": False,
+        })
+        assert s._summary_max_tokens() == 1500
+
+
+class TestSelectChunks:
+    def test_head_plus_tail_selection(self, summarizer_factory):
+        """6 chunks, cap 4 → first cap-1 + final = [0,1,2,5]."""
+        s = summarizer_factory(settings_overrides={"episode_summary_max_chunks": 4})
+        chunks = [f"chunk-{i}" for i in range(6)]
+        assert s._select_chunks(chunks) == ["chunk-0", "chunk-1", "chunk-2", "chunk-5"]
+
+    def test_zero_cap_is_unlimited(self, summarizer_factory):
+        s = summarizer_factory(settings_overrides={"episode_summary_max_chunks": 0})
+        chunks = [f"chunk-{i}" for i in range(6)]
+        assert s._select_chunks(chunks) == chunks
+
+    def test_noop_under_cap(self, summarizer_factory):
+        s = summarizer_factory(settings_overrides={"episode_summary_max_chunks": 4})
+        chunks = ["a", "b"]
+        assert s._select_chunks(chunks) == chunks
+
+    def test_warn_logged_when_truncated(self, summarizer_factory, caplog):
+        s = summarizer_factory(settings_overrides={"episode_summary_max_chunks": 3})
+        chunks = [f"chunk-{i}" for i in range(5)]
+        with caplog.at_level(logging.WARNING, logger="nous.handlers.episode_summarizer"):
+            result = s._select_chunks(chunks)
+        assert result == ["chunk-0", "chunk-1", "chunk-4"]
+        assert any("5" in r.message and "3" in r.message for r in caplog.records)
+
+    def test_cap_one_returns_only_final_chunk(self, summarizer_factory):
+        """cap=1 → first 0 + final = [chunks[-1]]; documents the head+tail semantic at its edge."""
+        s = summarizer_factory(settings_overrides={"episode_summary_max_chunks": 1})
+        chunks = ["chunk-0", "chunk-1", "chunk-2"]
+        result = s._select_chunks(chunks)
+        assert result == ["chunk-2"]
+
+    def test_cap_equal_to_len_is_noop(self, summarizer_factory):
+        """cap == len(chunks) → unchanged (no truncation, no WARN)."""
+        s = summarizer_factory(settings_overrides={"episode_summary_max_chunks": 3})
+        chunks = ["chunk-0", "chunk-1", "chunk-2"]
+        result = s._select_chunks(chunks)
+        assert result == chunks
+
+
+@pytest.mark.asyncio
+async def test_f067_chunk_count_cap(summarizer_factory, caplog):
+    """Transcript long enough for >3 chunks with chunk_size 50, cap=3 → only 3 embedded."""
+    from nous.handlers.episode_summarizer import EpisodeSummarizer as ES
+
+    # Build instance with a real _settings and a wired embedder
+    s = summarizer_factory(settings_overrides={
+        "episode_chunk_max_per_episode": 3,
+        "episode_chunks_enabled": True,
+        "episode_chunk_size": 50,
+        "episode_chunk_overlap": 5,
+        "episode_chunk_min_transcript_chars": 10,
+        "agent_id": "test-agent",
+    })
+
+    # Fake embedder: records call count + returns fixed vectors
+    call_count = 0
+
+    async def fake_embed_batch(texts):
+        nonlocal call_count
+        call_count += 1
+        return [[0.1] * 3 for _ in texts]
+
+    embedder = MagicMock()
+    embedder.embed_batch = AsyncMock(side_effect=fake_embed_batch)
+    s._embedder = embedder
+
+    # Transcript long enough to produce more than 3 chunks at chunk_size=50
+    transcript = ("abcdefghij " * 30).strip()  # ~330 chars → ~6 chunks at size=50
+
+    # Track INSERT calls
+    inserted_indices = []
+
+    async def fake_execute(sql_or_text, params=None):
+        result = MagicMock()
+        result.scalar = MagicMock(return_value=0)
+        result.first = MagicMock(return_value=None)
+        sql_str = str(sql_or_text)
+        if "INSERT INTO heart.episode_chunks" in sql_str and params:
+            inserted_indices.append(params.get("idx"))
+        return result
+
+    fake_session = AsyncMock()
+    fake_session.execute = AsyncMock(side_effect=fake_execute)
+    fake_session.commit = AsyncMock()
+
+    fake_db = MagicMock()
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _session_ctx():
+        yield fake_session
+
+    fake_db.session = _session_ctx
+    s._heart = MagicMock()
+    s._heart.db = fake_db
+    s._heart._embeddings = None
+
+    episode_id = uuid4()
+
+    with caplog.at_level(logging.WARNING, logger="nous.handlers.episode_summarizer"):
+        await s._chunk_and_store_transcript(
+            episode_id=episode_id,
+            agent_id="test-agent",
+            transcript=transcript,
+        )
+
+    # Exactly 3 chunks should have been inserted
+    assert len(inserted_indices) == 3, f"Expected 3 inserts, got {inserted_indices}"
+    # embed_batch was called with exactly 3 texts
+    embed_call_args = embedder.embed_batch.call_args[0][0]
+    assert len(embed_call_args) == 3
+    # WARN log must mention the episode and the cap
+    assert any("F067" in r.message and "3" in r.message for r in caplog.records)

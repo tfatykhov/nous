@@ -699,6 +699,7 @@ class SleepHandler:
         """Phase 4: Cross-session reflection on recent activity with orient context."""
         if not self._llm:
             return True
+        sleep_reflection_summary_chars = self._settings.sleep_reflection_summary_chars
         try:
             recent = await self._heart.list_episodes(limit=10)
             if not recent or len(recent) < 2:
@@ -706,7 +707,7 @@ class SleepHandler:
                 return True
 
             episodes_text = "\n\n".join(
-                f"- {ep.summary[:200]}" for ep in recent if ep.summary
+                f"- {ep.summary[:sleep_reflection_summary_chars]}" for ep in recent if ep.summary
             )
             if not episodes_text:
                 return True
@@ -1007,6 +1008,7 @@ class SleepHandler:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""
         if not self._llm:
             return True
+        sleep_contradiction_fact_chars = self._settings.sleep_contradiction_fact_chars
         try:
             candidates = await self._heart.find_contradiction_candidates(limit=10)
             if not candidates:
@@ -1023,8 +1025,8 @@ class SleepHandler:
                 prompt = _CONTRADICTION_RESOLUTION_PROMPT.format(
                     date_a=str(pair["date1"])[:10],
                     date_b=str(pair["date2"])[:10],
-                    content_a=pair["content1"][:500],
-                    content_b=pair["content2"][:500],
+                    content_a=pair["content1"][:sleep_contradiction_fact_chars],
+                    content_b=pair["content2"][:sleep_contradiction_fact_chars],
                 )
 
                 resolution = await call_background_llm_structured(
