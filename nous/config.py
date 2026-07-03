@@ -1541,6 +1541,21 @@ class Settings(BaseSettings):
             "lift with no QA regression from noise."
         ),
     )
+    extraction_input_hardening_enabled: bool = Field(
+        default=True,
+        description=(
+            "S2 hardening (2026-07-02 MAB audit): wrap the transcript/"
+            "conversation fed to the episode summarizer and knowledge "
+            "extractor in explicit <transcript>/<conversation> delimiters, "
+            "append a DATA/INSTRUCTION boundary guard to their prompts, and "
+            "drop candidate facts that verbatim-echo the extraction prompt "
+            "itself. Fixes instruction-like input (e.g. 'Please remember the "
+            "following... (part 1/9)') making the extractor LLM regurgitate "
+            "its own prompt as facts (observed: 11/11 prompt-echo facts, 0 "
+            "content facts on a 274k-char ingest). Default ON — kill-switch "
+            "only."
+        ),
+    )
     candidate_facts_stable_limit: int = Field(
         default=15,
         ge=1,

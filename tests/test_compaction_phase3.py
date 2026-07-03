@@ -74,6 +74,10 @@ def _mock_settings(**overrides) -> MagicMock:
     s.keep_last_tool_results = 2
     s.event_bus_enabled = True
     s.knowledge_extractor_max_chars = 24000
+    # S2 hardening changes the prompt shape; these tests assert the legacy
+    # format (MagicMock attrs are otherwise implicitly truthy). The hardened
+    # path is covered in test_s2_input_hardening.py.
+    s.extraction_input_hardening_enabled = False
     for k, v in overrides.items():
         setattr(s, k, v)
     return s

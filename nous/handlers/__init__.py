@@ -219,6 +219,66 @@ def _try_parse_json(candidate: str, context: str) -> Any | None:
     return None
 
 
+_ECHO_SHINGLE_WORDS = 6
+
+
+def _normalize_for_echo(text: str) -> str:
+    """Lowercase + strip punctuation + collapse whitespace for echo matching."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+
+def _is_prompt_echo(content: str, normalized_prompts: list[str]) -> bool:
+    """True when ``content`` shares a 6-word verbatim run with a prompt template.
+
+    Facts shorter than the shingle length fall back to a whole-content
+    substring check (catches short verbatim echoes like "Return ONLY valid
+    JSON" without loosening the long-fact criterion).
+    """
+    norm = _normalize_for_echo(content)
+    if not norm:
+        return False
+    words = norm.split()
+    if len(words) < _ECHO_SHINGLE_WORDS:
+        return any(norm in p for p in normalized_prompts)
+    for i in range(len(words) - _ECHO_SHINGLE_WORDS + 1):
+        shingle = " ".join(words[i : i + _ECHO_SHINGLE_WORDS])
+        if any(shingle in p for p in normalized_prompts):
+            return True
+    return False
+
+
+def drop_prompt_echo_facts(
+    candidates: list, prompt_templates: tuple[str, ...] | list[str], source: str = ""
+) -> list:
+    """S2 (2026-07-02 MAB audit): drop candidate facts that echo the extraction
+    prompt itself.
+
+    When instruction-like input makes the extractor LLM misread its transcript
+    as instructions, it regurgitates its own prompt as facts (observed: 11/11
+    stored facts were verbatim summarizer-prompt echoes, 0 content facts).
+    This is the deterministic backstop behind the <transcript> data/instruction
+    boundary — it catches verbatim echoes; fully-paraphrased echoes are left to
+    the boundary guard. Compares against the STATIC templates only (never the
+    formatted prompt — that contains the transcript, and transcript-derived
+    facts must not be dropped). Precision-first: a 6-word verbatim run is the
+    drop criterion because false drops are permanent data loss.
+    """
+    normalized = [_normalize_for_echo(t) for t in prompt_templates if t]
+    kept = []
+    dropped = 0
+    for cand in candidates:
+        content = cand.get("content", "") if isinstance(cand, dict) else ""
+        if content and _is_prompt_echo(content, normalized):
+            dropped += 1
+            logger.warning(
+                "S2 echo guard (%s): dropped prompt-echo candidate fact: %.80s",
+                source, content,
+            )
+            continue
+        kept.append(cand)
+    return kept
+
+
 def cap_candidate_facts(candidates: list, settings: Any) -> list:
     """Partition candidate_facts into dated/stable pools and apply per-pool caps.
 
