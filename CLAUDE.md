@@ -521,6 +521,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_EPISODE_CHUNK_SIZE` | `600` | F067 chunk size in chars (sliding window). |
 | `NOUS_EPISODE_CHUNK_OVERLAP` | `80` | F067 chunk overlap in chars to avoid splitting key tokens. |
 | `NOUS_EPISODE_CHUNK_RECALL_LIMIT` | `10` | F067 max chunks returned by the chunk-recall leg. |
+| `NOUS_CHUNK_HYBRID_SEARCH_ENABLED` | `false` | R2 (2026-07-02 MAB audit): RRF-fuse an FTS leg (the migration-050 `search_tsv` GIN index, previously unconsumed) with the vector leg in the F067 chunk-recall stage via the shared `heart.search.hybrid_search` helper. Also moves chunk scores from raw cosine onto the 1/k-normalized RRF [0,1] scale the coherent heart legs use (F080 deviant-leg renorm). Probe on the MAB CR corpus: gold-chunk in top-30 goes 1/5 → 4/5 (top-10: 0/5 → 1/5); compose with `NOUS_EPISODE_CHUNK_RECALL_LIMIT=30`. **Land-dark; flip after the retrieval A/B gate.** |
 | `NOUS_EPISODE_CHUNK_MIN_TRANSCRIPT_CHARS` | `50` | F067 minimum transcript length to chunk (shorter transcripts skip). |
 | `NOUS_RECALL_INCLUDE_PARENT_EPISODES` | `false` | F067 Phase 2. When true, `recall_deep` appends up to `recall_max_parent_episodes` parent episode summaries to its text output. **Validated on per-question isolation only; opt-in for prod.** |
 | `NOUS_RECALL_MAX_PARENT_EPISODES` | `2` | F067 cap on parent episode summaries appended (deduplicated). |
