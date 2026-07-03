@@ -33,6 +33,16 @@ _MAX_RETRIES = 3
 _RETRY_BACKOFF = (0.5, 1.0, 2.0)
 _DEFAULT_CACHE_SIZE = 1024
 
+# OpenAI embeddings per-request hard limits (API facts, not tuning knobs).
+# 2048 = max inputs per request. The char budget proxies the ~300k-token
+# per-request cap without a tokenizer dependency: 250k chars stays under
+# it even at the 1-token-per-char worst case (CJK); typical English text
+# (~4 chars/token) sits far below. A large transcript (~2000 chunks x
+# ~600 chars ~ 300k tokens) previously shipped as ONE request → HTTP 400
+# → callers like the F067 chunk path aborted and stored nothing.
+_MAX_BATCH_ITEMS = 2048
+_MAX_BATCH_CHARS = 250_000
+
 
 class EmbeddingProvider:
     """Async embedding generation using the OpenAI embeddings API."""
@@ -163,8 +173,12 @@ class EmbeddingProvider:
         """Generate embeddings for multiple texts.
 
         Cache-aware: only texts missing from the LRU are sent to the API
-        (one call for all misses, duplicates collapsed); results are
-        reassembled in input order.
+        (duplicates collapsed); results are reassembled in input order.
+        Misses are split into sub-batches respecting the OpenAI
+        per-request limits (_MAX_BATCH_ITEMS inputs, _MAX_BATCH_CHARS
+        chars) and sent sequentially; each sub-batch is cached as it
+        succeeds, so a mid-run failure doesn't re-pay completed requests
+        when the caller retries.
         """
         if not texts:
             return []
@@ -189,24 +203,52 @@ class EmbeddingProvider:
                 miss_texts.append(t)
 
         if miss_texts:
-            response = await self._post_with_retry({
-                "model": self.model,
-                "input": miss_texts,
-                "dimensions": self.dimensions,
-            })
-            data = response.json()["data"]
-            vectors = [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
-            # Guard BEFORE caching: a short/skipped-index response would
-            # misalign the zip and poison the LRU with wrong vectors that
-            # then silently serve dedup/recall until eviction (review P2).
-            if len(vectors) != len(miss_texts):
-                raise RuntimeError(
-                    f"embeddings API returned {len(vectors)} vectors "
-                    f"for {len(miss_texts)} inputs"
+            fetched: dict[str, list[float]] = {}
+            start = 0
+            n_batches = 0
+            while start < len(miss_texts):
+                # Greedy sub-batch: extend while both per-request limits
+                # hold. A single text over the char budget still ships as
+                # a batch of one (end starts past it) rather than looping.
+                end = start + 1
+                batch_chars = len(miss_texts[start])
+                while (
+                    end < len(miss_texts)
+                    and end - start < _MAX_BATCH_ITEMS
+                    and batch_chars + len(miss_texts[end]) <= _MAX_BATCH_CHARS
+                ):
+                    batch_chars += len(miss_texts[end])
+                    end += 1
+                sub_texts = miss_texts[start:end]
+                n_batches += 1
+
+                response = await self._post_with_retry({
+                    "model": self.model,
+                    "input": sub_texts,
+                    "dimensions": self.dimensions,
+                })
+                data = response.json()["data"]
+                vectors = [
+                    item["embedding"] for item in sorted(data, key=lambda x: x["index"])
+                ]
+                # Guard BEFORE caching: a short/skipped-index response would
+                # misalign the zip and poison the LRU with wrong vectors that
+                # then silently serve dedup/recall until eviction (review P2).
+                if len(vectors) != len(sub_texts):
+                    raise RuntimeError(
+                        f"embeddings API returned {len(vectors)} vectors "
+                        f"for {len(sub_texts)} inputs"
+                    )
+                for k, v in zip(miss_keys[start:end], vectors):
+                    fetched[k] = v
+                    self._cache_put(k, v)
+                start = end
+
+            if n_batches > 1:
+                logger.info(
+                    "embed_batch: %d texts split into %d sub-batches",
+                    len(miss_texts), n_batches,
                 )
-            fetched = dict(zip(miss_keys, vectors))
-            for k, v in fetched.items():
-                self._cache_put(k, v)
             out = [v if v is not None else fetched[k] for k, v in zip(keys, out)]
 
         return out  # type: ignore[return-value]
