@@ -9,11 +9,13 @@ is the ~300k-token/request cap: the fix needs a size budget, not just a
 count cap.
 
 Fix: split misses into sub-batches capped at ``_MAX_BATCH_ITEMS`` (2048,
-the OpenAI input-count hard limit) AND ``_MAX_BATCH_CHARS`` (250k chars,
-a dependency-free proxy that stays under 300k tokens even at the
-1-token-per-char worst case), sequential requests, reassembled in input
-order. Each sub-batch is cached as it succeeds so a mid-run failure
-doesn't re-pay earlier requests on retry.
+the OpenAI input-count hard limit) AND ``_MAX_BATCH_BYTES`` (250k UTF-8
+bytes — a dependency-free HARD token bound: byte-level BPE maps every
+token to a non-empty byte sequence, so tokens <= utf8 bytes; char counts
+have no such bound, one emoji can be 3+ tokens — codex P2 on PR #554),
+sequential requests, reassembled in input order. Each sub-batch is
+cached as it succeeds so a mid-run failure doesn't re-pay earlier
+requests on retry.
 """
 
 from __future__ import annotations
@@ -57,8 +59,9 @@ def _expected(text: str) -> list[float]:
 class TestDefaults:
     def test_caps_match_openai_limits(self):
         assert embeddings_mod._MAX_BATCH_ITEMS == 2048
-        # 300k tokens/request at the 1-token-per-char worst case
-        assert 0 < embeddings_mod._MAX_BATCH_CHARS <= 300_000
+        # tokens <= utf8 bytes (byte-level BPE), so this bounds the
+        # 300k-token/request cap
+        assert 0 < embeddings_mod._MAX_BATCH_BYTES <= 300_000
 
 
 class TestCountCap:
@@ -86,12 +89,12 @@ class TestCountCap:
         assert result[-1] == _expected("t2048")
 
 
-class TestCharBudget:
+class TestByteBudget:
     @pytest.mark.asyncio
-    async def test_char_budget_splits_requests(self, monkeypatch):
+    async def test_byte_budget_splits_requests(self, monkeypatch):
         """The MAB failure shape: input count under the cap, total size over
         the token budget — MUST still split."""
-        monkeypatch.setattr(embeddings_mod, "_MAX_BATCH_CHARS", 10)
+        monkeypatch.setattr(embeddings_mod, "_MAX_BATCH_BYTES", 10)
         calls: list = []
         p = _content_keyed_provider(calls)
         result = await p.embed_batch(["aaaaa", "bbbbb", "cc"])
@@ -99,10 +102,25 @@ class TestCharBudget:
         assert result == [_expected("aaaaa"), _expected("bbbbb"), _expected("cc")]
 
     @pytest.mark.asyncio
+    async def test_budget_counts_utf8_bytes_not_chars(self, monkeypatch):
+        """codex P2 (PR #554): BPE can exceed 1 token per CHAR on non-Latin
+        text, so a char budget can still trip the 400. The safe invariant is
+        tokens <= UTF-8 BYTES. 'ééééé' is 5 chars but 10 bytes: a
+        char-counted budget of 10 would pack the next text into the same
+        request; a byte-counted one must split."""
+        monkeypatch.setattr(embeddings_mod, "_MAX_BATCH_BYTES", 10)
+        calls: list = []
+        p = _content_keyed_provider(calls)
+        multibyte = "é" * 5  # 5 chars, 10 UTF-8 bytes
+        result = await p.embed_batch([multibyte, "a"])
+        assert [c["input"] for c in calls] == [[multibyte], ["a"]]
+        assert result == [_expected(multibyte), _expected("a")]
+
+    @pytest.mark.asyncio
     async def test_oversized_single_text_sent_alone(self, monkeypatch):
         """A single text larger than the budget still ships as a batch of
         one — never dropped, never an infinite loop."""
-        monkeypatch.setattr(embeddings_mod, "_MAX_BATCH_CHARS", 10)
+        monkeypatch.setattr(embeddings_mod, "_MAX_BATCH_BYTES", 10)
         calls: list = []
         p = _content_keyed_provider(calls)
         big = "x" * 50

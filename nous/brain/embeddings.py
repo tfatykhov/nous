@@ -34,14 +34,16 @@ _RETRY_BACKOFF = (0.5, 1.0, 2.0)
 _DEFAULT_CACHE_SIZE = 1024
 
 # OpenAI embeddings per-request hard limits (API facts, not tuning knobs).
-# 2048 = max inputs per request. The char budget proxies the ~300k-token
-# per-request cap without a tokenizer dependency: 250k chars stays under
-# it even at the 1-token-per-char worst case (CJK); typical English text
-# (~4 chars/token) sits far below. A large transcript (~2000 chunks x
-# ~600 chars ~ 300k tokens) previously shipped as ONE request → HTTP 400
-# → callers like the F067 chunk path aborted and stored nothing.
+# 2048 = max inputs per request. The byte budget bounds the ~300k-token
+# per-request cap without a tokenizer dependency: byte-level BPE maps
+# every token to a non-empty UTF-8 byte sequence, so tokens <= utf8
+# bytes — a hard invariant, unlike char counts (one emoji char can be
+# 3+ tokens; codex P2 on PR #554). Typical English text (~4 bytes/token)
+# sits far below. A large transcript (~2000 chunks x ~600 chars ~ 300k
+# tokens) previously shipped as ONE request → HTTP 400 → callers like
+# the F067 chunk path aborted and stored nothing.
 _MAX_BATCH_ITEMS = 2048
-_MAX_BATCH_CHARS = 250_000
+_MAX_BATCH_BYTES = 250_000
 
 
 class EmbeddingProvider:
@@ -175,8 +177,8 @@ class EmbeddingProvider:
         Cache-aware: only texts missing from the LRU are sent to the API
         (duplicates collapsed); results are reassembled in input order.
         Misses are split into sub-batches respecting the OpenAI
-        per-request limits (_MAX_BATCH_ITEMS inputs, _MAX_BATCH_CHARS
-        chars) and sent sequentially; each sub-batch is cached as it
+        per-request limits (_MAX_BATCH_ITEMS inputs, _MAX_BATCH_BYTES
+        UTF-8 bytes) and sent sequentially; each sub-batch is cached as it
         succeeds, so a mid-run failure doesn't re-pay completed requests
         when the caller retries.
         """
@@ -203,21 +205,24 @@ class EmbeddingProvider:
                 miss_texts.append(t)
 
         if miss_texts:
+            # UTF-8 byte lengths, not char counts: tokens <= utf8 bytes is
+            # the invariant that makes the budget a hard token bound.
+            byte_lens = [len(t.encode("utf-8", "replace")) for t in miss_texts]
             fetched: dict[str, list[float]] = {}
             start = 0
             n_batches = 0
             while start < len(miss_texts):
                 # Greedy sub-batch: extend while both per-request limits
-                # hold. A single text over the char budget still ships as
+                # hold. A single text over the byte budget still ships as
                 # a batch of one (end starts past it) rather than looping.
                 end = start + 1
-                batch_chars = len(miss_texts[start])
+                batch_bytes = byte_lens[start]
                 while (
                     end < len(miss_texts)
                     and end - start < _MAX_BATCH_ITEMS
-                    and batch_chars + len(miss_texts[end]) <= _MAX_BATCH_CHARS
+                    and batch_bytes + byte_lens[end] <= _MAX_BATCH_BYTES
                 ):
-                    batch_chars += len(miss_texts[end])
+                    batch_bytes += byte_lens[end]
                     end += 1
                 sub_texts = miss_texts[start:end]
                 n_batches += 1
