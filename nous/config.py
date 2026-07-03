@@ -1383,6 +1383,20 @@ class Settings(BaseSettings):
         default=10,
         description="F067 max chunks returned by the new chunk-recall leg before RRF merge.",
     )
+    chunk_hybrid_search_enabled: bool = Field(
+        default=False,
+        description=(
+            "R2 (2026-07-02 MAB audit): RRF-fuse an FTS leg (search_tsv GIN, "
+            "provisioned by migration 050 but unconsumed) with the vector leg "
+            "in the F067 chunk-recall stage, via the shared "
+            "heart.search.hybrid_search helper. Also moves chunk scores from "
+            "raw cosine onto the 1/k-normalized RRF [0,1] scale the coherent "
+            "heart legs use (F080 deviant-leg renorm). Vector-only chunk "
+            "search left 4/5 CR gold chunks at ranks 16-50; the one top-10 "
+            "hit was a token-only match — exactly what the FTS leg "
+            "generalizes. Land dark; flip after the retrieval A/B gate."
+        ),
+    )
     episode_chunk_min_transcript_chars: int = Field(
         default=50,
         description="F067 minimum transcript length to chunk (shorter transcripts are skipped).",

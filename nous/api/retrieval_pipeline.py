@@ -423,6 +423,7 @@ async def _run_stages(
                 limit=min(
                     settings.episode_chunk_recall_limit, limit * 2
                 ),
+                settings=settings,
             )
         except Exception:
             # Match the sibling stages' pattern (spreading_activation,
@@ -989,19 +990,60 @@ async def _search_episode_chunks(
     query: str,
     agent_id: str,
     limit: int,
+    settings: "Settings | None" = None,
 ) -> list[tuple[UUID, str, float]]:
-    """F067: vector-similarity search over heart.episode_chunks.
+    """F067: search over heart.episode_chunks.
 
-    Returns ``[(id, content, similarity_score)]`` ordered by descending
-    similarity. Returns ``[]`` only when no embedder is wired (no way to
-    embed the query) or the query embeds to an empty vector. All other
-    failure modes — embed timeout, DB error, pgvector cast failure — RAISE
-    so the caller's try/except surfaces them via ``acc.stage_errors``
-    AND a WARN log. Silent fall-through to ``[]`` on embedder failure
-    would masquerade as "no matches" and hide real outages.
+    Default (``chunk_hybrid_search_enabled`` off): vector-only cosine search,
+    byte-identical to the original F067 leg; returns ``[]`` when no embedder
+    is wired or the query embeds to an empty vector.
+
+    R2 (flag on): RRF-fused vector + FTS legs via the shared
+    ``heart.search.hybrid_search`` helper (the FTS leg consumes the
+    ``search_tsv`` GIN index migration 050 provisioned for exactly this).
+    Scores are then on the 1/k-normalized RRF [0,1] scale the coherent heart
+    legs emit — not raw cosine (F080 deviant-leg renorm). With no embedder,
+    the hybrid path degrades to keyword-only instead of ``[]``.
+
+    Returns ``[(id, content, score, episode_id)]`` ordered by descending
+    score. All failure modes other than the missing-embedder cases — embed
+    timeout, DB error, pgvector cast failure — RAISE so the caller's
+    try/except surfaces them via ``acc.stage_errors`` AND a WARN log. Silent
+    fall-through to ``[]`` on embedder failure would masquerade as "no
+    matches" and hide real outages.
     """
     from sqlalchemy import text as sa_text
     embedder = getattr(heart, "_embeddings", None)
+
+    if getattr(settings, "chunk_hybrid_search_enabled", False):
+        from nous.heart import search as heart_search
+
+        query_vec = (await embedder.embed(query)) if embedder is not None else None
+        query_vec = query_vec or None  # empty embed → keyword-only fallback
+        async with heart.db.session() as s:
+            ranked = await heart_search.hybrid_search(
+                s,
+                "heart.episode_chunks",
+                query_vec,
+                query,
+                agent_id,
+                limit=limit,
+                active_filter=False,  # chunks have no active column
+            )
+            if not ranked:
+                return []
+            ids = [cid for cid, _ in ranked]
+            rows = (await s.execute(sa_text(
+                "SELECT id, content, episode_id FROM heart.episode_chunks "
+                "WHERE id = ANY(:ids)"
+            ), {"ids": ids})).all()
+        by_id = {r[0]: (r[1], r[2]) for r in rows}
+        return [
+            (cid, by_id[cid][0], float(score), by_id[cid][1])
+            for cid, score in ranked
+            if cid in by_id
+        ]
+
     if embedder is None:
         return []
     query_vec = await embedder.embed(query)
