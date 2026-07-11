@@ -825,6 +825,11 @@ class Settings(BaseSettings):
     spreading_activation_alpha: float = 0.5
     spreading_activation_beta: float = 0.3
     spreading_activation_gamma: float = 0.2
+    # F022 extension (2026-07-11, land-dark): seed the spreading CTE with the
+    # top heart FACT results (RRF-scored) alongside decision seeds, so
+    # spreading fires on decision-less corpora and leverages the fact/chunk
+    # graph instead of decisions only. Flip only after the retrieval A/B.
+    spreading_heart_seeds_enabled: bool = False
 
     # F040: Graph densification — backfill
     # F044 tinyHippo-Lite v1 — STC state machine (telemetry-only slice).

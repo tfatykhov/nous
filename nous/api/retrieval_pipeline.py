@@ -620,8 +620,22 @@ async def _run_stages(
         acc.searched_decisions = True
         decision_results = await brain.query(query, limit=limit)
 
-        # F022: graph expansion — expand top decisions
-        if decision_results and settings.graph_recall_enabled:
+        # F022 extension (land-dark): heart FACT seeds for spreading. Top-3
+        # fact results with their RRF scores — same seed shape as decision
+        # seeds (coherent normalizer) and same cap as Path A's heart seeds.
+        # Lets spreading fire on decision-less corpora and leverage the
+        # fact/chunk graph instead of decisions only.
+        heart_fact_seeds: list[tuple[UUID, str, float]] = []
+        if getattr(settings, "spreading_heart_seeds_enabled", False):
+            heart_fact_seeds = [
+                (hr.id, "fact", float(hr.score))
+                for hr in acc.heart_results
+                if hr.type == "fact" and hr.score is not None
+            ][:3]
+
+        # F022: graph expansion — expand top decisions (and, when heart
+        # seeding is enabled, fire spreading even with zero decision hits).
+        if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
             seen_ids: set[UUID] = {d.id for d in decision_results}
 
             # F022 Phase 4: density-gated spreading activation
@@ -671,7 +685,16 @@ async def _run_stages(
                         seeds = [
                             (d.id, "decision", d.score or 0.5)
                             for d in decision_results[: settings.graph_recall_max_expand]
-                        ]
+                        ] + heart_fact_seeds
+                        # Heart-seeded spreading re-reaches existing heart/
+                        # chunk candidates constantly — exclude them so the
+                        # same item never ranks twice. Flag-gated so the
+                        # decision-only path stays byte-identical.
+                        candidate_ids: set[UUID] = set()
+                        if heart_fact_seeds:
+                            candidate_ids = {hr.id for hr in acc.heart_results} | {
+                                item[0] for item in acc.chunk_results
+                            }
                         activated = await spreading_activation_search(
                             sa_session, brain.agent_id, seeds, settings,
                             limit=_SPREADING_OVERFETCH_LIMIT,
@@ -682,6 +705,7 @@ async def _run_stages(
                             for nid, ntype, activation in activated
                             if nid not in seed_ids
                             and nid not in seen_ids
+                            and nid not in candidate_ids
                             and activation > 0.1
                         ]
                         # Resolve real content + created_at (shared with
