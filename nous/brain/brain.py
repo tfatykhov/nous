@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, select, text
+from sqlalchemy import case, delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1348,6 +1348,12 @@ class Brain:
             )
             .subquery()
         )
+        # Over-fetch 3x (mirrors hybrid_search's limit_expanded and the
+        # spreading-branch over-fetch): the resolver below drops rows whose
+        # endpoints are inactive/foreign/dangling (codex P2 round 7,
+        # PR #555), and Path A windows are small (limit=3) — without the
+        # buffer a few bad high-weight edges starve the window. Results are
+        # capped back to ``limit`` after resolution.
         union_q = (
             select(
                 ranked.c.neighbor_id,
@@ -1358,7 +1364,7 @@ class Brain:
             )
             .where(ranked.c.rn == 1)
             .order_by(func.coalesce(ranked.c.edge_weight, -1.0).desc(), ranked.c.neighbor_id)
-            .limit(limit)
+            .limit(limit * 3)
         )
         result = await session.execute(union_q)
         rows = result.all()
@@ -1381,14 +1387,95 @@ class Brain:
         for r in rows:
             ids_by_type[r.neighbor_type].append(r.neighbor_id)
 
-        descriptions: dict[UUID, tuple[str, datetime]] = {}
+        descriptions = await self._resolve_node_descriptions(session, ids_by_type)
 
-        # Decision: existing behavior, kept verbatim so consumers that only
-        # use decision neighbors observe no change.
+        # Build results
+        # Node types where the content column is declared NOT NULL in models.py
+        # (Fact.content, Episode.summary, EpisodeChunk.content). An empty
+        # resolved description for these types means a data integrity issue
+        # (NOT NULL bypass, or a manual insert with empty string) — log it
+        # rather than silently shipping a placeholder candidate to rerank.
+        _NOT_NULL_CONTENT_TYPES = {"fact", "episode", "chunk"}
+        results = []
+        for r in rows:
+            if len(results) >= limit:
+                break
+            ntype, rel, weight, method = edge_map[r.neighbor_id]
+            # F080 / Audit BR-1 (codex P1) + codex P2 round 3 (PR #555): an
+            # id absent from the resolver map is an inactive/superseded
+            # fact or procedure (active=true filters), a foreign-agent node
+            # (agent_id filters — graph_edges endpoints are polymorphic and
+            # not FK-protected), or a dangling edge. Drop ALL of them rather
+            # than surfacing a "[type] <uuid>" placeholder that ships no
+            # information yet consumes a post-LIMIT ranking slot.
+            if r.neighbor_id not in descriptions:
+                continue
+            desc, created = descriptions[r.neighbor_id]
+            # Defensive: keep placeholder if resolved description is empty
+            # (DB rows with NULL/empty content shouldn't crash retrieval).
+            if not desc:
+                if ntype in _NOT_NULL_CONTENT_TYPES:
+                    logger.warning(
+                        "brain._neighbors: empty/NULL content on "
+                        "%s id=%s (column is declared NOT NULL — "
+                        "data integrity issue)",
+                        ntype, r.neighbor_id,
+                    )
+                desc = f"[{ntype}] {r.neighbor_id}"
+            if created is None:
+                logger.warning(
+                    "brain._neighbors: NULL created_at on %s id=%s "
+                    "(column has server_default — possible migration bug)",
+                    ntype, r.neighbor_id,
+                )
+                created = datetime.now(UTC)
+            results.append(NeighborResult(
+                id=r.neighbor_id,
+                node_type=ntype,
+                description=desc,
+                edge_relation=rel,
+                edge_weight=weight,
+                created_at=created,
+                extraction_method=method,  # F065
+            ))
+
+        return results
+
+    async def _resolve_node_descriptions(
+        self,
+        session: AsyncSession,
+        ids_by_type: dict[str, list[UUID]],
+    ) -> dict[UUID, tuple[str, datetime | None]]:
+        """Resolve real content + created_at for graph node ids, batched per type.
+
+        Shared by ``_neighbors`` and the spreading-activation branch in
+        ``run_recall_pipeline`` so every graph consumer surfaces real memory
+        content instead of ``"[<ntype>] <uuid>"`` placeholders.
+
+        Inactive facts and procedures are filtered out (for those types,
+        ``active=false`` is a soft-delete / supersession marker) and are simply
+        ABSENT from the returned map — callers must treat a missing id as
+        "drop this node".
+
+        Every lookup is agent-scoped (codex P2 round 2, PR #555):
+        ``graph_edges`` endpoints are polymorphic and not FK-protected, so a
+        miswritten edge can point at another agent's node — foreign content
+        must never resolve.
+        """
+        descriptions: dict[UUID, tuple[str, datetime | None]] = {}
+
+        # Decision: mirrors Brain._query's default suppression of abandoned
+        # decisions (outcome='failure' AND confidence=0.0 — codex P2 round 8,
+        # PR #555) so graph traversal cannot reintroduce noise decisions
+        # that normal brain search hides.
         if ids_by_type.get("decision"):
             dec_result = await session.execute(
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
+                .where(Decision.agent_id == self.agent_id)
+                .where(
+                    ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
+                )
             )
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
@@ -1406,17 +1493,28 @@ class Brain:
                 select(Fact.id, Fact.content, Fact.created_at)
                 .where(Fact.id.in_(ids_by_type["fact"]))
                 .where(Fact.active == True)  # noqa: E712
+                .where(Fact.agent_id == self.agent_id)
             )
             for f in f_result.all():
                 descriptions[f.id] = (f.content, f.created_at)
 
         # Episode: heart.episodes.summary (matches _ENTITY_CONFIG fallback;
         # structured_summary preferred at densifier time but plain summary
-        # is always populated).
+        # is always populated). Mirrors the episode recall contract
+        # (episodes.py HT-1 filter; codex P2 round 4, PR #555): ongoing
+        # (active=true) OR genuinely-closed (ended_at IS NOT NULL), never
+        # deactivated-noise or abandoned rows — graph edges to suppressed
+        # episodes must not resurface them past normal recall's filters.
         if ids_by_type.get("episode"):
             e_result = await session.execute(
                 select(Episode.id, Episode.summary, Episode.created_at)
                 .where(Episode.id.in_(ids_by_type["episode"]))
+                .where(Episode.agent_id == self.agent_id)
+                .where(or_(
+                    Episode.active == True,  # noqa: E712
+                    Episode.ended_at.is_not(None),
+                ))
+                .where(Episode.outcome.is_distinct_from("abandoned"))
             )
             for e in e_result.all():
                 descriptions[e.id] = (e.summary, e.created_at)
@@ -1426,6 +1524,7 @@ class Brain:
             c_result = await session.execute(
                 select(EpisodeChunk.id, EpisodeChunk.content, EpisodeChunk.created_at)
                 .where(EpisodeChunk.id.in_(ids_by_type["chunk"]))
+                .where(EpisodeChunk.agent_id == self.agent_id)
             )
             for c in c_result.all():
                 descriptions[c.id] = (c.content, c.created_at)
@@ -1433,71 +1532,29 @@ class Brain:
         # Procedure: heart.procedures.description. F080: only ACTIVE procedures —
         # archived/superseded skills (active=false, set by name-dedup) must never
         # be surfaced as graph neighbors. Inactive ids are simply absent from
-        # ``descriptions`` and dropped in the results loop below (this also fixes
+        # ``descriptions`` and dropped by the caller (this also fixes
         # a live Path-A resurrection of dead skills via auto_linked edges).
         if ids_by_type.get("procedure"):
             p_result = await session.execute(
-                select(Procedure.id, Procedure.description, Procedure.created_at)
+                select(
+                    Procedure.id,
+                    Procedure.name,
+                    Procedure.description,
+                    Procedure.created_at,
+                )
                 .where(Procedure.id.in_(ids_by_type["procedure"]))
                 .where(Procedure.active == True)  # noqa: E712
+                .where(Procedure.agent_id == self.agent_id)
             )
             for p in p_result.all():
-                # Procedure.description is nullable — fall back to placeholder
-                # so consumers don't get None.
-                desc_text = p.description or f"[procedure] {p.id}"
+                # Procedure.description is nullable — fall back to the NAME
+                # (NOT NULL; matches how recall formats descriptionless
+                # procedures), then to a placeholder so consumers never get
+                # None (codex P2, PR #555).
+                desc_text = p.description or p.name or f"[procedure] {p.id}"
                 descriptions[p.id] = (desc_text, p.created_at)
 
-        # Build results
-        # Node types where the content column is declared NOT NULL in models.py
-        # (Fact.content, Episode.summary, EpisodeChunk.content). An empty
-        # resolved description for these types means a data integrity issue
-        # (NOT NULL bypass, or a manual insert with empty string) — log it
-        # rather than silently shipping a placeholder candidate to rerank.
-        _NOT_NULL_CONTENT_TYPES = {"fact", "episode", "chunk"}
-        results = []
-        for r in rows:
-            ntype, rel, weight, method = edge_map[r.neighbor_id]
-            # F080 / Audit BR-1 (codex P1): an inactive/superseded procedure OR
-            # fact was filtered out of the description resolution above (both
-            # queries carry `active = true`). Drop it rather than surfacing an
-            # archived skill / superseded fact as a "[type] <uuid>" placeholder
-            # that would also consume a post-LIMIT ranking slot.
-            if ntype in ("procedure", "fact") and r.neighbor_id not in descriptions:
-                continue
-            if r.neighbor_id in descriptions:
-                desc, created = descriptions[r.neighbor_id]
-                # Defensive: keep placeholder if resolved description is empty
-                # (DB rows with NULL/empty content shouldn't crash retrieval).
-                if not desc:
-                    if ntype in _NOT_NULL_CONTENT_TYPES:
-                        logger.warning(
-                            "brain._neighbors: empty/NULL content on "
-                            "%s id=%s (column is declared NOT NULL — "
-                            "data integrity issue)",
-                            ntype, r.neighbor_id,
-                        )
-                    desc = f"[{ntype}] {r.neighbor_id}"
-                if created is None:
-                    logger.warning(
-                        "brain._neighbors: NULL created_at on %s id=%s "
-                        "(column has server_default — possible migration bug)",
-                        ntype, r.neighbor_id,
-                    )
-                    created = datetime.now(UTC)
-            else:
-                desc = f"[{ntype}] {r.neighbor_id}"
-                created = datetime.now(UTC)
-            results.append(NeighborResult(
-                id=r.neighbor_id,
-                node_type=ntype,
-                description=desc,
-                edge_relation=rel,
-                edge_weight=weight,
-                created_at=created,
-                extraction_method=method,  # F065
-            ))
-
-        return results
+        return descriptions
 
     # ------------------------------------------------------------------
     # top_hubs() — F065 god-node surfacing

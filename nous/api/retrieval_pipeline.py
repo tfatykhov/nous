@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import difflib
 import logging
+import time
+import weakref
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Literal
@@ -39,6 +41,24 @@ if TYPE_CHECKING:
     from nous.heart.schemas import RecallResult
 
 logger = logging.getLogger(__name__)
+
+# Spreading-activation result window: at most this many activated nodes are
+# appended per recall (the CTE's historic LIMIT). The CTE is over-fetched at
+# 2x so rows dropped by content resolution (inactive/foreign/dangling —
+# codex P2 round 5, PR #555) backfill from lower-ranked valid nodes instead
+# of consuming the window.
+_SPREADING_RESULT_CAP = 20
+_SPREADING_OVERFETCH_LIMIT = 40
+
+# Spreading-activation density gate: TTL cache per Brain instance.
+# Density only moves at sleep-cycle cadence (densifier/pruning), so paying
+# the graph_edges aggregate on EVERY recall with decision hits is pure
+# overhead now that prod density sits above the auto-mode threshold.
+# WeakKeyDictionary so a torn-down Brain frees its entry.
+_DENSITY_GATE_TTL_SECONDS = 300.0
+_density_gate_cache: "weakref.WeakKeyDictionary[object, tuple[float, float]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 # ---------------------------------------------------------------------------
@@ -606,20 +626,34 @@ async def _run_stages(
 
             # F022 Phase 4: density-gated spreading activation
             use_spreading = False
-            if settings.spreading_activation_enabled != "false":
+            mode = str(settings.spreading_activation_enabled).lower()
+            if mode == "true":
+                # Forced on — no need to pay the density aggregate query.
+                use_spreading = True
+            elif mode != "false":
+                # auto — density-gated, TTL-cached per Brain instance.
                 try:
                     from nous.brain.spreading_activation import (
                         compute_graph_density,
                         should_use_spreading_activation,
                     )
 
-                    async with brain.db.session() as sa_session:
-                        density = await compute_graph_density(
-                            sa_session, brain.agent_id
-                        )
-                        use_spreading = should_use_spreading_activation(
-                            settings, density
-                        )
+                    now_ts = time.monotonic()
+                    cached = _density_gate_cache.get(brain)
+                    if (
+                        cached is not None
+                        and now_ts - cached[1] < _DENSITY_GATE_TTL_SECONDS
+                    ):
+                        density = cached[0]
+                    else:
+                        async with brain.db.session() as sa_session:
+                            density = await compute_graph_density(
+                                sa_session, brain.agent_id
+                            )
+                        _density_gate_cache[brain] = (density, now_ts)
+                    use_spreading = should_use_spreading_activation(
+                        settings, density
+                    )
                 except Exception:
                     logger.debug("Density check failed, using 1-hop")
                     acc.stage_errors["spreading_density_check"] = (
@@ -639,27 +673,64 @@ async def _run_stages(
                             for d in decision_results[: settings.graph_recall_max_expand]
                         ]
                         activated = await spreading_activation_search(
-                            sa_session, brain.agent_id, seeds, settings
+                            sa_session, brain.agent_id, seeds, settings,
+                            limit=_SPREADING_OVERFETCH_LIMIT,
                         )
                         seed_ids = {s[0] for s in seeds}
-                        for nid, ntype, activation in activated:
-                            if (
-                                nid not in seed_ids
-                                and nid not in seen_ids
-                                and activation > 0.1
-                            ):
-                                graph_expanded.append(
-                                    NeighborResult(
-                                        id=nid,
-                                        node_type=ntype,
-                                        description=f"[{ntype}] {str(nid)[:8]}",
-                                        edge_relation="spreading_activation",
-                                        edge_weight=activation,
-                                        created_at=datetime.now(UTC),
-                                    )
+                        hits = [
+                            (nid, ntype, activation)
+                            for nid, ntype, activation in activated
+                            if nid not in seed_ids
+                            and nid not in seen_ids
+                            and activation > 0.1
+                        ]
+                        # Resolve real content + created_at (shared with
+                        # brain._neighbors). Ids the resolver omits —
+                        # inactive facts/procedures, missing rows — are
+                        # DROPPED rather than surfaced as "[<ntype>] <uuid>"
+                        # placeholders that ship no information to the LLM
+                        # yet consume ranking slots.
+                        ids_by_type: dict[str, list[UUID]] = {}
+                        for nid, ntype, _activation in hits:
+                            ids_by_type.setdefault(ntype, []).append(nid)
+                        descriptions = (
+                            await brain._resolve_node_descriptions(
+                                sa_session, ids_by_type
+                            )
+                            if ids_by_type
+                            else {}
+                        )
+                        n_appended = 0
+                        for nid, ntype, activation in hits:
+                            if n_appended >= _SPREADING_RESULT_CAP:
+                                break
+                            resolved = descriptions.get(nid)
+                            if resolved is None or not resolved[0]:
+                                continue
+                            desc, created = resolved
+                            graph_expanded.append(
+                                NeighborResult(
+                                    id=nid,
+                                    node_type=ntype,
+                                    description=desc,
+                                    edge_relation="spreading_activation",
+                                    edge_weight=activation,
+                                    created_at=created or datetime.now(UTC),
                                 )
-                                seen_ids.add(nid)
-                    acc.spreading_activation_used = True
+                            )
+                            seen_ids.add(nid)
+                            n_appended += 1
+                    if n_appended > 0:
+                        acc.spreading_activation_used = True
+                    else:
+                        # Every activated node was dropped by resolution
+                        # (inactive/foreign/dangling). Fall back to 1-hop
+                        # rather than shipping an empty graph expansion.
+                        logger.debug(
+                            "Spreading resolved 0 of %d hits; using 1-hop",
+                            len(hits),
+                        )
+                        use_spreading = False
                 except Exception:
                     logger.debug(
                         "Spreading activation failed, falling back to 1-hop"
