@@ -218,11 +218,13 @@ def _make_settings(
     episode_chunks_enabled=False,
     episode_chunk_recall_limit=10,
     coherent_ranking_enabled=False,
+    spreading_activation_density_threshold=3.0,
 ):
     return SimpleNamespace(
         graph_recall_enabled=graph_recall_enabled,
         cross_type_linking_enabled=cross_type_linking_enabled,
         spreading_activation_enabled=spreading_activation_enabled,
+        spreading_activation_density_threshold=spreading_activation_density_threshold,
         contradiction_detection=contradiction_detection,
         graph_recall_decay=graph_recall_decay,
         graph_recall_max_expand=graph_recall_max_expand,
@@ -787,6 +789,132 @@ class TestPathAStage2b:
         assert count >= 1, (
             f"expected heart_graph_memory_neighbors counter to increment, "
             f"got {stats.n_stage_errors}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Spreading-activation branch: content resolution + density-gate caching
+# ---------------------------------------------------------------------------
+
+
+SPREAD_FACT_ID = UUID("77777777-7777-7777-7777-777777777777")
+
+
+class TestSpreadingContentResolution:
+    """The spreading branch must resolve real node content via
+    ``Brain._resolve_node_descriptions`` (shared with ``_neighbors``) instead
+    of fabricating ``[<ntype>] <uuid8>`` placeholder descriptions, and must
+    drop nodes the resolver does not return (inactive/missing rows)."""
+
+    def _spreading_fixtures(self, *, resolved):
+        heart = _make_heart(recall_results=[])
+        brain = _make_brain(
+            neighbors_by_node={},
+            contradictions=[],
+            decision_results=_make_decision_summaries(),
+        )
+        brain._resolve_node_descriptions = AsyncMock(return_value=resolved)
+        return heart, brain
+
+    @pytest.mark.asyncio
+    async def test_spreading_results_carry_real_content(self):
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._spreading_fixtures(
+            resolved={
+                SPREAD_FACT_ID: ("real fact content about pgvector", resolved_at)
+            },
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6)]),
+        ), patch(
+            "nous.brain.spreading_activation.compute_graph_density",
+            AsyncMock(return_value=5.0),
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert stats.spreading_activation_used is True
+        spread = next(r for r in results if r.id == SPREAD_FACT_ID)
+        assert spread.source == "spreading_activation"
+        assert spread.description == "real fact content about pgvector"
+
+    @pytest.mark.asyncio
+    async def test_spreading_drops_unresolvable_nodes(self):
+        heart, brain = self._spreading_fixtures(resolved={})
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6)]),
+        ), patch(
+            "nous.brain.spreading_activation.compute_graph_density",
+            AsyncMock(return_value=5.0),
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert stats.spreading_activation_used is True
+        assert all(r.id != SPREAD_FACT_ID for r in results), (
+            "unresolvable spreading node must be dropped, not surfaced as a "
+            "placeholder"
+        )
+
+    @pytest.mark.asyncio
+    async def test_true_mode_skips_density_query(self):
+        heart, brain = self._spreading_fixtures(resolved={})
+        settings = _make_settings(spreading_activation_enabled="true")
+        density_mock = AsyncMock(return_value=5.0)
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "nous.brain.spreading_activation.compute_graph_density",
+            density_mock,
+        ):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert density_mock.await_count == 0, (
+            "forced-on mode must not pay the density aggregate query"
+        )
+
+    @pytest.mark.asyncio
+    async def test_auto_mode_density_gate_cached_across_recalls(self):
+        heart, brain = self._spreading_fixtures(resolved={})
+        settings = _make_settings(
+            spreading_activation_enabled="auto",
+            spreading_activation_density_threshold=3.0,
+        )
+        density_mock = AsyncMock(return_value=5.0)
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "nous.brain.spreading_activation.compute_graph_density",
+            density_mock,
+        ):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert density_mock.await_count == 1, (
+            "density gate must be TTL-cached per Brain instance across recalls"
         )
 
 

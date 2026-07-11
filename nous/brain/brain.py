@@ -1381,71 +1381,7 @@ class Brain:
         for r in rows:
             ids_by_type[r.neighbor_type].append(r.neighbor_id)
 
-        descriptions: dict[UUID, tuple[str, datetime]] = {}
-
-        # Decision: existing behavior, kept verbatim so consumers that only
-        # use decision neighbors observe no change.
-        if ids_by_type.get("decision"):
-            dec_result = await session.execute(
-                select(Decision.id, Decision.description, Decision.created_at)
-                .where(Decision.id.in_(ids_by_type["decision"]))
-            )
-            for d in dec_result.all():
-                descriptions[d.id] = (d.description, d.created_at)
-
-        # Fact: heart.facts.content
-        # Audit BR-1 (2026-06-09): only ACTIVE facts. For facts, active=false
-        # is a soft-delete / supersession marker (F027), so superseded and
-        # contradiction-resolved facts must never resurface as graph neighbors
-        # via Path A or decision 1-hop expansion — mirrors the F080 procedure
-        # fix below. (Episodes/chunks are intentionally NOT filtered here:
-        # episode active=false is the normal *closed* lifecycle state, and
-        # episode_chunks has no soft-delete column.)
-        if ids_by_type.get("fact"):
-            f_result = await session.execute(
-                select(Fact.id, Fact.content, Fact.created_at)
-                .where(Fact.id.in_(ids_by_type["fact"]))
-                .where(Fact.active == True)  # noqa: E712
-            )
-            for f in f_result.all():
-                descriptions[f.id] = (f.content, f.created_at)
-
-        # Episode: heart.episodes.summary (matches _ENTITY_CONFIG fallback;
-        # structured_summary preferred at densifier time but plain summary
-        # is always populated).
-        if ids_by_type.get("episode"):
-            e_result = await session.execute(
-                select(Episode.id, Episode.summary, Episode.created_at)
-                .where(Episode.id.in_(ids_by_type["episode"]))
-            )
-            for e in e_result.all():
-                descriptions[e.id] = (e.summary, e.created_at)
-
-        # Chunk: heart.episode_chunks.content (F067 raw transcript fragment).
-        if ids_by_type.get("chunk"):
-            c_result = await session.execute(
-                select(EpisodeChunk.id, EpisodeChunk.content, EpisodeChunk.created_at)
-                .where(EpisodeChunk.id.in_(ids_by_type["chunk"]))
-            )
-            for c in c_result.all():
-                descriptions[c.id] = (c.content, c.created_at)
-
-        # Procedure: heart.procedures.description. F080: only ACTIVE procedures —
-        # archived/superseded skills (active=false, set by name-dedup) must never
-        # be surfaced as graph neighbors. Inactive ids are simply absent from
-        # ``descriptions`` and dropped in the results loop below (this also fixes
-        # a live Path-A resurrection of dead skills via auto_linked edges).
-        if ids_by_type.get("procedure"):
-            p_result = await session.execute(
-                select(Procedure.id, Procedure.description, Procedure.created_at)
-                .where(Procedure.id.in_(ids_by_type["procedure"]))
-                .where(Procedure.active == True)  # noqa: E712
-            )
-            for p in p_result.all():
-                # Procedure.description is nullable — fall back to placeholder
-                # so consumers don't get None.
-                desc_text = p.description or f"[procedure] {p.id}"
-                descriptions[p.id] = (desc_text, p.created_at)
+        descriptions = await self._resolve_node_descriptions(session, ids_by_type)
 
         # Build results
         # Node types where the content column is declared NOT NULL in models.py
@@ -1498,6 +1434,90 @@ class Brain:
             ))
 
         return results
+
+    async def _resolve_node_descriptions(
+        self,
+        session: AsyncSession,
+        ids_by_type: dict[str, list[UUID]],
+    ) -> dict[UUID, tuple[str, datetime | None]]:
+        """Resolve real content + created_at for graph node ids, batched per type.
+
+        Shared by ``_neighbors`` and the spreading-activation branch in
+        ``run_recall_pipeline`` so every graph consumer surfaces real memory
+        content instead of ``"[<ntype>] <uuid>"`` placeholders.
+
+        Inactive facts and procedures are filtered out (for those types,
+        ``active=false`` is a soft-delete / supersession marker) and are simply
+        ABSENT from the returned map — callers must treat a missing id as
+        "drop this node".
+        """
+        descriptions: dict[UUID, tuple[str, datetime | None]] = {}
+
+        # Decision: existing behavior, kept verbatim so consumers that only
+        # use decision neighbors observe no change.
+        if ids_by_type.get("decision"):
+            dec_result = await session.execute(
+                select(Decision.id, Decision.description, Decision.created_at)
+                .where(Decision.id.in_(ids_by_type["decision"]))
+            )
+            for d in dec_result.all():
+                descriptions[d.id] = (d.description, d.created_at)
+
+        # Fact: heart.facts.content
+        # Audit BR-1 (2026-06-09): only ACTIVE facts. For facts, active=false
+        # is a soft-delete / supersession marker (F027), so superseded and
+        # contradiction-resolved facts must never resurface as graph neighbors
+        # via Path A or decision 1-hop expansion — mirrors the F080 procedure
+        # fix below. (Episodes/chunks are intentionally NOT filtered here:
+        # episode active=false is the normal *closed* lifecycle state, and
+        # episode_chunks has no soft-delete column.)
+        if ids_by_type.get("fact"):
+            f_result = await session.execute(
+                select(Fact.id, Fact.content, Fact.created_at)
+                .where(Fact.id.in_(ids_by_type["fact"]))
+                .where(Fact.active == True)  # noqa: E712
+            )
+            for f in f_result.all():
+                descriptions[f.id] = (f.content, f.created_at)
+
+        # Episode: heart.episodes.summary (matches _ENTITY_CONFIG fallback;
+        # structured_summary preferred at densifier time but plain summary
+        # is always populated).
+        if ids_by_type.get("episode"):
+            e_result = await session.execute(
+                select(Episode.id, Episode.summary, Episode.created_at)
+                .where(Episode.id.in_(ids_by_type["episode"]))
+            )
+            for e in e_result.all():
+                descriptions[e.id] = (e.summary, e.created_at)
+
+        # Chunk: heart.episode_chunks.content (F067 raw transcript fragment).
+        if ids_by_type.get("chunk"):
+            c_result = await session.execute(
+                select(EpisodeChunk.id, EpisodeChunk.content, EpisodeChunk.created_at)
+                .where(EpisodeChunk.id.in_(ids_by_type["chunk"]))
+            )
+            for c in c_result.all():
+                descriptions[c.id] = (c.content, c.created_at)
+
+        # Procedure: heart.procedures.description. F080: only ACTIVE procedures —
+        # archived/superseded skills (active=false, set by name-dedup) must never
+        # be surfaced as graph neighbors. Inactive ids are simply absent from
+        # ``descriptions`` and dropped by the caller (this also fixes
+        # a live Path-A resurrection of dead skills via auto_linked edges).
+        if ids_by_type.get("procedure"):
+            p_result = await session.execute(
+                select(Procedure.id, Procedure.description, Procedure.created_at)
+                .where(Procedure.id.in_(ids_by_type["procedure"]))
+                .where(Procedure.active == True)  # noqa: E712
+            )
+            for p in p_result.all():
+                # Procedure.description is nullable — fall back to placeholder
+                # so consumers don't get None.
+                desc_text = p.description or f"[procedure] {p.id}"
+                descriptions[p.id] = (desc_text, p.created_at)
+
+        return descriptions
 
     # ------------------------------------------------------------------
     # top_hubs() — F065 god-node surfacing
