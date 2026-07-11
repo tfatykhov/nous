@@ -1122,6 +1122,42 @@ class TestSpreadingHeartSeeds:
         assert (FACT_ID, "fact", 0.9) in seeds_arg
 
     @pytest.mark.asyncio
+    async def test_flag_on_spread_hit_already_in_graph_stage_not_duplicated(self):
+        """Codex P2 (PR #556): a node already surfaced by Stage 2 heart-graph
+        (or Path A) must not be re-appended by heart-seeded spreading — in
+        the decision-less path ``seen_ids`` is empty, so the dedup set must
+        include prior graph-stage outputs, not just direct heart/chunk ids."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={FACT_ID: _make_neighbors_for_heart_seed()},
+            contradictions=[],
+            decision_results=[],  # decision-less: seen_ids starts empty
+        )
+        brain._resolve_node_descriptions = AsyncMock(
+            return_value={
+                HEART_GRAPH_DECISION_ID: ("decision via heart graph", resolved_at)
+            }
+        )
+        settings = _make_settings(
+            spreading_activation_enabled="true",
+            spreading_heart_seeds_enabled=True,
+        )
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(HEART_GRAPH_DECISION_ID, "decision", 0.6)]),
+        ):
+            results, _stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert sum(1 for r in results if r.id == HEART_GRAPH_DECISION_ID) == 1, (
+            "Stage-2 graph result must not be re-appended by spreading"
+        )
+
+    @pytest.mark.asyncio
     async def test_flag_on_spread_hit_already_in_candidates_not_duplicated(self):
         """A spreading hit that is already a heart candidate (e.g. the
         EPISODE_ID heart result) must not append a second ranked row."""

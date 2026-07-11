@@ -687,14 +687,21 @@ async def _run_stages(
                             for d in decision_results[: settings.graph_recall_max_expand]
                         ] + heart_fact_seeds
                         # Heart-seeded spreading re-reaches existing heart/
-                        # chunk candidates constantly — exclude them so the
-                        # same item never ranks twice. Flag-gated so the
+                        # chunk candidates AND prior graph-stage outputs
+                        # (Stage 2 decisions, Path A neighbors) constantly —
+                        # exclude all of them so the same item never ranks
+                        # twice (codex P2, PR #556: in the decision-less
+                        # path seen_ids starts empty, so graph-stage ids
+                        # must be excluded here too). Flag-gated so the
                         # decision-only path stays byte-identical.
                         candidate_ids: set[UUID] = set()
                         if heart_fact_seeds:
-                            candidate_ids = {hr.id for hr in acc.heart_results} | {
-                                item[0] for item in acc.chunk_results
-                            }
+                            candidate_ids = (
+                                {hr.id for hr in acc.heart_results}
+                                | {item[0] for item in acc.chunk_results}
+                                | {n.id for n in acc.heart_graph_decisions}
+                                | {n.id for n in acc.heart_graph_memory_neighbors}
+                            )
                         activated = await spreading_activation_search(
                             sa_session, brain.agent_id, seeds, settings,
                             limit=_SPREADING_OVERFETCH_LIMIT,
