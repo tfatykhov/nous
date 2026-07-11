@@ -81,11 +81,15 @@ async def spreading_activation_search(
     agent_id: str,
     seed_nodes: list[tuple[UUID, str, float]],
     settings: Settings,
+    limit: int = 20,
 ) -> list[tuple[UUID, str, float]]:
     """Run spreading activation CTE and return activated nodes.
 
     Args:
         seed_nodes: List of (node_id, node_type, score) from vector search
+        limit: max activated rows returned. Callers that post-filter the
+            results (e.g. the pipeline's content-resolution drop, PR #555)
+            should over-fetch so dropped rows don't consume the window.
 
     Returns:
         List of (node_id, node_type, total_activation) sorted by activation desc
@@ -98,6 +102,7 @@ async def spreading_activation_search(
         "decay": settings.spreading_activation_decay,
         "max_depth": settings.spreading_activation_max_depth,
         "agent_id": agent_id,
+        "result_limit": int(limit),
     }
     for i, (nid, ntype, score) in enumerate(seed_nodes):
         values_parts.append(f"(CAST(:id_{i} AS UUID), CAST(:type_{i} AS VARCHAR), CAST(:score_{i} AS FLOAT))")
@@ -136,7 +141,7 @@ async def spreading_activation_search(
         FROM activation
         GROUP BY id, node_type
         ORDER BY total_activation DESC
-        LIMIT 20
+        LIMIT :result_limit
     """)
 
     result = await session.execute(sql, params)

@@ -867,6 +867,66 @@ class TestSpreadingContentResolution:
         )
 
     @pytest.mark.asyncio
+    async def test_spreading_overfetches_and_caps_after_resolution(self):
+        """Codex P2 round 5 (PR #555): the CTE's hard LIMIT ran BEFORE the
+        resolution drop, so dropped rows consumed the window. The pipeline
+        must over-fetch (limit=40) and cap appended results at 20 AFTER
+        resolution, so drops backfill from lower-ranked valid nodes."""
+        # 30 resolvable hits: first 10 unresolvable (dropped), next 20 resolve.
+        hits = [(UUID(int=1000 + i), "fact", 0.9 - i * 0.01) for i in range(30)]
+        resolved = {
+            nid: (f"content {i}", datetime(2026, 1, 5, tzinfo=UTC))
+            for i, (nid, _t, _a) in enumerate(hits)
+            if i >= 10
+        }
+        heart, brain = self._spreading_fixtures(resolved=resolved)
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(return_value=hits)
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert stats.spreading_activation_used is True
+        # Over-fetch wiring: the CTE limit must be raised above the 20 cap.
+        assert search_mock.await_args.kwargs.get("limit") == 40
+        spread_ids = [r.id for r in results if r.source == "spreading_activation"]
+        # All 20 resolvable hits surface — the 10 dropped rows did not
+        # consume the cap.
+        assert len(spread_ids) == 20
+        assert set(spread_ids) == set(resolved.keys())
+
+    @pytest.mark.asyncio
+    async def test_spreading_cap_bounds_appended_results(self):
+        """Even when everything resolves, at most 20 spreading results append."""
+        hits = [(UUID(int=2000 + i), "fact", 0.9 - i * 0.01) for i in range(30)]
+        resolved = {
+            nid: (f"content {i}", datetime(2026, 1, 5, tzinfo=UTC))
+            for i, (nid, _t, _a) in enumerate(hits)
+        }
+        heart, brain = self._spreading_fixtures(resolved=resolved)
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=hits),
+        ):
+            results, _stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        spread_ids = [r.id for r in results if r.source == "spreading_activation"]
+        assert len(spread_ids) == 20
+        # Highest-activation resolvable hits win the cap (order preserved).
+        assert spread_ids == [nid for nid, _t, _a in hits[:20]]
+
+    @pytest.mark.asyncio
     async def test_true_mode_skips_density_query(self):
         heart, brain = self._spreading_fixtures(resolved={})
         settings = _make_settings(spreading_activation_enabled="true")

@@ -42,6 +42,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Spreading-activation result window: at most this many activated nodes are
+# appended per recall (the CTE's historic LIMIT). The CTE is over-fetched at
+# 2x so rows dropped by content resolution (inactive/foreign/dangling —
+# codex P2 round 5, PR #555) backfill from lower-ranked valid nodes instead
+# of consuming the window.
+_SPREADING_RESULT_CAP = 20
+_SPREADING_OVERFETCH_LIMIT = 40
+
 # Spreading-activation density gate: TTL cache per Brain instance.
 # Density only moves at sleep-cycle cadence (densifier/pruning), so paying
 # the graph_edges aggregate on EVERY recall with decision hits is pure
@@ -665,7 +673,8 @@ async def _run_stages(
                             for d in decision_results[: settings.graph_recall_max_expand]
                         ]
                         activated = await spreading_activation_search(
-                            sa_session, brain.agent_id, seeds, settings
+                            sa_session, brain.agent_id, seeds, settings,
+                            limit=_SPREADING_OVERFETCH_LIMIT,
                         )
                         seed_ids = {s[0] for s in seeds}
                         hits = [
@@ -691,7 +700,10 @@ async def _run_stages(
                             if ids_by_type
                             else {}
                         )
+                        n_appended = 0
                         for nid, ntype, activation in hits:
+                            if n_appended >= _SPREADING_RESULT_CAP:
+                                break
                             resolved = descriptions.get(nid)
                             if resolved is None or not resolved[0]:
                                 continue
@@ -707,6 +719,7 @@ async def _run_stages(
                                 )
                             )
                             seen_ids.add(nid)
+                            n_appended += 1
                     acc.spreading_activation_used = True
                 except Exception:
                     logger.debug(
