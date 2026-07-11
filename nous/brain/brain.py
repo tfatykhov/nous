@@ -1450,6 +1450,11 @@ class Brain:
         ``active=false`` is a soft-delete / supersession marker) and are simply
         ABSENT from the returned map — callers must treat a missing id as
         "drop this node".
+
+        Every lookup is agent-scoped (codex P2 round 2, PR #555):
+        ``graph_edges`` endpoints are polymorphic and not FK-protected, so a
+        miswritten edge can point at another agent's node — foreign content
+        must never resolve.
         """
         descriptions: dict[UUID, tuple[str, datetime | None]] = {}
 
@@ -1459,6 +1464,7 @@ class Brain:
             dec_result = await session.execute(
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
+                .where(Decision.agent_id == self.agent_id)
             )
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
@@ -1476,6 +1482,7 @@ class Brain:
                 select(Fact.id, Fact.content, Fact.created_at)
                 .where(Fact.id.in_(ids_by_type["fact"]))
                 .where(Fact.active == True)  # noqa: E712
+                .where(Fact.agent_id == self.agent_id)
             )
             for f in f_result.all():
                 descriptions[f.id] = (f.content, f.created_at)
@@ -1487,6 +1494,7 @@ class Brain:
             e_result = await session.execute(
                 select(Episode.id, Episode.summary, Episode.created_at)
                 .where(Episode.id.in_(ids_by_type["episode"]))
+                .where(Episode.agent_id == self.agent_id)
             )
             for e in e_result.all():
                 descriptions[e.id] = (e.summary, e.created_at)
@@ -1496,6 +1504,7 @@ class Brain:
             c_result = await session.execute(
                 select(EpisodeChunk.id, EpisodeChunk.content, EpisodeChunk.created_at)
                 .where(EpisodeChunk.id.in_(ids_by_type["chunk"]))
+                .where(EpisodeChunk.agent_id == self.agent_id)
             )
             for c in c_result.all():
                 descriptions[c.id] = (c.content, c.created_at)
@@ -1515,6 +1524,7 @@ class Brain:
                 )
                 .where(Procedure.id.in_(ids_by_type["procedure"]))
                 .where(Procedure.active == True)  # noqa: E712
+                .where(Procedure.agent_id == self.agent_id)
             )
             for p in p_result.all():
                 # Procedure.description is nullable — fall back to the NAME

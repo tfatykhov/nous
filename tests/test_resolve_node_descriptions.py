@@ -95,6 +95,29 @@ async def test_descriptionless_procedure_resolves_to_name(brain, session):
 
 
 @pytest.mark.asyncio
+async def test_foreign_agent_nodes_do_not_resolve(brain, session):
+    """Codex P2 round 2 (PR #555): graph_edges endpoints are polymorphic and
+    not FK-protected — a miswritten edge can point at ANOTHER agent's node.
+    The resolver must agent-scope every lookup so foreign content is never
+    surfaced (absent from the map => dropped by callers)."""
+    foreign = Fact(
+        id=uuid.uuid4(),
+        agent_id="some-other-agent",
+        content="foreign agent secret fact",
+        active=True,
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    session.add(foreign)
+    await session.flush()
+
+    resolved = await brain._resolve_node_descriptions(
+        session, {"fact": [foreign.id]}
+    )
+
+    assert foreign.id not in resolved
+
+
+@pytest.mark.asyncio
 async def test_empty_input_returns_empty_map(brain, session):
     resolved = await brain._resolve_node_descriptions(session, {})
     assert resolved == {}
