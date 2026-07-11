@@ -15,7 +15,7 @@ import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
-from nous.storage.models import Episode, Fact, GraphEdge, Procedure
+from nous.storage.models import Decision, Episode, Fact, GraphEdge, Procedure
 
 
 @pytest_asyncio.fixture
@@ -263,6 +263,44 @@ async def test_neighbors_backfills_past_dropped_rows(brain, session):
         "the dropped high-weight foreign edge must not starve the window; "
         "the valid lower-weight neighbor must backfill"
     )
+
+
+@pytest.mark.asyncio
+async def test_abandoned_decisions_do_not_resolve(brain, session):
+    """Codex P2 round 8 (PR #555): ``Brain._query`` suppresses abandoned
+    decisions (outcome='failure' AND confidence=0.0) by default
+    (brain.py filter_clauses). The resolver must mirror that predicate so
+    spreading/Path-A cannot reintroduce abandoned/noise decisions that
+    normal brain search hides."""
+    abandoned = Decision(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        description="abandoned decision",
+        category="process",
+        stakes="low",
+        outcome="failure",
+        confidence=0.0,
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    real_failure = Decision(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        description="genuine failed decision",
+        category="process",
+        stakes="low",
+        outcome="failure",
+        confidence=0.8,
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    session.add_all([abandoned, real_failure])
+    await session.flush()
+
+    resolved = await brain._resolve_node_descriptions(
+        session, {"decision": [abandoned.id, real_failure.id]}
+    )
+
+    assert abandoned.id not in resolved
+    assert resolved[real_failure.id][0] == "genuine failed decision"
 
 
 @pytest.mark.asyncio

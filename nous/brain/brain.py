@@ -1464,13 +1464,18 @@ class Brain:
         """
         descriptions: dict[UUID, tuple[str, datetime | None]] = {}
 
-        # Decision: existing behavior, kept verbatim so consumers that only
-        # use decision neighbors observe no change.
+        # Decision: mirrors Brain._query's default suppression of abandoned
+        # decisions (outcome='failure' AND confidence=0.0 — codex P2 round 8,
+        # PR #555) so graph traversal cannot reintroduce noise decisions
+        # that normal brain search hides.
         if ids_by_type.get("decision"):
             dec_result = await session.execute(
                 select(Decision.id, Decision.description, Decision.created_at)
                 .where(Decision.id.in_(ids_by_type["decision"]))
                 .where(Decision.agent_id == self.agent_id)
+                .where(
+                    ~((Decision.outcome == "failure") & (Decision.confidence == 0.0))
+                )
             )
             for d in dec_result.all():
                 descriptions[d.id] = (d.description, d.created_at)
