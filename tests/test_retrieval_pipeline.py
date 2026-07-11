@@ -860,7 +860,9 @@ class TestSpreadingContentResolution:
                 settings=settings, limit=10,
             )
 
-        assert stats.spreading_activation_used is True
+        # Zero hits resolved -> the pipeline falls back to 1-hop (round-6
+        # refinement), so spreading is reported unused for this recall.
+        assert stats.spreading_activation_used is False
         assert all(r.id != SPREAD_FACT_ID for r in results), (
             "unresolvable spreading node must be dropped, not surfaced as a "
             "placeholder"
@@ -925,6 +927,38 @@ class TestSpreadingContentResolution:
         assert len(spread_ids) == 20
         # Highest-activation resolvable hits win the cap (order preserved).
         assert spread_ids == [nid for nid, _t, _a in hits[:20]]
+
+    @pytest.mark.asyncio
+    async def test_spreading_zero_resolved_falls_back_to_one_hop(self):
+        """If every spreading hit is dropped by resolution (inactive/foreign/
+        dangling), fall back to 1-hop expansion instead of returning an empty
+        graph expansion. Pre-PR#555 this state was unreachable (placeholders
+        always appended); the drop made it real."""
+        heart, brain = self._spreading_fixtures(resolved={})
+        one_hop = NeighborResult(
+            id=UUID(int=3001),
+            node_type="decision",
+            description="one-hop fallback neighbor",
+            edge_relation="supports",
+            edge_weight=0.8,
+            created_at=datetime(2026, 1, 5, tzinfo=UTC),
+        )
+        brain.neighbors = AsyncMock(return_value=[one_hop])
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(SPREAD_FACT_ID, "fact", 0.6)]),
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert any(r.id == one_hop.id for r in results), (
+            "1-hop fallback must fire when spreading resolves nothing"
+        )
+        assert stats.spreading_activation_used is False
 
     @pytest.mark.asyncio
     async def test_true_mode_skips_density_query(self):

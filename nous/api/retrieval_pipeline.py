@@ -720,7 +720,17 @@ async def _run_stages(
                             )
                             seen_ids.add(nid)
                             n_appended += 1
-                    acc.spreading_activation_used = True
+                    if n_appended > 0:
+                        acc.spreading_activation_used = True
+                    else:
+                        # Every activated node was dropped by resolution
+                        # (inactive/foreign/dangling). Fall back to 1-hop
+                        # rather than shipping an empty graph expansion.
+                        logger.debug(
+                            "Spreading resolved 0 of %d hits; using 1-hop",
+                            len(hits),
+                        )
+                        use_spreading = False
                 except Exception:
                     logger.debug(
                         "Spreading activation failed, falling back to 1-hop"
