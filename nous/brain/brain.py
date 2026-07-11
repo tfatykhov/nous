@@ -1393,35 +1393,33 @@ class Brain:
         results = []
         for r in rows:
             ntype, rel, weight, method = edge_map[r.neighbor_id]
-            # F080 / Audit BR-1 (codex P1): an inactive/superseded procedure OR
-            # fact was filtered out of the description resolution above (both
-            # queries carry `active = true`). Drop it rather than surfacing an
-            # archived skill / superseded fact as a "[type] <uuid>" placeholder
-            # that would also consume a post-LIMIT ranking slot.
-            if ntype in ("procedure", "fact") and r.neighbor_id not in descriptions:
+            # F080 / Audit BR-1 (codex P1) + codex P2 round 3 (PR #555): an
+            # id absent from the resolver map is an inactive/superseded
+            # fact or procedure (active=true filters), a foreign-agent node
+            # (agent_id filters — graph_edges endpoints are polymorphic and
+            # not FK-protected), or a dangling edge. Drop ALL of them rather
+            # than surfacing a "[type] <uuid>" placeholder that ships no
+            # information yet consumes a post-LIMIT ranking slot.
+            if r.neighbor_id not in descriptions:
                 continue
-            if r.neighbor_id in descriptions:
-                desc, created = descriptions[r.neighbor_id]
-                # Defensive: keep placeholder if resolved description is empty
-                # (DB rows with NULL/empty content shouldn't crash retrieval).
-                if not desc:
-                    if ntype in _NOT_NULL_CONTENT_TYPES:
-                        logger.warning(
-                            "brain._neighbors: empty/NULL content on "
-                            "%s id=%s (column is declared NOT NULL — "
-                            "data integrity issue)",
-                            ntype, r.neighbor_id,
-                        )
-                    desc = f"[{ntype}] {r.neighbor_id}"
-                if created is None:
+            desc, created = descriptions[r.neighbor_id]
+            # Defensive: keep placeholder if resolved description is empty
+            # (DB rows with NULL/empty content shouldn't crash retrieval).
+            if not desc:
+                if ntype in _NOT_NULL_CONTENT_TYPES:
                     logger.warning(
-                        "brain._neighbors: NULL created_at on %s id=%s "
-                        "(column has server_default — possible migration bug)",
+                        "brain._neighbors: empty/NULL content on "
+                        "%s id=%s (column is declared NOT NULL — "
+                        "data integrity issue)",
                         ntype, r.neighbor_id,
                     )
-                    created = datetime.now(UTC)
-            else:
                 desc = f"[{ntype}] {r.neighbor_id}"
+            if created is None:
+                logger.warning(
+                    "brain._neighbors: NULL created_at on %s id=%s "
+                    "(column has server_default — possible migration bug)",
+                    ntype, r.neighbor_id,
+                )
                 created = datetime.now(UTC)
             results.append(NeighborResult(
                 id=r.neighbor_id,

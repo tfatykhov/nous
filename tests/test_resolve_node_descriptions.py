@@ -15,7 +15,7 @@ import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
-from nous.storage.models import Fact, Procedure
+from nous.storage.models import Episode, Fact, GraphEdge, Procedure
 
 
 @pytest_asyncio.fixture
@@ -115,6 +115,52 @@ async def test_foreign_agent_nodes_do_not_resolve(brain, session):
     )
 
     assert foreign.id not in resolved
+
+
+@pytest.mark.asyncio
+async def test_neighbors_drops_all_unresolved_node_types(brain, session):
+    """Codex P2 round 3 (PR #555): after agent-scoping, an unresolved
+    decision/episode/chunk must be DROPPED by ``_neighbors`` like
+    facts/procedures already are — not emitted as a ``[type] <uuid>``
+    placeholder that surfaces a foreign/dangling node as a recall
+    candidate."""
+    d1 = await brain.record(
+        RecordInput(
+            description="edge source decision",
+            confidence=0.8,
+            category="architecture",
+            stakes="low",
+            reasons=[ReasonInput(type="analysis", text="neighbors drop test")],
+        ),
+        session=session,
+    )
+    foreign_episode = Episode(
+        id=uuid.uuid4(),
+        agent_id="some-other-agent",
+        title="foreign episode",
+        summary="foreign agent episode summary",
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    session.add(foreign_episode)
+    await session.flush()
+    # Current-agent edge whose endpoint points at another agent's episode
+    # (polymorphic, not FK-protected — this can exist).
+    session.add(GraphEdge(
+        source_id=d1.id,
+        target_id=foreign_episode.id,
+        source_type="decision",
+        target_type="episode",
+        agent_id=brain.agent_id,
+        relation="related_to",
+        weight=0.9,
+    ))
+    await session.flush()
+
+    results = await brain.neighbors(d1.id, session=session)
+
+    assert all(r.id != foreign_episode.id for r in results), (
+        "foreign-agent episode must be dropped, not surfaced as a placeholder"
+    )
 
 
 @pytest.mark.asyncio
