@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, select, text
+from sqlalchemy import case, delete, func, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -1487,12 +1487,21 @@ class Brain:
 
         # Episode: heart.episodes.summary (matches _ENTITY_CONFIG fallback;
         # structured_summary preferred at densifier time but plain summary
-        # is always populated).
+        # is always populated). Mirrors the episode recall contract
+        # (episodes.py HT-1 filter; codex P2 round 4, PR #555): ongoing
+        # (active=true) OR genuinely-closed (ended_at IS NOT NULL), never
+        # deactivated-noise or abandoned rows — graph edges to suppressed
+        # episodes must not resurface them past normal recall's filters.
         if ids_by_type.get("episode"):
             e_result = await session.execute(
                 select(Episode.id, Episode.summary, Episode.created_at)
                 .where(Episode.id.in_(ids_by_type["episode"]))
                 .where(Episode.agent_id == self.agent_id)
+                .where(or_(
+                    Episode.active == True,  # noqa: E712
+                    Episode.ended_at.is_not(None),
+                ))
+                .where(Episode.outcome.is_distinct_from("abandoned"))
             )
             for e in e_result.all():
                 descriptions[e.id] = (e.summary, e.created_at)

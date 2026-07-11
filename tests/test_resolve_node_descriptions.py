@@ -164,6 +164,53 @@ async def test_neighbors_drops_all_unresolved_node_types(brain, session):
 
 
 @pytest.mark.asyncio
+async def test_episode_lifecycle_filters_applied(brain, session):
+    """Codex P2 round 4 (PR #555): the resolver must mirror the episode
+    recall contract (episodes.py HT-1 filter): include ongoing
+    (active=true) OR genuinely-closed (ended_at IS NOT NULL) episodes,
+    exclude deactivated-noise (active=false, ended_at NULL) and
+    outcome='abandoned' rows — otherwise spreading/Path-A resurface
+    episodes normal recall suppresses."""
+    closed = Episode(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        title="closed episode",
+        summary="genuinely closed episode summary",
+        active=False,
+        ended_at=datetime(2026, 1, 6, tzinfo=UTC),
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    noise = Episode(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        title="deactivated noise",
+        summary="trivial-session noise summary",
+        active=False,
+        ended_at=None,
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    abandoned = Episode(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        title="abandoned episode",
+        summary="abandoned episode summary",
+        active=True,
+        outcome="abandoned",
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    session.add_all([closed, noise, abandoned])
+    await session.flush()
+
+    resolved = await brain._resolve_node_descriptions(
+        session, {"episode": [closed.id, noise.id, abandoned.id]}
+    )
+
+    assert closed.id in resolved, "closed episodes are the ones worth recalling"
+    assert noise.id not in resolved, "deactivated-noise episodes must not resolve"
+    assert abandoned.id not in resolved, "abandoned episodes must not resolve"
+
+
+@pytest.mark.asyncio
 async def test_empty_input_returns_empty_map(brain, session):
     resolved = await brain._resolve_node_descriptions(session, {})
     assert resolved == {}
