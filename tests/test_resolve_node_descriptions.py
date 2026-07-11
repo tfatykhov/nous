@@ -15,7 +15,7 @@ import pytest_asyncio
 
 from nous.brain.brain import Brain
 from nous.brain.schemas import ReasonInput, RecordInput
-from nous.storage.models import Fact
+from nous.storage.models import Fact, Procedure
 
 
 @pytest_asyncio.fixture
@@ -67,6 +67,31 @@ async def test_resolves_content_and_drops_inactive_fact(brain, session):
     assert isinstance(resolved[active.id][1], datetime)
     assert inactive.id not in resolved
     assert resolved[decision.id][0] == "resolver decision"
+
+
+@pytest.mark.asyncio
+async def test_descriptionless_procedure_resolves_to_name(brain, session):
+    """Codex P2 (PR #555): ``Procedure.description`` is optional — a NULL
+    description must fall back to the procedure NAME (matching how normal
+    recall formats descriptionless procedures), not a ``[procedure] <uuid>``
+    placeholder that re-introduces the non-informative content this
+    resolver exists to remove."""
+    proc = Procedure(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        name="deploy-checklist",
+        description=None,
+        active=True,
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    session.add(proc)
+    await session.flush()
+
+    resolved = await brain._resolve_node_descriptions(
+        session, {"procedure": [proc.id]}
+    )
+
+    assert resolved[proc.id][0] == "deploy-checklist"
 
 
 @pytest.mark.asyncio

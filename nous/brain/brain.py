@@ -1507,14 +1507,21 @@ class Brain:
         # a live Path-A resurrection of dead skills via auto_linked edges).
         if ids_by_type.get("procedure"):
             p_result = await session.execute(
-                select(Procedure.id, Procedure.description, Procedure.created_at)
+                select(
+                    Procedure.id,
+                    Procedure.name,
+                    Procedure.description,
+                    Procedure.created_at,
+                )
                 .where(Procedure.id.in_(ids_by_type["procedure"]))
                 .where(Procedure.active == True)  # noqa: E712
             )
             for p in p_result.all():
-                # Procedure.description is nullable — fall back to placeholder
-                # so consumers don't get None.
-                desc_text = p.description or f"[procedure] {p.id}"
+                # Procedure.description is nullable — fall back to the NAME
+                # (NOT NULL; matches how recall formats descriptionless
+                # procedures), then to a placeholder so consumers never get
+                # None (codex P2, PR #555).
+                desc_text = p.description or p.name or f"[procedure] {p.id}"
                 descriptions[p.id] = (desc_text, p.created_at)
 
         return descriptions
