@@ -1348,6 +1348,12 @@ class Brain:
             )
             .subquery()
         )
+        # Over-fetch 3x (mirrors hybrid_search's limit_expanded and the
+        # spreading-branch over-fetch): the resolver below drops rows whose
+        # endpoints are inactive/foreign/dangling (codex P2 round 7,
+        # PR #555), and Path A windows are small (limit=3) — without the
+        # buffer a few bad high-weight edges starve the window. Results are
+        # capped back to ``limit`` after resolution.
         union_q = (
             select(
                 ranked.c.neighbor_id,
@@ -1358,7 +1364,7 @@ class Brain:
             )
             .where(ranked.c.rn == 1)
             .order_by(func.coalesce(ranked.c.edge_weight, -1.0).desc(), ranked.c.neighbor_id)
-            .limit(limit)
+            .limit(limit * 3)
         )
         result = await session.execute(union_q)
         rows = result.all()
@@ -1392,6 +1398,8 @@ class Brain:
         _NOT_NULL_CONTENT_TYPES = {"fact", "episode", "chunk"}
         results = []
         for r in rows:
+            if len(results) >= limit:
+                break
             ntype, rel, weight, method = edge_map[r.neighbor_id]
             # F080 / Audit BR-1 (codex P1) + codex P2 round 3 (PR #555): an
             # id absent from the resolver map is an inactive/superseded

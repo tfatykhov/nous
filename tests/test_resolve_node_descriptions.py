@@ -211,6 +211,61 @@ async def test_episode_lifecycle_filters_applied(brain, session):
 
 
 @pytest.mark.asyncio
+async def test_neighbors_backfills_past_dropped_rows(brain, session):
+    """Codex P2 round 7 (PR #555): the union SQL capped rows at ``limit``
+    BEFORE the resolver drop, so a bad high-weight edge (foreign/dangling
+    endpoint) starved small windows (Path A uses limit=3). ``_neighbors``
+    must over-fetch and cap after resolution so valid lower-weight
+    neighbors backfill."""
+    d1 = await brain.record(
+        RecordInput(
+            description="backfill source decision",
+            confidence=0.8,
+            category="architecture",
+            stakes="low",
+            reasons=[ReasonInput(type="analysis", text="backfill test")],
+        ),
+        session=session,
+    )
+    foreign_episode = Episode(
+        id=uuid.uuid4(),
+        agent_id="some-other-agent",
+        title="foreign high-weight target",
+        summary="foreign summary",
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    valid_fact = Fact(
+        id=uuid.uuid4(),
+        agent_id=brain.agent_id,
+        content="valid lower-weight neighbor fact",
+        active=True,
+        created_at=datetime(2026, 1, 5, tzinfo=UTC),
+    )
+    session.add_all([foreign_episode, valid_fact])
+    await session.flush()
+    session.add_all([
+        GraphEdge(
+            source_id=d1.id, target_id=foreign_episode.id,
+            source_type="decision", target_type="episode",
+            agent_id=brain.agent_id, relation="related_to", weight=0.9,
+        ),
+        GraphEdge(
+            source_id=d1.id, target_id=valid_fact.id,
+            source_type="decision", target_type="fact",
+            agent_id=brain.agent_id, relation="related_to", weight=0.5,
+        ),
+    ])
+    await session.flush()
+
+    results = await brain.neighbors(d1.id, limit=1, session=session)
+
+    assert [r.id for r in results] == [valid_fact.id], (
+        "the dropped high-weight foreign edge must not starve the window; "
+        "the valid lower-weight neighbor must backfill"
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_input_returns_empty_map(brain, session):
     resolved = await brain._resolve_node_descriptions(session, {})
     assert resolved == {}
