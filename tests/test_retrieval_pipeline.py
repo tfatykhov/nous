@@ -1392,3 +1392,235 @@ class TestExports:
         assert s.n_graph_expanded == 0
         assert s.n_stage_errors == {}
         assert s.contradiction_edges == []
+
+
+# ---------------------------------------------------------------------------
+# Plan 1.2 — seed_score threading for Stage 2 (heart-graph decisions) and
+# Stage 4 (1-hop expansion), and the flag-off byte-identical invariant.
+# ---------------------------------------------------------------------------
+
+
+class TestPlan12SeedScoreThreading:
+    """The converters are unit-tested in test_f065_pipeline_penalty.py; these
+    tests exercise the WIRING — the loop-level seed_score assignment — which
+    is the silent-inert failure class (converters swapped but loops never
+    thread the score)."""
+
+    @pytest.mark.asyncio
+    async def test_stage2_and_stage4_thread_seed_score_flag_on(self):
+        """E2E: a heart fact seed (0.9) with a decision neighbor (edge 0.8)
+        must produce a heart_graph result scored 0.72; a brain decision seed
+        (0.75) with a 1-hop neighbor (edge 0.7) must produce a graph_expanded
+        result scored 0.525."""
+        from uuid import uuid4
+
+        fact_seed = uuid4()
+        stage2_nbr = uuid4()
+        dec_seed = uuid4()
+        stage4_nbr = uuid4()
+        now = datetime.now(UTC)
+
+        recall = [
+            RecallResult(type="fact", id=fact_seed, summary="seed fact", score=0.9),
+        ]
+        decisions = [
+            DecisionSummary(
+                id=dec_seed, description="seed decision", confidence=0.8,
+                category="architecture", stakes="low", outcome="pending",
+                score=0.75, created_at=now,
+            ),
+        ]
+        neighbors_by_node = {
+            fact_seed: [
+                NeighborResult(
+                    id=stage2_nbr, node_type="decision",
+                    description="stage2 decision neighbor",
+                    edge_relation="evidence_for", edge_weight=0.8,
+                    created_at=now,
+                ),
+            ],
+            dec_seed: [
+                NeighborResult(
+                    id=stage4_nbr, node_type="fact",
+                    description="stage4 one-hop neighbor",
+                    edge_relation="related_to", edge_weight=0.7,
+                    created_at=now,
+                ),
+            ],
+        }
+        heart = _make_heart(recall_results=recall)
+        brain = _make_brain(
+            neighbors_by_node=neighbors_by_node,
+            contradictions=[], decision_results=decisions,
+        )
+        settings = _make_settings()
+        settings.graph_neighbor_seed_score_enabled = True
+        settings.graph_inferred_edge_penalty = 1.0
+
+        results, _ = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=20,
+        )
+        by_id = {r.id: r for r in results}
+        assert abs(by_id[stage2_nbr].score - 0.9 * 0.8) < 1e-6, (
+            f"Stage 2 neighbor must score seed(0.9)*edge(0.8), "
+            f"got {by_id[stage2_nbr].score}"
+        )
+        assert by_id[stage2_nbr].metadata.get("stage_origin") == "heart_graph"
+        assert abs(by_id[stage4_nbr].score - 0.75 * 0.7) < 1e-6, (
+            f"Stage 4 neighbor must score dec(0.75)*edge(0.7), "
+            f"got {by_id[stage4_nbr].score}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stage2_duplicate_flag_on_best_composed_path_wins(self):
+        """Two heart seeds reach the SAME decision: keep the best composed
+        (seed x edge) path — 0.4x0.9=0.36 beats 0.9x0.3=0.27; never the
+        phantom 0.9x0.9. Fresh objects per seed (shared instances hit the
+        aliasing guard by design)."""
+        from uuid import uuid4
+
+        weak_seed = uuid4()
+        strong_seed = uuid4()
+        dup_dec = uuid4()
+        now = datetime.now(UTC)
+
+        def _dec_nbr(weight):
+            return NeighborResult(
+                id=dup_dec, node_type="decision", description="shared decision",
+                edge_relation="evidence_for", edge_weight=weight,
+                created_at=now,
+            )
+
+        recall = [
+            RecallResult(type="fact", id=weak_seed, summary="weak", score=0.4),
+            RecallResult(type="episode", id=strong_seed, summary="strong", score=0.9),
+        ]
+        heart = _make_heart(recall_results=recall)
+        brain = _make_brain(
+            neighbors_by_node={
+                weak_seed: [_dec_nbr(0.9)], strong_seed: [_dec_nbr(0.3)],
+            },
+            contradictions=[], decision_results=[],
+        )
+        settings = _make_settings()
+        settings.graph_neighbor_seed_score_enabled = True
+        settings.graph_inferred_edge_penalty = 1.0
+
+        results, _ = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=20,
+        )
+        dup = next(r for r in results if r.id == dup_dec)
+        assert abs(dup.score - 0.36) < 1e-6, (
+            f"best composed path 0.4x0.9=0.36 must win, got {dup.score}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stage2_duplicate_flag_off_first_seed_wins_byte_identical(self):
+        """Flag OFF: the dedup must stay first-seed-wins (no best-path
+        replacement) so flag-off output — score AND edge metadata — stays
+        byte-identical to pre-plan-1.2 behavior (the external A/B control
+        arm depends on this)."""
+        from uuid import uuid4
+
+        first_seed = uuid4()
+        second_seed = uuid4()
+        dup_dec = uuid4()
+        now = datetime.now(UTC)
+
+        def _dec_nbr(weight, relation):
+            return NeighborResult(
+                id=dup_dec, node_type="decision", description="shared decision",
+                edge_relation=relation, edge_weight=weight,
+                created_at=now,
+            )
+
+        recall = [
+            RecallResult(type="fact", id=first_seed, summary="first", score=0.4),
+            RecallResult(type="fact", id=second_seed, summary="second", score=0.9),
+        ]
+        heart = _make_heart(recall_results=recall)
+        brain = _make_brain(
+            neighbors_by_node={
+                # Second path has the higher legacy score (0.9 edge) — under
+                # flag-off it must NOT replace the first (0.5 edge) path.
+                first_seed: [_dec_nbr(0.5, "evidence_for")],
+                second_seed: [_dec_nbr(0.9, "informed_by")],
+            },
+            contradictions=[], decision_results=[],
+        )
+        settings = _make_settings()  # seed-score flag ABSENT -> off
+
+        results, _ = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=20,
+        )
+        dup = next(r for r in results if r.id == dup_dec)
+        # Legacy formula on the FIRST path: edge(0.5) x decay(0.7) = 0.35.
+        assert abs(dup.score - 0.5 * 0.7) < 1e-6, (
+            f"flag-off dedup must stay first-seed-wins (0.35), got {dup.score}"
+        )
+        assert dup.edge_relation == "evidence_for", (
+            "flag-off must keep the first path's edge metadata"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stage4_seed_decision_neighbor_skipped_without_compare(self):
+        """A 1-hop neighbor whose id IS another seed decision (already in
+        seen_ids, never in seen_hop) must be skipped without a compare and
+        without crashing; the loop keeps collecting other neighbors."""
+        from uuid import uuid4
+
+        dec_a = uuid4()
+        dec_b = uuid4()
+        normal_nbr = uuid4()
+        now = datetime.now(UTC)
+
+        decisions = [
+            DecisionSummary(
+                id=dec_a, description="decision A", confidence=0.8,
+                category="architecture", stakes="low", outcome="pending",
+                score=0.75, created_at=now,
+            ),
+            DecisionSummary(
+                id=dec_b, description="decision B", confidence=0.7,
+                category="tooling", stakes="low", outcome="pending",
+                score=0.6, created_at=now,
+            ),
+        ]
+        neighbors_by_node = {
+            dec_a: [
+                # This neighbor IS seed decision B — must be skipped.
+                NeighborResult(
+                    id=dec_b, node_type="decision", description="decision B",
+                    edge_relation="related_to", edge_weight=0.9,
+                    created_at=now,
+                ),
+                NeighborResult(
+                    id=normal_nbr, node_type="fact", description="normal",
+                    edge_relation="related_to", edge_weight=0.7,
+                    created_at=now,
+                ),
+            ],
+        }
+        heart = _make_heart(recall_results=[])
+        brain = _make_brain(
+            neighbors_by_node=neighbors_by_node,
+            contradictions=[], decision_results=decisions,
+        )
+        settings = _make_settings()
+        settings.graph_neighbor_seed_score_enabled = True
+        settings.graph_inferred_edge_penalty = 1.0
+
+        results, _ = await run_recall_pipeline(
+            query="anything", heart=heart, brain=brain,
+            settings=settings, limit=20,
+        )
+        graph_rows = [r for r in results if r.source == "graph_expanded"]
+        graph_ids = {r.id for r in graph_rows}
+        assert normal_nbr in graph_ids, "loop must continue past the seed-id skip"
+        assert dec_b not in graph_ids, (
+            "a neighbor that IS a seed decision must not re-enter via 1-hop"
+        )
+
