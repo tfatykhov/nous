@@ -219,14 +219,12 @@ def _make_settings(
     episode_chunk_recall_limit=10,
     coherent_ranking_enabled=False,
     spreading_activation_density_threshold=3.0,
-    spreading_heart_seeds_enabled=False,
 ):
     return SimpleNamespace(
         graph_recall_enabled=graph_recall_enabled,
         cross_type_linking_enabled=cross_type_linking_enabled,
         spreading_activation_enabled=spreading_activation_enabled,
         spreading_activation_density_threshold=spreading_activation_density_threshold,
-        spreading_heart_seeds_enabled=spreading_heart_seeds_enabled,
         contradiction_detection=contradiction_detection,
         graph_recall_decay=graph_recall_decay,
         graph_recall_max_expand=graph_recall_max_expand,
@@ -1023,11 +1021,10 @@ SPREAD_NEIGHBOR_ID = UUID("88888888-8888-8888-8888-888888888888")
 
 
 class TestSpreadingHeartSeeds:
-    """F022 extension: when ``spreading_heart_seeds_enabled`` is on, the
-    spreading CTE is seeded with the top heart FACT results (RRF-scored)
-    alongside decision seeds, so spreading fires on decision-less corpora
-    and leverages the fact/chunk graph. Flag off => decision-only wiring,
-    byte-identical to today."""
+    """F022 extension (default behavior): the spreading CTE is seeded with
+    the top heart FACT results (RRF-scored) alongside decision seeds, so
+    spreading fires on decision-less corpora and leverages the fact/chunk
+    graph instead of decisions only."""
 
     def _fixtures(self, *, recall_results, decision_results, resolved):
         heart = _make_heart(recall_results=recall_results)
@@ -1040,17 +1037,14 @@ class TestSpreadingHeartSeeds:
         return heart, brain
 
     @pytest.mark.asyncio
-    async def test_flag_on_fact_seeds_fire_without_decisions(self):
+    async def test_fact_seeds_fire_without_decisions(self):
         resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
         heart, brain = self._fixtures(
             recall_results=_make_recall_results(),  # fact 0.9 + episode 0.8
             decision_results=[],
             resolved={SPREAD_NEIGHBOR_ID: ("spread-reached fact", resolved_at)},
         )
-        settings = _make_settings(
-            spreading_activation_enabled="true",
-            spreading_heart_seeds_enabled=True,
-        )
+        settings = _make_settings(spreading_activation_enabled="true")
         search_mock = AsyncMock(
             return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5)]
         )
@@ -1072,7 +1066,7 @@ class TestSpreadingHeartSeeds:
         assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
 
     @pytest.mark.asyncio
-    async def test_flag_off_keeps_decision_only_seeds(self):
+    async def test_combines_decision_and_fact_seeds(self):
         heart, brain = self._fixtures(
             recall_results=_make_recall_results(),
             decision_results=_make_decision_summaries(),
@@ -1091,38 +1085,11 @@ class TestSpreadingHeartSeeds:
             )
 
         seeds_arg = search_mock.await_args.args[2]
-        assert all(stype == "decision" for _nid, stype, _s in seeds_arg), (
-            "flag off must keep decision-only seeding (byte-identical wiring)"
-        )
-
-    @pytest.mark.asyncio
-    async def test_flag_on_combines_decision_and_fact_seeds(self):
-        heart, brain = self._fixtures(
-            recall_results=_make_recall_results(),
-            decision_results=_make_decision_summaries(),
-            resolved={},
-        )
-        settings = _make_settings(
-            spreading_activation_enabled="true",
-            spreading_heart_seeds_enabled=True,
-        )
-        search_mock = AsyncMock(return_value=[])
-
-        with patch(
-            "nous.brain.spreading_activation.spreading_activation_search",
-            search_mock,
-        ):
-            await run_recall_pipeline(
-                query="anything", heart=heart, brain=brain,
-                settings=settings, limit=10,
-            )
-
-        seeds_arg = search_mock.await_args.args[2]
         assert (DECISION_ONE_ID, "decision", 0.75) in seeds_arg
         assert (FACT_ID, "fact", 0.9) in seeds_arg
 
     @pytest.mark.asyncio
-    async def test_flag_on_spread_hit_already_in_graph_stage_not_duplicated(self):
+    async def test_spread_hit_already_in_graph_stage_not_duplicated(self):
         """Codex P2 (PR #556): a node already surfaced by Stage 2 heart-graph
         (or Path A) must not be re-appended by heart-seeded spreading — in
         the decision-less path ``seen_ids`` is empty, so the dedup set must
@@ -1139,10 +1106,7 @@ class TestSpreadingHeartSeeds:
                 HEART_GRAPH_DECISION_ID: ("decision via heart graph", resolved_at)
             }
         )
-        settings = _make_settings(
-            spreading_activation_enabled="true",
-            spreading_heart_seeds_enabled=True,
-        )
+        settings = _make_settings(spreading_activation_enabled="true")
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",
@@ -1158,7 +1122,7 @@ class TestSpreadingHeartSeeds:
         )
 
     @pytest.mark.asyncio
-    async def test_flag_on_spread_hit_already_in_candidates_not_duplicated(self):
+    async def test_spread_hit_already_in_candidates_not_duplicated(self):
         """A spreading hit that is already a heart candidate (e.g. the
         EPISODE_ID heart result) must not append a second ranked row."""
         resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
@@ -1167,10 +1131,7 @@ class TestSpreadingHeartSeeds:
             decision_results=[],
             resolved={EPISODE_ID: ("episode summary two", resolved_at)},
         )
-        settings = _make_settings(
-            spreading_activation_enabled="true",
-            spreading_heart_seeds_enabled=True,
-        )
+        settings = _make_settings(spreading_activation_enabled="true")
 
         with patch(
             "nous.brain.spreading_activation.spreading_activation_search",

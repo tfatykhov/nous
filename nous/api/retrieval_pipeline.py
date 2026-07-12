@@ -620,21 +620,20 @@ async def _run_stages(
         acc.searched_decisions = True
         decision_results = await brain.query(query, limit=limit)
 
-        # F022 extension (land-dark): heart FACT seeds for spreading. Top-3
+        # F022 extension (2026-07-11): heart FACT seeds for spreading. Top-3
         # fact results with their RRF scores — same seed shape as decision
         # seeds (coherent normalizer) and same cap as Path A's heart seeds.
-        # Lets spreading fire on decision-less corpora and leverage the
-        # fact/chunk graph instead of decisions only.
-        heart_fact_seeds: list[tuple[UUID, str, float]] = []
-        if getattr(settings, "spreading_heart_seeds_enabled", False):
-            heart_fact_seeds = [
-                (hr.id, "fact", float(hr.score))
-                for hr in acc.heart_results
-                if hr.type == "fact" and hr.score is not None
-            ][:3]
+        # Spreading fires on decision-less corpora and leverages the
+        # fact/chunk graph instead of decisions only. Default behavior per
+        # owner directive (MAB paired A/B: 0 memory regressions).
+        heart_fact_seeds: list[tuple[UUID, str, float]] = [
+            (hr.id, "fact", float(hr.score))
+            for hr in acc.heart_results
+            if hr.type == "fact" and hr.score is not None
+        ][:3]
 
-        # F022: graph expansion — expand top decisions (and, when heart
-        # seeding is enabled, fire spreading even with zero decision hits).
+        # F022: graph expansion — expand top decisions (heart seeds also
+        # fire spreading even with zero decision hits).
         if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
             seen_ids: set[UUID] = {d.id for d in decision_results}
 
@@ -692,16 +691,13 @@ async def _run_stages(
                         # exclude all of them so the same item never ranks
                         # twice (codex P2, PR #556: in the decision-less
                         # path seen_ids starts empty, so graph-stage ids
-                        # must be excluded here too). Flag-gated so the
-                        # decision-only path stays byte-identical.
-                        candidate_ids: set[UUID] = set()
-                        if heart_fact_seeds:
-                            candidate_ids = (
-                                {hr.id for hr in acc.heart_results}
-                                | {item[0] for item in acc.chunk_results}
-                                | {n.id for n in acc.heart_graph_decisions}
-                                | {n.id for n in acc.heart_graph_memory_neighbors}
-                            )
+                        # must be excluded here too).
+                        candidate_ids: set[UUID] = (
+                            {hr.id for hr in acc.heart_results}
+                            | {item[0] for item in acc.chunk_results}
+                            | {n.id for n in acc.heart_graph_decisions}
+                            | {n.id for n in acc.heart_graph_memory_neighbors}
+                        )
                         activated = await spreading_activation_search(
                             sa_session, brain.agent_id, seeds, settings,
                             limit=_SPREADING_OVERFETCH_LIMIT,

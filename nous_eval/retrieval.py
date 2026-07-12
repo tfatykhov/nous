@@ -325,20 +325,9 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "to triangulate the right default."
         ),
     ),
-    "spread_heart_on": RetrievalConfig(
-        name="spread_heart_on",
-        flags={
-            "spreading_activation_enabled": "true",
-            "spreading_heart_seeds_enabled": True,
-        },
-        description=(
-            "Spreading forced on WITH heart fact seeds (F022 extension, "
-            "2026-07-11) — top-3 RRF-scored fact results seed the CTE "
-            "alongside decisions. The ON arm of the spreading re-eval; "
-            "pair with `spread_force_off` and `spread_force_on` to "
-            "separate the mechanism's lift from the seeding change."
-        ),
-    ),
+    # NOTE (2026-07-11): heart fact seeding is now DEFAULT spreading
+    # behavior (unflagged, per owner directive + MAB no-harm A/B), so
+    # `spread_force_on` exercises it — no separate heart-seeds config.
     # ------------------------------------------------------------------
     # RRF fusion knobs. Hybrid search blends vector + keyword via
     # ``rrf_score = vector_weight/(k+v_rank) + (1-vector_weight)/(k+k_rank)``.
