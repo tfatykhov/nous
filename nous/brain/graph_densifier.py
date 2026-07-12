@@ -684,6 +684,11 @@ class GraphDensifier:
                 FROM heart.episode_decisions ed
                 JOIN heart.episodes ep
                   ON ep.id = ed.episode_id AND ep.agent_id = :agent_id
+                -- Codex PR #557 P2: episode_decisions has NO agent_id column,
+                -- so the decision side must be verified explicitly or a
+                -- cross-agent join-table row materializes a cross-agent edge.
+                JOIN brain.decisions d
+                  ON d.id = ed.decision_id AND d.agent_id = :agent_id
                 WHERE {live}
             """,
         }

@@ -2014,6 +2014,19 @@ async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
             "INSERT INTO heart.episode_decisions "
             "(episode_id, decision_id) VALUES (:eid, :did)"
         ), {"eid": ep_live, "did": decision_id})
+        # Codex PR #557 P2: episode_decisions has no agent_id — a row from
+        # agent A's episode to a decision owned by agent B must be SKIPPED,
+        # not materialized as a cross-agent discussed_in edge.
+        cross_agent_decision = uuid4()
+        await fs.execute(text(
+            "INSERT INTO brain.decisions "
+            "(id, agent_id, description, confidence, category, stakes) "
+            "VALUES (:id, :aid, 'agent B decision', 0.8, 'process', 'low')"
+        ), {"id": cross_agent_decision, "aid": agent_b})
+        await fs.execute(text(
+            "INSERT INTO heart.episode_decisions "
+            "(episode_id, decision_id) VALUES (:eid, :did)"
+        ), {"eid": ep_live, "did": cross_agent_decision})
         await fs.commit()
 
     linker = GraphLinker(db, mock_embeddings, settings, agent_a)
