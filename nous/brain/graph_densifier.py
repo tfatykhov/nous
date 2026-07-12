@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain._entity_config import _ENTITY_CONFIG
-from nous.brain.graph_constants import autobehavior_exclusion_sql
+from nous.brain.graph_constants import autobehavior_exclusion_sql, episode_live_sql
 from nous.brain.backfill_rerank import (
     ce_rerank_backfill_candidates,
     fetch_candidate_content,
@@ -210,15 +210,22 @@ class GraphDensifier:
             orphan_embedding = json.loads(raw) if isinstance(raw, str) else raw
 
         # Hybrid search: vector + keyword via RRF
-        # brain.decisions has no `active` column — disable active filter for it
+        # brain.decisions has no `active` column — disable active filter for
+        # it. Episodes: `active=false` is the closed lifecycle state, not
+        # deletion (HT-1) — filter by the liveness predicate instead of the
+        # raw flag, or closed episodes can never be link targets.
+        extra_where = "AND t.id != :orphan_id"
         has_active = entity_type != "decision"
+        if entity_type == "episode":
+            has_active = False
+            extra_where += f" AND {episode_live_sql('t.')}"
         candidates = await hybrid_search(
             session=session,
             table=table,
             embedding=orphan_embedding,
             query_text=orphan_content[:500] if orphan_content else "",
             agent_id=self._agent_id,
-            extra_where=f"AND t.id != :orphan_id",
+            extra_where=extra_where,
             extra_params={"orphan_id": orphan_id},
             limit=10,
             vector_weight=0.6,  # 60% vector, 40% keyword — gives FTS more weight than default
@@ -348,12 +355,21 @@ class GraphDensifier:
         # Source 2: Keyword search via hybrid_search (keyword-only, no embedding)
         if orphan_content:
             has_active = target_type != "decision"
+            kw_extra_where = ""
+            if target_type == "episode":
+                # Same liveness carve-out as _backfill_same_type. No live
+                # caller passes target_type="episode" today — this is
+                # consistency-hardening so a future caller doesn't silently
+                # re-inherit the active=true filter (2026-07-12 review F9).
+                has_active = False
+                kw_extra_where = f"AND {episode_live_sql('t.')}"
             keyword_hits = await hybrid_search(
                 session=session,
                 table=target_table,
                 embedding=None,  # keyword-only
                 query_text=orphan_content[:500],
                 agent_id=self._agent_id,
+                extra_where=kw_extra_where,
                 limit=5,
                 active_filter=has_active,
             )

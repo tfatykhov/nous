@@ -378,6 +378,39 @@ async def test_find_orphans_episode_liveness(db, settings, mock_embeddings):
 
 
 @pytest.mark.postgres_only
+async def test_same_type_backfill_links_orphan_to_closed_episode(
+    db, settings, mock_embeddings,
+):
+    """2026-07-12 Task 4: two closed episodes with identical stored
+    embeddings and no edges — backfilling must link them episode↔episode
+    even though both have active=false (closed lifecycle state). Before
+    the carve-out, hybrid_search's `AND t.active = true` excluded the
+    closed candidate (the orphan itself is found thanks to the Task-3
+    liveness extra_where)."""
+    from datetime import UTC, datetime
+
+    agent_id = f"f040-tgt-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    settings.ce_backfill_enabled = False
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    emb = _vec(1.0, 0.5, 0.25)
+    async with db.session() as s:
+        for _ in range(2):
+            await _insert_lifecycle_episode(
+                s, agent_id, "deploying the nous agent to production",
+                active=False, ended_at=now, outcome="success", embedding=emb,
+            )
+        await s.commit()
+
+    created = await densifier.backfill_orphan_episodes(max_count=5)
+    assert created >= 1, (
+        "orphan closed episode must link to the other closed episode"
+    )
+
+
+@pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_find_orphans_returns_unlinked(db, settings, mock_embeddings, _fix_stale_relation_constraint):
     """find_orphans returns facts that have no graph edges."""
