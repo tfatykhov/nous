@@ -200,6 +200,24 @@ class TestF053DeadEdgePrune:
         assert result is False
         assert sleep_stats.get("dead_edges_prune_error") == "RuntimeError"
 
+    @pytest.mark.asyncio
+    async def test_sql_does_not_treat_closed_episodes_as_dead(self):
+        """2026-07-12 audit: episodes.active=false is the normal CLOSED
+        lifecycle state (008.3), not deletion. The old predicate erased the
+        entire episode graph layer (657 closed prod episodes held 6 edges).
+        The episode branch must select only trivial discards
+        (active=false AND ended_at IS NULL) and abandoned marks."""
+        handler, mock_session = _make_handler()
+        await handler._phase_prune_dead_edges({})
+        sql_str = str(mock_session.execute.await_args.args[0])
+        assert "ended_at IS NULL" in sql_str, (
+            "episode dead-node branch must require ended_at IS NULL "
+            "alongside active=false (trivial-discard shape)"
+        )
+        assert "outcome = 'abandoned'" in sql_str, (
+            "episode dead-node branch must include F060.2 abandoned marks"
+        )
+
 
 # ===========================================================================
 # Integration test — real Postgres, end-to-end behavior
@@ -358,6 +376,123 @@ class TestF053Integration:
                 ), {"aid": agent_id})
                 await cs.execute(sql_text(
                     "DELETE FROM heart.facts WHERE agent_id = :aid"
+                ), {"aid": agent_id})
+                await cs.execute(sql_text(
+                    "DELETE FROM nous_system.agents WHERE id = :aid"
+                ), {"aid": agent_id})
+                await cs.commit()
+
+    @pytest.mark.asyncio
+    async def test_closed_episode_edges_survive_prune(
+        self, db, mock_embeddings,
+    ):
+        """2026-07-12 audit: fixture has one normally-closed episode
+        (active=false, ended_at set, outcome='success'), one trivial-discard
+        episode (active=false, ended_at NULL), one abandoned episode
+        (prod shape per F060.2: ended_at SET, outcome='abandoned'), each
+        with one incident edge from an active fact. Run the phase. Only the
+        trivial + abandoned episodes' edges are deleted; the closed
+        episode's edge survives."""
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock
+        from uuid import uuid4
+
+        from sqlalchemy import text as sql_text
+
+        from nous.config import Settings
+        from nous.events import EventBus
+        from nous.handlers.sleep_handler import SleepHandler
+        from nous.heart import Heart
+
+        agent_id = f"f053-ep-{uuid4().hex[:8]}"
+        now = datetime.now(UTC)
+
+        fact_id = uuid4()
+        ep_closed = uuid4()
+        ep_trivial = uuid4()
+        ep_abandoned = uuid4()
+        e_closed = uuid4()      # SURVIVES
+        e_trivial = uuid4()     # DELETED
+        e_abandoned = uuid4()   # DELETED
+
+        try:
+            async with db.session() as fs:
+                await fs.execute(sql_text(
+                    "INSERT INTO nous_system.agents (id, name) "
+                    "VALUES (:aid, :name) ON CONFLICT (id) DO NOTHING"
+                ), {"aid": agent_id, "name": "F053 episode IT agent"})
+                await fs.execute(sql_text(
+                    "INSERT INTO heart.facts (id, agent_id, content, active) "
+                    "VALUES (:id, :aid, 'anchor fact', true)"
+                ), {"id": fact_id, "aid": agent_id})
+                episodes = [
+                    # (id, active, ended_at, outcome)
+                    (ep_closed, False, now, "success"),
+                    (ep_trivial, False, None, None),
+                    # Prod shape (F060.2 sets ended_at=COALESCE(ended_at, now())):
+                    # ended_at SET — dead only via the outcome='abandoned' branch.
+                    (ep_abandoned, False, now, "abandoned"),
+                ]
+                for eid, active, ended, outcome in episodes:
+                    await fs.execute(sql_text(
+                        "INSERT INTO heart.episodes "
+                        "(id, agent_id, title, summary, active, started_at, "
+                        " ended_at, outcome) "
+                        "VALUES (:id, :aid, 'f053 ep fixture', 'summary', "
+                        "        :act, :st, :en, :oc)"
+                    ), {
+                        "id": eid, "aid": agent_id, "act": active,
+                        "st": now, "en": ended, "oc": outcome,
+                    })
+                for eid, ep in [
+                    (e_closed, ep_closed),
+                    (e_trivial, ep_trivial),
+                    (e_abandoned, ep_abandoned),
+                ]:
+                    await fs.execute(sql_text(
+                        "INSERT INTO brain.graph_edges "
+                        "(id, source_id, source_type, target_id, target_type, "
+                        " agent_id, relation, weight) "
+                        "VALUES (:id, :s, 'fact', :t, 'episode', :aid, "
+                        "        'extracted_from', 1.0)"
+                    ), {"id": eid, "s": fact_id, "t": ep, "aid": agent_id})
+                await fs.commit()
+
+            settings = Settings()
+            object.__setattr__(settings, "agent_id", agent_id)
+            object.__setattr__(settings, "dead_edge_pruning_enabled", True)
+            object.__setattr__(settings, "dead_edge_pruning_max_per_cycle", 1000)
+
+            heart = Heart(db, settings, embedding_provider=mock_embeddings)
+            brain = AsyncMock()
+            bus = MagicMock(spec=EventBus)
+            bus.on = MagicMock()
+            bus.emit = AsyncMock()
+            handler = SleepHandler(brain, heart, settings, bus, AsyncMock())
+
+            sleep_stats: dict = {}
+            assert await handler._phase_prune_dead_edges(sleep_stats) is True
+            assert sleep_stats.get("dead_edges_pruned") == 2
+
+            async with db.session() as vs:
+                rows = await vs.execute(sql_text(
+                    "SELECT id FROM brain.graph_edges WHERE agent_id = :aid"
+                ), {"aid": agent_id})
+                surviving = {r.id for r in rows}
+            assert surviving == {e_closed}, (
+                f"closed episode's edge must survive; got {surviving}"
+            )
+            await heart.close()
+        finally:
+            async with db.session() as cs:
+                await cs.execute(sql_text(
+                    "DELETE FROM brain.graph_edges WHERE agent_id = :aid"
+                ), {"aid": agent_id})
+                await cs.execute(sql_text(
+                    "DELETE FROM heart.facts WHERE agent_id = :aid"
+                ), {"aid": agent_id})
+                await cs.execute(sql_text(
+                    "DELETE FROM heart.episodes WHERE agent_id = :aid"
                 ), {"aid": agent_id})
                 await cs.execute(sql_text(
                     "DELETE FROM nous_system.agents WHERE id = :aid"

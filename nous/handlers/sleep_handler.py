@@ -1777,21 +1777,31 @@ class SleepHandler:
             if max_per_cycle <= 0:
                 return True
             from sqlalchemy import text
+
+            from nous.brain.graph_constants import episode_dead_sql
             async with self._heart.db.session() as session:
                 # `brain.decisions` has no `active` column today — decisions
                 # are append-only and reviewed-not-deleted. If/when a soft-
                 # delete is added, append a UNION ALL branch here. Including
                 # it pre-emptively would crash every sleep cycle until the
                 # column lands (review caught this).
-                sql = text("""
+                sql = text(f"""
                     WITH inactive_nodes AS (
                         SELECT id, 'fact'::text AS node_type
                         FROM heart.facts
                         WHERE agent_id = :agent_id AND active = false
                         UNION ALL
+                        -- Episodes: active=false is the NORMAL closed lifecycle
+                        -- state (008.3 — Episode._end() flips it on every session
+                        -- close), NOT a deletion marker. Only genuinely-deleted
+                        -- episodes are dead nodes: trivial discards (deactivated
+                        -- without ever ending) and F060.2 abandoned marks.
+                        -- 2026-07-12 prod audit: the old bare `active = false`
+                        -- predicate erased the entire episode graph layer
+                        -- (657 closed episodes held 6 edges).
                         SELECT id, 'episode'
                         FROM heart.episodes
-                        WHERE agent_id = :agent_id AND active = false
+                        WHERE agent_id = :agent_id AND {episode_dead_sql()}
                         UNION ALL
                         SELECT id, 'procedure'
                         FROM heart.procedures
