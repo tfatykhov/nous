@@ -98,7 +98,15 @@ async def spreading_activation_search(
             PR #556). Traversal still passes THROUGH excluded nodes.
 
     Returns:
-        List of (node_id, node_type, total_activation) sorted by activation desc
+        List of (node_id, node_type, activation) sorted by activation desc.
+        Aggregation across paths is MAX (bounded best-path), not SUM: each
+        path's activation is seed_score × ∏(weight × decay) ≤ 1 when weights
+        ≤ 1, so MAX keeps results on the seeds' [0,1] score scale and makes
+        undirected-traversal cycles score-harmless. (Plan 1.2 — SUM let
+        multi-path/cyclic nodes exceed 1.0 and dominate the RRF-sorted
+        merge.) The per-hop weight term is clamped to 1.0 in the CTE:
+        ``brain.graph_edges.weight`` has no DB CHECK, so the bound is
+        enforced here rather than assumed of every writer.
     """
     if not seed_nodes:
         return []
@@ -134,7 +142,7 @@ async def spreading_activation_search(
             SELECT
                 CASE WHEN e.source_id = a.id THEN e.target_id ELSE e.source_id END,
                 CASE WHEN e.source_id = a.id THEN e.target_type ELSE e.source_type END,
-                a.activation * COALESCE(e.weight, 1.0) * :decay,
+                a.activation * LEAST(COALESCE(e.weight, 1.0), 1.0) * :decay,
                 a.depth + 1
             FROM activation a
             JOIN brain.graph_edges e
@@ -147,7 +155,7 @@ async def spreading_activation_search(
                 AND {excl_e}
                 AND e.agent_id = :agent_id
         )
-        SELECT id, node_type, SUM(activation) AS total_activation
+        SELECT id, node_type, MAX(activation) AS total_activation
         FROM activation
         {exclude_clause}
         GROUP BY id, node_type

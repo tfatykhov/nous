@@ -307,3 +307,98 @@ async def test_spreading_excludes_supersedes_edges(brain, session):
     ids = {r[0] for r in activated}
     assert b.id in ids, "a normal edge must be traversed"
     assert c.id not in ids, "a supersedes edge must NOT be traversed by spreading activation"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_spreading_activation_is_bounded_best_path(brain, session):
+    """Plan 1.2: cross-path aggregation is MAX, not SUM. A diamond
+    (seed→A→C, seed→B→C, all weight 1.0, decay 0.5, depth 2) must give C
+    activation = one best path (1.0 × 0.5 × 0.5 = 0.25), NOT the 0.5 a
+    SUM over both paths would produce. Also pins the global bound: no
+    activation may exceed the max seed score (SUM additionally inflated
+    seeds themselves via undirected cycle returns — seed would score 1.5)."""
+    from sqlalchemy import text
+
+    from nous.brain.schemas import RecordInput
+
+    def _inp(d):
+        return RecordInput(description=d, confidence=0.8, category="architecture",
+                           stakes="low", reasons=_reasons())
+
+    seed = await brain.record(_inp("Diamond seed decision for bounded path test"), session=session)
+    a = await brain.record(_inp("Diamond left intermediate decision node"), session=session)
+    b = await brain.record(_inp("Diamond right intermediate decision node"), session=session)
+    c = await brain.record(_inp("Diamond sink decision reachable via two paths"), session=session)
+
+    async def _edge(s_id, t_id):
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+            "agent_id,relation,weight,auto_linked,extraction_method) "
+            "VALUES (:s,:t,'decision','decision',:a,'related_to',1.0,true,'deterministic')"),
+            {"s": str(s_id), "t": str(t_id), "a": brain.agent_id})
+
+    await _edge(seed.id, a.id)
+    await _edge(seed.id, b.id)
+    await _edge(a.id, c.id)
+    await _edge(b.id, c.id)
+    await session.flush()
+
+    # Explicit kwargs: exact-magnitude assertions must not inherit .env drift.
+    settings = Settings(
+        spreading_activation_decay=0.5, spreading_activation_max_depth=2,
+    )
+    activated = await spreading_activation_search(
+        session, brain.agent_id, [(seed.id, "decision", 1.0)], settings,
+    )
+    by_id = {r[0]: r[2] for r in activated}
+    assert by_id[c.id] == pytest.approx(0.25), (
+        "C must score its best single path (MAX), not the sum of both paths"
+    )
+    assert all(act <= 1.0 + 1e-9 for act in by_id.values()), (
+        "no activation may exceed the max seed score"
+    )
+    # Seed's own activation must stay its seed score, not seed + cycle returns.
+    assert by_id[seed.id] == pytest.approx(1.0)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_spreading_activation_max_across_mixed_depths(brain, session):
+    """Plan 1.2: MAX must also hold across DIFFERENT-length paths to the
+    same node. seed→X directly (0.5) plus seed→A→X (0.25): X scores 0.5
+    (best path), not 0.75 (SUM)."""
+    from sqlalchemy import text
+
+    from nous.brain.schemas import RecordInput
+
+    def _inp(d):
+        return RecordInput(description=d, confidence=0.8, category="architecture",
+                           stakes="low", reasons=_reasons())
+
+    seed = await brain.record(_inp("Mixed depth seed decision for max test"), session=session)
+    a = await brain.record(_inp("Mixed depth intermediate decision node"), session=session)
+    x = await brain.record(_inp("Mixed depth sink reachable at two depths"), session=session)
+
+    async def _edge(s_id, t_id):
+        await session.execute(text(
+            "INSERT INTO brain.graph_edges (source_id,target_id,source_type,target_type,"
+            "agent_id,relation,weight,auto_linked,extraction_method) "
+            "VALUES (:s,:t,'decision','decision',:a,'related_to',1.0,true,'deterministic')"),
+            {"s": str(s_id), "t": str(t_id), "a": brain.agent_id})
+
+    await _edge(seed.id, x.id)
+    await _edge(seed.id, a.id)
+    await _edge(a.id, x.id)
+    await session.flush()
+
+    settings = Settings(
+        spreading_activation_decay=0.5, spreading_activation_max_depth=2,
+    )
+    activated = await spreading_activation_search(
+        session, brain.agent_id, [(seed.id, "decision", 1.0)], settings,
+    )
+    by_id = {r[0]: r[2] for r in activated}
+    assert by_id[x.id] == pytest.approx(0.5), (
+        "X must take its best (depth-1) path, not accumulate the depth-2 one"
+    )
