@@ -625,6 +625,112 @@ class GraphDensifier:
         )
         return total
 
+    async def restore_episode_anchor_edges(
+        self, *, dry_run: bool = False,
+    ) -> dict[str, int]:
+        """One-shot remediation for the F053 episode-prune bug (2026-07-12).
+
+        The old prune predicate treated every closed episode as a dead node
+        and deleted its incident edges; the orphan gate (chunks keep their
+        chunk↔chunk edges → never re-orphan) made the loss permanent. This
+        restores the three DETERMINISTIC edge classes directly from their FK
+        ground truth — no embeddings, no LLM:
+
+          - chunk   → episode  ``part_of``        (episode_chunks.episode_id;
+            mirrors backfill_orphan_chunks step 1: weight 1.0, structural)
+          - fact    → episode  ``extracted_from`` (facts.source_episode_id,
+            active facts only; mirrors GraphLinker.link_episode_deterministic)
+          - episode → decision ``discussed_in``   (heart.episode_decisions;
+            mirrors GraphLinker.link_episode_deterministic — F053 destroyed
+            these too, and no other mechanism rebuilds them)
+
+        Cosine-inferred classes (episode↔episode related_to, episode→fact)
+        are NOT restored here — they heal via
+        ``scripts/backfill_f053_episode_edges.py --densify``, which MUST run
+        BEFORE this method for the historical population: these anchors
+        de-orphan every episode they touch, and F040's orphan gate then
+        skips them forever (the same ratchet this fix diagnoses).
+
+        Idempotent (ON CONFLICT DO NOTHING); only targets LIVE episodes.
+        Returns inserted counts per relation (would-insert counts when
+        ``dry_run``).
+        """
+        live = episode_live_sql("ep.")
+        # ep.agent_id scoping is defense-in-depth (FKs cannot cross agents),
+        # per the repo rule: agent-scope every side of every new query.
+        selects = {
+            "part_of": f"""
+                SELECT c.id AS source_id, c.episode_id AS target_id,
+                       'chunk' AS source_type, 'episode' AS target_type,
+                       c.agent_id, 'part_of' AS relation
+                FROM heart.episode_chunks c
+                JOIN heart.episodes ep
+                  ON ep.id = c.episode_id AND ep.agent_id = :agent_id
+                WHERE c.agent_id = :agent_id AND {live}
+            """,
+            "extracted_from": f"""
+                SELECT f.id AS source_id, f.source_episode_id AS target_id,
+                       'fact' AS source_type, 'episode' AS target_type,
+                       f.agent_id, 'extracted_from' AS relation
+                FROM heart.facts f
+                JOIN heart.episodes ep
+                  ON ep.id = f.source_episode_id AND ep.agent_id = :agent_id
+                WHERE f.agent_id = :agent_id AND f.active = TRUE AND {live}
+            """,
+            "discussed_in": f"""
+                SELECT ed.episode_id AS source_id, ed.decision_id AS target_id,
+                       'episode' AS source_type, 'decision' AS target_type,
+                       ep.agent_id, 'discussed_in' AS relation
+                FROM heart.episode_decisions ed
+                JOIN heart.episodes ep
+                  ON ep.id = ed.episode_id AND ep.agent_id = :agent_id
+                WHERE {live}
+            """,
+        }
+        results: dict[str, int] = {}
+        async with self.db.session() as session:
+            for relation, select_sql in selects.items():
+                if dry_run:
+                    count_sql = text(f"""
+                        SELECT count(*) FROM ({select_sql}) cand
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM brain.graph_edges e
+                            WHERE e.agent_id = :agent_id
+                              AND e.source_id = cand.source_id
+                              AND e.target_id = cand.target_id
+                              AND e.relation = cand.relation
+                        )
+                    """)
+                    row = await session.execute(
+                        count_sql, {"agent_id": self._agent_id},
+                    )
+                    results[relation] = int(row.scalar() or 0)
+                    continue
+                insert_sql = text(f"""
+                    INSERT INTO brain.graph_edges
+                        (source_id, target_id, source_type, target_type,
+                         agent_id, relation, weight, auto_linked,
+                         extraction_method)
+                    SELECT source_id, target_id, source_type, target_type,
+                           agent_id, relation, 1.0, TRUE, 'deterministic'
+                    FROM ({select_sql}) cand
+                    ON CONFLICT (source_id, target_id, relation) DO NOTHING
+                """)
+                result = await session.execute(
+                    insert_sql, {"agent_id": self._agent_id},
+                )
+                results[relation] = result.rowcount or 0
+            if not dry_run:
+                await session.commit()
+        if not dry_run and any(results.values()):
+            logger.info(
+                "F053 restore: %d part_of + %d extracted_from + "
+                "%d discussed_in edges re-anchored for agent_id=%s",
+                results["part_of"], results["extracted_from"],
+                results["discussed_in"], self._agent_id,
+            )
+        return results
+
     async def _link_chunk_to_same_episode_facts(
         self,
         chunk_id: UUID,
