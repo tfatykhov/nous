@@ -1013,6 +1013,238 @@ class TestSpreadingContentResolution:
 
 
 # ---------------------------------------------------------------------------
+# Heart-seeded spreading activation (NOUS_SPREADING_HEART_SEEDS_ENABLED)
+# ---------------------------------------------------------------------------
+
+
+SPREAD_NEIGHBOR_ID = UUID("88888888-8888-8888-8888-888888888888")
+
+
+class TestSpreadingHeartSeeds:
+    """F022 extension (default behavior): the spreading CTE is seeded with
+    the top heart FACT results (RRF-scored) alongside decision seeds, so
+    spreading fires on decision-less corpora and leverages the fact/chunk
+    graph instead of decisions only."""
+
+    def _fixtures(self, *, recall_results, decision_results, resolved):
+        heart = _make_heart(recall_results=recall_results)
+        brain = _make_brain(
+            neighbors_by_node={},
+            contradictions=[],
+            decision_results=decision_results,
+        )
+        brain._resolve_node_descriptions = AsyncMock(return_value=resolved)
+        return heart, brain
+
+    @pytest.mark.asyncio
+    async def test_fact_seeds_fire_without_decisions(self):
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),  # fact 0.9 + episode 0.8
+            decision_results=[],
+            resolved={SPREAD_NEIGHBOR_ID: ("spread-reached fact", resolved_at)},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(
+            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5)]
+        )
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        # Seeds: only the FACT heart result, with its RRF score — episodes
+        # are not seeds (reachable via traversal instead).
+        seeds_arg = search_mock.await_args.args[2]
+        assert seeds_arg == [(FACT_ID, "fact", 0.9)]
+        assert stats.spreading_activation_used is True
+        assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
+
+    @pytest.mark.asyncio
+    async def test_fact_scoped_recall_seeds_spreading(self):
+        """Codex P2 round 4 (PR #556): heart-seeded spreading must fire for
+        Heart-only scopes (memory_types=['fact']) — it was nested under the
+        decision-search gate, so exactly the fact-based association this
+        feature targets was unreachable without 'decision'/'all' scope."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=[],
+            resolved={SPREAD_NEIGHBOR_ID: ("spread-reached fact", resolved_at)},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(
+            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5)]
+        )
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+                memory_types=["fact"],  # Heart-only scope
+            )
+
+        brain.query.assert_not_awaited()  # decision search never ran
+        seeds_arg = search_mock.await_args.args[2]
+        assert seeds_arg == [(FACT_ID, "fact", 0.9)]
+        assert stats.spreading_activation_used is True
+        assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
+
+    @pytest.mark.asyncio
+    async def test_non_decision_spread_hits_route_to_heart_memory(self):
+        """Codex P2 round 3 (PR #556): fact/episode/chunk/procedure spreading
+        hits must carry stage_origin='heart_graph_memory' (typed Heart
+        Memory rendering, like Path A) — NOT 'brain_graph', which makes
+        recall_deep present memory facts under '=== Brain Decisions ==='."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=[],
+            resolved={
+                SPREAD_NEIGHBOR_ID: ("spread-reached fact", resolved_at),
+                GRAPH_DECISION_ID: ("spread-reached decision", resolved_at),
+            },
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[
+                (SPREAD_NEIGHBOR_ID, "fact", 0.5),
+                (GRAPH_DECISION_ID, "decision", 0.4),
+            ]),
+        ):
+            results, _stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        fact_row = next(r for r in results if r.id == SPREAD_NEIGHBOR_ID)
+        decision_row = next(r for r in results if r.id == GRAPH_DECISION_ID)
+        assert fact_row.metadata.get("stage_origin") == "heart_graph_memory"
+        assert decision_row.metadata.get("stage_origin") == "brain_graph"
+
+    @pytest.mark.asyncio
+    async def test_candidate_exclusions_pushed_into_cte(self):
+        """Codex P2 round 2 (PR #556): known duplicates (seeds, decision ids,
+        heart/chunk/graph-stage candidates) must be excluded INSIDE the
+        activation query, not post-filtered — otherwise they consume the
+        CTE's result window and novel neighbors below the limit are lost."""
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=_make_decision_summaries(),
+            resolved={},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(return_value=[])
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        excluded = search_mock.await_args.kwargs.get("exclude_ids")
+        assert excluded is not None, "exclude_ids must be passed to the CTE"
+        # Heart/chunk candidates and decision ids are known pre-call.
+        assert EPISODE_ID in excluded, "heart candidate must be CTE-excluded"
+        assert FACT_ID in excluded, "fact candidate/seed must be CTE-excluded"
+        assert DECISION_ONE_ID in excluded, "decision id must be CTE-excluded"
+
+    @pytest.mark.asyncio
+    async def test_combines_decision_and_fact_seeds(self):
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=_make_decision_summaries(),
+            resolved={},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(return_value=[])
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        seeds_arg = search_mock.await_args.args[2]
+        assert (DECISION_ONE_ID, "decision", 0.75) in seeds_arg
+        assert (FACT_ID, "fact", 0.9) in seeds_arg
+
+    @pytest.mark.asyncio
+    async def test_spread_hit_already_in_graph_stage_not_duplicated(self):
+        """Codex P2 (PR #556): a node already surfaced by Stage 2 heart-graph
+        (or Path A) must not be re-appended by heart-seeded spreading — in
+        the decision-less path ``seen_ids`` is empty, so the dedup set must
+        include prior graph-stage outputs, not just direct heart/chunk ids."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(
+            neighbors_by_node={FACT_ID: _make_neighbors_for_heart_seed()},
+            contradictions=[],
+            decision_results=[],  # decision-less: seen_ids starts empty
+        )
+        brain._resolve_node_descriptions = AsyncMock(
+            return_value={
+                HEART_GRAPH_DECISION_ID: ("decision via heart graph", resolved_at)
+            }
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(HEART_GRAPH_DECISION_ID, "decision", 0.6)]),
+        ):
+            results, _stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert sum(1 for r in results if r.id == HEART_GRAPH_DECISION_ID) == 1, (
+            "Stage-2 graph result must not be re-appended by spreading"
+        )
+
+    @pytest.mark.asyncio
+    async def test_spread_hit_already_in_candidates_not_duplicated(self):
+        """A spreading hit that is already a heart candidate (e.g. the
+        EPISODE_ID heart result) must not append a second ranked row."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=[],
+            resolved={EPISODE_ID: ("episode summary two", resolved_at)},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[(EPISODE_ID, "episode", 0.7)]),
+        ):
+            results, _stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        assert sum(1 for r in results if r.id == EPISODE_ID) == 1, (
+            "existing heart candidate must not be re-appended by spreading"
+        )
+
+
+# ---------------------------------------------------------------------------
 # _format_pipeline_text: byte-identical snapshot
 # ---------------------------------------------------------------------------
 

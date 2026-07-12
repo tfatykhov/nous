@@ -82,6 +82,7 @@ async def spreading_activation_search(
     seed_nodes: list[tuple[UUID, str, float]],
     settings: Settings,
     limit: int = 20,
+    exclude_ids: set[UUID] | None = None,
 ) -> list[tuple[UUID, str, float]]:
     """Run spreading activation CTE and return activated nodes.
 
@@ -90,6 +91,11 @@ async def spreading_activation_search(
         limit: max activated rows returned. Callers that post-filter the
             results (e.g. the pipeline's content-resolution drop, PR #555)
             should over-fetch so dropped rows don't consume the window.
+        exclude_ids: node ids the caller already has as candidates (seeds,
+            direct heart/chunk hits, prior graph-stage results). Excluded
+            INSIDE the final SELECT — before the LIMIT — so known
+            duplicates never consume the result window (codex P2,
+            PR #556). Traversal still passes THROUGH excluded nodes.
 
     Returns:
         List of (node_id, node_type, total_activation) sorted by activation desc
@@ -104,6 +110,10 @@ async def spreading_activation_search(
         "agent_id": agent_id,
         "result_limit": int(limit),
     }
+    exclude_clause = ""
+    if exclude_ids:
+        params["excluded_ids"] = [str(x) for x in exclude_ids]
+        exclude_clause = "WHERE id != ALL(CAST(:excluded_ids AS uuid[]))"
     for i, (nid, ntype, score) in enumerate(seed_nodes):
         values_parts.append(f"(CAST(:id_{i} AS UUID), CAST(:type_{i} AS VARCHAR), CAST(:score_{i} AS FLOAT))")
         params[f"id_{i}"] = str(nid)
@@ -139,6 +149,7 @@ async def spreading_activation_search(
         )
         SELECT id, node_type, SUM(activation) AS total_activation
         FROM activation
+        {exclude_clause}
         GROUP BY id, node_type
         ORDER BY total_activation DESC
         LIMIT :result_limit

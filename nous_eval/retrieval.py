@@ -325,6 +325,9 @@ _DEFAULT_CONFIGS: dict[str, RetrievalConfig] = {
             "to triangulate the right default."
         ),
     ),
+    # NOTE (2026-07-11): heart fact seeding is now DEFAULT spreading
+    # behavior (unflagged, per owner directive + MAB no-harm A/B), so
+    # `spread_force_on` exercises it — no separate heart-seeds config.
     # ------------------------------------------------------------------
     # RRF fusion knobs. Hybrid search blends vector + keyword via
     # ``rrf_score = vector_weight/(k+v_rank) + (1-vector_weight)/(k+k_rank)``.
