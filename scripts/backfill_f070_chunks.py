@@ -215,7 +215,19 @@ async def run_backfill(
             print("--dry-run set; not writing edges. Exiting.")
             return 0
 
-        embedder = EmbeddingProvider(settings)
+        # Codex PR #557 P2 (same latent bug here): EmbeddingProvider takes
+        # (api_key, model, dimensions, cache_size) — passing the Settings
+        # object binds it to api_key and every embed call auth-fails
+        # silently. Chunk passes work off STORED embeddings so this script's
+        # writes were unaffected, but the construction was still wrong.
+        embedder = None
+        if settings.openai_api_key:
+            embedder = EmbeddingProvider(
+                api_key=settings.openai_api_key,
+                model=settings.embedding_model,
+                dimensions=settings.embedding_dimensions,
+                cache_size=settings.embedding_cache_size,
+            )
         linker = GraphLinker(
             db=db, embedder=embedder, settings=settings, agent_id=agent_id,
         )

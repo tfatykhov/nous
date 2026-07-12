@@ -105,7 +105,27 @@ async def run(
     db = Database(settings)
     await db.connect()
     try:
-        embedder = EmbeddingProvider(settings)
+        # Codex PR #557 P2: EmbeddingProvider takes (api_key, model,
+        # dimensions, cache_size) — passing the Settings object binds it to
+        # api_key and every embed call auth-fails silently (caught/skipped),
+        # so --densify would report success while skipping the cross-type
+        # healing. Mirror main.py's construction; without a key the
+        # same-type pass still works off stored embeddings.
+        embedder = None
+        if settings.openai_api_key:
+            embedder = EmbeddingProvider(
+                api_key=settings.openai_api_key,
+                model=settings.embedding_model,
+                dimensions=settings.embedding_dimensions,
+                cache_size=settings.embedding_cache_size,
+            )
+        elif densify and not dry_run:
+            print(
+                "WARN: OPENAI_API_KEY not set — --densify will run the "
+                "same-type pass off stored embeddings only; the episode→fact "
+                "cross-type pass needs an embedder and will be skipped.",
+                file=sys.stderr,
+            )
         linker = GraphLinker(
             db=db, embedder=embedder, settings=settings, agent_id=agent_id,
         )
