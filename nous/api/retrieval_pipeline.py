@@ -620,184 +620,186 @@ async def _run_stages(
         acc.searched_decisions = True
         decision_results = await brain.query(query, limit=limit)
 
-        # F022 extension (2026-07-11): heart FACT seeds for spreading. Top-3
-        # fact results with their RRF scores — same seed shape as decision
-        # seeds (coherent normalizer) and same cap as Path A's heart seeds.
-        # Spreading fires on decision-less corpora and leverages the
-        # fact/chunk graph instead of decisions only. Default behavior per
-        # owner directive (MAB paired A/B: 0 memory regressions).
-        heart_fact_seeds: list[tuple[UUID, str, float]] = [
-            (hr.id, "fact", float(hr.score))
-            for hr in acc.heart_results
-            if hr.type == "fact" and hr.score is not None
-        ][:3]
+    # F022 extension (2026-07-11): heart FACT seeds for spreading. Top-3
+    # fact results with their RRF scores — same seed shape as decision
+    # seeds (coherent normalizer) and same cap as Path A's heart seeds.
+    # Spreading fires on decision-less corpora and leverages the
+    # fact/chunk graph instead of decisions only. Default behavior per
+    # owner directive (MAB paired A/B: 0 memory regressions). Deliberately
+    # OUTSIDE the decision-search gate (codex P2 round 4, PR #556) so
+    # Heart-only scopes (memory_types=["fact"]) can seed spreading too.
+    heart_fact_seeds: list[tuple[UUID, str, float]] = [
+        (hr.id, "fact", float(hr.score))
+        for hr in acc.heart_results
+        if hr.type == "fact" and hr.score is not None
+    ][:3]
 
-        # F022: graph expansion — expand top decisions (heart seeds also
-        # fire spreading even with zero decision hits).
-        if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
-            seen_ids: set[UUID] = {d.id for d in decision_results}
+    # F022: graph expansion — expand top decisions (heart seeds also
+    # fire spreading even with zero decision hits / no decision scope).
+    if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
+        seen_ids: set[UUID] = {d.id for d in decision_results}
 
-            # F022 Phase 4: density-gated spreading activation
-            use_spreading = False
-            mode = str(settings.spreading_activation_enabled).lower()
-            if mode == "true":
-                # Forced on — no need to pay the density aggregate query.
-                use_spreading = True
-            elif mode != "false":
-                # auto — density-gated, TTL-cached per Brain instance.
-                try:
-                    from nous.brain.spreading_activation import (
-                        compute_graph_density,
-                        should_use_spreading_activation,
-                    )
+        # F022 Phase 4: density-gated spreading activation
+        use_spreading = False
+        mode = str(settings.spreading_activation_enabled).lower()
+        if mode == "true":
+            # Forced on — no need to pay the density aggregate query.
+            use_spreading = True
+        elif mode != "false":
+            # auto — density-gated, TTL-cached per Brain instance.
+            try:
+                from nous.brain.spreading_activation import (
+                    compute_graph_density,
+                    should_use_spreading_activation,
+                )
 
-                    now_ts = time.monotonic()
-                    cached = _density_gate_cache.get(brain)
-                    if (
-                        cached is not None
-                        and now_ts - cached[1] < _DENSITY_GATE_TTL_SECONDS
-                    ):
-                        density = cached[0]
-                    else:
-                        async with brain.db.session() as sa_session:
-                            density = await compute_graph_density(
-                                sa_session, brain.agent_id
-                            )
-                        _density_gate_cache[brain] = (density, now_ts)
-                    use_spreading = should_use_spreading_activation(
-                        settings, density
-                    )
-                except Exception:
-                    logger.debug("Density check failed, using 1-hop")
-                    acc.stage_errors["spreading_density_check"] = (
-                        acc.stage_errors.get("spreading_density_check", 0) + 1
-                    )
-
-            if use_spreading:
-                try:
-                    from nous.brain.schemas import NeighborResult
-                    from nous.brain.spreading_activation import (
-                        spreading_activation_search,
-                    )
-
+                now_ts = time.monotonic()
+                cached = _density_gate_cache.get(brain)
+                if (
+                    cached is not None
+                    and now_ts - cached[1] < _DENSITY_GATE_TTL_SECONDS
+                ):
+                    density = cached[0]
+                else:
                     async with brain.db.session() as sa_session:
-                        seeds = [
-                            (d.id, "decision", d.score or 0.5)
-                            for d in decision_results[: settings.graph_recall_max_expand]
-                        ] + heart_fact_seeds
-                        # Heart-seeded spreading re-reaches existing heart/
-                        # chunk candidates AND prior graph-stage outputs
-                        # (Stage 2 decisions, Path A neighbors) constantly —
-                        # exclude all of them so the same item never ranks
-                        # twice (codex P2, PR #556: in the decision-less
-                        # path seen_ids starts empty, so graph-stage ids
-                        # must be excluded here too).
-                        candidate_ids: set[UUID] = (
-                            {hr.id for hr in acc.heart_results}
-                            | {item[0] for item in acc.chunk_results}
-                            | {n.id for n in acc.heart_graph_decisions}
-                            | {n.id for n in acc.heart_graph_memory_neighbors}
+                        density = await compute_graph_density(
+                            sa_session, brain.agent_id
                         )
-                        seed_ids = {s[0] for s in seeds}
-                        # Known duplicates are excluded INSIDE the CTE's
-                        # final SELECT (before its LIMIT) so they never
-                        # consume the result window (codex P2 round 2,
-                        # PR #556). The python-side guards below stay as a
-                        # belt for callers/mocks that ignore exclude_ids.
-                        activated = await spreading_activation_search(
-                            sa_session, brain.agent_id, seeds, settings,
-                            limit=_SPREADING_OVERFETCH_LIMIT,
-                            exclude_ids=seed_ids | seen_ids | candidate_ids,
-                        )
-                        hits = [
-                            (nid, ntype, activation)
-                            for nid, ntype, activation in activated
-                            if nid not in seed_ids
-                            and nid not in seen_ids
-                            and nid not in candidate_ids
-                            and activation > 0.1
-                        ]
-                        # Resolve real content + created_at (shared with
-                        # brain._neighbors). Ids the resolver omits —
-                        # inactive facts/procedures, missing rows — are
-                        # DROPPED rather than surfaced as "[<ntype>] <uuid>"
-                        # placeholders that ship no information to the LLM
-                        # yet consume ranking slots.
-                        ids_by_type: dict[str, list[UUID]] = {}
-                        for nid, ntype, _activation in hits:
-                            ids_by_type.setdefault(ntype, []).append(nid)
-                        descriptions = (
-                            await brain._resolve_node_descriptions(
-                                sa_session, ids_by_type
-                            )
-                            if ids_by_type
-                            else {}
-                        )
-                        n_appended = 0
-                        for nid, ntype, activation in hits:
-                            if n_appended >= _SPREADING_RESULT_CAP:
-                                break
-                            resolved = descriptions.get(nid)
-                            if resolved is None or not resolved[0]:
-                                continue
-                            desc, created = resolved
-                            graph_expanded.append(
-                                NeighborResult(
-                                    id=nid,
-                                    node_type=ntype,
-                                    description=desc,
-                                    edge_relation="spreading_activation",
-                                    edge_weight=activation,
-                                    created_at=created or datetime.now(UTC),
-                                )
-                            )
-                            seen_ids.add(nid)
-                            n_appended += 1
-                    if n_appended > 0:
-                        acc.spreading_activation_used = True
-                    else:
-                        # Every activated node was dropped by resolution
-                        # (inactive/foreign/dangling). Fall back to 1-hop
-                        # rather than shipping an empty graph expansion.
-                        logger.debug(
-                            "Spreading resolved 0 of %d hits; using 1-hop",
-                            len(hits),
-                        )
-                        use_spreading = False
-                except Exception:
-                    logger.debug(
-                        "Spreading activation failed, falling back to 1-hop"
+                    _density_gate_cache[brain] = (density, now_ts)
+                use_spreading = should_use_spreading_activation(
+                    settings, density
+                )
+            except Exception:
+                logger.debug("Density check failed, using 1-hop")
+                acc.stage_errors["spreading_density_check"] = (
+                    acc.stage_errors.get("spreading_density_check", 0) + 1
+                )
+
+        if use_spreading:
+            try:
+                from nous.brain.schemas import NeighborResult
+                from nous.brain.spreading_activation import (
+                    spreading_activation_search,
+                )
+
+                async with brain.db.session() as sa_session:
+                    seeds = [
+                        (d.id, "decision", d.score or 0.5)
+                        for d in decision_results[: settings.graph_recall_max_expand]
+                    ] + heart_fact_seeds
+                    # Heart-seeded spreading re-reaches existing heart/
+                    # chunk candidates AND prior graph-stage outputs
+                    # (Stage 2 decisions, Path A neighbors) constantly —
+                    # exclude all of them so the same item never ranks
+                    # twice (codex P2, PR #556: in the decision-less
+                    # path seen_ids starts empty, so graph-stage ids
+                    # must be excluded here too).
+                    candidate_ids: set[UUID] = (
+                        {hr.id for hr in acc.heart_results}
+                        | {item[0] for item in acc.chunk_results}
+                        | {n.id for n in acc.heart_graph_decisions}
+                        | {n.id for n in acc.heart_graph_memory_neighbors}
                     )
-                    acc.stage_errors["spreading_activation"] = (
-                        acc.stage_errors.get("spreading_activation", 0) + 1
+                    seed_ids = {s[0] for s in seeds}
+                    # Known duplicates are excluded INSIDE the CTE's
+                    # final SELECT (before its LIMIT) so they never
+                    # consume the result window (codex P2 round 2,
+                    # PR #556). The python-side guards below stay as a
+                    # belt for callers/mocks that ignore exclude_ids.
+                    activated = await spreading_activation_search(
+                        sa_session, brain.agent_id, seeds, settings,
+                        limit=_SPREADING_OVERFETCH_LIMIT,
+                        exclude_ids=seed_ids | seen_ids | candidate_ids,
+                    )
+                    hits = [
+                        (nid, ntype, activation)
+                        for nid, ntype, activation in activated
+                        if nid not in seed_ids
+                        and nid not in seen_ids
+                        and nid not in candidate_ids
+                        and activation > 0.1
+                    ]
+                    # Resolve real content + created_at (shared with
+                    # brain._neighbors). Ids the resolver omits —
+                    # inactive facts/procedures, missing rows — are
+                    # DROPPED rather than surfaced as "[<ntype>] <uuid>"
+                    # placeholders that ship no information to the LLM
+                    # yet consume ranking slots.
+                    ids_by_type: dict[str, list[UUID]] = {}
+                    for nid, ntype, _activation in hits:
+                        ids_by_type.setdefault(ntype, []).append(nid)
+                    descriptions = (
+                        await brain._resolve_node_descriptions(
+                            sa_session, ids_by_type
+                        )
+                        if ids_by_type
+                        else {}
+                    )
+                    n_appended = 0
+                    for nid, ntype, activation in hits:
+                        if n_appended >= _SPREADING_RESULT_CAP:
+                            break
+                        resolved = descriptions.get(nid)
+                        if resolved is None or not resolved[0]:
+                            continue
+                        desc, created = resolved
+                        graph_expanded.append(
+                            NeighborResult(
+                                id=nid,
+                                node_type=ntype,
+                                description=desc,
+                                edge_relation="spreading_activation",
+                                edge_weight=activation,
+                                created_at=created or datetime.now(UTC),
+                            )
+                        )
+                        seen_ids.add(nid)
+                        n_appended += 1
+                if n_appended > 0:
+                    acc.spreading_activation_used = True
+                else:
+                    # Every activated node was dropped by resolution
+                    # (inactive/foreign/dangling). Fall back to 1-hop
+                    # rather than shipping an empty graph expansion.
+                    logger.debug(
+                        "Spreading resolved 0 of %d hits; using 1-hop",
+                        len(hits),
                     )
                     use_spreading = False
+            except Exception:
+                logger.debug(
+                    "Spreading activation failed, falling back to 1-hop"
+                )
+                acc.stage_errors["spreading_activation"] = (
+                    acc.stage_errors.get("spreading_activation", 0) + 1
+                )
+                use_spreading = False
 
-            if not use_spreading:
-                # Fall back to 1-hop expansion
-                for dec in decision_results[: settings.graph_recall_max_expand]:
-                    if dec.score is None:
-                        continue
-                    try:
-                        neighbors = await brain.neighbors(
-                            dec.id,
-                            node_type="decision",
-                            limit=settings.graph_recall_max_neighbors,
-                        )
-                        for n in neighbors:
-                            if n.id not in seen_ids:
-                                graph_expanded.append(n)
-                                seen_ids.add(n.id)
-                    except Exception:
-                        logger.debug(
-                            "Graph expansion failed for decision %s", dec.id
-                        )
-                        acc.stage_errors["decision_neighbors"] = (
-                            acc.stage_errors.get("decision_neighbors", 0) + 1
-                        )
+        if not use_spreading:
+            # Fall back to 1-hop expansion
+            for dec in decision_results[: settings.graph_recall_max_expand]:
+                if dec.score is None:
+                    continue
+                try:
+                    neighbors = await brain.neighbors(
+                        dec.id,
+                        node_type="decision",
+                        limit=settings.graph_recall_max_neighbors,
+                    )
+                    for n in neighbors:
+                        if n.id not in seen_ids:
+                            graph_expanded.append(n)
+                            seen_ids.add(n.id)
+                except Exception:
+                    logger.debug(
+                        "Graph expansion failed for decision %s", dec.id
+                    )
+                    acc.stage_errors["decision_neighbors"] = (
+                        acc.stage_errors.get("decision_neighbors", 0) + 1
+                    )
 
-            if graph_expanded:
-                acc.graph_expansion_used = True
+        if graph_expanded:
+            acc.graph_expansion_used = True
 
     acc.decision_results = decision_results
     acc.graph_expanded = graph_expanded

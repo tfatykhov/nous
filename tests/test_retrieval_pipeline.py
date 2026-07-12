@@ -1066,6 +1066,39 @@ class TestSpreadingHeartSeeds:
         assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
 
     @pytest.mark.asyncio
+    async def test_fact_scoped_recall_seeds_spreading(self):
+        """Codex P2 round 4 (PR #556): heart-seeded spreading must fire for
+        Heart-only scopes (memory_types=['fact']) — it was nested under the
+        decision-search gate, so exactly the fact-based association this
+        feature targets was unreachable without 'decision'/'all' scope."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=[],
+            resolved={SPREAD_NEIGHBOR_ID: ("spread-reached fact", resolved_at)},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(
+            return_value=[(SPREAD_NEIGHBOR_ID, "fact", 0.5)]
+        )
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            results, stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+                memory_types=["fact"],  # Heart-only scope
+            )
+
+        brain.query.assert_not_awaited()  # decision search never ran
+        seeds_arg = search_mock.await_args.args[2]
+        assert seeds_arg == [(FACT_ID, "fact", 0.9)]
+        assert stats.spreading_activation_used is True
+        assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
+
+    @pytest.mark.asyncio
     async def test_non_decision_spread_hits_route_to_heart_memory(self):
         """Codex P2 round 3 (PR #556): fact/episode/chunk/procedure spreading
         hits must carry stage_origin='heart_graph_memory' (typed Heart
