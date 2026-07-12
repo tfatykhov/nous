@@ -804,6 +804,7 @@ async def _run_stages(
 
         if not use_spreading:
             # Fall back to 1-hop expansion
+            seen_hop: dict[UUID, "NeighborResult"] = {}
             for dec in decision_results[: settings.graph_recall_max_expand]:
                 if dec.score is None:
                     continue
@@ -814,9 +815,30 @@ async def _run_stages(
                         limit=settings.graph_recall_max_neighbors,
                     )
                     for n in neighbors:
-                        if n.id not in seen_ids:
-                            graph_expanded.append(n)
-                            seen_ids.add(n.id)
+                        prev = seen_hop.get(n.id)
+                        if prev is n:
+                            # Aliasing guard — see Stage 2.
+                            continue
+                        # Plan 1.2: thread the expanding decision's score
+                        # (guaranteed non-None here by the guard above).
+                        n.seed_score = dec.score
+                        if n.id in seen_ids:
+                            # prev is None when the id is a seed decision or
+                            # a spreading leftover — skip without compare.
+                            if (
+                                prev is not None
+                                and getattr(settings, "graph_neighbor_seed_score_enabled", False)
+                                and _score_memory_neighbor(n, settings)
+                                > _score_memory_neighbor(prev, settings)
+                            ):
+                                prev.seed_score = n.seed_score
+                                prev.edge_weight = n.edge_weight
+                                prev.edge_relation = n.edge_relation
+                                prev.extraction_method = n.extraction_method
+                            continue
+                        graph_expanded.append(n)
+                        seen_hop[n.id] = n
+                        seen_ids.add(n.id)
                 except Exception:
                     logger.debug(
                         "Graph expansion failed for decision %s", dec.id
