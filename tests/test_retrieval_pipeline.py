@@ -1066,6 +1066,40 @@ class TestSpreadingHeartSeeds:
         assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
 
     @pytest.mark.asyncio
+    async def test_non_decision_spread_hits_route_to_heart_memory(self):
+        """Codex P2 round 3 (PR #556): fact/episode/chunk/procedure spreading
+        hits must carry stage_origin='heart_graph_memory' (typed Heart
+        Memory rendering, like Path A) — NOT 'brain_graph', which makes
+        recall_deep present memory facts under '=== Brain Decisions ==='."""
+        resolved_at = datetime(2026, 1, 5, tzinfo=UTC)
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=[],
+            resolved={
+                SPREAD_NEIGHBOR_ID: ("spread-reached fact", resolved_at),
+                GRAPH_DECISION_ID: ("spread-reached decision", resolved_at),
+            },
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            AsyncMock(return_value=[
+                (SPREAD_NEIGHBOR_ID, "fact", 0.5),
+                (GRAPH_DECISION_ID, "decision", 0.4),
+            ]),
+        ):
+            results, _stats = await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        fact_row = next(r for r in results if r.id == SPREAD_NEIGHBOR_ID)
+        decision_row = next(r for r in results if r.id == GRAPH_DECISION_ID)
+        assert fact_row.metadata.get("stage_origin") == "heart_graph_memory"
+        assert decision_row.metadata.get("stage_origin") == "brain_graph"
+
+    @pytest.mark.asyncio
     async def test_candidate_exclusions_pushed_into_cte(self):
         """Codex P2 round 2 (PR #556): known duplicates (seeds, decision ids,
         heart/chunk/graph-stage candidates) must be excluded INSIDE the

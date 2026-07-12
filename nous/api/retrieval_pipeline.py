@@ -1306,12 +1306,21 @@ def _graph_expanded_to_pipeline(
             ),
             edge_relation=n.edge_relation,
             # Stage origin tag — companion to _heart_graph_to_pipeline.
-            # Brain-side graph expansion (1-hop neighbors of brain seeds
-            # OR spreading activation from brain seeds) ends up under the
-            # "Brain Decisions" section. Keeping this metadata in sync
-            # with the formatter's bucketing logic is what makes the
-            # output stable under ``rerank_by_score``.
-            metadata={"stage_origin": "brain_graph"},
+            # DECISION expansion results render under "Brain Decisions".
+            # Non-decision nodes (facts/episodes/chunks/procedures reached
+            # by spreading — common with heart fact seeds) route to the
+            # typed Heart Memory section like Path A neighbors, instead of
+            # being mislabeled as decisions (codex P2 round 3, PR #556).
+            # Keeping this metadata in sync with the formatter's bucketing
+            # logic is what makes the output stable under
+            # ``rerank_by_score``.
+            metadata={
+                "stage_origin": (
+                    "brain_graph"
+                    if n.node_type == "decision"
+                    else "heart_graph_memory"
+                )
+            },
         )
         for n in graph_expanded
     ]
