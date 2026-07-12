@@ -14,6 +14,8 @@ references inside ``graph_densifier`` continue to resolve unchanged.
 
 from __future__ import annotations
 
+from nous.brain.graph_constants import episode_live_sql
+
 # Entity configuration: (table, type_name, content_column, extra_where)
 # content_column uses `t.` alias for the main table.
 _ENTITY_CONFIG: dict[str, tuple[str, str, str, str]] = {
@@ -30,7 +32,11 @@ _ENTITY_CONFIG: dict[str, tuple[str, str, str, str]] = {
         # eval-scratch orphans because of the IS NOT NULL filter; same pattern
         # on prod (78 active orphans, all NULL structured_summary).
         "COALESCE(t.structured_summary->>'summary', t.summary)",
-        "t.active = true",
+        # 2026-07-12: episodes.active=false is the normal CLOSED state
+        # (008.3), not deletion — bare `t.active = true` excluded every
+        # completed episode from backfill, so F053's over-prune could never
+        # heal. Liveness predicate mirrors HT-1's search fix.
+        episode_live_sql("t."),
     ),
     "procedure": ("heart.procedures", "procedure", "t.description", "t.active = true"),
     # F070 (2026-05-25): chunk node type. heart.episode_chunks has no `active`

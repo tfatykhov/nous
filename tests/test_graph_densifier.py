@@ -63,6 +63,22 @@ class TestEntityConfig:
         assert "tags" not in extra
 
 
+class TestEpisodeOrphanEligibility:
+    """2026-07-12: closed episodes (active=false, ended_at set) must be
+    orphan-eligible so F040 can heal the layer F053 wrongly pruned;
+    trivial discards and abandoned episodes must stay excluded."""
+
+    def test_entity_config_episode_uses_liveness_predicate(self):
+        _, _, _, extra_where = _ENTITY_CONFIG["episode"]
+        assert "ended_at IS NOT NULL" in extra_where
+        assert "IS DISTINCT FROM 'abandoned'" in extra_where
+        assert extra_where.count("t.active = true") == 1
+
+    def test_entity_config_fact_and_procedure_unchanged(self):
+        assert _ENTITY_CONFIG["fact"][3] == "t.active = true"
+        assert _ENTITY_CONFIG["procedure"][3] == "t.active = true"
+
+
 class TestGetRelation:
     def test_fact_fact(self):
         assert _get_relation("fact", "fact") == "related_to"
@@ -247,6 +263,30 @@ async def _insert_dated_fact(
     return fact_id
 
 
+async def _insert_lifecycle_episode(
+    session: AsyncSession, agent_id: str, summary: str,
+    *, active: bool, ended_at, outcome: str | None,
+    embedding: list[float] | None = None,
+) -> str:
+    """2026-07-12 F053 helper: insert an episode with explicit lifecycle
+    state (active/ended_at/outcome) and optional embedding."""
+    ep_id = uuid4()
+    emb_sql = "CAST(:emb AS vector)" if embedding is not None else "NULL"
+    params = {
+        "id": ep_id, "agent_id": agent_id, "summary": summary,
+        "act": active, "en": ended_at, "oc": outcome,
+    }
+    if embedding is not None:
+        params["emb"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+    await session.execute(text(f"""
+        INSERT INTO heart.episodes
+            (id, agent_id, summary, active, started_at, ended_at, outcome,
+             embedding)
+        VALUES (:id, :agent_id, :summary, :act, NOW(), :en, :oc, {emb_sql})
+    """), params)
+    return ep_id
+
+
 def _vec(*head: float) -> list[float]:
     """1536-dim test embedding: the given head, zero-padded."""
     return list(head) + [0.0] * (1536 - len(head))
@@ -298,6 +338,76 @@ async def test_happened_before_gate_disabled_at_zero(densifier, db, settings):
 
     n = await densifier._build_happened_before_edges()
     assert n == 1, "gate disabled -> unrelated pair still links on date order"
+
+
+@pytest.mark.postgres_only
+async def test_find_orphans_episode_liveness(db, settings, mock_embeddings):
+    """2026-07-12: a closed edge-less episode IS an orphan; a trivial
+    discard and an abandoned episode (prod shape: ended_at SET per F060.2)
+    are NOT — they're genuinely deleted."""
+    from datetime import UTC, datetime
+
+    agent_id = f"f040-ep-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    async with db.session() as s:
+        ep_closed = await _insert_lifecycle_episode(
+            s, agent_id, "closed episode", active=False, ended_at=now,
+            outcome="success",
+        )
+        ep_trivial = await _insert_lifecycle_episode(
+            s, agent_id, "trivial discard", active=False, ended_at=None,
+            outcome=None,
+        )
+        ep_abandoned = await _insert_lifecycle_episode(
+            s, agent_id, "abandoned mark", active=False, ended_at=now,
+            outcome="abandoned",
+        )
+        await s.commit()
+
+    async with db.session() as s:
+        orphans = await densifier.find_orphans(
+            "episode", 50, s, require_embedding=False,
+        )
+    orphan_ids = {oid for oid, _ in orphans}
+    assert ep_closed in orphan_ids
+    assert ep_trivial not in orphan_ids
+    assert ep_abandoned not in orphan_ids
+
+
+@pytest.mark.postgres_only
+async def test_same_type_backfill_links_orphan_to_closed_episode(
+    db, settings, mock_embeddings,
+):
+    """2026-07-12 Task 4: two closed episodes with identical stored
+    embeddings and no edges — backfilling must link them episode↔episode
+    even though both have active=false (closed lifecycle state). Before
+    the carve-out, hybrid_search's `AND t.active = true` excluded the
+    closed candidate (the orphan itself is found thanks to the Task-3
+    liveness extra_where)."""
+    from datetime import UTC, datetime
+
+    agent_id = f"f040-tgt-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    settings.ce_backfill_enabled = False
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    emb = _vec(1.0, 0.5, 0.25)
+    async with db.session() as s:
+        for _ in range(2):
+            await _insert_lifecycle_episode(
+                s, agent_id, "deploying the nous agent to production",
+                active=False, ended_at=now, outcome="success", embedding=emb,
+            )
+        await s.commit()
+
+    created = await densifier.backfill_orphan_episodes(max_count=5)
+    assert created >= 1, (
+        "orphan closed episode must link to the other closed episode"
+    )
 
 
 @pytest.mark.postgres_only
@@ -1815,3 +1925,172 @@ async def test_cross_episode_backfill_visits_every_chunk_even_when_some_link(
         f"every candidate must be attempted at least once across batches; "
         f"got {attempted_str} vs expected {expected} (created={total_created})"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-12 F053 remediation — restore_episode_anchor_edges
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_restore_is_complete_scoped_idempotent_and_prune_safe(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """The full F053 damage shape, plus the invariants around it:
+
+    Agent A fixture:
+      - LIVE closed episode: 2 chunks, 1 active fact, 1 inactive fact,
+        1 linked decision (episode_decisions row), 1 fact with NULL
+        source_episode_id (must contribute nothing).
+      - DEAD (trivial) episode: 1 chunk, 1 active fact (all skipped).
+    Agent B fixture: identical minimal live shape (1 chunk) — must be
+    untouched by agent A's run and excluded from A's dry-run counts.
+
+    Asserts: dry_run counts == real-run counts and dry_run writes
+    nothing; restored rows have exact endpoints, weight 1.0,
+    extraction_method='deterministic'; re-run inserts 0 (idempotent);
+    and — the invariant this whole plan exists for — running
+    _phase_prune_dead_edges AFTER the restore deletes none of the
+    restored edges (episode_dead_sql and episode_live_sql stay
+    complements)."""
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.events import EventBus
+    from nous.handlers.sleep_handler import SleepHandler
+    from nous.heart import Heart
+
+    agent_a = f"f053-ra-{uuid4().hex[:8]}"
+    agent_b = f"f053-rb-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    decision_id = uuid4()
+
+    async with db.session() as fs:
+        for aid in (agent_a, agent_b):
+            await fs.execute(text(
+                "INSERT INTO nous_system.agents (id, name) VALUES "
+                "(:aid, 'x') ON CONFLICT (id) DO NOTHING"
+            ), {"aid": aid})
+        await fs.commit()
+
+    async with db.session() as fs:
+        ep_live = await _insert_lifecycle_episode(
+            fs, agent_a, "live closed episode", active=False, ended_at=now,
+            outcome="success",
+        )
+        ep_dead = await _insert_lifecycle_episode(
+            fs, agent_a, "trivial discard", active=False, ended_at=None,
+            outcome=None,
+        )
+        ep_b = await _insert_lifecycle_episode(
+            fs, agent_b, "agent B closed episode", active=False, ended_at=now,
+            outcome="success",
+        )
+        chunk_l1 = await _insert_chunk(fs, agent_a, ep_live, 0, "chunk one", None)
+        chunk_l2 = await _insert_chunk(fs, agent_a, ep_live, 1, "chunk two", None)
+        await _insert_chunk(fs, agent_a, ep_dead, 0, "dead chunk", None)
+        await _insert_chunk(fs, agent_b, ep_b, 0, "agent B chunk", None)
+
+        async def _fact(aid, eid, active):
+            fid = uuid4()
+            await fs.execute(text(
+                "INSERT INTO heart.facts "
+                "(id, agent_id, content, active, source_episode_id) "
+                "VALUES (:id, :aid, 'restore fact fixture', :a, :eid)"
+            ), {"id": fid, "aid": aid, "a": active, "eid": eid})
+            return fid
+
+        fact_live = await _fact(agent_a, ep_live, True)
+        await _fact(agent_a, ep_live, False)   # inactive — skipped
+        await _fact(agent_a, ep_dead, True)    # dead parent — skipped
+        await _fact(agent_a, None, True)       # NULL FK — contributes nothing
+        await fs.execute(text(
+            "INSERT INTO brain.decisions "
+            "(id, agent_id, description, confidence, category, stakes) "
+            "VALUES (:id, :aid, 'restore decision fixture', 0.8, "
+            "        'process', 'low')"
+        ), {"id": decision_id, "aid": agent_a})
+        await fs.execute(text(
+            "INSERT INTO heart.episode_decisions "
+            "(episode_id, decision_id) VALUES (:eid, :did)"
+        ), {"eid": ep_live, "did": decision_id})
+        # Codex PR #557 P2: episode_decisions has no agent_id — a row from
+        # agent A's episode to a decision owned by agent B must be SKIPPED,
+        # not materialized as a cross-agent discussed_in edge.
+        cross_agent_decision = uuid4()
+        await fs.execute(text(
+            "INSERT INTO brain.decisions "
+            "(id, agent_id, description, confidence, category, stakes) "
+            "VALUES (:id, :aid, 'agent B decision', 0.8, 'process', 'low')"
+        ), {"id": cross_agent_decision, "aid": agent_b})
+        await fs.execute(text(
+            "INSERT INTO heart.episode_decisions "
+            "(episode_id, decision_id) VALUES (:eid, :did)"
+        ), {"eid": ep_live, "did": cross_agent_decision})
+        await fs.commit()
+
+    linker = GraphLinker(db, mock_embeddings, settings, agent_a)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_a)
+
+    expected = {"part_of": 2, "extracted_from": 1, "discussed_in": 1}
+
+    # dry_run: report without writing, agent-scoped
+    dry = await densifier.restore_episode_anchor_edges(dry_run=True)
+    assert dry == expected
+    async with db.session() as vs:
+        n = (await vs.execute(text(
+            "SELECT count(*) FROM brain.graph_edges "
+            "WHERE agent_id IN (:a, :b)"
+        ), {"a": agent_a, "b": agent_b})).scalar()
+    assert n == 0, "dry_run must not write"
+
+    # real run
+    created = await densifier.restore_episode_anchor_edges()
+    assert created == expected
+
+    async with db.session() as vs:
+        rows = (await vs.execute(text(
+            "SELECT source_id, target_id, relation, weight, "
+            "       extraction_method, agent_id "
+            "FROM brain.graph_edges "
+            "WHERE agent_id IN (:a, :b)"
+        ), {"a": agent_a, "b": agent_b})).all()
+    assert all(r.agent_id == agent_a for r in rows), "agent B must be untouched"
+    by_rel: dict = {}
+    for r in rows:
+        by_rel.setdefault(r.relation, []).append(r)
+    assert {r.source_id for r in by_rel["part_of"]} == {chunk_l1, chunk_l2}
+    assert all(r.target_id == ep_live for r in by_rel["part_of"])
+    assert by_rel["extracted_from"][0].source_id == fact_live
+    assert by_rel["extracted_from"][0].target_id == ep_live
+    assert by_rel["discussed_in"][0].source_id == ep_live
+    assert by_rel["discussed_in"][0].target_id == decision_id
+    assert all(
+        float(r.weight) == 1.0 and r.extraction_method == "deterministic"
+        for r in rows
+    )
+
+    # idempotent re-run
+    again = await densifier.restore_episode_anchor_edges()
+    assert again == {"part_of": 0, "extracted_from": 0, "discussed_in": 0}
+
+    # restore → prune interplay: the prune must NOT delete what the
+    # restore just wrote (dead/live predicates stay complements).
+    handler_settings = Settings()
+    object.__setattr__(handler_settings, "agent_id", agent_a)
+    object.__setattr__(handler_settings, "dead_edge_pruning_enabled", True)
+    object.__setattr__(handler_settings, "dead_edge_pruning_max_per_cycle", 1000)
+    heart = Heart(db, handler_settings, embedding_provider=mock_embeddings)
+    bus = MagicMock(spec=EventBus)
+    bus.on = MagicMock()
+    bus.emit = AsyncMock()
+    handler = SleepHandler(AsyncMock(), heart, handler_settings, bus, AsyncMock())
+    assert await handler._phase_prune_dead_edges({}) is True
+    async with db.session() as vs:
+        n_after = (await vs.execute(text(
+            "SELECT count(*) FROM brain.graph_edges WHERE agent_id = :a"
+        ), {"a": agent_a})).scalar()
+    assert n_after == sum(expected.values()), (
+        "prune deleted restored edges — dead/live predicates drifted"
+    )
+    await heart.close()

@@ -53,3 +53,34 @@ def autobehavior_exclusion_sql(col_prefix: str = "") -> str:
         f"{p}relation NOT IN ({rels}) "
         f"AND ({p}extraction_method IS NULL OR {p}extraction_method NOT IN ({methods}))"
     )
+
+
+# --- episode lifecycle vs deletion (2026-07-12 F053 audit) ---
+# `heart.episodes.active` is OVERLOADED: on facts/procedures `active=false`
+# means soft-deleted, but on episodes it is the normal CLOSED lifecycle
+# state (008.3 — `Episode._end()` sets it on every session close). Graph
+# consumers that treat `active=false` as "dead node" erase the episode
+# graph layer (prod 2026-07-12: 657 closed episodes held 6 edges). HT-1
+# hit the same trap in episode search; these fragments mirror its fixed
+# predicate (heart/episodes.py::search). Genuinely-deleted episodes are
+# only: trivial discards (deactivated without ever ending) and F060.2
+# abandoned marks.
+
+
+def episode_dead_sql(col_prefix: str = "") -> str:
+    """SQL boolean fragment selecting genuinely-deleted episodes only."""
+    p = col_prefix
+    return (
+        f"(({p}active = false AND {p}ended_at IS NULL) "
+        f"OR {p}outcome = 'abandoned')"
+    )
+
+
+def episode_live_sql(col_prefix: str = "") -> str:
+    """Complement of :func:`episode_dead_sql` for row selection: ongoing
+    or genuinely-closed episodes, excluding abandoned."""
+    p = col_prefix
+    return (
+        f"(({p}active = true OR {p}ended_at IS NOT NULL) "
+        f"AND {p}outcome IS DISTINCT FROM 'abandoned')"
+    )
