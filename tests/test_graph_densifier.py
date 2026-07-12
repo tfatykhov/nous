@@ -63,6 +63,22 @@ class TestEntityConfig:
         assert "tags" not in extra
 
 
+class TestEpisodeOrphanEligibility:
+    """2026-07-12: closed episodes (active=false, ended_at set) must be
+    orphan-eligible so F040 can heal the layer F053 wrongly pruned;
+    trivial discards and abandoned episodes must stay excluded."""
+
+    def test_entity_config_episode_uses_liveness_predicate(self):
+        _, _, _, extra_where = _ENTITY_CONFIG["episode"]
+        assert "ended_at IS NOT NULL" in extra_where
+        assert "IS DISTINCT FROM 'abandoned'" in extra_where
+        assert extra_where.count("t.active = true") == 1
+
+    def test_entity_config_fact_and_procedure_unchanged(self):
+        assert _ENTITY_CONFIG["fact"][3] == "t.active = true"
+        assert _ENTITY_CONFIG["procedure"][3] == "t.active = true"
+
+
 class TestGetRelation:
     def test_fact_fact(self):
         assert _get_relation("fact", "fact") == "related_to"
@@ -247,6 +263,30 @@ async def _insert_dated_fact(
     return fact_id
 
 
+async def _insert_lifecycle_episode(
+    session: AsyncSession, agent_id: str, summary: str,
+    *, active: bool, ended_at, outcome: str | None,
+    embedding: list[float] | None = None,
+) -> str:
+    """2026-07-12 F053 helper: insert an episode with explicit lifecycle
+    state (active/ended_at/outcome) and optional embedding."""
+    ep_id = uuid4()
+    emb_sql = "CAST(:emb AS vector)" if embedding is not None else "NULL"
+    params = {
+        "id": ep_id, "agent_id": agent_id, "summary": summary,
+        "act": active, "en": ended_at, "oc": outcome,
+    }
+    if embedding is not None:
+        params["emb"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
+    await session.execute(text(f"""
+        INSERT INTO heart.episodes
+            (id, agent_id, summary, active, started_at, ended_at, outcome,
+             embedding)
+        VALUES (:id, :agent_id, :summary, :act, NOW(), :en, :oc, {emb_sql})
+    """), params)
+    return ep_id
+
+
 def _vec(*head: float) -> list[float]:
     """1536-dim test embedding: the given head, zero-padded."""
     return list(head) + [0.0] * (1536 - len(head))
@@ -298,6 +338,43 @@ async def test_happened_before_gate_disabled_at_zero(densifier, db, settings):
 
     n = await densifier._build_happened_before_edges()
     assert n == 1, "gate disabled -> unrelated pair still links on date order"
+
+
+@pytest.mark.postgres_only
+async def test_find_orphans_episode_liveness(db, settings, mock_embeddings):
+    """2026-07-12: a closed edge-less episode IS an orphan; a trivial
+    discard and an abandoned episode (prod shape: ended_at SET per F060.2)
+    are NOT — they're genuinely deleted."""
+    from datetime import UTC, datetime
+
+    agent_id = f"f040-ep-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    linker = GraphLinker(db, mock_embeddings, settings, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent_id)
+
+    async with db.session() as s:
+        ep_closed = await _insert_lifecycle_episode(
+            s, agent_id, "closed episode", active=False, ended_at=now,
+            outcome="success",
+        )
+        ep_trivial = await _insert_lifecycle_episode(
+            s, agent_id, "trivial discard", active=False, ended_at=None,
+            outcome=None,
+        )
+        ep_abandoned = await _insert_lifecycle_episode(
+            s, agent_id, "abandoned mark", active=False, ended_at=now,
+            outcome="abandoned",
+        )
+        await s.commit()
+
+    async with db.session() as s:
+        orphans = await densifier.find_orphans(
+            "episode", 50, s, require_embedding=False,
+        )
+    orphan_ids = {oid for oid, _ in orphans}
+    assert ep_closed in orphan_ids
+    assert ep_trivial not in orphan_ids
+    assert ep_abandoned not in orphan_ids
 
 
 @pytest.mark.postgres_only
