@@ -1762,11 +1762,15 @@ class Settings(BaseSettings):
     chunk_consolidation_enabled: bool = Field(
         default=False,
         description=(
-            "F070 (2026-05-25). When true, sleep cycle and EpisodeSummarizer "
-            "build graph edges to/from heart.episode_chunks rows. Fixes the "
-            "gap that chunks have zero edges (audit 2026-05-25 found 1,775 "
-            "edges, all fact↔fact / procedure↔procedure). Required for "
-            "adjacency boost and F022 spreading activation to reach chunks."
+            "F070 (2026-05-25). When true, the sleep-cycle graph backfill "
+            "(GraphDensifier.backfill_orphan_chunks + the F070.1 "
+            "cross-episode pass) builds graph edges to/from "
+            "heart.episode_chunks rows. Fixes the gap that chunks have "
+            "zero edges (audit 2026-05-25 found 1,775 edges, all "
+            "fact↔fact / procedure↔procedure). Required for adjacency "
+            "boost and F022 spreading activation to reach chunks. "
+            "(The EpisodeSummarizer writes chunk ROWS via F067; it never "
+            "writes chunk edges.)"
         ),
     )
     graph_backfill_max_chunks: int = Field(
