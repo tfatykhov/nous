@@ -1066,6 +1066,36 @@ class TestSpreadingHeartSeeds:
         assert any(r.id == SPREAD_NEIGHBOR_ID for r in results)
 
     @pytest.mark.asyncio
+    async def test_candidate_exclusions_pushed_into_cte(self):
+        """Codex P2 round 2 (PR #556): known duplicates (seeds, decision ids,
+        heart/chunk/graph-stage candidates) must be excluded INSIDE the
+        activation query, not post-filtered — otherwise they consume the
+        CTE's result window and novel neighbors below the limit are lost."""
+        heart, brain = self._fixtures(
+            recall_results=_make_recall_results(),
+            decision_results=_make_decision_summaries(),
+            resolved={},
+        )
+        settings = _make_settings(spreading_activation_enabled="true")
+        search_mock = AsyncMock(return_value=[])
+
+        with patch(
+            "nous.brain.spreading_activation.spreading_activation_search",
+            search_mock,
+        ):
+            await run_recall_pipeline(
+                query="anything", heart=heart, brain=brain,
+                settings=settings, limit=10,
+            )
+
+        excluded = search_mock.await_args.kwargs.get("exclude_ids")
+        assert excluded is not None, "exclude_ids must be passed to the CTE"
+        # Heart/chunk candidates and decision ids are known pre-call.
+        assert EPISODE_ID in excluded, "heart candidate must be CTE-excluded"
+        assert FACT_ID in excluded, "fact candidate/seed must be CTE-excluded"
+        assert DECISION_ONE_ID in excluded, "decision id must be CTE-excluded"
+
+    @pytest.mark.asyncio
     async def test_combines_decision_and_fact_seeds(self):
         heart, brain = self._fixtures(
             recall_results=_make_recall_results(),

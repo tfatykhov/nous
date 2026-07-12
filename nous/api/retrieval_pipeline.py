@@ -698,11 +698,17 @@ async def _run_stages(
                             | {n.id for n in acc.heart_graph_decisions}
                             | {n.id for n in acc.heart_graph_memory_neighbors}
                         )
+                        seed_ids = {s[0] for s in seeds}
+                        # Known duplicates are excluded INSIDE the CTE's
+                        # final SELECT (before its LIMIT) so they never
+                        # consume the result window (codex P2 round 2,
+                        # PR #556). The python-side guards below stay as a
+                        # belt for callers/mocks that ignore exclude_ids.
                         activated = await spreading_activation_search(
                             sa_session, brain.agent_id, seeds, settings,
                             limit=_SPREADING_OVERFETCH_LIMIT,
+                            exclude_ids=seed_ids | seen_ids | candidate_ids,
                         )
-                        seed_ids = {s[0] for s in seeds}
                         hits = [
                             (nid, ntype, activation)
                             for nid, ntype, activation in activated
