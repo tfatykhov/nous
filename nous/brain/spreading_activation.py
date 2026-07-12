@@ -142,7 +142,13 @@ async def spreading_activation_search(
             SELECT
                 CASE WHEN e.source_id = a.id THEN e.target_id ELSE e.source_id END,
                 CASE WHEN e.source_id = a.id THEN e.target_type ELSE e.source_type END,
-                a.activation * LEAST(COALESCE(e.weight, 1.0), 1.0) * :decay,
+                -- Clamp the weight term at 1.0 (no DB CHECK on
+                -- graph_edges.weight). CASE, not LEAST: the suite's default
+                -- SQLite backend has no LEAST() (codex PR #558 P2).
+                a.activation
+                    * CASE WHEN COALESCE(e.weight, 1.0) > 1.0 THEN 1.0
+                           ELSE COALESCE(e.weight, 1.0) END
+                    * :decay,
                 a.depth + 1
             FROM activation a
             JOIN brain.graph_edges e
