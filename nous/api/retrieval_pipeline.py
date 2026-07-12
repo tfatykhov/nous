@@ -473,7 +473,7 @@ async def _run_stages(
         and settings.graph_recall_enabled
         and settings.cross_type_linking_enabled
     ):
-        seen_graph_ids: set[UUID] = set()
+        seen_graph: dict[UUID, "NeighborResult"] = {}
         for hr in acc.heart_results[:3]:
             if hr.type in ("fact", "episode"):
                 try:
@@ -491,9 +491,36 @@ async def _run_stages(
                         neighbor_type="decision",
                     )
                     for n in neighbors:
-                        if n.node_type == "decision" and n.id not in seen_graph_ids:
-                            acc.heart_graph_decisions.append(n)
-                            seen_graph_ids.add(n.id)
+                        if n.node_type != "decision":
+                            continue
+                        prev = seen_graph.get(n.id)
+                        if prev is n:
+                            # Aliasing guard: the same object reached again
+                            # (shared instances from mocks) must not have
+                            # its stored seed_score overwritten below.
+                            continue
+                        # Plan 1.2: thread the seed's retrieval score
+                        # (nullable — None stays None so the scorer's
+                        # legacy fallback fires; never coerce to 0.0).
+                        n.seed_score = hr.score
+                        if prev is not None:
+                            # Best-composed-path replacement (same rule as
+                            # Stage 2b :578-596) is part of the seed-score
+                            # mechanism — flag-gated so flag-off dedup
+                            # stays first-seed-wins, byte-identical to the
+                            # pre-plan-1.2 behavior.
+                            if (
+                                getattr(settings, "graph_neighbor_seed_score_enabled", False)
+                                and _score_memory_neighbor(n, settings)
+                                > _score_memory_neighbor(prev, settings)
+                            ):
+                                prev.seed_score = n.seed_score
+                                prev.edge_weight = n.edge_weight
+                                prev.edge_relation = n.edge_relation
+                                prev.extraction_method = n.extraction_method
+                            continue
+                        acc.heart_graph_decisions.append(n)
+                        seen_graph[n.id] = n
                 except Exception:
                     # 3a: log (was silent) so a graph-expansion outage is
                     # diagnosable, not just counted. Still non-fatal.
@@ -1198,13 +1225,15 @@ def _f065_provenance_penalty(
 def _heart_graph_to_pipeline(
     heart_graph: list["NeighborResult"], settings: "Settings"
 ) -> list[PipelineResult]:
-    decay = settings.graph_recall_decay
     return [
         PipelineResult(
             id=n.id,
             type="decision",  # Only decision neighbors are appended at this stage
             description=n.description,
-            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
+            # Plan 1.2: shared Path-A scorer — seed×edge×penalty when the
+            # seed-score flag is on and Stage 2 threaded seed_score; exact
+            # legacy edge×decay×penalty otherwise.
+            score=_score_memory_neighbor(n, settings),
             source="graph_expanded",
             edge_relation=n.edge_relation,
             # Stage origin tag — the formatter uses this to bucket
@@ -1294,13 +1323,17 @@ def _decisions_to_pipeline(
 def _graph_expanded_to_pipeline(
     graph_expanded: list["NeighborResult"], settings: "Settings"
 ) -> list[PipelineResult]:
-    decay = settings.graph_recall_decay
     return [
         PipelineResult(
             id=n.id,
             type=n.node_type,  # type: ignore[arg-type]
             description=n.description,
-            score=_f065_provenance_penalty(n, n.edge_weight, decay, settings),
+            # Plan 1.2: shared Path-A scorer. 1-hop rows (Stage 4 threads
+            # seed_score=dec.score) score seed×edge×penalty under the flag;
+            # spreading rows keep seed_score=None by design (their activation
+            # already composes the seed per hop, bounded by the MAX
+            # aggregation) and fall through to the legacy activation×decay.
+            score=_score_memory_neighbor(n, settings),
             source=(
                 "spreading_activation"
                 if n.edge_relation == "spreading_activation"

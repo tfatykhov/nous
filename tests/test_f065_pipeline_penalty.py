@@ -29,15 +29,19 @@ def _neighbor(
     method: str = "heuristic",
     relation: str = "related_to",
     weight: float = 1.0,
+    seed_score: float | None = None,
+    node_type: str = "decision",
+    description: str = "x",
 ) -> NeighborResult:
     return NeighborResult(
         id=uuid.uuid4(),
-        node_type="decision",
-        description="x",
+        node_type=node_type,
+        description=description,
         edge_relation=relation,
         edge_weight=weight,
         created_at=datetime.now(UTC),
         extraction_method=method,
+        seed_score=seed_score,
     )
 
 
@@ -116,3 +120,64 @@ class TestPipelineHelpers:
         hg = _heart_graph_to_pipeline([inferred], settings)
         assert ge[0].score == pytest.approx(0.85 * decay)
         assert hg[0].score == pytest.approx(0.85 * decay)
+
+
+class TestSeedScoreScoring:
+    """Plan 1.2: Stage 2 / Stage 4 converters join Path A's seed-anchored
+    scale via the shared _score_memory_neighbor — seed × edge × penalty
+    when graph_neighbor_seed_score_enabled and the loop threaded a
+    seed_score; exact legacy formula otherwise."""
+
+    def test_heart_graph_to_pipeline_uses_seed_score_when_flag_on(self) -> None:
+        settings = Settings(
+            graph_neighbor_seed_score_enabled=True,
+            graph_inferred_edge_penalty=0.5,
+            graph_recall_decay=0.7,
+        )
+        n = _neighbor(method="inferred", weight=0.8, seed_score=0.9)
+        [res] = _heart_graph_to_pipeline([n], settings)
+        assert res.score == pytest.approx(0.9 * 0.8 * 0.5)
+
+    def test_heart_graph_to_pipeline_legacy_when_flag_off_or_no_seed(self) -> None:
+        """Flag off, or seed_score None (spreading rows / legacy callers),
+        must reproduce the pre-plan-1.2 formula edge × decay × penalty
+        exactly — the byte-identical flag-off invariant."""
+        settings = Settings(
+            graph_neighbor_seed_score_enabled=False,
+            graph_recall_decay=0.7,
+        )
+        n = _neighbor(weight=0.8, seed_score=0.9)
+        [res] = _heart_graph_to_pipeline([n], settings)
+        assert res.score == pytest.approx(0.8 * 0.7)
+
+        settings_on = Settings(
+            graph_neighbor_seed_score_enabled=True,
+            graph_recall_decay=0.7,
+        )
+        n2 = _neighbor(weight=0.8, seed_score=None)
+        [res2] = _heart_graph_to_pipeline([n2], settings_on)
+        assert res2.score == pytest.approx(0.8 * 0.7)
+
+    def test_graph_expanded_to_pipeline_uses_seed_score_for_one_hop(self) -> None:
+        """1-hop expansion rows (seed_score threaded) score seed×edge×penalty
+        under the flag; spreading rows (seed_score None, edge_weight = bounded
+        activation) keep activation × decay."""
+        settings = Settings(
+            graph_neighbor_seed_score_enabled=True,
+            graph_recall_decay=0.7,
+        )
+        one_hop = _neighbor(
+            node_type="fact", description="f", weight=0.7, seed_score=0.6,
+        )
+        spreading = _neighbor(
+            node_type="fact", description="f2",
+            relation="spreading_activation", weight=0.4,
+        )
+        res = {
+            r.description: r
+            for r in _graph_expanded_to_pipeline([one_hop, spreading], settings)
+        }
+        assert res["f"].score == pytest.approx(0.6 * 0.7)
+        # Spreading branch: observed once the converter swap lands (Step 4);
+        # pins the forward regression that spreading stays on activation×decay.
+        assert res["f2"].score == pytest.approx(0.4 * 0.7)

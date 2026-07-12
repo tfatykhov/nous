@@ -176,8 +176,10 @@ class NeighborResult(BaseModel):
     # or for rows that somehow slip through the migration with NULL.
     extraction_method: str = "heuristic"
     # Retrieval score of the SEED this neighbor was expanded from (Path A
-    # graph-neighbor scoring fix). Set by run_recall_pipeline Stage 2b when
-    # the neighbor is collected; consumed by _heart_graph_memory_to_pipeline
-    # when graph_neighbor_seed_score_enabled. None for neighbors built outside
-    # that path (e.g. decision expansion, spreading activation).
+    # graph-neighbor scoring fix). Set by run_recall_pipeline when the
+    # neighbor is collected (Stage 2b since Path A; Stage 2 decision
+    # expansion and Stage 4 1-hop since plan 1.2); consumed by the pipeline
+    # converters via _score_memory_neighbor when
+    # graph_neighbor_seed_score_enabled. Spreading-activation rows keep None
+    # BY DESIGN — their activation already composes the seed score per hop.
     seed_score: float | None = None
