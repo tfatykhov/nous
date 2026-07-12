@@ -1286,7 +1286,11 @@ def _score_memory_neighbor(n: "NeighborResult", settings: "Settings") -> float:
             if (n.extraction_method or "heuristic") == "inferred"
             else 1.0
         )
-        return n.seed_score * n.edge_weight * penalty
+        # Clamp the edge term at 1.0 — graph_edges.weight has no DB CHECK,
+        # so a >1 edge would push a seed-scored neighbor above the
+        # direct-hit scale, reintroducing the inflation plan 1.2 removes
+        # (codex PR #558 P2; mirrors the spreading-CTE clamp).
+        return n.seed_score * min(n.edge_weight, 1.0) * penalty
     return _f065_provenance_penalty(n, n.edge_weight, settings.graph_recall_decay, settings)
 
 

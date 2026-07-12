@@ -158,6 +158,20 @@ class TestSeedScoreScoring:
         [res2] = _heart_graph_to_pipeline([n2], settings_on)
         assert res2.score == pytest.approx(0.8 * 0.7)
 
+    def test_seed_score_path_clamps_edge_weight_above_one(self) -> None:
+        """graph_edges.weight has no DB CHECK <= 1; a rogue 1.3 edge must not
+        push a seed-scored neighbor above the direct-hit scale (codex PR #558
+        P2 — mirrors the spreading-CTE clamp)."""
+        settings = Settings(
+            graph_neighbor_seed_score_enabled=True,
+            graph_recall_decay=0.7,
+        )
+        n = _neighbor(weight=1.3, seed_score=0.9)
+        [res] = _heart_graph_to_pipeline([n], settings)
+        assert res.score == pytest.approx(0.9 * 1.0), (
+            "edge term must clamp at 1.0, not multiply seed by 1.3"
+        )
+
     def test_graph_expanded_to_pipeline_uses_seed_score_for_one_hop(self) -> None:
         """1-hop expansion rows (seed_score threaded) score seed×edge×penalty
         under the flag; spreading rows (seed_score None, edge_weight = bounded
