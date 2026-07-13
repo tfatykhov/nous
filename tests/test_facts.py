@@ -6,17 +6,20 @@ Heart methods receive the test session via the session parameter (P1-1).
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import update
 
 from nous.heart import (
     EpisodeInput,
     FactDetail,
     FactInput,
 )
+from nous.storage.models import Fact
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -541,3 +544,74 @@ class TestFactSupersessionThresholdConfigurable:
 
         assert fact.active is True, "Similarity 0.82 < threshold 0.90 should NOT supersede"
         assert fact.superseded_by is None
+
+
+# ---------------------------------------------------------------------------
+# 8. test_get_superseded_contents_maps_and_caps
+# ---------------------------------------------------------------------------
+
+
+async def test_get_superseded_contents_maps_and_caps(heart, session):
+    """get_superseded_contents returns up to 2 superseded contents, newest first.
+
+    OLDs may be inactive — that is the normal supersession end-state.
+    Empty input must short-circuit without issuing SQL.
+    """
+    # Arrange: create the superseder fact (NEW).
+    # Contents must exceed the fact_min_content_chars floor (default 30).
+    new_fact = await heart.learn(
+        _fact_input(content="new content superseder: earth is definitely round"),
+        session=session,
+    )
+    assert isinstance(new_fact, FactDetail), f"learn returned {type(new_fact)}"
+    new_id = new_fact.id
+
+    # Create three OLD facts
+    old1 = await heart.learn(
+        _fact_input(content="old1 content: earth was believed to be flat pancake"),
+        session=session,
+    )
+    assert isinstance(old1, FactDetail)
+    old2 = await heart.learn(
+        _fact_input(content="old2 content: earth was believed to be a cube shape"),
+        session=session,
+    )
+    assert isinstance(old2, FactDetail)
+    old3 = await heart.learn(
+        _fact_input(content="old3 content: earth was believed to be a disc shape"),
+        session=session,
+    )
+    assert isinstance(old3, FactDetail)
+
+    # Set superseded_by = new_id on all three OLDs (inactive, as in real supersession).
+    # Assign distinct created_at so that OLD3 is newest → returned first.
+    base_time = datetime.now(timezone.utc)
+    await session.execute(
+        update(Fact).where(Fact.id == old1.id).values(
+            superseded_by=new_id, active=False,
+            created_at=base_time - timedelta(minutes=2),
+        )
+    )
+    await session.execute(
+        update(Fact).where(Fact.id == old2.id).values(
+            superseded_by=new_id, active=False,
+            created_at=base_time - timedelta(minutes=1),
+        )
+    )
+    await session.execute(
+        update(Fact).where(Fact.id == old3.id).values(
+            superseded_by=new_id, active=False,
+            created_at=base_time,  # newest
+        )
+    )
+
+    # Act
+    result = await heart.get_superseded_contents([new_id], session=session)
+
+    # Assert: only NEW is a key; cap 2; newest (old3) first
+    assert set(result.keys()) == {new_id}
+    assert len(result[new_id]) == 2
+    assert result[new_id][0] == "old3 content: earth was believed to be a disc shape"   # newest first
+
+    # Empty input must short-circuit without SQL
+    assert await heart.get_superseded_contents([], session=session) == {}

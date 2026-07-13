@@ -615,6 +615,7 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Brain.query failed during context build: %s", e)
 
+        facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
         if budget.facts > 0 and "fact" not in skip_types:
             try:
@@ -634,6 +635,8 @@ class ContextEngine:
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
                     # value drops out of the injected set and the agent sees the current one.
                     facts = self._resolve_recency(facts)
+                    pin_k = getattr(self._settings, "fact_pin_top_k", 0)
+                    pinned_facts = list(facts[:pin_k]) if pin_k > 0 else []
                     # F017: Staleness penalty (before boosts)
                     facts = self._apply_staleness_penalty(facts)
                     # F10: apply_frame_boost (preserved from existing pipeline)
@@ -649,6 +652,23 @@ class ContextEngine:
                     facts = self._apply_usage_boost(facts, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
                     facts = self._apply_relevance_filter(facts, "fact")
+                    if pinned_facts:
+                        facts = self._reinsert_pinned(pinned_facts, facts)
+
+                    # Supersession lineage: build a str(id)->contents dict for
+                    # _format_facts.  Never mutate fact objects (may be
+                    # _ScoredWrapper with __slots__).
+                    _lineage_by_id: dict[str, list[str]] = {}
+                    lineage_mode = getattr(self._settings, "supersession_lineage_mode", "off")
+                    if lineage_mode != "off" and facts:
+                        try:
+                            _fact_uuids = [f.id for f in facts if getattr(f, "id", None)]
+                            _lineage_raw = await self._heart.get_superseded_contents(
+                                _fact_uuids, session=session
+                            )
+                            _lineage_by_id = {str(k): v for k, v in _lineage_raw.items()}
+                        except Exception:
+                            logger.debug("Supersession lineage fetch failed", exc_info=True)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
@@ -661,7 +681,12 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(f, "score", 0) or 0
 
                     logger.info("Tier3 facts after pipeline: %d remaining", len(facts))
-                    facts_text = self._format_facts(facts)
+                    facts_injected = bool(facts)
+                    facts_text = self._format_facts(
+                        facts,
+                        full_top_n=getattr(self._settings, "fact_format_full_top_n", 0),
+                        lineage=_lineage_by_id or None,
+                    )
                     facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
                     sections.append(
                         ContextSection(
@@ -674,6 +699,27 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
+
+        # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
+        # agent to recall before answering. Fires on search failure too (the
+        # except path leaves facts_injected False) and when dedup/filters empty
+        # the list (facts_injected evaluated on the FINAL list) — both desired.
+        if (
+            getattr(self._settings, "recall_backstop_enabled", False)
+            and budget.facts > 0
+            and "fact" not in skip_types
+            and not facts_injected
+        ):
+            _bs_text = self._recall_backstop_text()
+            sections.append(
+                ContextSection(
+                    priority=2,
+                    label="Memory Retrieval Notice",
+                    content=_bs_text,
+                    token_estimate=self._estimate_tokens(_bs_text),
+                    tier="dynamic",
+                )
+            )
 
         # 7. F080 §14.7: graph-primary procedure selection — preloads the BODIES of
         # procedures activated via K-line graph edges from recalled facts/decisions,
@@ -1154,6 +1200,24 @@ class ContextEngine:
 
         return results
 
+    def _reinsert_pinned(self, pinned: list, survivors: list) -> list:
+        """Guarantee pinned facts appear in the injected list.
+
+        Pinned facts the pipeline dropped are re-inserted AT THE FRONT (they
+        are the strongest direct hits, and front position also protects them
+        from budget truncation, which cuts from the tail). Survivors keep
+        their pipeline order. Facts the recency resolver tagged superseded
+        are never re-inserted — the pin must not resurrect a stale value the
+        resolver demoted (c12 failure class).
+        """
+        surviving_ids = {str(getattr(f, "id", "")) for f in survivors}
+        dropped = [
+            p for p in pinned
+            if str(getattr(p, "id", "")) not in surviving_ids
+            and getattr(p, "recency_status", None) != "superseded"
+        ]
+        return dropped + survivors
+
     def _apply_staleness_penalty(self, results: list) -> list:
         """Apply time-decay penalty to relevance scores (F017 Phase 5)."""
         if not self._settings.staleness_penalty_enabled:
@@ -1358,21 +1422,40 @@ class ContextEngine:
                         older.score = (getattr(older, "score", None) or 0.0) * 0.3
         return facts
 
-    def _format_facts(self, facts: list) -> str:
+    def _recall_backstop_text(self) -> str:
+        """Instruction injected when pre-turn fact retrieval came back empty."""
+        return (
+            "Pre-turn memory retrieval found no relevant stored facts for this input. "
+            "Before answering any question about prior conversations, stored knowledge, "
+            "or user-specific information, call recall_deep with a focused query — "
+            "do not answer such questions from general knowledge alone."
+        )
+
+    def _format_facts(
+        self,
+        facts: list,
+        *,
+        full_top_n: int = 0,
+        lineage: dict[str, list[str]] | None = None,
+    ) -> str:
         """Format facts for context.
 
         Format: - [subject]: content_truncated [confidence: N.NN]
-        Truncates content to 200 chars at word boundary.
+        Truncates content at fact_format_max_chars (word boundary); the first
+        ``full_top_n`` facts render untruncated. ``lineage`` maps str(fact.id)
+        -> superseded contents (consumed by the supersession-lineage feature;
+        passed as a dict because pipeline items may be _ScoredWrapper objects
+        whose __slots__ forbid attribute writes).
         """
         lines = []
-        for f in facts:
+        max_len = getattr(self._settings, "fact_format_max_chars", 200)
+        for idx, f in enumerate(facts):
             content = getattr(f, "content", "")
             conf = getattr(f, "confidence", 1.0)
             subject = getattr(f, "subject", None)
 
-            # Truncate at word boundary
-            max_len = 200
-            if len(content) > max_len:
+            # Truncate at word boundary (top-N exempt)
+            if idx >= full_top_n and len(content) > max_len:
                 truncated = content[:max_len].rsplit(" ", 1)[0]
                 content = truncated + "..."
 
@@ -1380,10 +1463,19 @@ class ContextEngine:
             status = getattr(f, "recency_status", None)
             rtag = f" [{status} {getattr(f, 'recency_date', '') or ''}]".rstrip() if status else ""
 
+            # Supersession lineage (off|tag|named): dict-threaded, keyed str(id).
+            olds = (lineage or {}).get(str(getattr(f, "id", "")))
+            mode = getattr(self._settings, "supersession_lineage_mode", "off")
+            ltag = ""
+            if olds and mode == "tag":
+                ltag = " [current — supersedes an earlier belief]"
+            elif olds and mode == "named":
+                ltag = f' (supersedes earlier belief: "{olds[0][:120]}")'
+
             if subject:
-                lines.append(f"- [{subject}] {content}{rtag} [confidence: {conf:.2f}]")
+                lines.append(f"- [{subject}] {content}{rtag}{ltag} [confidence: {conf:.2f}]")
             else:
-                lines.append(f"- {content}{rtag} [confidence: {conf:.2f}]")
+                lines.append(f"- {content}{rtag}{ltag} [confidence: {conf:.2f}]")
         return "\n".join(lines)
 
     def _format_procedures(self, procedures: list) -> str:

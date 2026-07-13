@@ -195,6 +195,45 @@ class Settings(BaseSettings):
     relevance_min_results: dict[str, int] = Field(default_factory=dict)
     relevance_max_results: dict[str, int] = Field(default_factory=dict)
 
+    # Pre-turn fact render depth (2026-07-13 plan). Defaults preserve the
+    # legacy hardcoded 200-char cap byte-for-byte. NOTE: max_chars is read
+    # inside _format_facts, so raising it also affects the User Profile
+    # section (shared formatter) — intended.
+    fact_format_max_chars: int = Field(
+        default=200, ge=50,
+        description="Per-fact char cap in pre-turn context rendering (_format_facts). Was hardcoded 200.",
+    )
+    fact_format_full_top_n: int = Field(
+        default=0, ge=0,
+        description="Render the top-N facts in the Relevant Facts section untruncated (0 = all capped).",
+    )
+    fact_pin_top_k: int = Field(
+        default=0, ge=0,
+        description=(
+            "Pin the top-K post-recency-resolve fact search hits into pre-turn "
+            "context, bypassing diversity/dedup/relevance demotion (0 = off). "
+            "Facts tagged superseded by the recency resolver are never pinned. "
+            "Remedy for the counterfactual-fact injection miss (2026-07-13 plan)."
+        ),
+    )
+    supersession_lineage_mode: Literal["off", "tag", "named"] = Field(
+        default="off",
+        description=(
+            "Annotate pre-turn injected facts that supersede an earlier fact: "
+            "'tag' = generic [current — supersedes an earlier belief] marker; "
+            "'named' = quotes the superseded content (anchoring risk — A/B before prod); "
+            "'off' = byte-identical legacy rendering."
+        ),
+    )
+    recall_backstop_enabled: bool = Field(
+        default=False,
+        description=(
+            "When pre-turn fact retrieval yields ZERO surviving facts, inject a "
+            "system-prompt instruction to call recall_deep before answering "
+            "memory questions. Deterministic trigger (empty set), no score thresholds."
+        ),
+    )
+
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 

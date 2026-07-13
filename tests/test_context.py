@@ -445,7 +445,7 @@ def _make_context_engine_light():
 
     brain = MagicMock()
     heart = MagicMock()
-    settings = MagicMock()
+    settings = Settings(_env_file=None)
     return ContextEngine(brain, heart, settings, identity_prompt="test")
 
 
