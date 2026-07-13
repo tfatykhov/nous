@@ -940,6 +940,11 @@ class Settings(BaseSettings):
     stable_tool_set_enabled: bool = Field(
         default=True, validation_alias="NOUS_STABLE_TOOL_SET_ENABLED"
     )
+    # Salvage tool args the model leaked as XML <parameter> tags inside a
+    # string arg (dispatch-level repair; see ToolDispatcher.dispatch).
+    tool_arg_salvage_enabled: bool = Field(
+        default=True, validation_alias="NOUS_TOOL_ARG_SALVAGE_ENABLED"
+    )
     # Kill-switch for the agent-facing decision-resolution tools
     # (resolve_decision / resolve_decisions / list_decisions). Set False to
     # un-register them; the migration + calibration filter are unconditional.

@@ -14,8 +14,10 @@ Each tool returns MCP-compliant response format and handles errors gracefully.
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -49,6 +51,101 @@ _INITIATION_ONLY_TOOLS: frozenset[str] = frozenset(
     {"store_identity", "complete_initiation"}
 )
 
+# Trailing run of leaked XML tool syntax inside a JSON string arg. The model
+# can slip from JSON tool-input into Claude's internal XML tool-call format
+# mid-string (observed in prod 2026-07-13: record_decision's description
+# string ended with '</description>\n<parameter name="confidence">0.55', so
+# the parsed input had no top-level confidence key). Anchored to end-of-string
+# so legitimate XML/HTML quoted mid-string is never touched.
+_XML_PARAM_LEAK_TAIL = re.compile(
+    r'\s*(?:</\w+>\s*)?(?:<parameter\s+name="[^"]+">[^<]*(?:</parameter>)?\s*)+$'
+)
+_XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
+
+
+def _coerce_to_schema_type(raw: str, prop_schema: dict[str, Any]) -> Any:
+    """Coerce a leaked string value to its schema-declared type.
+
+    Returns None when coercion fails — the caller treats the key as still
+    missing and falls through to the actionable error.
+    """
+    raw = raw.strip()
+    prop_type = prop_schema.get("type")
+    try:
+        if prop_type == "number":
+            return float(raw)
+        if prop_type == "integer":
+            return int(raw)
+        if prop_type == "boolean":
+            return {"true": True, "false": False}.get(raw.lower())
+        if prop_type in ("array", "object"):
+            value = json.loads(raw)
+            return value if isinstance(value, list | dict) else None
+        return raw  # string / untyped
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def _salvage_leaked_args(
+    tool_name: str,
+    args: dict[str, Any],
+    missing: list[str],
+    schema: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Recover schema-required args leaked as XML <parameter> tags.
+
+    Scans top-level string arg values for a trailing leak run, extracts any
+    of the missing keys found there, type-coerces them per the schema, and
+    strips the leaked tail from the host string. Returns (args, still_missing)
+    — unchanged inputs when nothing salvageable is found.
+    """
+    properties = schema.get("properties", {})
+    salvaged: dict[str, Any] = {}
+    cleaned: dict[str, str] = {}
+    for host_key, host_value in args.items():
+        if not isinstance(host_value, str):
+            continue
+        tail = _XML_PARAM_LEAK_TAIL.search(host_value)
+        if not tail:
+            continue
+        found_in_host = False
+        for leaked_key, leaked_raw in _XML_PARAM_LEAK_PAIR.findall(tail.group(0)):
+            if leaked_key not in missing or leaked_key in salvaged:
+                continue
+            value = _coerce_to_schema_type(leaked_raw, properties.get(leaked_key, {}))
+            if value is None:
+                continue
+            salvaged[leaked_key] = value
+            found_in_host = True
+            logger.warning(
+                "Salvaged leaked tool arg %s.%s=%r from inside %r (model "
+                "emitted XML <parameter> syntax in a JSON string value)",
+                tool_name,
+                leaked_key,
+                value,
+                host_key,
+            )
+        if found_in_host:
+            cleaned[host_key] = host_value[: tail.start()]
+    if not salvaged:
+        return args, missing
+    return {**args, **cleaned, **salvaged}, [k for k in missing if k not in salvaged]
+
+
+def _required_handler_params(handler: Callable[..., Any]) -> set[str]:
+    """Parameter names the handler cannot be invoked without."""
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return set()
+    return {
+        p.name
+        for p in sig.parameters.values()
+        if p.default is inspect.Parameter.empty
+        and p.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
 
 class ToolDispatcher:
     """Registers tool handlers and dispatches tool calls from the API.
@@ -64,6 +161,7 @@ class ToolDispatcher:
         *,
         tool_schema_cache_enabled: bool = True,
         stable_tool_set_enabled: bool = True,
+        arg_salvage_enabled: bool = True,
     ) -> None:
         self._handlers: dict[str, Callable[..., Any]] = {}
         self._schemas: dict[str, dict[str, Any]] = {}  # P0-7 fix
@@ -73,6 +171,9 @@ class ToolDispatcher:
         # superset so the Anthropic prompt-cache prefix isn't busted on frame
         # change (tools sit at the front of the cacheable prefix).
         self._stable_tool_set_enabled = stable_tool_set_enabled
+        # Repair model-emitted input where a required arg leaked as an XML
+        # <parameter> tag inside another string arg (see _salvage_leaked_args).
+        self._arg_salvage_enabled = arg_salvage_enabled
 
     def register(self, name: str, handler: Callable[..., Any], schema: dict[str, Any]) -> None:
         """Register a tool handler with its JSON schema."""
@@ -97,6 +198,31 @@ class ToolDispatcher:
         if not handler:
             return f"Unknown tool: {name}", True
         try:
+            # Guard the **args unpacking below: validate schema-required keys
+            # up front and, when one is missing, try to salvage a value the
+            # model leaked as an XML <parameter> tag inside another string
+            # arg (observed prod failure mode, 2026-07-13). Only error when
+            # the handler signature would actually raise — schema-required
+            # keys with handler defaults keep today's lenient behavior.
+            schema = self._schemas.get(name) or {}
+            missing = [k for k in schema.get("required") or [] if k not in args]
+            if missing and self._arg_salvage_enabled:
+                args, missing = _salvage_leaked_args(name, args, missing, schema)
+            if missing:
+                hard_missing = [
+                    k for k in missing if k in _required_handler_params(handler)
+                ]
+                if hard_missing:
+                    provided = sorted(k for k in args if not k.startswith("_"))
+                    return (
+                        f"Tool error: {name} is missing required argument(s): "
+                        f"{', '.join(hard_missing)}. Provided: "
+                        f"{', '.join(provided) if provided else 'none'}. Emit "
+                        "every required field as a top-level JSON key in the "
+                        "tool input — do not embed values as XML tags inside "
+                        "another field's text.",
+                        True,
+                    )
             if name in ("resolve_decision", "resolve_decisions"):
                 args = {**args, "_is_background": is_background}
             if session_id is not None and name == "spawn_task":
