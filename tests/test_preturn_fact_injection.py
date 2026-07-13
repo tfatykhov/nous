@@ -12,6 +12,7 @@ import pytest
 from pydantic import ValidationError
 
 from nous.cognitive.context import ContextEngine
+from nous.cognitive.intent import RetrievalPlan
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
 from nous.heart.search import _wrap_with_score
@@ -249,9 +250,6 @@ async def test_lineage_fetch_failure_degrades_to_plain_rendering():
     section = next(s for s in result.sections if s.label == "Relevant Facts")
     assert "current value" in section.content
     assert "supersede" not in section.content.lower()
-
-
-from nous.cognitive.intent import RetrievalPlan
 
 
 class TestRecallBackstop:

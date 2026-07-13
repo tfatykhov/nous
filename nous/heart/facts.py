@@ -1586,7 +1586,7 @@ class FactManager:
                 Fact.agent_id == self.agent_id,
                 Fact.superseded_by.in_(fact_ids),
             )
-            .order_by(Fact.created_at.desc())
+            .order_by(Fact.created_at.desc(), Fact.id.desc())
         )
         rows = (await session.execute(stmt)).all()
         out: dict[UUID, list[str]] = {}
