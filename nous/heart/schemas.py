@@ -113,6 +113,18 @@ class FactInput(BaseModel):
     # Non-F075 callers leave this None so the backfill remains eligible.
     event_date_classified_at: datetime | None = None
 
+    # 064 R1: normalized conflict-slot identifiers (lowercased, punctuation-
+    # stripped — see normalize_key). Drive the R2 exact-key candidate lookup.
+    subject_key: str | None = None
+    attribute_key: str | None = None
+    # 064 R1: ordinal position of the source statement (statement number when
+    # explicit, else chunk_index * 1_000_000 + in-chunk position). Higher =
+    # later in the source. The 'ordinal' supersession policy's authority signal.
+    source_ordinal: int | None = None
+    # 064 R2.4: statement contradicts widely-known world knowledge; rendered
+    # with an override marker when NOUS_OVERRIDE_PRIOR_MARKING_ENABLED.
+    overrides_prior: bool = False
+
     @field_validator("event_date", mode="before")
     @classmethod
     def _parse_event_date(cls, v):

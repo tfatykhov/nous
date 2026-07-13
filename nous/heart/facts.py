@@ -660,6 +660,10 @@ class FactManager:
             # knowledge_extractor) leave both at None → backfill-eligible.
             event_date=input.event_date,
             event_date_classified_at=input.event_date_classified_at,
+            subject_key=input.subject_key,
+            attribute_key=input.attribute_key,
+            source_ordinal=input.source_ordinal,
+            overrides_prior=input.overrides_prior if input.overrides_prior else None,
         )
         session.add(fact)
         await session.flush()

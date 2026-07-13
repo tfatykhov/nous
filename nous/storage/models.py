@@ -5,6 +5,7 @@ from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -588,6 +589,14 @@ class Fact(Base):
     event_date_classified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
+
+    # 064 write-path adjudication (R1/R2): normalized conflict-slot keys,
+    # in-source ordinal (authority signal for supersession policy), and the
+    # R2.4 parametric-override marker.
+    subject_key: Mapped[str | None] = mapped_column(String(200), nullable=True, default=None)
+    attribute_key: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
+    source_ordinal: Mapped[int | None] = mapped_column(BigInteger, nullable=True, default=None)
+    overrides_prior: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
 
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])
