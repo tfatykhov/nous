@@ -207,6 +207,15 @@ class Settings(BaseSettings):
         default=0, ge=0,
         description="Render the top-N facts in the Relevant Facts section untruncated (0 = all capped).",
     )
+    fact_pin_top_k: int = Field(
+        default=0, ge=0,
+        description=(
+            "Pin the top-K post-recency-resolve fact search hits into pre-turn "
+            "context, bypassing diversity/dedup/relevance demotion (0 = off). "
+            "Facts tagged superseded by the recency resolver are never pinned. "
+            "Remedy for the counterfactual-fact injection miss (2026-07-13 plan)."
+        ),
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True

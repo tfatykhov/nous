@@ -634,6 +634,8 @@ class ContextEngine:
                     # tag) BEFORE the staleness/boost/relevance pipeline, so a superseded
                     # value drops out of the injected set and the agent sees the current one.
                     facts = self._resolve_recency(facts)
+                    pin_k = getattr(self._settings, "fact_pin_top_k", 0)
+                    pinned_facts = list(facts[:pin_k]) if pin_k > 0 else []
                     # F017: Staleness penalty (before boosts)
                     facts = self._apply_staleness_penalty(facts)
                     # F10: apply_frame_boost (preserved from existing pipeline)
@@ -649,6 +651,8 @@ class ContextEngine:
                     facts = self._apply_usage_boost(facts, usage_tracker)
                     # Adaptive relevance filter (min/max K + gap detection)
                     facts = self._apply_relevance_filter(facts, "fact")
+                    if pinned_facts:
+                        facts = self._reinsert_pinned(pinned_facts, facts)
 
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
@@ -1156,6 +1160,24 @@ class ContextEngine:
             prev_score = score
 
         return results
+
+    def _reinsert_pinned(self, pinned: list, survivors: list) -> list:
+        """Guarantee pinned facts appear in the injected list.
+
+        Pinned facts the pipeline dropped are re-inserted AT THE FRONT (they
+        are the strongest direct hits, and front position also protects them
+        from budget truncation, which cuts from the tail). Survivors keep
+        their pipeline order. Facts the recency resolver tagged superseded
+        are never re-inserted — the pin must not resurrect a stale value the
+        resolver demoted (c12 failure class).
+        """
+        surviving_ids = {str(getattr(f, "id", "")) for f in survivors}
+        dropped = [
+            p for p in pinned
+            if str(getattr(p, "id", "")) not in surviving_ids
+            and getattr(p, "recency_status", None) != "superseded"
+        ]
+        return dropped + survivors
 
     def _apply_staleness_penalty(self, results: list) -> list:
         """Apply time-decay penalty to relevance scores (F017 Phase 5)."""

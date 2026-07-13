@@ -119,3 +119,63 @@ class TestFactRenderDepth:
         engine = _make_engine()
         f = FakeFact(content="short fact", subject="subj", confidence=0.93)
         assert engine._format_facts([f]) == "- [subj] short fact [confidence: 0.93]"
+
+
+class TestFactPin:
+    """fact_pin_top_k guarantees top-K search hits survive the pipeline.
+
+    NOTE: the relevance filter alone can't drop rank-1/2 facts (min_k=3 floor);
+    the drops the pin repairs come from diversity, conversation-dedup, and the
+    gap-cut at deeper ranks (staleness is a phantom for facts — FactSummary has
+    no created_at). These tests exercise _reinsert_pinned directly with
+    explicit dropped-survivor configurations, plus a build()-level wiring test.
+    """
+
+    def test_pin_reinserts_dropped_facts_at_front(self):
+        engine = _make_engine(fact_pin_top_k=2)
+        raw = [FakeFact(content=f"fact {i}", id=str(i)) for i in range(5)]
+        pinned = raw[:2]
+        survivors = raw[2:]  # pipeline dropped BOTH pinned facts
+        merged = engine._reinsert_pinned(pinned, survivors)
+        assert [f.id for f in merged] == ["0", "1", "2", "3", "4"]
+
+    def test_pin_partial_drop_keeps_survivor_position(self):
+        engine = _make_engine(fact_pin_top_k=2)
+        raw = [FakeFact(content=f"fact {i}", id=str(i)) for i in range(4)]
+        pinned = raw[:2]
+        survivors = [raw[2], raw[0], raw[3]]  # "0" survived mid-list, "1" dropped
+        merged = engine._reinsert_pinned(pinned, survivors)
+        assert [f.id for f in merged] == ["1", "2", "0", "3"]  # only "1" re-inserted
+
+    def test_pin_never_resurrects_superseded_fact(self):
+        engine = _make_engine(fact_pin_top_k=2)
+        stale = FakeFact(content="old value", id="stale")
+        stale.recency_status = "superseded"   # tagged by _resolve_recency
+        fresh = FakeFact(content="new value", id="fresh")
+        merged = engine._reinsert_pinned([stale, fresh], [])  # pipeline dropped both
+        assert [f.id for f in merged] == ["fresh"]            # stale NOT re-inserted
+
+    def test_pin_preserves_pipeline_order_when_nothing_dropped(self):
+        engine = _make_engine(fact_pin_top_k=1)
+        raw = [FakeFact(content="a", id="a"), FakeFact(content="b", id="b")]
+        merged = engine._reinsert_pinned(raw[:1], list(raw))
+        assert [f.id for f in merged] == ["a", "b"]  # unchanged, no duplicate
+
+    def test_pin_zero_is_inert(self):
+        engine = _make_engine()  # fact_pin_top_k defaults 0
+        assert engine._settings.fact_pin_top_k == 0
+
+
+async def test_pin_build_wiring_records_pinned_ids():
+    """build()-level: pinned facts flow through to the section AND recalled ids."""
+    engine = _make_engine(fact_pin_top_k=2)
+    facts = [FakeFact(content=f"pinnable fact {i}", subject=f"s{i}",
+                      id=f"id-{i}", score=0.9 - i * 0.1) for i in range(4)]
+    _stub_heart_for_build(engine, facts)
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="pinnable?", frame=_frame(),
+    )
+    section = next(s for s in result.sections if s.label == "Relevant Facts")
+    assert "pinnable fact 0" in section.content
+    assert "id-0" in result.recalled_ids["fact"]
+    assert "id-1" in result.recalled_ids["fact"]
