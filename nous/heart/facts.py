@@ -1558,6 +1558,44 @@ class FactManager:
                 return await self._find_similar_for_dedup(content, limit, session)
         return await self._find_similar_for_dedup(content, limit, session)
 
+    async def get_superseded_contents(
+        self,
+        fact_ids: list[UUID],
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, list[str]]:
+        """Map superseder fact id -> contents of facts it superseded (max 2, newest first).
+
+        Reads the authoritative ``superseded_by`` column (NOT graph edges, which
+        historically lag it). Includes inactive rows on purpose — supersession
+        deactivates the old fact, and the old content is exactly what the
+        lineage annotation needs. Agent-scoped like every FactManager read.
+        """
+        if not fact_ids:
+            return {}
+        if session is None:
+            async with self.db.session() as session:
+                return await self._get_superseded_contents_impl(fact_ids, session)
+        return await self._get_superseded_contents_impl(fact_ids, session)
+
+    async def _get_superseded_contents_impl(
+        self, fact_ids: list[UUID], session: AsyncSession
+    ) -> dict[UUID, list[str]]:
+        stmt = (
+            select(Fact.superseded_by, Fact.content)
+            .where(
+                Fact.agent_id == self.agent_id,
+                Fact.superseded_by.in_(fact_ids),
+            )
+            .order_by(Fact.created_at.desc())
+        )
+        rows = (await session.execute(stmt)).all()
+        out: dict[UUID, list[str]] = {}
+        for superseder_id, content in rows:
+            bucket = out.setdefault(superseder_id, [])
+            if len(bucket) < 2:
+                bucket.append(content or "")
+        return out
+
     async def _find_similar_for_dedup(
         self,
         content: str,

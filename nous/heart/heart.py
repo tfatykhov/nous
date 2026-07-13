@@ -384,6 +384,14 @@ class Heart:
         """
         return await self.facts.find_similar_for_dedup(content, limit, session)
 
+    async def get_superseded_contents(
+        self,
+        fact_ids: list[UUID],
+        session: AsyncSession | None = None,
+    ) -> dict[UUID, list[str]]:
+        """Contents of facts superseded by each given fact (lineage annotation)."""
+        return await self.facts.get_superseded_contents(fact_ids, session)
+
     async def list_facts_by_category(
         self,
         categories: list[str],

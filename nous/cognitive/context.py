@@ -654,6 +654,21 @@ class ContextEngine:
                     if pinned_facts:
                         facts = self._reinsert_pinned(pinned_facts, facts)
 
+                    # Supersession lineage: build a str(id)->contents dict for
+                    # _format_facts.  Never mutate fact objects (may be
+                    # _ScoredWrapper with __slots__).
+                    _lineage_by_id: dict[str, list[str]] = {}
+                    lineage_mode = getattr(self._settings, "supersession_lineage_mode", "off")
+                    if lineage_mode != "off" and facts:
+                        try:
+                            _fact_uuids = [f.id for f in facts if getattr(f, "id", None)]
+                            _lineage_raw = await self._heart.get_superseded_contents(
+                                _fact_uuids, session=session
+                            )
+                            _lineage_by_id = {str(k): v for k, v in _lineage_raw.items()}
+                        except Exception:
+                            logger.debug("Supersession lineage fetch failed", exc_info=True)
+
                     # F1: Collect recalled IDs AFTER filtering (P1-1 fix:
                     # collecting before dedup would penalize deduped memories
                     # in the usage tracker as "retrieved but not referenced")
@@ -668,6 +683,7 @@ class ContextEngine:
                     facts_text = self._format_facts(
                         facts,
                         full_top_n=getattr(self._settings, "fact_format_full_top_n", 0),
+                        lineage=_lineage_by_id or None,
                     )
                     facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
                     sections.append(
@@ -1415,10 +1431,19 @@ class ContextEngine:
             status = getattr(f, "recency_status", None)
             rtag = f" [{status} {getattr(f, 'recency_date', '') or ''}]".rstrip() if status else ""
 
+            # Supersession lineage (off|tag|named): dict-threaded, keyed str(id).
+            olds = (lineage or {}).get(str(getattr(f, "id", "")))
+            mode = getattr(self._settings, "supersession_lineage_mode", "off")
+            ltag = ""
+            if olds and mode == "tag":
+                ltag = " [current — supersedes an earlier belief]"
+            elif olds and mode == "named":
+                ltag = f' (supersedes earlier belief: "{olds[0][:120]}")'
+
             if subject:
-                lines.append(f"- [{subject}] {content}{rtag} [confidence: {conf:.2f}]")
+                lines.append(f"- [{subject}] {content}{rtag}{ltag} [confidence: {conf:.2f}]")
             else:
-                lines.append(f"- {content}{rtag} [confidence: {conf:.2f}]")
+                lines.append(f"- {content}{rtag}{ltag} [confidence: {conf:.2f}]")
         return "\n".join(lines)
 
     def _format_procedures(self, procedures: list) -> str:

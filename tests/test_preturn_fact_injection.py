@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
+from nous.heart.search import _wrap_with_score
 
 
 class FakeFact:
@@ -179,3 +180,72 @@ async def test_pin_build_wiring_records_pinned_ids():
     assert "pinnable fact 0" in section.content
     assert "id-0" in result.recalled_ids["fact"]
     assert "id-1" in result.recalled_ids["fact"]
+
+
+class TestSupersessionLineage:
+    def test_mode_validates(self):
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, supersession_lineage_mode="bogus")
+
+    def test_tag_mode_appends_generic_marker(self):
+        engine = _make_engine(supersession_lineage_mode="tag")
+        f = FakeFact(content="Past Masters was performed by Madonna",
+                     subject="Past Masters", id="f1")
+        out = engine._format_facts(
+            [f], lineage={"f1": ["Past Masters was performed by The Beatles"]})
+        assert "[current — supersedes an earlier belief]" in out
+        assert "Beatles" not in out               # tag mode never names the stale value
+
+    def test_named_mode_quotes_stale_value(self):
+        engine = _make_engine(supersession_lineage_mode="named")
+        f = FakeFact(content="Past Masters was performed by Madonna",
+                     subject="Past Masters", id="f1")
+        out = engine._format_facts(
+            [f], lineage={"f1": ["Past Masters was performed by The Beatles"]})
+        assert 'supersedes earlier belief: "Past Masters was performed by The Beatles"' in out
+
+    def test_named_mode_truncates_stale_value_at_120(self):
+        engine = _make_engine(supersession_lineage_mode="named")
+        f = FakeFact(content="new", subject="s", id="f1")
+        out = engine._format_facts([f], lineage={"f1": ["X" * 500]})
+        assert "X" * 120 in out
+        assert "X" * 121 not in out
+
+    def test_off_mode_renders_nothing_even_with_lineage(self):
+        engine = _make_engine()  # mode defaults "off"
+        f = FakeFact(content="new", subject="s", id="f1")
+        out = engine._format_facts([f], lineage={"f1": ["old"]})
+        assert "supersede" not in out.lower()
+
+    def test_lineage_renders_through_scored_wrapper(self):
+        """The pipeline wraps facts in _ScoredWrapper (__slots__ forbids attribute
+        writes) — lineage must render via the dict, reading id through the wrapper."""
+        engine = _make_engine(supersession_lineage_mode="tag")
+        f = _wrap_with_score(FakeFact(content="new", subject="s", id="f1"), 0.9)
+        out = engine._format_facts([f], lineage={"f1": ["old"]})
+        assert "[current — supersedes an earlier belief]" in out
+
+
+async def test_lineage_build_wiring_fetches_and_renders():
+    engine = _make_engine(supersession_lineage_mode="tag")
+    facts = [FakeFact(content="current value", subject="cv", id="f1", score=0.9)]
+    _stub_heart_for_build(engine, facts)
+    engine._heart.get_superseded_contents.return_value = {"f1": ["old value"]}
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="current?", frame=_frame(),
+    )
+    section = next(s for s in result.sections if s.label == "Relevant Facts")
+    assert "[current — supersedes an earlier belief]" in section.content
+
+
+async def test_lineage_fetch_failure_degrades_to_plain_rendering():
+    engine = _make_engine(supersession_lineage_mode="tag")
+    facts = [FakeFact(content="current value", subject="cv", id="f1", score=0.9)]
+    _stub_heart_for_build(engine, facts)
+    engine._heart.get_superseded_contents.side_effect = Exception("db down")
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="current?", frame=_frame(),
+    )
+    section = next(s for s in result.sections if s.label == "Relevant Facts")
+    assert "current value" in section.content
+    assert "supersede" not in section.content.lower()

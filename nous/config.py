@@ -216,6 +216,15 @@ class Settings(BaseSettings):
             "Remedy for the counterfactual-fact injection miss (2026-07-13 plan)."
         ),
     )
+    supersession_lineage_mode: Literal["off", "tag", "named"] = Field(
+        default="off",
+        description=(
+            "Annotate pre-turn injected facts that supersede an earlier fact: "
+            "'tag' = generic [current — supersedes an earlier belief] marker; "
+            "'named' = quotes the superseded content (anchoring risk — A/B before prod); "
+            "'off' = byte-identical legacy rendering."
+        ),
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True
