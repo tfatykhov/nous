@@ -195,6 +195,19 @@ class Settings(BaseSettings):
     relevance_min_results: dict[str, int] = Field(default_factory=dict)
     relevance_max_results: dict[str, int] = Field(default_factory=dict)
 
+    # Pre-turn fact render depth (2026-07-13 plan). Defaults preserve the
+    # legacy hardcoded 200-char cap byte-for-byte. NOTE: max_chars is read
+    # inside _format_facts, so raising it also affects the User Profile
+    # section (shared formatter) — intended.
+    fact_format_max_chars: int = Field(
+        default=200, ge=50,
+        description="Per-fact char cap in pre-turn context rendering (_format_facts). Was hardcoded 200.",
+    )
+    fact_format_full_top_n: int = Field(
+        default=0, ge=0,
+        description="Render the top-N facts in the Relevant Facts section untruncated (0 = all capped).",
+    )
+
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 

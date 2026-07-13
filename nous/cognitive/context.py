@@ -661,7 +661,10 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(f, "score", 0) or 0
 
                     logger.info("Tier3 facts after pipeline: %d remaining", len(facts))
-                    facts_text = self._format_facts(facts)
+                    facts_text = self._format_facts(
+                        facts,
+                        full_top_n=getattr(self._settings, "fact_format_full_top_n", 0),
+                    )
                     facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
                     sections.append(
                         ContextSection(
@@ -1358,21 +1361,31 @@ class ContextEngine:
                         older.score = (getattr(older, "score", None) or 0.0) * 0.3
         return facts
 
-    def _format_facts(self, facts: list) -> str:
+    def _format_facts(
+        self,
+        facts: list,
+        *,
+        full_top_n: int = 0,
+        lineage: dict[str, list[str]] | None = None,
+    ) -> str:
         """Format facts for context.
 
         Format: - [subject]: content_truncated [confidence: N.NN]
-        Truncates content to 200 chars at word boundary.
+        Truncates content at fact_format_max_chars (word boundary); the first
+        ``full_top_n`` facts render untruncated. ``lineage`` maps str(fact.id)
+        -> superseded contents (consumed by the supersession-lineage feature;
+        passed as a dict because pipeline items may be _ScoredWrapper objects
+        whose __slots__ forbid attribute writes).
         """
         lines = []
-        for f in facts:
+        max_len = getattr(self._settings, "fact_format_max_chars", 200)
+        for idx, f in enumerate(facts):
             content = getattr(f, "content", "")
             conf = getattr(f, "confidence", 1.0)
             subject = getattr(f, "subject", None)
 
-            # Truncate at word boundary
-            max_len = 200
-            if len(content) > max_len:
+            # Truncate at word boundary (top-N exempt)
+            if idx >= full_top_n and len(content) > max_len:
                 truncated = content[:max_len].rsplit(" ", 1)[0]
                 content = truncated + "..."
 
