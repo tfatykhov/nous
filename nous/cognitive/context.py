@@ -615,6 +615,7 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Brain.query failed during context build: %s", e)
 
+        facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
         if budget.facts > 0 and "fact" not in skip_types:
             try:
@@ -680,6 +681,7 @@ class ContextEngine:
                             recalled_score_map[mid] = getattr(f, "score", 0) or 0
 
                     logger.info("Tier3 facts after pipeline: %d remaining", len(facts))
+                    facts_injected = bool(facts)
                     facts_text = self._format_facts(
                         facts,
                         full_top_n=getattr(self._settings, "fact_format_full_top_n", 0),
@@ -697,6 +699,27 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
+
+        # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
+        # agent to recall before answering. Fires on search failure too (the
+        # except path leaves facts_injected False) and when dedup/filters empty
+        # the list (facts_injected evaluated on the FINAL list) — both desired.
+        if (
+            getattr(self._settings, "recall_backstop_enabled", False)
+            and budget.facts > 0
+            and "fact" not in skip_types
+            and not facts_injected
+        ):
+            _bs_text = self._recall_backstop_text()
+            sections.append(
+                ContextSection(
+                    priority=2,
+                    label="Memory Retrieval Notice",
+                    content=_bs_text,
+                    token_estimate=self._estimate_tokens(_bs_text),
+                    tier="dynamic",
+                )
+            )
 
         # 7. F080 §14.7: graph-primary procedure selection — preloads the BODIES of
         # procedures activated via K-line graph edges from recalled facts/decisions,
@@ -1398,6 +1421,15 @@ class ContextEngine:
                         older.recency_date = older.event_date.strftime("%Y-%m")
                         older.score = (getattr(older, "score", None) or 0.0) * 0.3
         return facts
+
+    def _recall_backstop_text(self) -> str:
+        """Instruction injected when pre-turn fact retrieval came back empty."""
+        return (
+            "Pre-turn memory retrieval found no relevant stored facts for this input. "
+            "Before answering any question about prior conversations, stored knowledge, "
+            "or user-specific information, call recall_deep with a focused query — "
+            "do not answer such questions from general knowledge alone."
+        )
 
     def _format_facts(
         self,

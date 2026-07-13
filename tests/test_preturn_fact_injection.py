@@ -249,3 +249,66 @@ async def test_lineage_fetch_failure_degrades_to_plain_rendering():
     section = next(s for s in result.sections if s.label == "Relevant Facts")
     assert "current value" in section.content
     assert "supersede" not in section.content.lower()
+
+
+from nous.cognitive.intent import RetrievalPlan
+
+
+class TestRecallBackstop:
+    def test_backstop_text_mentions_recall_deep(self):
+        engine = _make_engine(recall_backstop_enabled=True)
+        assert "recall_deep" in engine._recall_backstop_text()
+
+    def test_backstop_setting_defaults_off(self):
+        engine = _make_engine()
+        assert engine._settings.recall_backstop_enabled is False
+
+
+async def test_backstop_section_appears_when_no_facts():
+    engine = _make_engine(recall_backstop_enabled=True)
+    _stub_heart_for_build(engine, [])
+    result = await engine.build(
+        agent_id="a", session_id="s",
+        input_text="who performed Past Masters?", frame=_frame(),
+    )
+    assert any(s.label == "Memory Retrieval Notice" for s in result.sections)
+
+
+async def test_backstop_fires_on_search_exception():
+    engine = _make_engine(recall_backstop_enabled=True)
+    _stub_heart_for_build(engine, [])
+    engine._heart.search_facts.side_effect = Exception("search down")
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="anything?", frame=_frame(),
+    )
+    assert any(s.label == "Memory Retrieval Notice" for s in result.sections)
+
+
+async def test_backstop_absent_when_facts_present():
+    engine = _make_engine(recall_backstop_enabled=True)
+    _stub_heart_for_build(engine, [FakeFact(content="a stored fact about things",
+                                            subject="s", id="f1", score=0.9)])
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="things?", frame=_frame(),
+    )
+    assert not any(s.label == "Memory Retrieval Notice" for s in result.sections)
+
+
+async def test_backstop_absent_when_fact_type_skipped():
+    engine = _make_engine(recall_backstop_enabled=True)
+    _stub_heart_for_build(engine, [])
+    plan = RetrievalPlan(skip_types={"fact"})
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="hi there", frame=_frame(),
+        retrieval_plan=plan,
+    )
+    assert not any(s.label == "Memory Retrieval Notice" for s in result.sections)
+
+
+async def test_backstop_absent_by_default():
+    engine = _make_engine()  # flag off
+    _stub_heart_for_build(engine, [])
+    result = await engine.build(
+        agent_id="a", session_id="s", input_text="anything", frame=_frame(),
+    )
+    assert not any(s.label == "Memory Retrieval Notice" for s in result.sections)

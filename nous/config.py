@@ -225,6 +225,14 @@ class Settings(BaseSettings):
             "'off' = byte-identical legacy rendering."
         ),
     )
+    recall_backstop_enabled: bool = Field(
+        default=False,
+        description=(
+            "When pre-turn fact retrieval yields ZERO surviving facts, inject a "
+            "system-prompt instruction to call recall_deep before answering "
+            "memory questions. Deterministic trigger (empty set), no score thresholds."
+        ),
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True
