@@ -571,6 +571,11 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RECALL_BEFORE_CLARIFY_PROMPT` | `true` | F083 C2. When true, inject a static system-prompt instruction telling the agent to call `recall_deep`/`recall_recent` to resolve a referent before asking the user to clarify. |
 | `NOUS_FOLLOWUP_FIRST_TURN_EPISODE` | `false` | F083 A2 (**land-dark**, pending local A/B). When true, on a verified first turn of a new session the temporal tier injects the most-recent episode's FULL `structured_summary.summary` (+ `open_threads`, truncated to `recall_parent_episode_truncate`) instead of titles-only. First-turn signal = `session_id not in _active_episodes` (survives LRU eviction). |
 | `NOUS_EPISODE_OPEN_THREADS` | `false` | F083 B (**land-dark**, pending local A/B). When true, the episode summarizer extracts a top-level `open_threads` array (unfinished items / next steps) into `structured_summary`; raises summary `max_tokens` to 3000 so the extra field doesn't truncate the JSON. Consumed by A2. |
+| `NOUS_FACT_FORMAT_MAX_CHARS` | `200` | Per-fact char cap in pre-turn context rendering (was hardcoded 200). Shared by Relevant Facts AND User Profile sections. |
+| `NOUS_FACT_FORMAT_FULL_TOP_N` | `0` | Render the top-N Relevant Facts untruncated (0 = all capped). |
+| `NOUS_FACT_PIN_TOP_K` | `0` | Pin top-K post-recency-resolve fact hits into pre-turn context past diversity/dedup/relevance demotion (0 = off; superseded-tagged facts never pinned). Counterfactual-injection fix, 2026-07-13 plan; flip gated on prod-generator A/B. |
+| `NOUS_SUPERSESSION_LINEAGE_MODE` | `off` | Annotate injected facts that supersede an earlier fact: `tag` (generic marker) / `named` (quotes stale value — anchoring risk, A/B first) / `off`. |
+| `NOUS_RECALL_BACKSTOP_ENABLED` | `false` | Inject a "call recall_deep before answering" instruction when pre-turn fact retrieval returns zero facts. |
 
 ### Dashboard (Svelte v2)
 

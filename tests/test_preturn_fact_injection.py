@@ -312,3 +312,17 @@ async def test_backstop_absent_by_default():
         agent_id="a", session_id="s", input_text="anything", frame=_frame(),
     )
     assert not any(s.label == "Memory Retrieval Notice" for s in result.sections)
+
+
+class TestFlagsOffInvariant:
+    """With default Settings, the new code paths must be provably inert.
+    (The build()-level byte-identity oracle is the HEAD golden at the top
+    of this file — this class covers the settings surface.)"""
+
+    def test_all_new_settings_default_off(self):
+        s = Settings(_env_file=None)
+        assert s.fact_format_max_chars == 200
+        assert s.fact_format_full_top_n == 0
+        assert s.fact_pin_top_k == 0
+        assert s.supersession_lineage_mode == "off"
+        assert s.recall_backstop_enabled is False
