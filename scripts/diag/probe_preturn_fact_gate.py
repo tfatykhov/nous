@@ -124,7 +124,7 @@ async def probe_one(engine: ContextEngine, heart, classifier: IntentClassifier,
     if gold.lower() not in text.lower():
         print("  DROP @ budget-or-render-truncation (survived pipeline, cut from text)")
         return
-    print("  SURVIVES to injected text ✓")
+    print("  SURVIVES to injected text")
 
 
 async def main() -> int:
