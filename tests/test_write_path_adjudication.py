@@ -1723,6 +1723,9 @@ async def test_key_conflict_sweep_cursor_pages_past_keep_both():
     heart_mock = AsyncMock()
     heart_mock.facts.find_key_conflict_pairs = find_mock
     heart_mock.facts.resolve_key_conflict_pair = resolve_mock
+    # key_budget_exhausted is synchronous — pin it so the AsyncMock parent
+    # doesn't return a truthy coroutine and fire the budget guard prematurely.
+    heart_mock.facts.key_budget_exhausted = MagicMock(return_value=False)
 
     settings = SimpleNamespace(
         supersession_key_resolution_enabled=True,
@@ -1813,6 +1816,9 @@ async def test_key_conflict_sweep_cursor_on_interruption():
 
     heart_mock = AsyncMock()
     heart_mock.facts.find_key_conflict_pairs = AsyncMock(return_value=[pair1, pair2, pair3])
+    # key_budget_exhausted is synchronous — pin it so the AsyncMock parent
+    # doesn't return a truthy coroutine and fire the budget guard prematurely.
+    heart_mock.facts.key_budget_exhausted = MagicMock(return_value=False)
 
     call_count = 0
 
@@ -3348,5 +3354,87 @@ async def test_enumerative_seen_set_distinct_dates_preserved(monkeypatch, settin
     dates_stored = {fi.event_date for fi in stored_args}
     assert _date(2026, 3, 10) in dates_stored, "2026-03-10 fact must be stored"
     assert _date(2026, 3, 11) in dates_stored, "2026-03-11 fact must be stored"
+
+
+# ---------------------------------------------------------------------------
+# Codex round-13 FIX 1: budget-exhausted sweep breaks without advancing cursor
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_key_conflict_sweep_budget_exhausted_cursor_stays_at_last_resolved():
+    """Codex r13 FIX 1: when key_budget_exhausted() fires at the TOP of the
+    loop for pair-2, the cursor must NOT advance past pair-1's 4-tuple.
+
+    2 pairs in a page (max_pairs=2), budget cap=1.  The first resolve call
+    consumes the single slot (classifier UNRELATED → keep-both).  On the next
+    iteration key_budget_exhausted() returns True → handler breaks before
+    calling resolve again.
+
+    Assertions:
+    - cursor == pair-1's 4-tuple (not pair-2's)
+    - resolve called exactly once
+    """
+    from datetime import datetime, timezone
+    from nous.handlers.sleep_handler import SleepHandler
+
+    ts = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    id_f1 = uuid4()
+    id_f2a = uuid4()
+    id_f2b = uuid4()
+
+    pair1 = {"id1": id_f1, "id2": id_f2a, "c1": "c1a", "c2": "c2a", "ts1": ts, "ts2": ts}
+    pair2 = {"id1": id_f1, "id2": id_f2b, "c1": "c1b", "c2": "c2b", "ts1": ts, "ts2": ts}
+
+    expected_cursor = (pair1["ts1"], pair1["id1"], pair1["ts2"], pair1["id2"])
+
+    # Simulate budget=1: resolve call increments a counter; peek returns True
+    # once the counter reaches the cap (mirrors _key_budget_ok / key_budget_exhausted).
+    key_calls = [0]
+    cap = 1
+
+    def _key_budget_exhausted() -> bool:
+        return key_calls[0] >= cap
+
+    resolve_call_count = [0]
+
+    async def _resolve(id1, id2, c1, c2) -> bool:
+        resolve_call_count[0] += 1
+        key_calls[0] += 1  # mirrors _key_budget_ok() consuming a slot inside resolve
+        return False  # UNRELATED → keep-both
+
+    heart_mock = AsyncMock()
+    heart_mock.facts.find_key_conflict_pairs = AsyncMock(return_value=[pair1, pair2])
+    heart_mock.facts.resolve_key_conflict_pair = _resolve
+    heart_mock.facts.key_budget_exhausted = _key_budget_exhausted
+
+    settings = SimpleNamespace(
+        supersession_key_resolution_enabled=True,
+        supersession_sweep_max_pairs=2,
+        supersession_classifier_max_per_hour=1,
+    )
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart_mock,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=MagicMock(),
+    )
+    handler._llm = MagicMock()
+    handler._interrupted = False
+
+    stats: dict = {}
+    result = await handler._phase_sweep_key_conflicts(stats)
+
+    assert result is True
+    assert resolve_call_count[0] == 1, (
+        f"resolve must be called exactly once (budget exhausted before pair-2); "
+        f"got {resolve_call_count[0]}"
+    )
+    assert handler._key_sweep_cursor == expected_cursor, (
+        f"cursor must be pair-1's 4-tuple {expected_cursor}; "
+        f"got {handler._key_sweep_cursor} — budget exhaustion must not advance "
+        "past the unadjudicated pair"
+    )
 
 

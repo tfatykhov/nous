@@ -1319,6 +1319,13 @@ class SleepHandler:
                 if self._interrupted:
                     interrupted_early = True
                     break
+                if self._heart.facts.key_budget_exhausted():
+                    logger.info(
+                        "Key-conflict sweep: classifier budget exhausted — "
+                        "deferring remaining pairs to next cycle"
+                    )
+                    interrupted_early = True
+                    break
                 if await self._heart.facts.resolve_key_conflict_pair(
                     pair["id1"], pair["id2"], pair["c1"], pair["c2"]
                 ):
