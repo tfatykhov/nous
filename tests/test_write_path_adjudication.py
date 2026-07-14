@@ -3438,3 +3438,80 @@ async def test_key_conflict_sweep_budget_exhausted_cursor_stays_at_last_resolved
     )
 
 
+# ---------------------------------------------------------------------------
+# Codex round-13 FIX 2: budget-stopped pairs stay unseen in run_sweep
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_backfill_budget_stops_pair_not_marked_seen(heart, monkeypatch):
+    """Codex r13 FIX 2: when key_budget_exhausted() fires on pair-2 BEFORE
+    seen.add, that pair is NOT added to the seen set so a re-run can retry it.
+
+    Seeds 2 distinct same-key pairs (2 × 2 facts with different attribute_keys).
+    Budget cap=1.  First resolve consumes the slot via _key_budget_ok() inside
+    the real resolve path (classifier mocked to UNRELATED).  Second pair hits
+    the budget check before seen.add.
+
+    Assertions:
+    - pairs_examined == 1 (second pair not examined)
+    - budget_stops >= 1
+    - resolve_key_conflict_pair invoked exactly once
+      (proxy: _classify_fact_pair called once)
+    """
+    from scripts.backfill_supersession import run_sweep
+
+    unique_agent = f"t13c-{uuid4().hex[:8]}"
+    heart.facts.agent_id = unique_agent
+
+    # Pair A: two facts sharing subject_key + attribute_key "rate_a"
+    await heart.learn(FactInput(
+        content="The pipeline ingestion rate is one thousand records per minute at peak.",
+        subject_key="r13_pipeline",
+        attribute_key="rate_a",
+    ))
+    await heart.learn(FactInput(
+        content="The pipeline ingestion rate is two thousand records per minute at peak.",
+        subject_key="r13_pipeline",
+        attribute_key="rate_a",
+    ))
+
+    # Pair B: two facts sharing subject_key + attribute_key "rate_b"
+    await heart.learn(FactInput(
+        content="The pipeline processing rate is one hundred batches per hour at capacity.",
+        subject_key="r13_pipeline",
+        attribute_key="rate_b",
+    ))
+    await heart.learn(FactInput(
+        content="The pipeline processing rate is two hundred batches per hour at capacity.",
+        subject_key="r13_pipeline",
+        attribute_key="rate_b",
+    ))
+
+    classify_call_count = [0]
+
+    async def _classify(c1, c2):
+        classify_call_count[0] += 1
+        return {"relation": "UNRELATED", "current_fact": "new", "confidence": 0.9}
+
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", _classify)
+
+    settings = heart.facts._settings.model_copy(update={
+        "supersession_key_resolution_enabled": True,
+        "supersession_classifier_max_per_hour": 1,
+    })
+
+    result = await run_sweep(heart, settings, max_pairs=0, batch_size=25, dry_run=False)
+
+    assert result["pairs_examined"] == 1, (
+        f"expected 1 pair examined (budget stops second); got {result['pairs_examined']}"
+    )
+    assert result["budget_stops"] >= 1, (
+        f"expected budget_stops>=1; got {result['budget_stops']}"
+    )
+    assert classify_call_count[0] == 1, (
+        f"classifier must be called exactly once (pair-1 only); "
+        f"got {classify_call_count[0]}"
+    )
+
+

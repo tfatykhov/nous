@@ -96,6 +96,7 @@ async def run_sweep(
             # All pairs in this batch already processed — stable state, stop.
             break
 
+        budget_halt = False
         for p in new_pairs:
             if max_pairs > 0 and counters["pairs_examined"] >= max_pairs:
                 break
@@ -105,17 +106,27 @@ async def run_sweep(
             c1: str = p["c1"]
             c2: str = p["c2"]
 
+            # Budget check BEFORE marking seen: budget-stopped pairs must NOT
+            # be added to `seen` so a re-run (after the hour bucket resets)
+            # can retry them.  dry_run never calls the classifier, so skip
+            # this guard in that mode.
+            if not dry_run and heart.facts.key_budget_exhausted():
+                unseen_remaining = [
+                    q for q in new_pairs
+                    if frozenset({q["id1"], q["id2"]}) not in seen
+                ]
+                counters["budget_stops"] += len(unseen_remaining)
+                print(
+                    f"\nclassifier budget exhausted — {len(unseen_remaining)} pair(s) deferred; "
+                    "re-run the script or use --classifier-budget 0"
+                )
+                budget_halt = True
+                break
+
             seen.add(frozenset({id1, id2}))
             counters["pairs_examined"] += 1
 
             if dry_run:
-                continue
-
-            # Peek budget before calling to distinguish budget-stops from
-            # genuine KEEP-BOTH; use the non-consuming key_budget_exhausted()
-            # so hour-boundary rollover resets the counter correctly.
-            if heart.facts.key_budget_exhausted():
-                counters["budget_stops"] += 1
                 continue
 
             resolved = await heart.facts.resolve_key_conflict_pair(id1, id2, c1, c2)
@@ -125,6 +136,9 @@ async def run_sweep(
                     counters["sample_resolutions"].append((c1, c2))
             else:
                 counters["keep_both"] += 1
+
+        if budget_halt:
+            break
 
     return counters
 
