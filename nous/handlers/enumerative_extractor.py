@@ -158,16 +158,26 @@ class EnumerativeExtractor:
                 )
                 truncated = True
                 break
-            raw = await self._extract_chunk(chunk)
-            if not raw:
-                continue
-            inputs = self._to_fact_inputs(raw, chunk_index, episode_id)
-            if cap:
-                remaining = cap - len(stored_ids)
-                if len(inputs) > remaining:
-                    inputs = inputs[:remaining]
-                    truncated = True
-            stored_ids.extend(await self._store_batch(inputs))
+            try:
+                raw = await self._extract_chunk(chunk)
+                if not raw:
+                    continue
+                inputs = self._to_fact_inputs(raw, chunk_index, episode_id)
+                if cap:
+                    remaining = cap - len(stored_ids)
+                    if len(inputs) > remaining:
+                        inputs = inputs[:remaining]
+                        truncated = True
+                stored_ids.extend(await self._store_batch(inputs))
+            except Exception:
+                logger.exception(
+                    "R1: chunk %d failed for episode %s — stopping enumerative extraction with %d facts stored",
+                    chunk_index,
+                    episode_id,
+                    len(stored_ids),
+                )
+                truncated = True
+                break
         if truncated:
             # R1.3: silent caps read as full coverage — log LOUDLY.
             logger.warning(

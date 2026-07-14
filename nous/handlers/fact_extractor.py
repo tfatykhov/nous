@@ -274,8 +274,9 @@ class FactExtractor:
                         "R1 enumerative extraction failed for episode %s — falling back to legacy path",
                         episode_id,
                     )
-                    # fall through to the legacy path so a broken enumerative leg
-                    # never silently drops the episode's facts entirely
+                    # process_transcript catches per-chunk failures internally and returns
+                    # partial results; reaching this except means nothing was stored, so
+                    # the legacy fallback cannot create variant pairs.
 
         # Legacy path — byte-identical to today.
         cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])

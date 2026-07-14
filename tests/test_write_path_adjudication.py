@@ -2591,3 +2591,143 @@ async def test_enumerative_backfill_live_fails_without_embedding_key(monkeypatch
     assert exit_code == 2, f"Expected exit code 2, got {exit_code}"
     err = captured_stderr.getvalue()
     assert "OPENAI_API_KEY" in err, f"Expected OPENAI_API_KEY in stderr; got: {err!r}"
+
+
+# ---------------------------------------------------------------------------
+# Codex round-7 FIX 1: per-chunk failure isolation in process_transcript
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_process_transcript_partial_chunk_failure_no_raise(monkeypatch, settings_fixture):
+    """FIX 1 (codex r7): if chunk 1 raises RuntimeError after chunk 0 stored facts,
+    process_transcript must NOT propagate the exception — it returns the partial
+    stored IDs from chunk 0 only, with truncated=True logged."""
+    # Use chunk_size=600 and a 700-char transcript so chunk_text produces 2 chunks.
+    long_chunk = "x" * 650
+    two_chunk_transcript = long_chunk  # 650 chars > chunk_size=600 → 2 chunks
+
+    settings = settings_fixture(
+        enumerative_density_threshold=0.0,  # force-enumerable
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    heart = AsyncMock()
+    heart.learn = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+
+    # chunk 0 succeeds, chunk 1 raises
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(side_effect=[_CHUNK_FACTS, RuntimeError("simulated LLM failure on chunk 1")]),
+    )
+
+    ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=object(), embedder=embedder)
+    # Must not raise — per-chunk failures are isolated
+    stored_ids = await ex.process_transcript(two_chunk_transcript, episode_id=uuid4())
+
+    # chunk 0 stored _CHUNK_FACTS (2 facts); chunk 1 raised before storing → 2 IDs total
+    assert len(stored_ids) == 2, (
+        f"Expected 2 IDs from chunk 0 only; got {len(stored_ids)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_chunk_failure_wiring_skips_legacy(monkeypatch):
+    """FIX 1 (codex r7) wiring: when process_transcript returns a non-empty list
+    (partial stores from chunk 0), extract_and_store must return those IDs and
+    must NOT invoke the legacy candidate-facts path (heart.learn never called).
+
+    Uses a 2-chunk side_effect on process_transcript at the wiring level so the
+    test is independent of process_transcript's internals."""
+    from uuid import uuid4 as _uuid4
+
+    partial_ids = [_uuid4(), _uuid4()]  # 2 IDs from chunk 0
+
+    # Simulate: chunk 0 stored 2 facts, chunk 1 raised inside process_transcript;
+    # process_transcript caught it and returned the 2 partial IDs (no raise).
+    mock_process = AsyncMock(return_value=partial_ids)
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        mock_process,
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)
+    ext._dedup_via_search = False
+    ext._llm = object()  # non-None so the enumerative branch is entered
+
+    result = await ext.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(_uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+
+    # Enumerative leg ran and returned partial IDs
+    mock_process.assert_called_once()
+    # Legacy candidate path must NOT have run (no heart.learn calls)
+    assert heart._captured == [], (
+        "legacy candidate path must NOT run when enumerative leg returns partial stored IDs"
+    )
+    # extract_and_store returns the partial enumerative IDs
+    assert result == partial_ids, (
+        f"Expected partial_ids={partial_ids}, got {result}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-7 FIX 2: key_budget_exhausted — non-consuming peek with rollover
+# ---------------------------------------------------------------------------
+
+
+def test_key_budget_exhausted_reports_exhausted_and_resets_on_hour_boundary():
+    """FIX 2 (codex r7): key_budget_exhausted() is non-consuming and rolls the
+    hour bucket forward (resetting _key_calls) on a bucket mismatch.
+
+    Sequence:
+    1. cap=1, consume slot via _key_budget_ok() → _key_calls=1
+    2. key_budget_exhausted() → True (budget spent)
+    3. Simulate hour rollover: _key_bucket -= 1 (forces bucket mismatch)
+    4. key_budget_exhausted() → False (_key_calls reset to 0 by rollover)
+    5. _key_calls is still 0 (non-consuming: calling it twice doesn't increment)
+    """
+    from types import SimpleNamespace
+    from nous.heart.facts import FactManager
+
+    mgr = FactManager.__new__(FactManager)
+    mgr._settings = SimpleNamespace(supersession_classifier_max_per_hour=1)
+    mgr._key_bucket = -1
+    mgr._key_calls = 0
+
+    # Step 1: consume the one allowed slot
+    ok = mgr._key_budget_ok()
+    assert ok is True, "first call should be allowed"
+    assert mgr._key_calls == 1
+
+    # Step 2: budget exhausted
+    assert mgr.key_budget_exhausted() is True, "budget should be exhausted after consuming 1/1"
+
+    # Step 3: simulate next hour (decrement bucket so current bucket != stored)
+    mgr._key_bucket -= 1
+
+    # Step 4: key_budget_exhausted rolls the bucket, resets _key_calls, returns False
+    assert mgr.key_budget_exhausted() is False, (
+        "key_budget_exhausted must return False after bucket rollover resets counter"
+    )
+    assert mgr._key_calls == 0, (
+        "bucket rollover inside key_budget_exhausted must reset _key_calls to 0"
+    )
+
+    # Step 5: call again — _key_calls must still be 0 (non-consuming)
+    mgr.key_budget_exhausted()
+    assert mgr._key_calls == 0, (
+        "key_budget_exhausted must never increment _key_calls"
+    )
