@@ -1660,6 +1660,73 @@ async def test_key_conflict_sweep_cursor_pages_past_keep_both():
     )
 
 
+@pytest.mark.asyncio
+async def test_key_conflict_sweep_cursor_on_interruption():
+    """Codex r3 FIX 2: when _interrupted fires after the first resolve, the
+    cursor must advance only to that first pair's 4-tuple, NOT to pairs[-1].
+
+    Three pairs are returned in a single page (max_pairs=3).  The mock
+    resolve sets handler._interrupted=True after pair1 is processed.  The
+    loop then breaks at the top of pair2's iteration (before resolving it).
+    The cursor must be pair1's 4-tuple so pair2 and pair3 are retried next
+    cycle.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+    from nous.handlers.sleep_handler import SleepHandler
+
+    ts = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    id_f1 = uuid4()
+    id_f2a = uuid4()
+    id_f2b = uuid4()
+    id_f2c = uuid4()
+
+    pair1 = {"id1": id_f1, "id2": id_f2a, "c1": "c1a", "c2": "c2a", "ts1": ts, "ts2": ts}
+    pair2 = {"id1": id_f1, "id2": id_f2b, "c1": "c1b", "c2": "c2b", "ts1": ts, "ts2": ts}
+    pair3 = {"id1": id_f1, "id2": id_f2c, "c1": "c1c", "c2": "c2c", "ts1": ts, "ts2": ts}
+
+    expected_cursor = (pair1["ts1"], pair1["id1"], pair1["ts2"], pair1["id2"])
+
+    heart_mock = AsyncMock()
+    heart_mock.facts.find_key_conflict_pairs = AsyncMock(return_value=[pair1, pair2, pair3])
+
+    call_count = 0
+
+    async def resolve_and_interrupt(id1, id2, c1, c2):
+        nonlocal call_count
+        call_count += 1
+        handler._interrupted = True  # trigger break on next loop iteration
+        return False  # KEEP_BOTH
+
+    heart_mock.facts.resolve_key_conflict_pair = resolve_and_interrupt
+
+    settings = SimpleNamespace(
+        supersession_key_resolution_enabled=True,
+        supersession_sweep_max_pairs=3,
+        supersession_classifier_max_per_hour=500,
+    )
+    handler = SleepHandler(
+        brain=AsyncMock(),
+        heart=heart_mock,
+        settings=settings,
+        bus=MagicMock(),
+        llm_client=MagicMock(),
+    )
+    handler._llm = MagicMock()
+    handler._interrupted = False
+
+    stats: dict = {}
+    result = await handler._phase_sweep_key_conflicts(stats)
+
+    assert result is True
+    assert call_count == 1, f"Expected resolve called once, got {call_count}"
+    assert handler._key_sweep_cursor == expected_cursor, (
+        f"Cursor must be pair1's 4-tuple {expected_cursor}, "
+        f"got {handler._key_sweep_cursor} — the fix guards against advancing "
+        "past unprocessed pairs on interruption"
+    )
+
+
 @pytest.mark.postgres_only
 async def test_event_date_type_equality_round_trip(heart):
     """devil-2 #5 type-equality: event_date stored as datetime.date, not str.

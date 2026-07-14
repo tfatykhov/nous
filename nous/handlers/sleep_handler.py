@@ -1313,21 +1313,30 @@ class SleepHandler:
             )
             sleep_stats["key_conflicts_found"] = len(pairs)
             sleep_stats["key_supersessions_written"] = 0
+            last_processed: tuple | None = None
+            interrupted_early = False
             for pair in pairs:
                 if self._interrupted:
+                    interrupted_early = True
                     break
                 if await self._heart.facts.resolve_key_conflict_pair(
                     pair["id1"], pair["id2"], pair["c1"], pair["c2"]
                 ):
                     sleep_stats["key_supersessions_written"] += 1
-            # Advance the cursor to the last f1 row processed so the next
-            # cycle pages past pairs that were KEEP_BOTH this cycle.
-            # Reset to None when we got fewer rows than requested, meaning
-            # we've wrapped the table and should restart from the oldest pair.
-            if pairs and len(pairs) >= max_pairs:
-                last = pairs[-1]
-                self._key_sweep_cursor = (last["ts1"], last["id1"], last["ts2"], last["id2"])
-            else:
+                last_processed = (pair["ts1"], pair["id1"], pair["ts2"], pair["id2"])
+            # Advance the cursor only past pairs that were ACTUALLY processed.
+            # If interrupted mid-page, last_processed is the last resolved pair
+            # (not pairs[-1]) so the unprocessed remainder is retried next cycle.
+            # If the loop was interrupted before processing anything, leave the
+            # cursor unchanged so the same page is retried in full.
+            # Reset to None (restart from oldest) only when the page was exhausted
+            # without interruption, signalling a complete table wrap.
+            if last_processed is not None:
+                if not interrupted_early and len(pairs) < max_pairs:
+                    self._key_sweep_cursor = None
+                else:
+                    self._key_sweep_cursor = last_processed
+            elif not interrupted_early and len(pairs) < max_pairs:
                 self._key_sweep_cursor = None
             return True
         except Exception:
