@@ -2270,7 +2270,16 @@ async def test_select_backfill_episodes_includes_closed_episodes(session):
         ended_at=None,
         active=False,  # deactivated without ever closing — excluded
     )
-    session.add_all([ep_closed, ep_open, ep_orphan])
+    ep_abandoned = Episode(
+        agent_id=agent_id,
+        summary="Abandoned episode",
+        transcript="Stale fact 1.\nStale fact 2.\nStale fact 3.",
+        started_at=now,
+        ended_at=now,  # F060.2 stamps ended_at on abandonment too
+        active=False,
+        outcome="abandoned",  # excluded, mirroring the recall predicate
+    )
+    session.add_all([ep_closed, ep_open, ep_orphan, ep_abandoned])
     await session.flush()
 
     rows = await select_backfill_episodes(session, agent_id, None, 0)
@@ -2279,6 +2288,7 @@ async def test_select_backfill_episodes_includes_closed_episodes(session):
     assert ep_closed.id in ids, "closed episode (the normal case) must be included"
     assert ep_open.id in ids, "open episode must still be included"
     assert ep_orphan.id not in ids, "never-ended deactivated orphan must stay excluded"
+    assert ep_abandoned.id not in ids, "abandoned episode must stay excluded (F060.2)"
 
 
 @pytest.mark.postgres_only
