@@ -2861,3 +2861,195 @@ async def test_partial_store_batch_wiring_skips_legacy(monkeypatch):
         f"Expected exactly 2 learn calls (enumerative: 1 ok + 1 raise); "
         f"got {learn_calls[0]} — legacy path must NOT have been invoked"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-10 FIX 1: in-run content dedup across chunk overlap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_overlap_duplicate_dedup_first_ordinal_wins(monkeypatch, settings_fixture):
+    """FIX 1 (codex r10): statements in the overlap window are extracted from both
+    adjacent chunks; the in-run seen_contents filter drops the later-chunk copy,
+    preserving the FIRST ordinal.
+
+    chunk-0 → [X (pos 0), Y (pos 1)]
+    chunk-1 → [Y (pos 0, verbatim dup from overlap), Z (pos 1)]
+
+    Expected: 3 facts stored (Y once), stored Y has chunk-0 ordinal = 1.
+    """
+    # A 700-char transcript so chunk_text (size=600, overlap=80) produces 2 chunks.
+    transcript = "A" * 700
+
+    settings = settings_fixture(
+        enumerative_density_threshold=0.0,  # force-enumerable
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    stored_args: list = []
+
+    async def _learn(fi, **kw):
+        stored_args.append(fi)
+        return SimpleNamespace(id=uuid4())
+
+    heart_mock = AsyncMock()
+    heart_mock.learn = AsyncMock(side_effect=_learn)
+
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+
+    shared_y_content = "Y fact: the server memory allocation is sixteen gigabytes total."
+
+    chunk0_facts = {
+        "facts": [
+            {
+                "content": "X fact: the CPU core count is eight for each production node.",
+                "subject_key": "cpu",
+                "attribute_key": "core_count",
+            },
+            {
+                "content": shared_y_content,
+                "subject_key": "server",
+                "attribute_key": "memory_allocation",
+            },
+        ]
+    }
+    chunk1_facts = {
+        "facts": [
+            {
+                "content": shared_y_content,  # verbatim overlap duplicate
+                "subject_key": "server",
+                "attribute_key": "memory_allocation",
+            },
+            {
+                "content": "Z fact: the disk storage capacity is two terabytes per node.",
+                "subject_key": "disk",
+                "attribute_key": "storage_capacity",
+            },
+        ]
+    }
+
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(side_effect=[chunk0_facts, chunk1_facts]),
+    )
+
+    ex = EnumerativeExtractor(
+        heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
+    )
+    stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+
+    # 3 facts stored: X (chunk-0 pos 0), Y (chunk-0 pos 1), Z (chunk-1 pos 1)
+    # Y's chunk-1 copy (pos 0) is dropped by the in-run seen_contents filter.
+    assert len(stored_ids) == 3, (
+        f"Expected 3 stored IDs (X, Y once, Z); got {len(stored_ids)}"
+    )
+
+    # Y must appear exactly once and carry the FIRST ordinal: chunk_index=0, pos=1 → 1
+    y_args = [fi for fi in stored_args if fi.content == shared_y_content]
+    assert len(y_args) == 1, (
+        f"Y content must be stored exactly once; found {len(y_args)} copies"
+    )
+    assert y_args[0].source_ordinal == 0 * 1_000_000 + 1, (
+        f"Y's ordinal must be the chunk-0 ordinal (1); got {y_args[0].source_ordinal}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-10 FIX 2: fail open on malformed classifier confidence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_resolve_key_conflict_pair_malformed_confidence_keep_both(heart, monkeypatch):
+    """FIX 2 (codex r10): resolve_key_conflict_pair must not raise when the
+    classifier returns non-numeric confidence (e.g. "high") — fail open to
+    KEEP BOTH (return False), no exception, no supersession written."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+
+    f_old = await heart.learn(
+        FactInput(
+            content="The API response time averaged at two hundred milliseconds measured daily.",
+            subject_key="api",
+            attribute_key="response_time",
+        )
+    )
+    f_new = await heart.learn(
+        FactInput(
+            content="The API response time averaged at three hundred milliseconds measured daily.",
+            subject_key="api",
+            attribute_key="response_time",
+        )
+    )
+
+    # Classifier returns UPDATE with non-numeric confidence — must not raise
+    monkeypatch.setattr(
+        heart.facts,
+        "_classify_fact_pair",
+        AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": "high"}),
+    )
+
+    result = await heart.facts.resolve_key_conflict_pair(
+        f_old.id, f_new.id, f_old.content, f_new.content
+    )
+    assert result is False, (
+        f"Expected False (fail-open on malformed confidence 'high'); got {result}"
+    )
+
+    async with heart.db.session() as s:
+        old_row = await s.get(Fact, f_old.id)
+        new_row = await s.get(Fact, f_new.id)
+        assert old_row.superseded_by is None, "old fact must not be superseded"
+        assert old_row.active is not False, "old fact must remain active"
+        assert new_row.superseded_by is None, "new fact must not be superseded"
+        assert new_row.active is not False, "new fact must remain active"
+
+
+@pytest.mark.postgres_only
+async def test_resolve_key_conflicts_malformed_confidence_keep_both(heart, session, monkeypatch):
+    """FIX 2 (codex r10): write-time _resolve_key_conflicts (inside Heart.learn)
+    must not raise on non-numeric confidence — both facts kept active, no
+    transaction abort."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+
+    old_r = await heart.learn(
+        FactInput(
+            content="The deployment region is us-east-1 primary availability zone.",
+            subject_key="deployment",
+            attribute_key="region",
+        ),
+        session=session,
+    )
+
+    # Malformed confidence on the second write — must fail-open
+    monkeypatch.setattr(
+        heart.facts,
+        "_classify_fact_pair",
+        AsyncMock(return_value={"relation": "UPDATE", "current_fact": "new", "confidence": "high"}),
+    )
+
+    new_r = await heart.learn(
+        FactInput(
+            content="The deployment region is us-west-2 primary availability zone.",
+            subject_key="deployment",
+            attribute_key="region",
+        ),
+        session=session,
+    )
+
+    await session.flush()
+
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    assert old_row.superseded_by is None, "old fact must not be superseded on malformed confidence"
+    assert old_row.active is not False, "old fact must remain active"
+    assert new_row.superseded_by is None, "new fact must not be superseded on malformed confidence"
+    assert new_row.active is not False, "new fact must remain active"

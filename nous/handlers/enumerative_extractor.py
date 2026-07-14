@@ -145,6 +145,9 @@ class EnumerativeExtractor:
 
         cap = getattr(self._settings, "enumerative_max_facts_per_episode", 1000)
         stored_ids: list = []
+        # R10: track normalized content across chunks to drop verbatim overlap
+        # duplicates before _store_batch; first-occurrence ordinal always wins.
+        seen_contents: set[str] = set()
         for chunk_index, chunk in enumerate(chunks):
             if cap and len(stored_ids) >= cap:
                 truncated = True
@@ -163,6 +166,23 @@ class EnumerativeExtractor:
                 if not raw:
                     continue
                 inputs = self._to_fact_inputs(raw, chunk_index, episode_id)
+                # R10: drop overlap duplicates — keep first-occurrence ordinal.
+                filtered: list = []
+                for inp in inputs:
+                    norm = " ".join(inp.content.lower().split())
+                    if norm not in seen_contents:
+                        filtered.append(inp)
+                skipped = len(inputs) - len(filtered)
+                if skipped > 0:
+                    logger.debug(
+                        "R1: chunk %d: skipped %d duplicate(s) from overlap window",
+                        chunk_index,
+                        skipped,
+                    )
+                seen_contents.update(
+                    " ".join(inp.content.lower().split()) for inp in filtered
+                )
+                inputs = filtered
                 if cap:
                     remaining = cap - len(stored_ids)
                     if len(inputs) > remaining:
