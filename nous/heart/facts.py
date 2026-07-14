@@ -2328,16 +2328,23 @@ class FactManager:
         return await self._get_current(fact_id, session)
 
     async def _get_current(self, fact_id: UUID, session: AsyncSession) -> FactDetail:
+        # Path-based cycle detection: carry the visited-id array so the walk
+        # stops as soon as it would re-enter an already-visited node.  A
+        # legitimate chain of any length terminates naturally at the NULL-tip
+        # row; only a true cycle (A→B→A, or longer) ever yields no NULL-tip.
+        # depth < 100 is a backstop against degenerate runaway, not the
+        # primary cycle gate.
         sql = text("""
             WITH RECURSIVE chain AS (
-                SELECT id, superseded_by, 1 AS depth
+                SELECT id, superseded_by, 1 AS depth, ARRAY[id]::uuid[] AS path
                 FROM heart.facts
                 WHERE id = :start_id AND agent_id = :agent_id
                 UNION ALL
-                SELECT f.id, f.superseded_by, c.depth + 1
+                SELECT f.id, f.superseded_by, c.depth + 1, c.path || f.id
                 FROM heart.facts f
                 JOIN chain c ON f.id = c.superseded_by
-                WHERE c.depth < 10
+                WHERE NOT (f.id = ANY(c.path))
+                  AND c.depth < 100
             )
             SELECT id FROM chain WHERE superseded_by IS NULL
         """)
@@ -2345,18 +2352,21 @@ class FactManager:
         result = await session.execute(sql, {"start_id": fact_id, "agent_id": self.agent_id})
         row = result.first()
         if row is None:
-            # 064 AC-5: depth exhausted without a NULL tip = supersession cycle.
+            # Path-exhausted without a NULL tip = genuine supersession cycle.
             # Fall back to the chain member with the latest learned_at, break
             # the cycle persistently (null its superseded_by + reactivate), and
             # log the anomaly. Never leave the cycle in place.
             cycle_rows = await session.execute(text("""
                 WITH RECURSIVE chain AS (
-                    SELECT id, superseded_by, learned_at, 1 AS depth
+                    SELECT id, superseded_by, learned_at, 1 AS depth,
+                           ARRAY[id]::uuid[] AS path
                     FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
                     UNION ALL
-                    SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1
+                    SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
+                           c.path || f.id
                     FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
-                    WHERE c.depth < 10
+                    WHERE NOT (f.id = ANY(c.path))
+                      AND c.depth < 100
                 )
                 SELECT id FROM chain ORDER BY learned_at DESC NULLS LAST LIMIT 1
             """), {"start_id": fact_id, "agent_id": self.agent_id})

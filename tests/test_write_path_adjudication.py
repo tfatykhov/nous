@@ -1233,6 +1233,51 @@ async def test_get_current_cycle_break_durable_without_session(heart):
         assert fresh_b.active is True
 
 
+@pytest.mark.postgres_only
+async def test_get_current_long_chain_not_rewritten(heart, session):
+    """Path-based cycle detection: a legitimate 12-link chain must NOT be
+    mutated by get_current.  Only true cycles trigger the fallback repair.
+
+    Chain: A1 → A2 → A3 → ... → A12 (tip, superseded_by=NULL, active=True).
+    All intermediate nodes: superseded_by set, active=False.
+    """
+    n = 12
+    facts = []
+    for i in range(n):
+        f = await heart.learn(
+            FactInput(
+                content=f"Long chain link {i + 1} of {n}: the deployment revision is v{i + 1}.0.0."
+            ),
+            session=session,
+        )
+        facts.append(f)
+
+    # Wire the chain: A1.superseded_by=A2, A2.superseded_by=A3, …, A11.superseded_by=A12
+    rows = [await session.get(Fact, f.id) for f in facts]
+    for i, row in enumerate(rows[:-1]):
+        row.superseded_by = facts[i + 1].id
+        row.active = False
+    rows[-1].superseded_by = None
+    rows[-1].active = True
+    await session.flush()
+
+    # get_current from the head must reach the tip without any fallback
+    result = await heart.facts._get_current(facts[0].id, session)
+    assert result.id == facts[-1].id, (
+        f"Expected tip {facts[-1].id}, got {result.id}"
+    )
+
+    # Every intermediate row must be untouched (superseded_by and active unchanged)
+    for i, row in enumerate(rows[:-1]):
+        await session.refresh(row)
+        assert row.superseded_by == facts[i + 1].id, (
+            f"Intermediate link {i + 1} had superseded_by mutated"
+        )
+        assert row.active is False, (
+            f"Intermediate link {i + 1} was reactivated"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Task 9: sleep-phase key-conflict sweep (find_key_conflict_pairs,
 #         resolve_key_conflict_pair, _phase_sweep_key_conflicts)
