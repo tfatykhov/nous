@@ -401,6 +401,7 @@ class FactManager:
         session: AsyncSession | None = None,
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
+        precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
         """Store a new fact with deduplication.
 
@@ -413,6 +414,8 @@ class FactManager:
             session: Optional session for transaction injection.
             encoded_frame: Frame active when this fact was learned (003.2).
             encoded_censors: Censors active when this fact was learned (003.2).
+            precomputed_embedding: Pre-computed vector to use verbatim instead
+                of calling the embedder.  Enables RC-2 batched ingest (Task 4).
         """
         # W-1: precompute the admission LLM utility BEFORE opening the write
         # session, so the Haiku call doesn't hold a pooled connection through
@@ -449,6 +452,7 @@ class FactManager:
                     encoded_frame=encoded_frame,
                     encoded_censors=encoded_censors,
                     utility_override=utility_override,
+                    precomputed_embedding=precomputed_embedding,
                 )
                 await session.commit()
                 return result
@@ -460,6 +464,7 @@ class FactManager:
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
             utility_override=utility_override,
+            precomputed_embedding=precomputed_embedding,
         )
 
     async def _embed_with_retry(self, embed_text: str, *, attempts: int = 2) -> list[float] | None:
@@ -502,6 +507,7 @@ class FactManager:
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
         utility_override: float | None = None,
+        precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
         # F038-1.2: Reject facts with content < fact_min_content_chars characters.
         # 0 disables the gate entirely (useful for testing / low-noise corpora).
@@ -537,7 +543,13 @@ class FactManager:
 
         # Generate embedding (retry once; persistent failure logs ERROR and
         # stores a NULL-embed row rather than dropping the fact — 1b).
-        embedding = await self._embed_with_retry(input.content)
+        # RC-2: when caller provides a precomputed vector, skip the embedder
+        # entirely so batched ingest (Task 4) can embed once per batch.
+        embedding = (
+            precomputed_embedding
+            if precomputed_embedding is not None
+            else await self._embed_with_retry(input.content)
+        )
 
         # Near-duplicate detection: cosine similarity > threshold.
         # F075: pass candidate's event_date so _find_duplicate prefers same-date

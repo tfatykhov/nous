@@ -288,6 +288,7 @@ class Heart:
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
         exclude_ids: list[UUID] | None = None,
+        precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
         """Store a new fact with deduplication.
 
@@ -300,6 +301,8 @@ class Heart:
                 F377: lets the fact extractor exclude RRF hits its tiebreaker
                 already judged DISTINCT, so Heart.learn's Leg-2 dedup can't
                 silently re-merge them.
+            precomputed_embedding: Pre-computed vector to use verbatim instead
+                of calling the embedder.  Enables RC-2 batched ingest (Task 4).
         """
         result = await self.facts.learn(
             input,
@@ -307,6 +310,7 @@ class Heart:
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
             exclude_ids=exclude_ids,
+            precomputed_embedding=precomputed_embedding,
         )
 
         # F023: Skip event emission for rejected facts (FactRejected has no .id)
