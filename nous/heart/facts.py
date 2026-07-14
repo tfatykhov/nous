@@ -717,10 +717,16 @@ class FactManager:
         # Audit S11: exclude_ids threaded through so facts the F377
         # tiebreaker (or the band classifier above) just ruled distinct
         # are not silently superseded against that verdict.
-        # 064 R2: facts carrying conflict-slot keys are owned by keyed
-        # resolution (capped + budgeted). The legacy subject path is uncapped
-        # (risk-2 #1) and would double-adjudicate the same pairs.
-        if check_contradictions and input.subject and embedding is not None and input.subject_key is None:
+        # 064 R2: skip legacy path ONLY when keyed resolution will actually
+        # handle this fact (R2 enabled AND both keys present). With R2 off
+        # or a key missing the legacy subject path is the only write-time
+        # supersession guard — skipping it leaves stale unkeyed same-subject
+        # rows active (codex r5).
+        if check_contradictions and input.subject and embedding is not None and not (
+            getattr(self._settings, "supersession_key_resolution_enabled", False) is True
+            and input.subject_key
+            and input.attribute_key
+        ):
             await self._supersede_by_subject(
                 fact.id, input.subject, embedding, session,
                 new_content=input.content,

@@ -176,6 +176,11 @@ Partial index `idx_facts_conflict_slot` on `(agent_id, subject_key, attribute_ke
 4. **Modal, not additive:** Enumerable episodes route fact storage INSTEAD of the candidate-facts
    leg. The episode summary is still generated and stored; only fact extraction switches source.
 
+5. **R2 transition-period gap:** With R2 enabled (`supersession_key_resolution_enabled=true`),
+   keyed facts do not subject-supersede legacy UNKEYED rows — exact-key matching only. Stale
+   unkeyed rows for the same subject persist until the corpus becomes fully keyed and a backfill
+   sweep resolves them via R2.5. Remediated automatically once all subject rows carry keys.
+
 ---
 
 ## Backfill Runbooks

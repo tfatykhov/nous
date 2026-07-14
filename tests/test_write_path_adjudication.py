@@ -1158,11 +1158,39 @@ async def test_r2_row10_contradiction_ambiguous_keep_both(heart, session, monkey
 # Row 11 ─────────────────────────────────────────────────────────────────────
 
 @pytest.mark.postgres_only
-async def test_r2_row11_keyed_fact_skips_supersede_by_subject(heart, session, monkeypatch):
-    """Row 11: fact with subject AND subject_key → _supersede_by_subject NOT invoked.
-    Risk-2 #1: the legacy path is uncapped; keyed facts must bypass it unconditionally."""
+async def test_r2_row11_keyed_fact_runs_legacy_when_r2_off(heart, session, monkeypatch):
+    """Row 11 (codex r5 inverted): R2 OFF + keyed fact → legacy _supersede_by_subject RUNS.
+    With R2 disabled, keyed facts have no keyed resolver, so the legacy subject path is
+    the only write-time supersession guard and must NOT be skipped."""
     sentinel = AsyncMock()
     monkeypatch.setattr(heart.facts, "_supersede_by_subject", sentinel)
+    # Default Settings has supersession_key_resolution_enabled=False — R2 is off.
+
+    await heart.learn(
+        FactInput(
+            content="Red sports car belongs to Alice who lives downtown near the park.",
+            subject="red sports car",
+            subject_key="red sports car",
+            attribute_key="owner",
+        ),
+        session=session,
+    )
+    sentinel.assert_called_once()
+
+
+@pytest.mark.postgres_only
+async def test_r2_row11_keyed_fact_skips_legacy_when_r2_on(heart, session, monkeypatch):
+    """Row 11 sibling (codex r5): R2 ON + keyed fact → legacy _supersede_by_subject SKIPPED.
+    When R2 is enabled and both keys are present, keyed resolution owns the adjudication;
+    the legacy uncapped subject path must NOT double-adjudicate."""
+    sentinel = AsyncMock()
+    monkeypatch.setattr(heart.facts, "_supersede_by_subject", sentinel)
+    # Enable R2 on the facts module's settings copy.
+    monkeypatch.setattr(
+        heart.facts,
+        "_settings",
+        heart.facts._settings.model_copy(update={"supersession_key_resolution_enabled": True}),
+    )
 
     await heart.learn(
         FactInput(
