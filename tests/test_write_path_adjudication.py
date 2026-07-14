@@ -2737,3 +2737,127 @@ def test_key_budget_exhausted_reports_exhausted_and_resets_on_hour_boundary():
     assert mgr._key_calls == 0, (
         "key_budget_exhausted must never increment _key_calls"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex round-9 P2: per-fact failure isolation in _store_batch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_store_batch_per_fact_failure_isolation():
+    """Codex r9: heart.learn raises on fact 2 of 3 — _store_batch returns only
+    the first fact's id, does NOT raise, and does NOT attempt the third fact.
+
+    Before the fix _store_batch propagated the exception, causing
+    process_transcript to treat the whole chunk as failed and return [] even
+    though fact 1 was already committed to the DB."""
+    first_id = uuid4()
+    call_count = [0]
+
+    async def _learn(fi, **kw):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return SimpleNamespace(id=first_id)
+        raise RuntimeError(f"simulated DB failure on call {call_count[0]}")
+
+    heart = AsyncMock()
+    heart.learn = AsyncMock(side_effect=_learn)
+
+    settings = _make_settings()
+    ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=object(), embedder=None)
+
+    inputs = [
+        FactInput(
+            content=f"Content for fact {i} long enough to pass any validation check here.",
+            subject_key=f"entity{i}",
+            attribute_key="property",
+        )
+        for i in range(3)
+    ]
+
+    # Must not raise — per-fact failures are isolated
+    result = await ex._store_batch(inputs)
+
+    # Only the first committed fact appears in the result
+    assert result == [first_id], f"Expected [first_id]; got {result}"
+    # learn called twice: call 1 succeeds, call 2 raises → break (call 3 never reached)
+    assert call_count[0] == 2, (
+        f"Expected 2 learn calls (1 success + 1 raise, 3rd skipped); got {call_count[0]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_store_batch_wiring_skips_legacy(monkeypatch):
+    """Codex r9 integration: heart.learn raises on the second fact of the first
+    chunk — _store_batch returns [first_id] → process_transcript returns
+    [first_id] → extract_and_store returns [first_id], legacy candidate path
+    NOT invoked.
+
+    Exercises the ACTUAL _store_batch mid-batch failure (not mocked at the
+    process_transcript boundary), mirroring test_partial_chunk_failure_wiring_skips_legacy
+    (r7) but at a deeper level."""
+    from nous.handlers import fact_extractor as fe_mod
+
+    first_id = uuid4()
+    learn_calls = [0]
+
+    class _HeartStub:
+        """Heart stub that raises on the second learn call (simulates a DB error
+        mid-batch in _store_batch).  Subsequent calls succeed so the test is not
+        masked by legacy-path errors if the wiring accidentally reaches it."""
+        _embeddings = None
+
+        async def search_facts(self, *a, **kw):
+            return []
+
+        async def learn(self, fact_input, **kw):
+            learn_calls[0] += 1
+            if learn_calls[0] == 2:
+                raise RuntimeError("simulated DB failure on enumerative fact 2")
+            # Return a stable id so the result is predictable regardless of
+            # which call produced it (whether enumerative or legacy).
+            return SimpleNamespace(id=first_id)
+
+    heart = _HeartStub()
+
+    # LLM returns 2 facts for the single chunk — second will raise in heart.learn
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(return_value=_CHUNK_FACTS),
+    )
+
+    # Cap to 1 chunk so only the first chunk is processed — the partial-store
+    # failure in that chunk is what we are testing.  _DENSE_TRANSCRIPT would
+    # produce multiple chunks; later chunks would succeed and inflate the result.
+    settings = _make_settings(
+        flag_on=True,
+        enumerative_density_threshold=0.0,
+        enumerative_max_chunks_per_episode=1,
+    )
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = settings
+    ext._dedup_via_search = False
+    ext._llm = object()  # non-None so the enumerative branch is entered
+    ext._enumerative_extractor = None
+
+    result = await ext.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+
+    # With the fix: _store_batch isolates the failure → returns [first_id]
+    # → process_transcript returns [first_id] (non-empty)
+    # → extract_and_store returns those IDs without touching the legacy path.
+    assert result == [first_id], (
+        f"Expected [first_id] from enumerative partial store; got {result}"
+    )
+    # Exactly 2 learn calls: call 1 (enumerative fact 1, ok) + call 2 (raise).
+    # If the legacy candidate path had run, _store_candidate_facts would issue
+    # a third learn call → learn_calls[0] would be 3.
+    assert learn_calls[0] == 2, (
+        f"Expected exactly 2 learn calls (enumerative: 1 ok + 1 raise); "
+        f"got {learn_calls[0]} — legacy path must NOT have been invoked"
+    )

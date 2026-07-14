@@ -266,7 +266,16 @@ class EnumerativeExtractor:
         stored_ids: list = []
         for idx, fi in enumerate(inputs):
             vec = vectors[idx] if vectors is not None and idx < len(vectors) else None
-            result = await self._heart.learn(fi, precomputed_embedding=vec)
+            try:
+                result = await self._heart.learn(fi, precomputed_embedding=vec)
+            except Exception:
+                logger.exception(
+                    "R1: fact %d/%d failed to store — stopping batch with %d stored",
+                    idx,
+                    len(inputs),
+                    len(stored_ids),
+                )
+                break
             if not isinstance(result, FactRejected):
                 stored_ids.append(result.id)
         return stored_ids
