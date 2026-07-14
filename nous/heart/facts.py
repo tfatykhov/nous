@@ -747,13 +747,14 @@ class FactManager:
                 exclude_ids=exclude_ids,
             )
 
+        new_fact_lost = False  # codex r11: set True when keyed resolution deactivates the new fact
         if (
             check_contradictions
             and getattr(self._settings, "supersession_key_resolution_enabled", False) is True
             and input.subject_key
             and input.attribute_key
         ):
-            await self._resolve_key_conflicts(fact, input, session, exclude_ids)
+            new_fact_lost = await self._resolve_key_conflicts(fact, input, session, exclude_ids)
 
         await self._emit_event(
             session,
@@ -769,8 +770,10 @@ class FactManager:
         if band_warning is not None:
             detail.contradiction_warning = band_warning
 
-        if check_contradictions:
+        if check_contradictions and not new_fact_lost:
             # Contradiction detection: similarity 0.85-0.95 with different content
+            # codex r11: skipped when new fact lost keyed resolution (inactive fact
+            # must not trigger contradiction edges or domain compaction).
             if embedding is not None:
                 safe_excludes = list(exclude_ids) + [fact.id]
                 contradiction = await self._find_contradiction(
@@ -1701,7 +1704,7 @@ class FactManager:
     async def _resolve_key_conflicts(
         self, fact: Fact, input: FactInput, session: AsyncSession,
         exclude_ids: list[UUID],
-    ) -> None:
+    ) -> bool:
         """064 R2.1/R2.2: same-(subject_key, attribute_key) conflict resolution.
 
         Precedence (binding, reviews RC-4/AC-3):
@@ -1711,6 +1714,9 @@ class FactManager:
           3. Policy picks the winner: ordinal (same-episode, both ordinals
              present) else recency (learned_at).
         Never deletes; loser keeps full lineage via apply_supersession.
+
+        Returns True when the newly-inserted fact (``fact``) lost and is now
+        inactive; False otherwise (codex r11).
         """
         cap = self._settings.supersession_key_candidates_cap if self._settings else 8
         rows = await session.execute(
@@ -1736,7 +1742,7 @@ class FactManager:
                 continue  # F075 precedence: distinct events, never supersede
             if not self._key_budget_ok():
                 logger.warning("R2: key-conflict classifier hourly budget spent — deferring to sleep sweep")
-                return
+                return False
             cls = await self._classify_fact_pair(old.content, input.content)
             if not cls:
                 continue  # fail-open: KEEP BOTH
@@ -1764,7 +1770,8 @@ class FactManager:
                 winner, loser = self._pick_winner(fact, old, cls)
             await self.apply_supersession(winner.id, loser.id, session)
             if loser.id == fact.id:
-                return  # the new fact lost — it is now inactive; stop scanning
+                return True  # codex r11: new fact lost — it is inactive; stop scanning
+        return False
 
     def _pick_winner(self, new_fact: Fact, old_fact: Fact, classification: dict | None = None):
         """R2.2 policy for UPDATE conflicts. Returns (winner, loser).

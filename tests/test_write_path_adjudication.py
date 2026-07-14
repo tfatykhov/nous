@@ -3130,3 +3130,60 @@ async def test_confirm_duplicate_fills_adjudication_metadata(heart, session):
     assert row.overrides_prior is True, "overrides_prior must not be downgraded by third learn"
 
 
+@pytest.mark.postgres_only
+async def test_resolve_key_conflicts_loss_skips_contradiction_scan(heart, session, monkeypatch):
+    """codex r11 FIX 2: when the new fact loses keyed resolution (old wins),
+    _find_contradiction must NOT be invoked — an inactive loser must not generate
+    contradiction edges or trigger domain compaction.
+    """
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+
+    # Orthogonal unit vectors: cosine between old and new = 0 → no dedup.
+    vec_old = [1.0] + [0.0] * 1535
+    vec_new = [0.0, 1.0] + [0.0] * 1534
+
+    # Learn old fact via FactManager directly to pass check_contradictions=False,
+    # so the sentinel is not disturbed by the first learn's contradiction scan.
+    await heart.facts.learn(
+        FactInput(
+            content="The server cluster handles 1000 requests per second at peak.",
+            subject_key="server cluster",
+            attribute_key="throughput",
+        ),
+        session=session,
+        precomputed_embedding=vec_old,
+        check_contradictions=False,
+    )
+
+    # Wire: old wins (CONTRADICTION, current_fact=old, conf=0.9).
+    monkeypatch.setattr(
+        heart.facts,
+        "_classify_fact_pair",
+        AsyncMock(return_value={"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}),
+    )
+    # Sentinel: _find_contradiction must NOT fire for a losing (inactive) fact.
+    find_contradiction_sentinel = AsyncMock(return_value=None)
+    monkeypatch.setattr(heart.facts, "_find_contradiction", find_contradiction_sentinel)
+
+    new_r = await heart.facts.learn(
+        FactInput(
+            content="The server cluster handles 500 requests per second at peak.",
+            subject_key="server cluster",
+            attribute_key="throughput",
+        ),
+        session=session,
+        precomputed_embedding=vec_new,
+    )
+
+    find_contradiction_sentinel.assert_not_called()
+
+    # Confirm the new fact is inactive (lost keyed resolution).
+    await session.flush()
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.active is False or new_row.superseded_by is not None, (
+        "new fact must be inactive after losing keyed resolution"
+    )
+
+
