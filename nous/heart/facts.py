@@ -2544,7 +2544,28 @@ class FactManager:
             if deepest.is_cycle or deepest.id in visited:
                 # True intra-CTE cycle OR cross-restart cycle detected.
                 # Repair: pick latest-learned member, null superseded_by + reactivate.
-                winner_rows = await session.execute(_winner_sql, params)
+                if deepest.id in visited:
+                    # Cross-restart cycle: the cycle spans >100 links so _winner_sql
+                    # (a 100-depth CTE from the current restart point) may exclude the
+                    # true latest-learned member.  Select over the full visited set
+                    # which covers all restart endpoints accumulated so far.
+                    winner_rows = await session.execute(
+                        text("""
+                            SELECT id FROM heart.facts
+                            WHERE agent_id = :agent_id
+                              AND id::text = ANY(:visited_strs)
+                            ORDER BY learned_at DESC NULLS LAST, id DESC
+                            LIMIT 1
+                        """),
+                        {
+                            "agent_id": self.agent_id,
+                            "visited_strs": [str(v) for v in visited],
+                        },
+                    )
+                else:
+                    # Intra-CTE cycle: the whole cycle fits within the 100-node
+                    # window; the CTE-based winner correctly covers all members.
+                    winner_rows = await session.execute(_winner_sql, params)
                 tip = winner_rows.first()
                 if tip is None:
                     raise ValueError(f"Fact {fact_id} not found")

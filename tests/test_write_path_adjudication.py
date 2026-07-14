@@ -1465,6 +1465,68 @@ async def test_get_current_deep_chain_no_repair(heart, session):
 
 
 # ---------------------------------------------------------------------------
+# Codex r15 FIX 2: cycle repair selects winner over full visited set
+# ---------------------------------------------------------------------------
+
+@pytest.mark.postgres_only
+async def test_get_current_long_cycle_winner_from_full_visited_set(heart, session):
+    """R15 FIX 2: 150-node cycle where max learned_at is at index ~120 (past the
+    first 100-depth CTE window).  get_current(facts[0]) must return facts[120] —
+    the true latest-learned — and break the cycle there.
+
+    Chain: facts[0] → facts[1] → … → facts[149] → facts[0] (cycle).
+    learned_at: facts[120] has the globally maximum value; all others keep
+    their natural insert ordering; facts[120] jumps to base + 200 days.
+
+    The iterative walk accumulates restart endpoints in visited.  With step=98,
+    d(k)=(k*98) mod 150 generates all even values; d(15)=120, so facts[120]
+    IS a restart endpoint and appears in visited before cycle detection fires.
+    The fix queries the full visited set for the winner; without it, _winner_sql
+    starts at current_id near the detection point and misses facts[120].
+    """
+    from datetime import timedelta
+
+    n = 150
+    facts = []
+    for i in range(n):
+        f = await heart.learn(
+            FactInput(
+                content=(
+                    f"Long cycle link {i + 1} of {n}: the index counter "
+                    f"is at position {i + 1} in the rotation sequence."
+                )
+            ),
+            session=session,
+        )
+        facts.append(f)
+
+    # Wire the cycle: facts[0]→facts[1]→…→facts[149]→facts[0]
+    rows = [await session.get(Fact, f.id) for f in facts]
+    for i, row in enumerate(rows):
+        row.superseded_by = facts[(i + 1) % n].id
+        row.active = False
+
+    # Set facts[120]'s learned_at to be the globally maximum value.
+    # All others keep their natural insert ordering.
+    base_time = rows[0].learned_at
+    rows[120].learned_at = base_time + timedelta(days=200)
+
+    await session.flush()
+
+    # get_current must return facts[120] (the true latest-learned)
+    result = await heart.facts._get_current(facts[0].id, session)
+    assert result.id == facts[120].id, (
+        f"Expected facts[120]={facts[120].id}, got {result.id} — "
+        "cycle repair must select winner from the full visited set"
+    )
+
+    # Cycle must be broken at facts[120]: superseded_by=None, active=True
+    await session.refresh(rows[120])
+    assert rows[120].superseded_by is None, "winner's superseded_by must be cleared"
+    assert rows[120].active is True, "winner must be reactivated"
+
+
+# ---------------------------------------------------------------------------
 # Task 9: sleep-phase key-conflict sweep (find_key_conflict_pairs,
 #         resolve_key_conflict_pair, _phase_sweep_key_conflicts)
 # ---------------------------------------------------------------------------
