@@ -767,6 +767,16 @@ async def test_r2_row2_update_new_higher_ordinal_wins(heart, session, monkeypatc
     assert new_row.superseded_by is None
     assert new_row.active is True
 
+    # Assert supersedes graph edge: new_r (winner) → old_r (loser)
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == new_r.id)
+        .where(GraphEdge.target_id == old_r.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    edge = edge_r.scalars().first()
+    assert edge is not None
+
 
 # Row 3 ─────────────────────────────────────────────────────────────────────
 
@@ -806,6 +816,16 @@ async def test_r2_row3_old_higher_ordinal_new_loses(heart, session, monkeypatch)
     old_row = await session.get(Fact, old_r.id)
     assert old_row.superseded_by is None
     assert old_row.active is True
+
+    # Assert supersedes graph edge: old_r (winner) → new_r (loser)
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == old_r.id)
+        .where(GraphEdge.target_id == new_r.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    edge = edge_r.scalars().first()
+    assert edge is not None
 
 
 # Row 4 ─────────────────────────────────────────────────────────────────────
@@ -1040,6 +1060,16 @@ async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, 
     old_row = await session.get(Fact, old_r.id)
     assert old_row.superseded_by is None
     assert old_row.active is True
+
+    # Assert supersedes graph edge: old_r (winner) → new_r (loser)
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == old_r.id)
+        .where(GraphEdge.target_id == new_r.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    edge = edge_r.scalars().first()
+    assert edge is not None
 
 
 # Row 10 ─────────────────────────────────────────────────────────────────────
