@@ -1651,7 +1651,11 @@ class FactManager:
             if not cls:
                 return False
             relation = cls.get("relation", "")
-            conf = float(cls.get("confidence", 0.0))
+            try:
+                conf = float(cls.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                # Malformed confidence (e.g. "high") → fail-open: KEEP BOTH.
+                conf = 0.0
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 return False
             if relation == "CONTRADICTION":
@@ -1718,7 +1722,11 @@ class FactManager:
             if not cls:
                 continue  # fail-open: KEEP BOTH
             relation = cls.get("relation", "")
-            conf = float(cls.get("confidence", 0.0))
+            try:
+                conf = float(cls.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                # Malformed confidence (e.g. "high") → fail-open: KEEP BOTH.
+                conf = 0.0
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 continue  # not a confirmed same-slot conflict
             if relation == "CONTRADICTION":
