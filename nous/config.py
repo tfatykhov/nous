@@ -234,6 +234,40 @@ class Settings(BaseSettings):
         ),
     )
 
+    # 064 R1: enumerative extraction (land-dark)
+    extraction_enumerative_enabled: bool = Field(
+        default=False,
+        description=(
+            "R1: extract atomic facts from raw transcript chunks when the "
+            "density heuristic classifies the episode as enumerable. Additive — "
+            "the summarize-then-extract path is unchanged. Requires background LLM."
+        ),
+    )
+    enumerative_density_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="Statement-per-line density above which a transcript is enumerable (conservative default).",
+    )
+    enumerative_max_facts_per_episode: int = Field(
+        default=1000, ge=0,
+        description="R1.3 cap on enumerative facts per episode; 0 = unlimited. Truncation logs WARNING (never silent).",
+    )
+    enumerative_max_chunks_per_episode: int = Field(
+        default=200, ge=0,
+        description="Hard bound on extraction LLM calls per episode (one per chunk); 0 = unlimited. Truncation logs WARNING.",
+    )
+    enumerative_extraction_max_per_hour: int = Field(
+        default=1000, ge=0,
+        description="Hourly in-process cap on enumerative extraction LLM calls (mirrors *_max_per_hour pattern); 0 disables.",
+    )
+    enumerative_classifier: Literal["heuristic", "off"] = Field(
+        default="heuristic",
+        description="Density mode selection: 'heuristic' (no LLM) or 'off' (never enumerable). 'llm' reserved for v2.",
+    )
+    enumerative_min_content_chars: int = Field(
+        default=15, ge=0,
+        description="Min-content floor for source='enumerative_extractor' facts (atomic statements are often <30 chars).",
+    )
+
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 

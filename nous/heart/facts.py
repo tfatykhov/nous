@@ -435,6 +435,8 @@ class FactManager:
         # is that caller's responsibility.
         utility_override: float | None = None
         _min_chars_gate = self._settings.fact_min_content_chars if self._settings else 30
+        if input.source == "enumerative_extractor" and self._settings is not None:
+            _min_chars_gate = self._settings.enumerative_min_content_chars
         if (
             session is None
             and self._admission_controller is not None
@@ -512,6 +514,8 @@ class FactManager:
         # F038-1.2: Reject facts with content < fact_min_content_chars characters.
         # 0 disables the gate entirely (useful for testing / low-noise corpora).
         min_chars = self._settings.fact_min_content_chars if self._settings else 30
+        if input.source == "enumerative_extractor" and self._settings is not None:
+            min_chars = self._settings.enumerative_min_content_chars
         if min_chars and len(input.content.strip()) < min_chars:
             logger.info(
                 "Fact rejected by min-content floor (%d < %d): %.60s",
