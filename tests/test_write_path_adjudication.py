@@ -1126,3 +1126,67 @@ async def test_r2_row11_keyed_fact_skips_supersede_by_subject(heart, session, mo
         session=session,
     )
     sentinel.assert_not_called()
+
+
+# AC-5: supersession-cycle guard in _get_current ─────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_get_current_breaks_supersession_cycle(heart, session):
+    """AC-5: A→B→A cycle — get_current(A) returns later-learned B, cycle broken persistently."""
+    from datetime import timedelta
+
+    a = await heart.learn(
+        FactInput(content="Fact A: the project deadline is the end of this month."),
+        session=session,
+    )
+    b = await heart.learn(
+        FactInput(content="Fact B: the project deadline has been pushed to next quarter."),
+        session=session,
+    )
+
+    # Manufacture a cycle: A.superseded_by=B, B.superseded_by=A
+    a_row = await session.get(Fact, a.id)
+    b_row = await session.get(Fact, b.id)
+    # Make B's learned_at strictly later so the cycle-guard picks B as winner.
+    b_row.learned_at = a_row.learned_at + timedelta(seconds=10)
+    a_row.superseded_by = b.id
+    b_row.superseded_by = a.id
+    await session.flush()
+
+    # (a) Must not raise
+    result = await heart.facts._get_current(a.id, session)
+
+    # (b) Returns the later-learned fact (B)
+    assert result.id == b.id
+
+    # (c) B's cycle is broken persistently: superseded_by IS NULL, active=True
+    await session.refresh(b_row)
+    assert b_row.superseded_by is None
+    assert b_row.active is True
+
+
+@pytest.mark.postgres_only
+async def test_get_current_healthy_chain_unaffected(heart, session):
+    """AC-5 regression: A→B (no cycle) → get_current(A) returns B, cycle guard does not fire."""
+    a = await heart.learn(
+        FactInput(content="Healthy chain A: Alice used to work at the downtown branch."),
+        session=session,
+    )
+    b = await heart.learn(
+        FactInput(content="Healthy chain B: Alice now works at the uptown headquarters."),
+        session=session,
+    )
+
+    a_row = await session.get(Fact, a.id)
+    b_row = await session.get(Fact, b.id)
+    a_row.superseded_by = b.id
+    b_row.superseded_by = None
+    await session.flush()
+
+    result = await heart.facts._get_current(a.id, session)
+
+    assert result.id == b.id
+    # B must remain unchanged: superseded_by still None, active still True
+    await session.refresh(b_row)
+    assert b_row.superseded_by is None
+    assert b_row.active is True

@@ -2253,7 +2253,30 @@ class FactManager:
         result = await session.execute(sql, {"start_id": fact_id, "agent_id": self.agent_id})
         row = result.first()
         if row is None:
-            raise ValueError(f"Fact {fact_id} not found")
+            # 064 AC-5: depth exhausted without a NULL tip = supersession cycle.
+            # Fall back to the chain member with the latest learned_at, break
+            # the cycle persistently (null its superseded_by + reactivate), and
+            # log the anomaly. Never leave the cycle in place.
+            cycle_rows = await session.execute(text("""
+                WITH RECURSIVE chain AS (
+                    SELECT id, superseded_by, learned_at, 1 AS depth
+                    FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
+                    UNION ALL
+                    SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1
+                    FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
+                    WHERE c.depth < 10
+                )
+                SELECT id FROM chain ORDER BY learned_at DESC NULLS LAST LIMIT 1
+            """), {"start_id": fact_id, "agent_id": self.agent_id})
+            tip = cycle_rows.first()
+            if tip is None:
+                raise ValueError(f"Fact {fact_id} not found")
+            winner = await self._get_fact_orm(tip.id, session)
+            logger.warning("Supersession CYCLE detected at fact %s — breaking: winner %s", fact_id, tip.id)
+            winner.superseded_by = None
+            winner.active = True
+            await session.flush()
+            return self._to_detail(winner)
 
         current_fact = await self._get_fact_orm(row.id, session)
         if current_fact is None:
