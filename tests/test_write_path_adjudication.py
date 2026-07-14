@@ -1691,6 +1691,59 @@ async def test_event_date_type_equality_round_trip(heart):
         )
 
 
+@pytest.mark.postgres_only
+async def test_find_key_conflict_pairs_equal_timestamp_pair(heart):
+    """Codex r3 FIX 1: two same-key facts with an IDENTICAL learned_at must be
+    returned by find_key_conflict_pairs.  The (f1.learned_at, f1.id) row-comparison
+    uses id as the tiebreak so equal-timestamp pairs are not silently dropped."""
+    import datetime
+
+    from nous.storage.models import Fact as FactModel
+
+    # Learn two same-key facts (timestamps may already coincide at sub-ms resolution,
+    # but we set them explicitly to guarantee equality).
+    f1 = await heart.learn(
+        FactInput(
+            content="The cluster has eight replicas running in production at peak.",
+            subject_key="cluster",
+            attribute_key="replica_count",
+        )
+    )
+    f2 = await heart.learn(
+        FactInput(
+            content="The cluster now has sixteen replicas running in production at peak.",
+            subject_key="cluster",
+            attribute_key="replica_count",
+        )
+    )
+    assert f1.id is not None and f2.id is not None
+
+    # Force both rows to share the same learned_at timestamp.
+    shared_ts = datetime.datetime(2026, 1, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    async with heart.db.session() as s:
+        row1 = await s.get(FactModel, f1.id)
+        row2 = await s.get(FactModel, f2.id)
+        assert row1 is not None and row2 is not None
+        row1.learned_at = shared_ts
+        row2.learned_at = shared_ts
+        await s.commit()
+
+    pairs = await heart.facts.find_key_conflict_pairs(limit=25)
+
+    pair_id_sets = [{str(p["id1"]), str(p["id2"])} for p in pairs]
+    assert {str(f1.id), str(f2.id)} in pair_id_sets, (
+        f"Equal-timestamp pair {{{f1.id}, {f2.id}}} not found in {pair_id_sets}; "
+        "the (f1.learned_at, f1.id) row-comparison fix may not be applied"
+    )
+
+    # id1 must be the lower UUID (PG row comparison uses uuid lexicographic order)
+    matching = next(p for p in pairs if {str(p["id1"]), str(p["id2"])} == {str(f1.id), str(f2.id)})
+    lower_id = min(f1.id, f2.id, key=lambda u: str(u))
+    assert matching["id1"] == lower_id, (
+        f"Expected id1={lower_id} (lower UUID), got id1={matching['id1']}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 10: R2.3 retrieval-contract regression tests (RC-7 / DC-1)
 # ---------------------------------------------------------------------------

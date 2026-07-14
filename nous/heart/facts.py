@@ -1501,6 +1501,12 @@ class FactManager:
         missed (it only sees pairs at insert). Oldest-first for determinism;
         resolution deactivates losers so re-runs converge.
 
+        The JOIN uses row comparison ``(f1.learned_at, f1.id) <
+        (f2.learned_at, f2.id)`` rather than a scalar ``<`` so that pairs
+        whose ``learned_at`` values are identical (e.g. two facts committed
+        in the same transaction) are still included, with ``id`` as the
+        deterministic tiebreak.
+
         Args:
             after: Optional paging cursor ``(ts1, id1, ts2, id2)`` — the
                    full 4-tuple of the last pair processed.  The 4-tuple
@@ -1524,7 +1530,7 @@ class FactManager:
                   ON f2.agent_id = f1.agent_id
                  AND f2.subject_key = f1.subject_key
                  AND f2.attribute_key = f1.attribute_key
-                 AND f1.learned_at < f2.learned_at
+                 AND (f1.learned_at, f1.id) < (f2.learned_at, f2.id)
                 WHERE f1.agent_id = :agent_id
                   AND f1.active = true AND f2.active = true
                   AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
@@ -1554,7 +1560,7 @@ class FactManager:
                   ON f2.agent_id = f1.agent_id
                  AND f2.subject_key = f1.subject_key
                  AND f2.attribute_key = f1.attribute_key
-                 AND f1.learned_at < f2.learned_at
+                 AND (f1.learned_at, f1.id) < (f2.learned_at, f2.id)
                 WHERE f1.agent_id = :agent_id
                   AND f1.active = true AND f2.active = true
                   AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
