@@ -111,9 +111,6 @@ async def db():
         settings = Settings()
         database = Database(settings)
         await database.connect()
-        # Apply pending migrations for test database
-        from nous.storage.migrator import run_migrations
-        await run_migrations(database.engine)
         yield database
         await database.disconnect()
     else:
