@@ -96,6 +96,19 @@ def test_normalize_key_canonicalizes():
     assert len(normalize_key("x" * 500)) <= 200
 
 
+def test_normalize_key_max_len_param():
+    """FIX 2 (codex r5): max_len kwarg caps at column width for attribute_key (VARCHAR(100))."""
+    # Default still caps at 200
+    assert len(normalize_key("a" * 300)) == 200
+    # max_len=100 caps at 100 — a 150-char normalized key is truncated to 100
+    long_key = "word " * 30  # 150 chars
+    result = normalize_key(long_key, max_len=100)
+    assert result is not None
+    assert len(result) <= 100
+    # Default behavior for subject_key (VARCHAR(200)) unchanged
+    assert len(normalize_key("a" * 250)) == 200
+
+
 def test_density_score_high_for_enumerable():
     doc = "\n".join(f"Statement {i}: item {i} belongs to person {i}." for i in range(40))
     assert density_score(doc) > 0.8

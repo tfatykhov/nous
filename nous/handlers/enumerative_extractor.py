@@ -27,15 +27,15 @@ _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d{1,5}[.):])\s+")
 _STATEMENT_LINE = re.compile(r"^.{10,180}[.;]\s*$")
 
 
-def normalize_key(raw: str | None) -> str | None:
+def normalize_key(raw: str | None, *, max_len: int = 200) -> str | None:
     """Canonicalize an entity/attribute identifier: lowercase, strip
     punctuation (possessives collapse: "Tim's" -> "tims"), collapse
-    whitespace, cap at 200 chars. None/empty -> None."""
+    whitespace, cap at max_len chars. None/empty -> None."""
     if not raw:
         return None
     s = _PUNCT.sub("", raw.lower())
     s = _WS.sub(" ", s).strip()
-    return s[:200] or None
+    return s[:max_len] or None
 
 
 def density_score(text: str) -> float:
@@ -218,7 +218,7 @@ class EnumerativeExtractor:
         for pos, f in enumerate(raw_facts):
             content = str(f.get("content") or "").strip()
             skey = normalize_key(f.get("subject_key"))
-            akey = normalize_key(f.get("attribute_key"))
+            akey = normalize_key(f.get("attribute_key"), max_len=100)
             if not content or not skey or not akey:
                 continue  # keys are REQUIRED (R1.2) — unkeyed statements are dropped
             # devil-2 #2: POSITIONAL ONLY — never use explicit statement numbers
