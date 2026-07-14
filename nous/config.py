@@ -268,6 +268,24 @@ class Settings(BaseSettings):
         description="Min-content floor for source='enumerative_extractor' facts (atomic statements are often <30 chars).",
     )
 
+    # 064 R2: store-time supersession resolution (land-dark)
+    supersession_key_resolution_enabled: bool = Field(
+        default=False,
+        description="R2.1: resolve same-(subject_key, attribute_key) conflicts at write time via the F027 classifier + policy.",
+    )
+    supersession_policy: Literal["ordinal", "recency"] = Field(
+        default="ordinal",
+        description="R2.2 winner rule: 'ordinal' (higher source_ordinal wins, same-episode only; falls back to recency) or 'recency' (later learned_at wins). 'authority' reserved.",
+    )
+    supersession_key_candidates_cap: int = Field(
+        default=8, ge=1,
+        description="RC-3: max same-key active candidates examined per insert (newest first).",
+    )
+    supersession_classifier_max_per_hour: int = Field(
+        default=500, ge=0,
+        description="RC-5: hourly in-process cap on key-conflict classifier (Haiku) calls; 0 disables the cap.",
+    )
+
     # F017: Budget scaling
     budget_scale_enabled: bool = True
 

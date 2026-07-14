@@ -528,6 +528,10 @@ async def test_apply_supersession_clobber_guard(heart, session):
     loser_row.active = False
     await session.flush()
 
+    # Also write the prior_winner→loser supersedes edge so we can assert it survives.
+    await heart.link_facts(prior_winner.id, loser.id, "supersedes", 1.0, session=session)
+    await session.flush()
+
     result = await heart.facts.apply_supersession(winner.id, loser.id, session)
     assert result is False
 
@@ -542,6 +546,15 @@ async def test_apply_supersession_clobber_guard(heart, session):
         .where(GraphEdge.target_id == loser.id)
     )
     assert edge_r.scalars().first() is None
+
+    # Prior winner→loser edge must NOT be disturbed by the clobber guard
+    prior_edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == prior_winner.id)
+        .where(GraphEdge.target_id == loser.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    assert prior_edge_r.scalars().first() is not None
 
 
 @pytest.mark.asyncio
@@ -624,3 +637,462 @@ async def test_apply_supersession_edge_parity_with_link_facts(heart, session):
     assert edge1.auto_linked == edge2.auto_linked is True
     assert edge1.extraction_method == edge2.extraction_method
     assert edge1.extraction_method is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 6 carry-over fix 2: False-path delegation — commit still called
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sleep_apply_supersede_false_still_commits():
+    """_apply_supersede commits even when apply_supersession returns False (clobber guard)."""
+    from nous.handlers.sleep_handler import SleepHandler
+
+    winner_id = uuid4()
+    loser_id = uuid4()
+
+    mock_session = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_heart = MagicMock()
+    mock_heart.db.session = MagicMock(return_value=ctx)
+    mock_heart.facts = MagicMock()
+    mock_heart.facts.apply_supersession = AsyncMock(return_value=False)
+
+    handler = SleepHandler.__new__(SleepHandler)
+    handler._heart = mock_heart
+
+    result = await handler._apply_supersede(winner_id, loser_id)
+
+    assert result is False
+    mock_heart.facts.apply_supersession.assert_awaited_once_with(winner_id, loser_id, mock_session)
+    mock_session.commit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Task 7: R2.1/R2.2 — write-time key-conflict supersession (11 contract rows)
+# ---------------------------------------------------------------------------
+from datetime import date as _date
+
+from nous.storage.models import Episode
+
+
+async def _insert_episode(session, agent_id="nous-default") -> uuid4:
+    """Insert a minimal episode row (FK target for source_episode_id)."""
+    ep = Episode(agent_id=agent_id, summary="Test episode for R2 ordinal tests.")
+    session.add(ep)
+    await session.flush()
+    return ep.id
+
+
+_UPDATE_NEW = {"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
+_UPDATE_OLD = {"relation": "UPDATE", "current_fact": "old", "confidence": 0.9}
+_CONTRADICTION_OLD = {"relation": "CONTRADICTION", "current_fact": "old", "confidence": 0.9}
+_CONTRADICTION_AMBIG = {"relation": "CONTRADICTION", "current_fact": "", "confidence": 0.9}
+_UNRELATED = {"relation": "UNRELATED", "current_fact": "new", "confidence": 0.9}
+_UPDATE_NO_DIR = {"relation": "UPDATE", "confidence": 0.9}  # no current_fact key → recency
+
+
+# Row 1 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row1_flag_off_no_supersession(heart, session):
+    """Row 1 (golden): flag OFF — same-key conflict produces no write-time supersession."""
+    old_r = await heart.learn(
+        FactInput(
+            content="Server average response time is two hundred milliseconds measured daily.",
+            subject_key="server",
+            attribute_key="response_time",
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="Server average response time is three hundred fifty milliseconds measured daily.",
+            subject_key="server",
+            attribute_key="response_time",
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    assert old_row.superseded_by is None
+    assert new_row.superseded_by is None
+    assert old_row.active is True
+    assert new_row.active is True
+
+
+# Row 2 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row2_update_new_higher_ordinal_wins(heart, session, monkeypatch):
+    """Row 2: flag ON, UPDATE conf 0.9, new.ordinal > old.ordinal, same episode → old superseded."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    ep_id = await _insert_episode(session)
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_UPDATE_NEW))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="The deployment version in production environment is one point two point three.",
+            subject_key="deployment",
+            attribute_key="version",
+            source_ordinal=1,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="The deployment version in production environment is two point zero point zero.",
+            subject_key="deployment",
+            attribute_key="version",
+            source_ordinal=2,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    assert old_row.superseded_by == new_r.id
+    assert old_row.active is False
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.superseded_by is None
+    assert new_row.active is True
+
+
+# Row 3 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row3_old_higher_ordinal_new_loses(heart, session, monkeypatch):
+    """Row 3: old has higher ordinal (late-arriving earlier statement) → NEW superseded by old."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    ep_id = await _insert_episode(session)
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_UPDATE_NEW))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="Office building entrance security code was changed to nine nine nine nine.",
+            subject_key="office building",
+            attribute_key="security_code",
+            source_ordinal=5,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="Office building entrance security code was changed to one two three four.",
+            subject_key="office building",
+            attribute_key="security_code",
+            source_ordinal=1,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    await session.flush()
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.superseded_by == old_r.id
+    assert new_row.active is False
+    old_row = await session.get(Fact, old_r.id)
+    assert old_row.superseded_by is None
+    assert old_row.active is True
+
+
+# Row 4 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row4_differing_event_dates_no_supersession(heart, session, monkeypatch):
+    """Row 4 (F075 precedence): differing non-null event_dates → distinct events, KEEP BOTH."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    sentinel = AsyncMock(side_effect=AssertionError("classifier must not be called for F075 bypass"))
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", sentinel)
+
+    old_r = await heart.learn(
+        FactInput(
+            content="API endpoint health check returned status two hundred on first January twenty twenty four.",
+            subject_key="api endpoint",
+            attribute_key="health_status",
+            event_date=_date(2024, 1, 1),
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="API endpoint health check returned status five hundred on second January twenty twenty four.",
+            subject_key="api endpoint",
+            attribute_key="health_status",
+            event_date=_date(2024, 1, 2),
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    assert old_row.superseded_by is None
+    assert new_row.superseded_by is None
+    assert old_row.active is True
+    assert new_row.active is True
+
+
+# Row 5 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row5_unrelated_verdict_no_supersession(heart, session, monkeypatch):
+    """Row 5: UNRELATED / low confidence / None → fail-open, KEEP BOTH."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_UNRELATED))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="The database cluster has three replicas configured for high availability.",
+            subject_key="database cluster",
+            attribute_key="replica_count",
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="The database cluster has five replicas configured for high availability.",
+            subject_key="database cluster",
+            attribute_key="replica_count",
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    assert old_row.superseded_by is None
+    assert new_row.superseded_by is None
+
+
+# Row 6 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row6_cap_limits_classifier_calls(heart, session, monkeypatch):
+    """Row 6: 10 same-key active candidates, cap=3 → classifier called ≤3 times."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={
+            "supersession_key_resolution_enabled": True,
+            "supersession_key_candidates_cap": 3,
+        }
+    )
+    # Insert 10 pre-existing same-key facts with distinct content.
+    for i in range(10):
+        await heart.learn(
+            FactInput(
+                content=f"Cache cluster node count is {i + 1} nodes active right now in prod.",
+                subject_key="cache cluster",
+                attribute_key="node_count",
+            ),
+            session=session,
+        )
+    await session.flush()
+
+    call_count = 0
+
+    async def _counting_classifier(old_content, new_content):
+        nonlocal call_count
+        call_count += 1
+        return _UNRELATED
+
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", _counting_classifier)
+
+    await heart.learn(
+        FactInput(
+            content="Cache cluster node count is eleven nodes active right now in prod now.",
+            subject_key="cache cluster",
+            attribute_key="node_count",
+        ),
+        session=session,
+    )
+    assert call_count <= 3
+
+
+# Row 7 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row7_budget_exhausted_no_classifier(heart, session, monkeypatch):
+    """Row 7: hourly budget exhausted → classifier NOT called, no supersession."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    import time as _time
+    # Exhaust the budget by setting calls to cap.
+    heart.facts._key_bucket = int(_time.monotonic() // 3600)
+    heart.facts._key_calls = 500  # default cap
+
+    sentinel = AsyncMock(side_effect=AssertionError("classifier must not be called when budget is spent"))
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", sentinel)
+
+    old_r = await heart.learn(
+        FactInput(
+            content="Feature flag dark mode enabled is set to true in configuration.",
+            subject_key="feature flag",
+            attribute_key="dark_mode",
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="Feature flag dark mode enabled is set to false in configuration.",
+            subject_key="feature flag",
+            attribute_key="dark_mode",
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    assert old_row.superseded_by is None
+    assert new_row.superseded_by is None
+    sentinel.assert_not_called()
+
+
+# Row 8 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row8_policy_recency_no_ordinals(heart, session, monkeypatch):
+    """Row 8: policy=recency, no ordinals → later learned_at wins (new fact wins)."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={
+            "supersession_key_resolution_enabled": True,
+            "supersession_policy": "recency",
+        }
+    )
+    # Return UPDATE with no current_fact direction → falls through to recency.
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_UPDATE_NO_DIR))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="User subscription tier is currently basic plan active on the account.",
+            subject_key="user subscription",
+            attribute_key="tier",
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="User subscription tier is currently premium plan active on the account.",
+            subject_key="user subscription",
+            attribute_key="tier",
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    assert old_row.superseded_by == new_r.id
+    assert old_row.active is False
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.superseded_by is None
+    assert new_row.active is True
+
+
+# Row 9 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row9_contradiction_current_fact_beats_ordinal(heart, session, monkeypatch):
+    """Row 9: CONTRADICTION + current_fact=old, new has HIGHER ordinal → NEW superseded by old.
+    Devil-2 #1: CONTRADICTION verdict is resolved ONLY by current_fact; ordinal is irrelevant."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    ep_id = await _insert_episode(session)
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_CONTRADICTION_OLD))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="The capital city of France has always been Paris throughout recorded history.",
+            subject_key="france",
+            attribute_key="capital_city",
+            source_ordinal=1,
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="The capital city of France has always been London throughout recorded history.",
+            subject_key="france",
+            attribute_key="capital_city",
+            source_ordinal=2,  # higher ordinal — but CONTRADICTION ignores it
+            source_episode_id=ep_id,
+        ),
+        session=session,
+    )
+    await session.flush()
+    new_row = await session.get(Fact, new_r.id)
+    assert new_row.superseded_by == old_r.id
+    assert new_row.active is False
+    old_row = await session.get(Fact, old_r.id)
+    assert old_row.superseded_by is None
+    assert old_row.active is True
+
+
+# Row 10 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row10_contradiction_ambiguous_keep_both(heart, session, monkeypatch):
+    """Row 10: CONTRADICTION conf 0.9 but current_fact missing/ambiguous → NO supersession."""
+    heart.facts._settings = heart.facts._settings.model_copy(
+        update={"supersession_key_resolution_enabled": True}
+    )
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=_CONTRADICTION_AMBIG))
+
+    old_r = await heart.learn(
+        FactInput(
+            content="Mathematical constant pi is equal to three point one four one five nine.",
+            subject_key="mathematical_constant",
+            attribute_key="pi_value",
+        ),
+        session=session,
+    )
+    new_r = await heart.learn(
+        FactInput(
+            content="Mathematical constant pi is equal to three point one four one five eight.",
+            subject_key="mathematical_constant",
+            attribute_key="pi_value",
+        ),
+        session=session,
+    )
+    await session.flush()
+    old_row = await session.get(Fact, old_r.id)
+    new_row = await session.get(Fact, new_r.id)
+    assert old_row.superseded_by is None
+    assert new_row.superseded_by is None
+    assert old_row.active is True
+    assert new_row.active is True
+
+
+# Row 11 ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.postgres_only
+async def test_r2_row11_keyed_fact_skips_supersede_by_subject(heart, session, monkeypatch):
+    """Row 11: fact with subject AND subject_key → _supersede_by_subject NOT invoked.
+    Risk-2 #1: the legacy path is uncapped; keyed facts must bypass it unconditionally."""
+    sentinel = AsyncMock()
+    monkeypatch.setattr(heart.facts, "_supersede_by_subject", sentinel)
+
+    await heart.learn(
+        FactInput(
+            content="Red sports car belongs to Alice who lives downtown near the park.",
+            subject="red sports car",
+            subject_key="red sports car",
+            attribute_key="owner",
+        ),
+        session=session,
+    )
+    sentinel.assert_not_called()

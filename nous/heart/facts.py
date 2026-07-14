@@ -169,6 +169,9 @@ class FactManager:
         # 1a: advisory per-hour cap on in-band classifier (Haiku) calls.
         self._band_bucket: int = -1
         self._band_calls: int = 0
+        # 064 R2: advisory per-hour cap on key-conflict classifier calls.
+        self._key_bucket: int = -1
+        self._key_calls: int = 0
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -184,6 +187,21 @@ class FactManager:
         if self._band_calls >= cap:
             return False
         self._band_calls += 1
+        return True
+
+    def _key_budget_ok(self) -> bool:
+        """RC-5: advisory per-hour cap on key-conflict classifier calls.
+        Mirrors _band_budget_ok. Spent budget => fail open to KEEP-BOTH."""
+        cap = getattr(self._settings, "supersession_classifier_max_per_hour", 500) if self._settings else 500
+        if not cap or cap <= 0:
+            return True
+        bucket = int(time.monotonic() // 3600)
+        if bucket != self._key_bucket:
+            self._key_bucket = bucket
+            self._key_calls = 0
+        if self._key_calls >= cap:
+            return False
+        self._key_calls += 1
         return True
 
     # ------------------------------------------------------------------
@@ -699,13 +717,24 @@ class FactManager:
         # Audit S11: exclude_ids threaded through so facts the F377
         # tiebreaker (or the band classifier above) just ruled distinct
         # are not silently superseded against that verdict.
-        if check_contradictions and input.subject and embedding is not None:
+        # 064 R2: facts carrying conflict-slot keys are owned by keyed
+        # resolution (capped + budgeted). The legacy subject path is uncapped
+        # (risk-2 #1) and would double-adjudicate the same pairs.
+        if check_contradictions and input.subject and embedding is not None and input.subject_key is None:
             await self._supersede_by_subject(
                 fact.id, input.subject, embedding, session,
                 new_content=input.content,
                 new_event_date=input.event_date,
                 exclude_ids=exclude_ids,
             )
+
+        if (
+            check_contradictions
+            and getattr(self._settings, "supersession_key_resolution_enabled", False) is True
+            and input.subject_key
+            and input.attribute_key
+        ):
+            await self._resolve_key_conflicts(fact, input, session, exclude_ids)
 
         await self._emit_event(
             session,
@@ -1436,7 +1465,12 @@ class FactManager:
 
         Returns ``True`` if the supersession was applied, ``False`` if skipped
         due to the clobber guard (loser not found, or already superseded by a
-        prior path so the chain would be overwritten)."""
+        prior path so the chain would be overwritten).
+
+        Both IDs must belong to ``self.agent_id``; cross-agent IDs are not
+        validated by this primitive and will return ``False`` silently if the
+        loser row is not found.  Callers may ``commit()`` unconditionally even
+        when this returns ``False`` — the no-op path writes nothing."""
         loser = await self._get_fact_orm(loser_id, session)
         if loser is None:
             return False
@@ -1451,6 +1485,103 @@ class FactManager:
         loser.active = False
         await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
         return True
+
+    # ------------------------------------------------------------------
+    # 064 R2: key-conflict resolution
+    # ------------------------------------------------------------------
+
+    async def _resolve_key_conflicts(
+        self, fact: Fact, input: FactInput, session: AsyncSession,
+        exclude_ids: list[UUID],
+    ) -> None:
+        """064 R2.1/R2.2: same-(subject_key, attribute_key) conflict resolution.
+
+        Precedence (binding, reviews RC-4/AC-3):
+          1. F075 — differing non-null event_dates => distinct events, KEEP BOTH.
+          2. Classifier confirm — only UPDATE/CONTRADICTION at conf >= 0.8
+             counts as a same-slot conflict; anything else KEEPS BOTH.
+          3. Policy picks the winner: ordinal (same-episode, both ordinals
+             present) else recency (learned_at).
+        Never deletes; loser keeps full lineage via apply_supersession.
+        """
+        cap = self._settings.supersession_key_candidates_cap if self._settings else 8
+        rows = await session.execute(
+            select(Fact)
+            .where(
+                Fact.agent_id == self.agent_id,
+                Fact.active == True,  # noqa: E712
+                Fact.subject_key == input.subject_key,
+                Fact.attribute_key == input.attribute_key,
+                Fact.id != fact.id,
+            )
+            .order_by(Fact.learned_at.desc())
+            .limit(cap)
+        )
+        for old in rows.scalars().all():
+            if old.id in exclude_ids:
+                continue
+            if (
+                input.event_date is not None
+                and old.event_date is not None
+                and input.event_date != old.event_date
+            ):
+                continue  # F075 precedence: distinct events, never supersede
+            if not self._key_budget_ok():
+                logger.warning("R2: key-conflict classifier hourly budget spent — deferring to sleep sweep")
+                return
+            cls = await self._classify_fact_pair(old.content, input.content)
+            if not cls:
+                continue  # fail-open: KEEP BOTH
+            relation = cls.get("relation", "")
+            conf = float(cls.get("confidence", 0.0))
+            if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
+                continue  # not a confirmed same-slot conflict
+            if relation == "CONTRADICTION":
+                # devil-2 #1: a CONTRADICTION is about an inherently FIXED
+                # property — reading order says nothing about truth. Only the
+                # classifier's explicit current_fact verdict may resolve it;
+                # ambiguous => KEEP BOTH. Ordinal/recency never apply here.
+                current = cls.get("current_fact", "")
+                if current == "new":
+                    winner, loser = fact, old
+                elif current == "old":
+                    winner, loser = old, fact
+                else:
+                    continue
+            else:  # UPDATE — mutable state; ordinal (reading order) is the authority signal
+                winner, loser = self._pick_winner(fact, old, cls)
+            await self.apply_supersession(winner.id, loser.id, session)
+            if loser.id == fact.id:
+                return  # the new fact lost — it is now inactive; stop scanning
+
+    def _pick_winner(self, new_fact: Fact, old_fact: Fact, classification: dict | None = None):
+        """R2.2 policy for UPDATE conflicts. Returns (winner, loser).
+        Precedence: same-episode positional ordinal (reading order) →
+        classifier current_fact → recency (later learned_at). CONTRADICTION
+        never reaches this method (resolved by current_fact only)."""
+        policy = getattr(self._settings, "supersession_policy", "ordinal") if self._settings else "ordinal"
+        if (
+            policy == "ordinal"
+            and new_fact.source_ordinal is not None
+            and old_fact.source_ordinal is not None
+            and new_fact.source_episode_id is not None
+            and new_fact.source_episode_id == old_fact.source_episode_id
+        ):
+            return (new_fact, old_fact) if new_fact.source_ordinal >= old_fact.source_ordinal else (old_fact, new_fact)
+        # No comparable ordinals: respect an explicit classifier direction.
+        current = (classification or {}).get("current_fact", "")
+        if current == "old":
+            return (old_fact, new_fact)
+        if current == "new":
+            return (new_fact, old_fact)
+        # recency fallback (also the 'recency' policy): later learned_at wins;
+        # the just-inserted fact's learned_at is now(), so new wins unless the
+        # DB clock says otherwise (backfill can set learned_at explicitly).
+        new_ts = new_fact.learned_at
+        old_ts = old_fact.learned_at
+        if new_ts is not None and old_ts is not None and old_ts > new_ts:
+            return (old_fact, new_fact)
+        return (new_fact, old_fact)
 
     # ------------------------------------------------------------------
     # contradict()
