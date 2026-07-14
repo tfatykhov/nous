@@ -1326,7 +1326,7 @@ class SleepHandler:
             # we've wrapped the table and should restart from the oldest pair.
             if pairs and len(pairs) >= max_pairs:
                 last = pairs[-1]
-                self._key_sweep_cursor = (last["ts1"], last["id1"])
+                self._key_sweep_cursor = (last["ts1"], last["id1"], last["ts2"], last["id2"])
             else:
                 self._key_sweep_cursor = None
             return True
