@@ -194,7 +194,7 @@ class EnumerativeExtractor:
                     if len(inputs) > remaining:
                         inputs = inputs[:remaining]
                         truncated = True
-                stored_pairs = await self._store_batch(inputs)
+                stored_pairs, store_failed = await self._store_batch(inputs)
                 stored_ids.extend(uid for _, uid in stored_pairs)
                 # Mark seen ONLY for facts that were actually stored so that
                 # transient Heart.learn failures (r9 per-fact isolation) do not
@@ -204,6 +204,16 @@ class EnumerativeExtractor:
                     (" ".join(fi.content.lower().split()), fi.event_date)
                     for fi, _ in stored_pairs
                 )
+                if store_failed:
+                    logger.warning(
+                        "R1: mid-batch store failure at chunk %d for episode %s — "
+                        "stopping enumerative extraction with %d facts stored (truncated=true)",
+                        chunk_index,
+                        episode_id,
+                        len(stored_ids),
+                    )
+                    truncated = True
+                    break
             except Exception:
                 logger.exception(
                     "R1: chunk %d failed for episode %s — stopping enumerative extraction with %d facts stored",
@@ -304,13 +314,15 @@ class EnumerativeExtractor:
             )
         return inputs
 
-    async def _store_batch(self, inputs: list[FactInput]) -> list:
-        """Store a batch of facts. Returns list[tuple[FactInput, UUID]] for
-        facts that were actually committed (not rejected). Stops on the first
-        Heart.learn exception so the caller can exclude unstored inputs from
-        the seen-contents set and retry them in later chunks."""
+    async def _store_batch(self, inputs: list[FactInput]) -> tuple[list, bool]:
+        """Store a batch of facts. Returns (stored_pairs, store_failed) where:
+        - stored_pairs: list[tuple[FactInput, UUID]] for facts that were actually committed
+        - store_failed: True if a Heart.learn exception stopped the batch early
+
+        Stops on the first Heart.learn exception so the caller can propagate the
+        failure signal and exclude unstored inputs from the seen-contents set."""
         if not inputs:
-            return []
+            return [], False
         vectors = None
         if self._embedder is not None:
             try:
@@ -321,6 +333,7 @@ class EnumerativeExtractor:
                     exc_info=True,
                 )
         stored: list = []  # list[tuple[FactInput, UUID]]
+        failed = False
         for idx, fi in enumerate(inputs):
             vec = vectors[idx] if vectors is not None and idx < len(vectors) else None
             try:
@@ -332,7 +345,8 @@ class EnumerativeExtractor:
                     len(inputs),
                     len(stored),
                 )
+                failed = True
                 break
             if not isinstance(result, FactRejected):
                 stored.append((fi, result.id))
-        return stored
+        return stored, failed

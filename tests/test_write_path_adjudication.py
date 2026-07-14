@@ -2783,12 +2783,13 @@ async def test_store_batch_per_fact_failure_isolation():
     ]
 
     # Must not raise — per-fact failures are isolated
-    result = await ex._store_batch(inputs)
+    result_pairs, store_failed = await ex._store_batch(inputs)
 
-    # _store_batch now returns list[tuple[FactInput, UUID]] for stored facts.
-    # Only the first committed fact appears in the result.
-    stored_uids = [uid for _, uid in result]
+    # _store_batch returns (list[tuple[FactInput, UUID]], bool).
+    # Only the first committed fact appears in the result; store_failed must be True.
+    stored_uids = [uid for _, uid in result_pairs]
     assert stored_uids == [first_id], f"Expected [first_id] in stored uids; got {stored_uids}"
+    assert store_failed is True, "store_failed must be True when Heart.learn raises mid-batch"
     # learn called twice: call 1 succeeds, call 2 raises → break (call 3 never reached)
     assert call_count[0] == 2, (
         f"Expected 2 learn calls (1 success + 1 raise, 3rd skipped); got {call_count[0]}"
@@ -2868,6 +2869,81 @@ async def test_partial_store_batch_wiring_skips_legacy(monkeypatch):
     assert learn_calls[0] == 2, (
         f"Expected exactly 2 learn calls (enumerative: 1 ok + 1 raise); "
         f"got {learn_calls[0]} — legacy path must NOT have been invoked"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mid_batch_store_failure_stops_later_chunks(monkeypatch, settings_fixture, caplog):
+    """Codex r14 test (b): mid-batch Heart.learn failure in chunk-0 propagates
+    store_failed=True from _store_batch → process_transcript logs a WARNING and
+    BREAKs — chunk-1's LLM extraction is NEVER called.
+
+    Verifies: only chunk-0's committed IDs returned, chunk-1 sentinel never
+    invoked (call_count == 1), truncation WARNING logged."""
+    transcript = "A" * 700  # two chunks: size=600, overlap=80
+
+    settings = settings_fixture(
+        enumerative_density_threshold=0.0,
+        enumerative_max_facts_per_episode=1000,
+        episode_chunk_size=600,
+        episode_chunk_overlap=80,
+        episode_chunk_min_transcript_chars=0,
+    )
+
+    first_id = uuid4()
+    learn_calls = [0]
+
+    async def _learn(fi, **kw):
+        idx = learn_calls[0]
+        learn_calls[0] += 1
+        if idx == 0:
+            return SimpleNamespace(id=first_id)
+        raise RuntimeError("simulated store failure on second fact")
+
+    heart_mock = AsyncMock()
+    heart_mock.learn = AsyncMock(side_effect=_learn)
+
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+
+    chunk0_facts = {
+        "facts": [
+            {"content": "Fact A long enough to be valid: the server memory is eight gigabytes.",
+             "subject_key": "server", "attribute_key": "memory"},
+            {"content": "Fact B long enough to be valid: the server cpu is sixteen cores.",
+             "subject_key": "server", "attribute_key": "cpu"},
+        ]
+    }
+    chunk1_sentinel = {
+        "facts": [
+            {"content": "Fact C in chunk-1 that must never be extracted by the LLM.",
+             "subject_key": "sentinel", "attribute_key": "value"},
+        ]
+    }
+
+    llm_mock = AsyncMock(side_effect=[chunk0_facts, chunk1_sentinel])
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        llm_mock,
+    )
+
+    ex = EnumerativeExtractor(
+        heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
+    )
+    with caplog.at_level("WARNING"):
+        stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+
+    # Only chunk-0's first committed fact — chunk-1 must not have been reached.
+    assert stored_ids == [first_id], (
+        f"Expected [first_id] only; got {stored_ids}"
+    )
+    # Exactly 1 LLM call: chunk-0 only; chunk-1 sentinel must never fire.
+    assert llm_mock.call_count == 1, (
+        f"chunk-1 LLM extraction must not happen; got {llm_mock.call_count} calls"
+    )
+    # Truncation warning must be logged for the mid-batch failure.
+    assert any("mid-batch store failure" in r.message for r in caplog.records), (
+        "WARNING must be logged when mid-batch store failure stops the chunk loop"
     )
 
 
@@ -3523,17 +3599,17 @@ async def test_backfill_budget_stops_pair_not_marked_seen(heart, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, settings_fixture):
-    """Codex r13 FIX 3: when Heart.learn raises mid-batch in chunk-0 for fact Y,
-    Y must NOT be added to seen_contents — chunk-1's copy of Y (overlap window)
-    must be stored successfully.
+async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, settings_fixture, caplog):
+    """Codex r14 update (was r13 FIX 3): when Heart.learn raises mid-batch in chunk-0,
+    _store_batch returns (stored_pairs, store_failed=True).  process_transcript logs a
+    warning, sets truncated=True, and BREAKs — chunk-1 is NEVER attempted.
 
-    chunk-0 batch = [X, Y]  → Y's learn raises → _store_batch returns [(X, x_id)]
-    chunk-1 batch = [Y, Z]  → Y not in seen_contents → both stored → 3 total
+    The seen_contents fix (r13) still applies: Y is NOT added to seen_contents on failure.
+    But because the loop breaks after chunk-0's store failure, the retry cannot occur.
 
-    Before the fix: seen_contents was updated with filtered inputs BEFORE
-    _store_batch, so Y's failure still marked it seen → chunk-1 skipped Y →
-    permanent coverage loss.
+    chunk-0 batch = [X, Y]  → Y's learn raises → _store_batch returns ([X], True)
+                             → process_transcript breaks → chunk-1 never attempted
+    Result: only X stored; 2 learn calls total; 1 LLM call; truncation WARNING logged.
     """
     transcript = "A" * 700  # two chunks: size=600, overlap=80
 
@@ -3546,13 +3622,10 @@ async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, set
     )
 
     x_id = uuid4()
-    y_id = uuid4()
-    z_id = uuid4()
     learn_results = [
-        SimpleNamespace(id=x_id),     # call 1: X in chunk-0 → ok
-        RuntimeError("Y fails"),       # call 2: Y in chunk-0 → raises
-        SimpleNamespace(id=y_id),     # call 3: Y in chunk-1 → ok (retry)
-        SimpleNamespace(id=z_id),     # call 4: Z in chunk-1 → ok
+        SimpleNamespace(id=x_id),  # call 1: X in chunk-0 → ok
+        RuntimeError("Y fails"),    # call 2: Y in chunk-0 → raises → loop breaks
+        # No call 3 or 4: chunk-1 is never extracted
     ]
     learn_calls = [0]
 
@@ -3581,33 +3654,43 @@ async def test_failed_store_does_not_block_retry_in_later_chunk(monkeypatch, set
     }
     chunk1_facts = {
         "facts": [
-            {"content": shared_y_content,  # overlap copy of Y
+            {"content": shared_y_content,  # overlap copy of Y — never reached
              "subject_key": "worker", "attribute_key": "thread_count"},
             {"content": "Z fact: the retry backoff delay is five seconds exponential.",
              "subject_key": "retry", "attribute_key": "backoff_delay"},
         ]
     }
 
+    llm_mock = AsyncMock(side_effect=[chunk0_facts, chunk1_facts])
     monkeypatch.setattr(
         "nous.handlers.enumerative_extractor.call_background_llm_structured",
-        AsyncMock(side_effect=[chunk0_facts, chunk1_facts]),
+        llm_mock,
     )
 
     ex = EnumerativeExtractor(
         heart=heart_mock, settings=settings, llm_client=object(), embedder=embedder
     )
-    stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
+    with caplog.at_level("WARNING"):
+        stored_ids = await ex.process_transcript(transcript, episode_id=uuid4())
 
-    # 3 facts: X (chunk-0), Y (chunk-1 retry), Z (chunk-1)
-    assert len(stored_ids) == 3, (
-        f"Expected 3 stored IDs (X + Y-retry + Z); got {len(stored_ids)} — "
-        "Y must be retried in chunk-1 because the chunk-0 failure kept it out of seen_contents"
+    # r14: mid-batch failure stops the chunk loop — only X (committed before failure) is stored.
+    assert len(stored_ids) == 1, (
+        f"Expected 1 stored ID (X only); got {len(stored_ids)} — "
+        "chunk-1 must not be attempted when chunk-0's store fails"
     )
     assert x_id in stored_ids, "X must be stored from chunk-0"
-    assert y_id in stored_ids, "Y must be stored from chunk-1 retry (not skipped as seen)"
-    assert z_id in stored_ids, "Z must be stored from chunk-1"
-    assert learn_calls[0] == 4, (
-        f"Expected 4 learn calls (X ok, Y raise, Y retry ok, Z ok); got {learn_calls[0]}"
+    # chunk-1 was never extracted (only 1 LLM call for chunk-0)
+    assert llm_mock.call_count == 1, (
+        f"Expected 1 LLM call (chunk-0 only); got {llm_mock.call_count} — "
+        "chunk-1 extraction must not happen after store failure"
+    )
+    # learn called only twice: X ok, Y raise → break
+    assert learn_calls[0] == 2, (
+        f"Expected 2 learn calls (X ok + Y raise); got {learn_calls[0]}"
+    )
+    # Truncation warning must be logged
+    assert any("mid-batch store failure" in r.message for r in caplog.records), (
+        "truncation WARNING must be logged when mid-batch store failure stops the chunk loop"
     )
 
 
