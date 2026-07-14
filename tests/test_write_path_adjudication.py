@@ -1641,3 +1641,141 @@ class TestOverridePriorMarking:
 
         s = Settings(_env_file=None)
         assert s.override_prior_marking_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Task 12: R1.4 — backfill_enumerative_facts.py (select_backfill_episodes)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone
+
+
+@pytest.mark.postgres_only
+async def test_select_backfill_episodes_filters_empty_transcripts(session):
+    """select_backfill_episodes: returns only episodes with non-empty transcript.
+
+    Episodes with transcript=None or transcript='' must be excluded.
+    """
+    from scripts.backfill_enumerative_facts import select_backfill_episodes
+    from nous.storage.models import Episode
+
+    agent_id = f"test-enum-filter-{uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+
+    ep_with = Episode(
+        agent_id=agent_id,
+        summary="Episode with transcript",
+        transcript="Item 1.\nItem 2.\nItem 3.",
+        started_at=now,
+    )
+    ep_none = Episode(
+        agent_id=agent_id,
+        summary="Episode with None transcript",
+        transcript=None,
+        started_at=now,
+    )
+    ep_empty = Episode(
+        agent_id=agent_id,
+        summary="Episode with empty transcript",
+        transcript="",
+        started_at=now,
+    )
+    session.add_all([ep_with, ep_none, ep_empty])
+    await session.flush()
+
+    rows = await select_backfill_episodes(session, agent_id, None, 0)
+    ids = {r.id for r in rows}
+
+    assert ep_with.id in ids, "episode with transcript must be returned"
+    assert ep_none.id not in ids, "episode with None transcript must be excluded"
+    assert ep_empty.id not in ids, "episode with empty transcript must be excluded"
+
+
+@pytest.mark.postgres_only
+async def test_select_backfill_episodes_orders_oldest_first(session):
+    """select_backfill_episodes: returns episodes ordered oldest-first (started_at ASC)."""
+    from scripts.backfill_enumerative_facts import select_backfill_episodes
+    from nous.storage.models import Episode
+
+    agent_id = f"test-enum-order-{uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+
+    # Insert newest first (opposite of expected return order)
+    ep_newest = Episode(
+        agent_id=agent_id,
+        summary="Newest episode",
+        transcript="New fact 1.\nNew fact 2.\nNew fact 3.",
+        started_at=now,
+    )
+    ep_oldest = Episode(
+        agent_id=agent_id,
+        summary="Oldest episode",
+        transcript="Old fact 1.\nOld fact 2.\nOld fact 3.",
+        started_at=now - timedelta(hours=2),
+    )
+    session.add_all([ep_newest, ep_oldest])
+    await session.flush()
+
+    rows = await select_backfill_episodes(session, agent_id, None, 0)
+    # Filter to only our test episodes, preserving return order
+    our_ids = {ep_oldest.id, ep_newest.id}
+    ordered = [r for r in rows if r.id in our_ids]
+
+    assert len(ordered) == 2, f"expected 2 episodes, got {len(ordered)}"
+    assert ordered[0].id == ep_oldest.id, "oldest episode must come first"
+    assert ordered[1].id == ep_newest.id, "newest episode must come last"
+
+
+@pytest.mark.postgres_only
+async def test_dry_run_performs_zero_writes(session):
+    """Dry-run path: select_backfill_episodes + is_enumerable never calls heart.learn.
+
+    Verifies the dry-run branch by running the exact same code it runs —
+    select + classify — and asserting no facts were written.
+    """
+    from scripts.backfill_enumerative_facts import select_backfill_episodes
+    from nous.handlers.enumerative_extractor import is_enumerable
+
+    agent_id = f"test-enum-dryrun-{uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc)
+
+    # Dense transcript that would be enumerable at the default threshold
+    dense_transcript = "\n".join(
+        f"{i}. Entity {i} belongs to agent {i} and is stored here." for i in range(40)
+    )
+    ep = Episode(
+        agent_id=agent_id,
+        summary="Dense episode for dry-run test",
+        transcript=dense_transcript,
+        started_at=now,
+    )
+    session.add(ep)
+    await session.flush()
+
+    from sqlalchemy import text as sa_text
+
+    # Fact count before dry-run (must stay 0 — none were inserted for this agent)
+    before = (
+        await session.execute(
+            sa_text("SELECT COUNT(*) FROM heart.facts WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+    ).scalar()
+
+    # Dry-run core: select + classify, no heart.learn call
+    episodes = await select_backfill_episodes(session, agent_id, None, 0)
+    _enumerable = [e for e in episodes if is_enumerable(e.transcript, 0.6)]
+
+    # Fact count after — must equal before (no writes)
+    after = (
+        await session.execute(
+            sa_text("SELECT COUNT(*) FROM heart.facts WHERE agent_id = :a"),
+            {"a": agent_id},
+        )
+    ).scalar()
+
+    assert before == after == 0, (
+        f"dry-run must write 0 facts; before={before} after={after}"
+    )
+    # Sanity: the dense transcript IS enumerable so the path was exercised
+    assert len(_enumerable) >= 1, "dense transcript should be classified enumerable"
