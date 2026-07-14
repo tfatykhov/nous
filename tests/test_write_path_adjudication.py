@@ -112,3 +112,8 @@ def test_is_enumerable_respects_threshold():
     doc = "\n".join(f"{i}. fact number {i} is stored here." for i in range(30))
     assert is_enumerable(doc, threshold=0.6) is True
     assert is_enumerable(doc, threshold=1.01) is False
+
+
+def test_density_score_detects_unnumbered_short_fact_sheet():
+    doc = "\n".join(["Alice is 30.", "City: Paris.", "Bob is CEO.", "Tim likes dogs.", "Bob owns the car.", "Sky is blue."])
+    assert density_score(doc) > 0.8

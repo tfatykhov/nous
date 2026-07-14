@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 _PUNCT = re.compile(r"[^\w\s]")
 _WS = re.compile(r"\s+")
 _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d{1,5}[.):])\s+")
-# A short, self-contained declarative line: 20-180 chars ending in period/semicolon (not question/exclamation).
-_STATEMENT_LINE = re.compile(r"^.{20,180}[.;]\s*$")
+# A short, self-contained declarative line: 10-180 chars ending in period/semicolon (not question/exclamation).
+_STATEMENT_LINE = re.compile(r"^.{10,180}[.;]\s*$")
 
 
 def normalize_key(raw: str | None) -> str | None:
