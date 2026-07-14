@@ -1190,3 +1190,44 @@ async def test_get_current_healthy_chain_unaffected(heart, session):
     await session.refresh(b_row)
     assert b_row.superseded_by is None
     assert b_row.active is True
+
+
+@pytest.mark.postgres_only
+async def test_get_current_cycle_break_durable_without_session(heart):
+    """AC-5 durability: cycle repair via session-less get_current is committed to DB.
+
+    Creates A and B in committed state (heart.learn without session auto-commits),
+    manufactures a cycle in a separate committed transaction, calls get_current
+    without passing a session, then opens a FRESH session to confirm the repair
+    was durably written — not just flushed inside a rolled-back transaction.
+    """
+    from datetime import timedelta
+
+    # Step 1: create facts in committed state (no session → heart auto-commits)
+    a = await heart.learn(
+        FactInput(content="Durability cycle test A: the server cluster has four active nodes running.")
+    )
+    b = await heart.learn(
+        FactInput(content="Durability cycle test B: the server cluster now has eight active nodes running.")
+    )
+
+    # Step 2: manufacture a cycle and commit it in a dedicated transaction
+    async with heart.db.session() as s:
+        a_row = await s.get(Fact, a.id)
+        b_row = await s.get(Fact, b.id)
+        # Make B's learned_at strictly later so the cycle-guard picks B as winner
+        b_row.learned_at = a_row.learned_at + timedelta(seconds=10)
+        a_row.superseded_by = b.id
+        b_row.superseded_by = a.id
+        await s.commit()
+
+    # Step 3: call get_current WITHOUT a session — repair must be committed
+    result = await heart.facts.get_current(a.id)
+    assert result.id == b.id  # B is later-learned, wins
+
+    # Step 4: verify repair is durable via a completely FRESH session
+    async with heart.db.session() as s:
+        fresh_b = await s.get(Fact, b.id)
+        assert fresh_b is not None
+        assert fresh_b.superseded_by is None
+        assert fresh_b.active is True

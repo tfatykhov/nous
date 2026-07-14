@@ -2229,10 +2229,16 @@ class FactManager:
     # ------------------------------------------------------------------
 
     async def get_current(self, fact_id: UUID, session: AsyncSession | None = None) -> FactDetail:
-        """Follow superseded_by chain to find current version of a fact."""
+        """Follow superseded_by chain to find current version of a fact.
+
+        A detected supersession cycle is repaired in place; with a caller-provided
+        session the repair is flushed and the caller owns the commit.
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._get_current(fact_id, session)
+                result = await self._get_current(fact_id, session)
+                await session.commit()
+                return result
         return await self._get_current(fact_id, session)
 
     async def _get_current(self, fact_id: UUID, session: AsyncSession) -> FactDetail:
@@ -2272,6 +2278,8 @@ class FactManager:
             if tip is None:
                 raise ValueError(f"Fact {fact_id} not found")
             winner = await self._get_fact_orm(tip.id, session)
+            if winner is None:
+                raise ValueError(f"Cycle winner {tip.id} not found for fact {fact_id}")
             logger.warning("Supersession CYCLE detected at fact %s — breaking: winner %s", fact_id, tip.id)
             winner.superseded_by = None
             winner.active = True
