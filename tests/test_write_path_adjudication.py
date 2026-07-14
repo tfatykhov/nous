@@ -301,7 +301,7 @@ async def test_flag_off_extract_and_store_never_touches_enumerative(monkeypatch)
     ext._heart = _stub_heart_for_extractor()
     ext._settings = _make_settings(flag_on=False)
     ext._dedup_via_search = False
-    ext._llm = None
+    ext._llm = object()  # non-None so the flag is the ONLY gate
 
     # Dense transcript that WOULD trigger enumerative if flag were on.
     result = await ext.extract_and_store(
@@ -385,38 +385,80 @@ async def test_flag_on_narrative_keeps_legacy_path(monkeypatch):
     assert len(result) == 1
 
 
-def test_enumerative_min_chars_floor_applies_to_enumerative_source_only():
-    """_learn rejects a 20-char fact from source='fact_extractor' (floor 30)
-    but accepts a 20-char fact from source='enumerative_extractor' (floor 15)."""
-    import asyncio
-    import types
-    from nous.heart.facts import FactManager
-    from nous.heart.schemas import FactInput, FactRejected
-
-    settings = types.SimpleNamespace(
-        fact_min_content_chars=30,
-        enumerative_min_content_chars=15,
-        # enough fields to pass any guards before the min-chars check
+@pytest.mark.asyncio
+async def test_enumerative_leg_exception_falls_through_to_legacy(monkeypatch):
+    """Flag on + enumerable transcript, but process_transcript raises RuntimeError.
+    extract_and_store must NOT propagate the exception and must fall through to the
+    legacy candidate-facts path so episode facts are never silently dropped."""
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(side_effect=RuntimeError("simulated enumerative failure")),
     )
 
-    fm = FactManager.__new__(FactManager)
-    fm._settings = settings
+    from nous.handlers import fact_extractor as fe_mod
 
-    short_content = "x" * 20  # 20 chars — below 30, above 15
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)  # force-enumerable
+    ext._dedup_via_search = False
+    ext._llm = object()  # non-None so the enumerative branch is entered
 
-    # Synchronous wrapper: call the sync-ish guard by checking _learn's first
-    # few lines without actually running the full async path.
-    # We access the guard logic directly: replicate what _learn does.
-    def _check(source: str) -> bool:
-        """True = rejected by min-chars (returns FactRejected)."""
-        if source == "enumerative_extractor" and fm._settings is not None:
-            min_chars = fm._settings.enumerative_min_content_chars
-        else:
-            min_chars = fm._settings.fact_min_content_chars if fm._settings else 30
-        return bool(min_chars and len(short_content.strip()) < min_chars)
+    # Should not raise; exception is caught inside extract_and_store and the
+    # legacy candidate-facts path is taken instead.
+    result = await ext.extract_and_store(
+        summary=_VALID_SUMMARY,
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
 
-    assert _check("fact_extractor") is True, "source=fact_extractor must be rejected (20 < 30)"
-    assert _check("enumerative_extractor") is False, "source=enumerative_extractor must pass (20 >= 15)"
+    # Legacy path stored the one candidate fact from _VALID_SUMMARY.
+    assert len(heart._captured) == 1, "legacy candidate path must have stored the fact"
+    assert len(result) == 1, "extract_and_store must return the legacy UUID"
+
+
+@pytest.mark.postgres_only
+async def test_enumerative_min_chars_floor_applies_to_enumerative_source_only(heart, session):
+    """_learn rejects a 20-char fact from source='fact_extractor' (floor 30)
+    but accepts a 20-char fact from source='enumerative_extractor' (floor 15).
+
+    Exercises the REAL gate in FactManager._learn, not a local replica.
+    Content is 20 chars: above enumerative floor (15) but below standard floor (30).
+    """
+    from nous.heart.schemas import FactRejected
+
+    # 20 chars — "Bob owns the red car" = B-o-b(3)+ (4)+o-w-n-s(8)+ (9)+t-h-e(12)
+    #            + (13)+r-e-d(16)+ (17)+c-a-r(20)
+    enum_content = "Bob owns the red car"
+    assert len(enum_content) == 20
+
+    # enumerative_extractor floor = 15 → 20 chars is ACCEPTED
+    result_enum = await heart.learn(
+        FactInput(
+            content=enum_content,
+            source="enumerative_extractor",
+        ),
+        session=session,
+    )
+    assert not isinstance(result_enum, FactRejected), (
+        f"enumerative_extractor should accept a 20-char fact (floor=15), got: {result_enum}"
+    )
+    assert result_enum.id is not None
+
+    # fact_extractor floor = 30 → 20 chars is REJECTED before any DB access
+    # (different content avoids any dedup interaction with the row above)
+    std_content = "Tim has the blue van"
+    assert len(std_content) == 20
+    result_std = await heart.learn(
+        FactInput(
+            content=std_content,
+            source="fact_extractor",
+        ),
+        session=session,
+    )
+    assert isinstance(result_std, FactRejected), (
+        "fact_extractor should reject a 20-char fact (floor=30)"
+    )
 
 
 def test_admission_bypasses_enumerative_source():
