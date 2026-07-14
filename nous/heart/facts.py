@@ -1611,9 +1611,12 @@ class FactManager:
         change (tolerance windows, date ranges) MUST update both. Both compare
         `date` values (FactInput's validator coerces to datetime.date; the ORM
         column is Date) — the implementer must add the type-equality test below.
+
+        Execution order (codex r8): (1) open session + fetch both rows + None
+        guard + staleness guard — free, no budget consumed; (2) _key_budget_ok()
+        — consuming; (3) classify; (4) adjudicate + apply_supersession + commit.
+        Stale/missing pairs therefore never burn a classifier slot.
         """
-        if not self._key_budget_ok():
-            return False
         async with self.db.session() as session:
             f_old = await self._get_fact_orm(id1, session)
             f_new = await self._get_fact_orm(id2, session)
@@ -1638,6 +1641,11 @@ class FactManager:
                     id1,
                     id2,
                 )
+                return False
+            # Budget check after staleness guard (codex r8): stale pairs must
+            # not consume a classifier slot — dense clusters of already-resolved
+            # pairs would otherwise exhaust the hourly cap on no-ops.
+            if not self._key_budget_ok():
                 return False
             cls = await self._classify_fact_pair(c1, c2)
             if not cls:

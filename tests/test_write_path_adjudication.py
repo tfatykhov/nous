@@ -2422,6 +2422,9 @@ async def test_resolve_key_conflict_pair_skips_stale_pair(heart):
     )
     heart.facts._classify_fact_pair = classifier_sentinel
 
+    # r8: stale pairs must also not consume a budget slot — capture before call
+    key_calls_before = heart.facts._key_calls
+
     # B is f_old (id1), C is f_new (id2); B is inactive — must short-circuit
     result = await heart.facts.resolve_key_conflict_pair(
         f_b.id, f_c.id, f_b.content, f_c.content
@@ -2429,6 +2432,9 @@ async def test_resolve_key_conflict_pair_skips_stale_pair(heart):
 
     assert result is False, "stale pair (inactive winner candidate) must return False"
     classifier_sentinel.assert_not_called()
+    assert heart.facts._key_calls == key_calls_before, (
+        "stale pair must not consume a budget slot (_key_calls incremented before staleness guard)"
+    )
 
     # C must remain active and unsuperseded
     async with heart.db.session() as s:
