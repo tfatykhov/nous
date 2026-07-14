@@ -975,34 +975,17 @@ class SleepHandler:
     async def _apply_supersede(self, winner_id, loser_id) -> bool:
         """2a (2026-06-13 audit): deactivate the loser AND preserve the supersede
         chain — set ``loser.superseded_by = winner`` and write the supersedes
-        edge — all in one session+commit, mirroring the F031 MERGE atomicity and
-        clobber guard. The SUPERSEDE_A/B branches previously called
-        ``deactivate_fact`` alone, severing lineage (no column, no edge).
+        edge — all in one session+commit.
 
-        Returns ``True`` iff a real supersede was committed, ``False`` on either
-        no-op guard (loser gone / already superseded by a concurrent path). The
-        caller gates ``contradictions_resolved`` + the F035.6 audit row on this,
-        so a raced no-op never reports a supersession that did not occur."""
+        Delegates to ``FactManager.apply_supersession`` (AC-4 shared primitive)
+        so the clobber guard and edge write are identical across every write path.
+
+        Returns ``True`` iff a real supersede was committed, ``False`` on the
+        no-op clobber guard (loser gone / already superseded)."""
         async with self._heart.db.session() as session:
-            orm = await session.get(Fact, loser_id)
-            if orm is None:
-                return False
-            # codex P1 (PR #520): if a concurrent path already superseded this
-            # fact, skip EVERYTHING — writing a winner->loser edge now would
-            # record a second, conflicting winner while the column still names
-            # the original. Mirror the MERGE path: leave the existing chain
-            # intact (the active flip is paired — already-superseded is inactive).
-            if orm.superseded_by is not None:
-                logger.debug(
-                    "F031 supersede: skip %s — already superseded by %s",
-                    loser_id, orm.superseded_by,
-                )
-                return False
-            orm.superseded_by = winner_id
-            orm.active = False
-            await self._heart.link_facts(winner_id, loser_id, "supersedes", 1.0, session)
+            ok = await self._heart.facts.apply_supersession(winner_id, loser_id, session)
             await session.commit()
-            return True
+            return ok
 
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""

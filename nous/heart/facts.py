@@ -1419,6 +1419,40 @@ class FactManager:
         return new_detail
 
     # ------------------------------------------------------------------
+    # apply_supersession()
+    # ------------------------------------------------------------------
+
+    async def apply_supersession(
+        self,
+        winner_id: UUID,
+        loser_id: UUID,
+        session: AsyncSession,
+    ) -> bool:
+        """064 R2: shared supersession primitive extracted from sleep _apply_supersede.
+
+        Sets ``loser.superseded_by = winner_id``, ``loser.active = False``,
+        and writes the ``supersedes`` graph edge — all within the caller-owned
+        session.  Caller is responsible for ``session.commit()``.
+
+        Returns ``True`` if the supersession was applied, ``False`` if skipped
+        due to the clobber guard (loser not found, or already superseded by a
+        prior path so the chain would be overwritten)."""
+        loser = await self._get_fact_orm(loser_id, session)
+        if loser is None:
+            return False
+        if loser.superseded_by is not None:
+            logger.debug(
+                "apply_supersession: skip %s — already superseded by %s",
+                loser_id,
+                loser.superseded_by,
+            )
+            return False
+        loser.superseded_by = winner_id
+        loser.active = False
+        await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
+        return True
+
+    # ------------------------------------------------------------------
     # contradict()
     # ------------------------------------------------------------------
 

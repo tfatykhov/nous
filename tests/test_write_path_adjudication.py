@@ -1,13 +1,14 @@
 """Write-path adjudication (R1 enumerative extraction + R2 store-time supersession)."""
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import select
 
 from nous.heart.schemas import FactInput
-from nous.storage.models import Fact
+from nous.storage.models import Fact, GraphEdge
 
 
 def test_fact_input_accepts_adjudication_fields():
@@ -464,3 +465,162 @@ async def test_enumerative_min_chars_floor_applies_to_enumerative_source_only(he
 def test_admission_bypasses_enumerative_source():
     from nous.heart.admission import AdmissionConfig
     assert "enumerative_extractor" in AdmissionConfig().bypass_sources
+
+
+# ---------------------------------------------------------------------------
+# Task 6: AC-4 — shared apply_supersession primitive
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_apply_supersession_sets_columns_and_edge(heart, session):
+    """apply_supersession: sets loser.superseded_by, loser.active=False, writes supersedes edge, returns True."""
+    winner = await heart.learn(
+        FactInput(content="Winner fact: the office building has a rooftop garden now."),
+        session=session,
+    )
+    loser = await heart.learn(
+        FactInput(content="Loser fact: the office building has no rooftop garden yet."),
+        session=session,
+    )
+
+    result = await heart.facts.apply_supersession(winner.id, loser.id, session)
+    assert result is True
+
+    await session.flush()
+
+    loser_row = await session.get(Fact, loser.id)
+    assert loser_row.superseded_by == winner.id
+    assert loser_row.active is False
+
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == winner.id)
+        .where(GraphEdge.target_id == loser.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    edge = edge_r.scalars().first()
+    assert edge is not None
+    assert edge.weight == 1.0
+    assert edge.auto_linked is True
+
+
+@pytest.mark.postgres_only
+async def test_apply_supersession_clobber_guard(heart, session):
+    """apply_supersession: already-superseded loser => returns False, columns unchanged."""
+    # Prior winner must exist in the DB (FK constraint on superseded_by)
+    prior_winner = await heart.learn(
+        FactInput(content="Prior winner fact: Alice relocated to Utrecht earlier this spring."),
+        session=session,
+    )
+    winner = await heart.learn(
+        FactInput(content="New winner fact: Alice now lives in Amsterdam city center."),
+        session=session,
+    )
+    loser = await heart.learn(
+        FactInput(content="Already superseded: Alice lived in Rotterdam last year."),
+        session=session,
+    )
+
+    # Pre-set loser as already superseded by the prior winner
+    loser_row = await session.get(Fact, loser.id)
+    loser_row.superseded_by = prior_winner.id
+    loser_row.active = False
+    await session.flush()
+
+    result = await heart.facts.apply_supersession(winner.id, loser.id, session)
+    assert result is False
+
+    # Column must NOT be overwritten
+    await session.refresh(loser_row)
+    assert loser_row.superseded_by == prior_winner.id
+
+    # No new edge written for this winner->loser pair
+    edge_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == winner.id)
+        .where(GraphEdge.target_id == loser.id)
+    )
+    assert edge_r.scalars().first() is None
+
+
+@pytest.mark.asyncio
+async def test_sleep_apply_supersede_delegates():
+    """_apply_supersede delegates to heart.facts.apply_supersession and calls commit."""
+    from nous.handlers.sleep_handler import SleepHandler
+
+    winner_id = uuid4()
+    loser_id = uuid4()
+
+    mock_session = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_heart = MagicMock()
+    mock_heart.db.session = MagicMock(return_value=ctx)
+    mock_heart.facts = MagicMock()
+    mock_heart.facts.apply_supersession = AsyncMock(return_value=True)
+
+    handler = SleepHandler.__new__(SleepHandler)
+    handler._heart = mock_heart
+
+    result = await handler._apply_supersede(winner_id, loser_id)
+
+    assert result is True
+    mock_heart.facts.apply_supersession.assert_awaited_once_with(winner_id, loser_id, mock_session)
+    mock_session.commit.assert_awaited_once()
+
+
+@pytest.mark.postgres_only
+async def test_apply_supersession_edge_parity_with_link_facts(heart, session):
+    """Edge written by apply_supersession has same columns as one written by heart.link_facts."""
+    # Pair 1: via apply_supersession
+    w1 = await heart.learn(
+        FactInput(content="Edge parity winner: solar panel efficiency increased to 25 percent."),
+        session=session,
+    )
+    l1 = await heart.learn(
+        FactInput(content="Edge parity loser: solar panel efficiency was 20 percent before."),
+        session=session,
+    )
+    await heart.facts.apply_supersession(w1.id, l1.id, session)
+
+    # Pair 2: via heart.link_facts (the thin wrapper apply_supersession replaced)
+    w2 = await heart.learn(
+        FactInput(content="Link facts winner: wind turbine output is now 5 megawatts rated power."),
+        session=session,
+    )
+    l2 = await heart.learn(
+        FactInput(content="Link facts loser: wind turbine output was 3 megawatts old rating."),
+        session=session,
+    )
+    await heart.link_facts(w2.id, l2.id, "supersedes", 1.0, session=session)
+
+    await session.flush()
+
+    edge1_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == w1.id)
+        .where(GraphEdge.target_id == l1.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    edge1 = edge1_r.scalars().first()
+    assert edge1 is not None
+
+    edge2_r = await session.execute(
+        select(GraphEdge)
+        .where(GraphEdge.source_id == w2.id)
+        .where(GraphEdge.target_id == l2.id)
+        .where(GraphEdge.relation == "supersedes")
+    )
+    edge2 = edge2_r.scalars().first()
+    assert edge2 is not None
+
+    assert edge1.relation == edge2.relation == "supersedes"
+    assert edge1.weight == edge2.weight == 1.0
+    assert edge1.auto_linked == edge2.auto_linked is True
+    assert edge1.extraction_method == edge2.extraction_method
+    assert edge1.extraction_method is not None
