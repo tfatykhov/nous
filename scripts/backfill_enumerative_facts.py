@@ -167,6 +167,8 @@ async def _run_backfill(
             embedding_provider=embedder,
             owns_embeddings=False,
         )
+        # Override agent_id from CLI arg.
+        heart.facts.agent_id = agent_id
         client = create_client(settings)
         await client.start()
         try:

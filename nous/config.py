@@ -248,8 +248,10 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "R1: extract atomic facts from raw transcript chunks when the "
-            "density heuristic classifies the episode as enumerable. Additive — "
-            "the summarize-then-extract path is unchanged. Requires background LLM."
+            "density heuristic classifies the episode as enumerable. Modal — "
+            "enumerable episodes route fact storage through the enumerative leg "
+            "INSTEAD of the candidate/summary leg; narrative episodes keep the "
+            "current path unchanged. Requires background LLM."
         ),
     )
     enumerative_density_threshold: float = Field(

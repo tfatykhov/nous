@@ -74,6 +74,7 @@ async def run_sweep(
         "pairs_examined": 0,
         "resolutions_written": 0,
         "keep_both": 0,
+        "budget_stops": 0,
         "sample_resolutions": [],  # list[tuple[str, str]]
     }
     seen: set[frozenset] = set()
@@ -107,6 +108,14 @@ async def run_sweep(
             counters["pairs_examined"] += 1
 
             if dry_run:
+                continue
+
+            # Peek budget before calling to distinguish budget-stops from
+            # genuine KEEP-BOTH; _key_budget_ok() consumes a slot so we check
+            # _key_calls directly (non-consuming).
+            cap = settings.supersession_classifier_max_per_hour
+            if cap > 0 and heart.facts._key_calls >= cap:
+                counters["budget_stops"] += 1
                 continue
 
             resolved = await heart.facts.resolve_key_conflict_pair(id1, id2, c1, c2)
@@ -278,6 +287,7 @@ def _print_report(counters: dict, heart, agent_id: str, watermark: str, *, dry_r
     print(f"  pairs_examined    : {counters['pairs_examined']}")
     print(f"  resolutions_written: {counters['resolutions_written']}")
     print(f"  keep_both         : {counters['keep_both']}")
+    print(f"  budget_stops      : {counters['budget_stops']}")
 
     if dry_run:
         print(

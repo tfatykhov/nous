@@ -117,9 +117,10 @@ class FactInput(BaseModel):
     # stripped — see normalize_key). Drive the R2 exact-key candidate lookup.
     subject_key: str | None = None
     attribute_key: str | None = None
-    # 064 R1: ordinal position of the source statement (statement number when
-    # explicit, else chunk_index * 1_000_000 + in-chunk position). Higher =
-    # later in the source. The 'ordinal' supersession policy's authority signal.
+    # 064 R1: positional reading-order ordinal — chunk_index * 1_000_000 +
+    # in-chunk position; explicit statement numbers from the source are never
+    # used (mixed-form comparisons invert reading order). Higher = later in the
+    # source. The 'ordinal' supersession policy's authority signal.
     source_ordinal: int | None = None
     # 064 R2.4: statement contradicts widely-known world knowledge; rendered
     # with an override marker when NOUS_OVERRIDE_PRIOR_MARKING_ENABLED.
