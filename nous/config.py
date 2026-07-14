@@ -233,6 +233,73 @@ class Settings(BaseSettings):
             "memory questions. Deterministic trigger (empty set), no score thresholds."
         ),
     )
+    override_prior_marking_enabled: bool = Field(
+        default=False,
+        description=(
+            "R2.4: render facts whose stored value contradicts common world "
+            "knowledge (overrides_prior=true) with an explicit trust marker in "
+            "pre-turn context. Evidence: 12/12 MAB flip-failures were parametric "
+            "fallbacks; the inoculation must sit AT the fact, not in a generic instruction."
+        ),
+    )
+
+    # 064 R1: enumerative extraction (land-dark)
+    extraction_enumerative_enabled: bool = Field(
+        default=False,
+        description=(
+            "R1: extract atomic facts from raw transcript chunks when the "
+            "density heuristic classifies the episode as enumerable. Modal — "
+            "enumerable episodes route fact storage through the enumerative leg "
+            "INSTEAD of the candidate/summary leg; narrative episodes keep the "
+            "current path unchanged. Requires background LLM."
+        ),
+    )
+    enumerative_density_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="Statement-per-line density above which a transcript is enumerable (conservative default).",
+    )
+    enumerative_max_facts_per_episode: int = Field(
+        default=1000, ge=0,
+        description="R1.3 cap on enumerative facts per episode; 0 = unlimited. Truncation logs WARNING (never silent).",
+    )
+    enumerative_max_chunks_per_episode: int = Field(
+        default=200, ge=0,
+        description="Hard bound on extraction LLM calls per episode (one per chunk); 0 = unlimited. Truncation logs WARNING.",
+    )
+    enumerative_extraction_max_per_hour: int = Field(
+        default=1000, ge=0,
+        description="Hourly in-process cap on enumerative extraction LLM calls (mirrors *_max_per_hour pattern); 0 disables.",
+    )
+    enumerative_classifier: Literal["heuristic", "off"] = Field(
+        default="heuristic",
+        description="Density mode selection: 'heuristic' (no LLM) or 'off' (never enumerable). 'llm' reserved for v2.",
+    )
+    enumerative_min_content_chars: int = Field(
+        default=15, ge=0,
+        description="Min-content floor for source='enumerative_extractor' facts (atomic statements are often <30 chars).",
+    )
+
+    # 064 R2: store-time supersession resolution (land-dark)
+    supersession_key_resolution_enabled: bool = Field(
+        default=False,
+        description="R2.1: resolve same-(subject_key, attribute_key) conflicts at write time via the F027 classifier + policy.",
+    )
+    supersession_policy: Literal["ordinal", "recency"] = Field(
+        default="ordinal",
+        description="R2.2 winner rule: 'ordinal' (higher source_ordinal wins, same-episode only; falls back to recency) or 'recency' (later learned_at wins). 'authority' reserved.",
+    )
+    supersession_key_candidates_cap: int = Field(
+        default=8, ge=1,
+        description="RC-3: max same-key active candidates examined per insert (newest first).",
+    )
+    supersession_classifier_max_per_hour: int = Field(
+        default=500, ge=0,
+        description="RC-5: hourly in-process cap on key-conflict classifier (Haiku) calls; 0 disables the cap.",
+    )
+    supersession_sweep_max_pairs: int = Field(
+        default=25, ge=0,
+        description="R2.1 sleep sweep: max same-key conflict pairs processed per cycle (resumable by construction).",
+    )
 
     # F017: Budget scaling
     budget_scale_enabled: bool = True

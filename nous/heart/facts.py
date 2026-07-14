@@ -169,6 +169,9 @@ class FactManager:
         # 1a: advisory per-hour cap on in-band classifier (Haiku) calls.
         self._band_bucket: int = -1
         self._band_calls: int = 0
+        # 064 R2: advisory per-hour cap on key-conflict classifier calls.
+        self._key_bucket: int = -1
+        self._key_calls: int = 0
 
     def _band_budget_ok(self) -> bool:
         """Advisory in-process per-hour cap on the in-band classifier. Returns
@@ -185,6 +188,34 @@ class FactManager:
             return False
         self._band_calls += 1
         return True
+
+    def _key_budget_ok(self) -> bool:
+        """RC-5: advisory per-hour cap on key-conflict classifier calls.
+        Mirrors _band_budget_ok. Spent budget => fail open to KEEP-BOTH."""
+        cap = getattr(self._settings, "supersession_classifier_max_per_hour", 500) if self._settings else 500
+        if not cap or cap <= 0:
+            return True
+        bucket = int(time.monotonic() // 3600)
+        if bucket != self._key_bucket:
+            self._key_bucket = bucket
+            self._key_calls = 0
+        if self._key_calls >= cap:
+            return False
+        self._key_calls += 1
+        return True
+
+    def key_budget_exhausted(self) -> bool:
+        """Non-consuming peek at the hourly key-classifier budget. Rolls the
+        hour bucket forward (resetting the counter) exactly like _key_budget_ok,
+        but never consumes a slot."""
+        cap = getattr(self._settings, "supersession_classifier_max_per_hour", 500) if self._settings else 500
+        if not cap or cap <= 0:
+            return False
+        bucket = int(time.monotonic() // 3600)
+        if bucket != self._key_bucket:
+            self._key_bucket = bucket
+            self._key_calls = 0
+        return self._key_calls >= cap
 
     # ------------------------------------------------------------------
     # Event helper
@@ -401,6 +432,7 @@ class FactManager:
         session: AsyncSession | None = None,
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
+        precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
         """Store a new fact with deduplication.
 
@@ -413,6 +445,8 @@ class FactManager:
             session: Optional session for transaction injection.
             encoded_frame: Frame active when this fact was learned (003.2).
             encoded_censors: Censors active when this fact was learned (003.2).
+            precomputed_embedding: Pre-computed vector to use verbatim instead
+                of calling the embedder.  Enables RC-2 batched ingest (Task 4).
         """
         # W-1: precompute the admission LLM utility BEFORE opening the write
         # session, so the Haiku call doesn't hold a pooled connection through
@@ -432,6 +466,8 @@ class FactManager:
         # is that caller's responsibility.
         utility_override: float | None = None
         _min_chars_gate = self._settings.fact_min_content_chars if self._settings else 30
+        if input.source == "enumerative_extractor" and self._settings is not None:
+            _min_chars_gate = self._settings.enumerative_min_content_chars
         if (
             session is None
             and self._admission_controller is not None
@@ -449,6 +485,7 @@ class FactManager:
                     encoded_frame=encoded_frame,
                     encoded_censors=encoded_censors,
                     utility_override=utility_override,
+                    precomputed_embedding=precomputed_embedding,
                 )
                 await session.commit()
                 return result
@@ -460,6 +497,7 @@ class FactManager:
             encoded_frame=encoded_frame,
             encoded_censors=encoded_censors,
             utility_override=utility_override,
+            precomputed_embedding=precomputed_embedding,
         )
 
     async def _embed_with_retry(self, embed_text: str, *, attempts: int = 2) -> list[float] | None:
@@ -502,10 +540,13 @@ class FactManager:
         encoded_frame: str | None = None,
         encoded_censors: list[str] | None = None,
         utility_override: float | None = None,
+        precomputed_embedding: list[float] | None = None,
     ) -> FactDetail | FactRejected:
         # F038-1.2: Reject facts with content < fact_min_content_chars characters.
         # 0 disables the gate entirely (useful for testing / low-noise corpora).
         min_chars = self._settings.fact_min_content_chars if self._settings else 30
+        if input.source == "enumerative_extractor" and self._settings is not None:
+            min_chars = self._settings.enumerative_min_content_chars
         if min_chars and len(input.content.strip()) < min_chars:
             logger.info(
                 "Fact rejected by min-content floor (%d < %d): %.60s",
@@ -537,7 +578,13 @@ class FactManager:
 
         # Generate embedding (retry once; persistent failure logs ERROR and
         # stores a NULL-embed row rather than dropping the fact — 1b).
-        embedding = await self._embed_with_retry(input.content)
+        # RC-2: when caller provides a precomputed vector, skip the embedder
+        # entirely so batched ingest (Task 4) can embed once per batch.
+        embedding = (
+            precomputed_embedding
+            if precomputed_embedding is not None
+            else await self._embed_with_retry(input.content)
+        )
 
         # Near-duplicate detection: cosine similarity > threshold.
         # F075: pass candidate's event_date so _find_duplicate prefers same-date
@@ -660,6 +707,10 @@ class FactManager:
             # knowledge_extractor) leave both at None → backfill-eligible.
             event_date=input.event_date,
             event_date_classified_at=input.event_date_classified_at,
+            subject_key=input.subject_key,
+            attribute_key=input.attribute_key,
+            source_ordinal=input.source_ordinal,
+            overrides_prior=input.overrides_prior if input.overrides_prior else None,
         )
         session.add(fact)
         await session.flush()
@@ -679,13 +730,31 @@ class FactManager:
         # Audit S11: exclude_ids threaded through so facts the F377
         # tiebreaker (or the band classifier above) just ruled distinct
         # are not silently superseded against that verdict.
-        if check_contradictions and input.subject and embedding is not None:
+        # 064 R2: skip legacy path ONLY when keyed resolution will actually
+        # handle this fact (R2 enabled AND both keys present). With R2 off
+        # or a key missing the legacy subject path is the only write-time
+        # supersession guard — skipping it leaves stale unkeyed same-subject
+        # rows active (codex r5).
+        if check_contradictions and input.subject and embedding is not None and not (
+            getattr(self._settings, "supersession_key_resolution_enabled", False) is True
+            and input.subject_key
+            and input.attribute_key
+        ):
             await self._supersede_by_subject(
                 fact.id, input.subject, embedding, session,
                 new_content=input.content,
                 new_event_date=input.event_date,
                 exclude_ids=exclude_ids,
             )
+
+        new_fact_lost = False  # codex r11: set True when keyed resolution deactivates the new fact
+        if (
+            check_contradictions
+            and getattr(self._settings, "supersession_key_resolution_enabled", False) is True
+            and input.subject_key
+            and input.attribute_key
+        ):
+            new_fact_lost = await self._resolve_key_conflicts(fact, input, session, exclude_ids)
 
         await self._emit_event(
             session,
@@ -701,8 +770,10 @@ class FactManager:
         if band_warning is not None:
             detail.contradiction_warning = band_warning
 
-        if check_contradictions:
+        if check_contradictions and not new_fact_lost:
             # Contradiction detection: similarity 0.85-0.95 with different content
+            # codex r11: skipped when new fact lost keyed resolution (inactive fact
+            # must not trigger contradiction edges or domain compaction).
             if embedding is not None:
                 safe_excludes = list(exclude_ids) + [fact.id]
                 contradiction = await self._find_contradiction(
@@ -1141,12 +1212,31 @@ class FactManager:
         extraction on, a dated candidate colliding with an older undated
         paraphrase was silently de-dated (the F075 bypass requires BOTH sides
         non-null, and plain _confirm never copied the date).
+
+        codex r11 — dedup-confirm must not discard adjudication metadata;
+        fill-if-empty only (never overwrite existing non-NULL values).
         """
         if input.event_date is not None and dupe.event_date is None:
             dupe.event_date = input.event_date
             dupe.event_date_classified_at = (
                 input.event_date_classified_at or datetime.now(UTC)
             )
+        # Fill subject_key + attribute_key as a PAIR — only when both input
+        # keys are present and both row keys are NULL (avoids half-keyed rows).
+        if (
+            input.subject_key is not None
+            and input.attribute_key is not None
+            and dupe.subject_key is None
+            and dupe.attribute_key is None
+        ):
+            dupe.subject_key = input.subject_key
+            dupe.attribute_key = input.attribute_key
+        # Fill source_ordinal when the row has none and input provides one.
+        if input.source_ordinal is not None and dupe.source_ordinal is None:
+            dupe.source_ordinal = input.source_ordinal
+        # Upgrade overrides_prior: True is sticky — never downgrade.
+        if input.overrides_prior and not dupe.overrides_prior:
+            dupe.overrides_prior = True
         return await self._confirm(dupe.id, session)
 
     async def _find_duplicate(
@@ -1399,6 +1489,320 @@ class FactManager:
         return new_detail
 
     # ------------------------------------------------------------------
+    # apply_supersession()
+    # ------------------------------------------------------------------
+
+    async def apply_supersession(
+        self,
+        winner_id: UUID,
+        loser_id: UUID,
+        session: AsyncSession,
+    ) -> bool:
+        """064 R2: shared supersession primitive extracted from sleep _apply_supersede.
+
+        Sets ``loser.superseded_by = winner_id``, ``loser.active = False``,
+        and writes the ``supersedes`` graph edge — all within the caller-owned
+        session.  Caller is responsible for ``session.commit()``.
+
+        Returns ``True`` if the supersession was applied, ``False`` if skipped
+        due to the clobber guard (loser not found, or already superseded by a
+        prior path so the chain would be overwritten).
+
+        Both IDs must belong to ``self.agent_id``; cross-agent IDs are not
+        validated by this primitive and will return ``False`` silently if the
+        loser row is not found.  Callers may ``commit()`` unconditionally even
+        when this returns ``False`` — the no-op path writes nothing."""
+        loser = await self._get_fact_orm(loser_id, session)
+        if loser is None:
+            return False
+        if loser.superseded_by is not None:
+            logger.debug(
+                "apply_supersession: skip %s — already superseded by %s",
+                loser_id,
+                loser.superseded_by,
+            )
+            return False
+        loser.superseded_by = winner_id
+        loser.active = False
+        await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
+        return True
+
+    # ------------------------------------------------------------------
+    # 064 R2: key-conflict resolution
+    # ------------------------------------------------------------------
+
+    async def find_key_conflict_pairs(
+        self,
+        limit: int = 25,
+        session: AsyncSession | None = None,
+        after: tuple | None = None,
+    ) -> list[dict]:
+        """064 R2 sleep sweep: active fact pairs sharing (subject_key,
+        attribute_key) — the cross-episode conflicts write-time detection
+        missed (it only sees pairs at insert). Oldest-first for determinism;
+        resolution deactivates losers so re-runs converge.
+
+        The JOIN uses row comparison ``(f1.learned_at, f1.id) <
+        (f2.learned_at, f2.id)`` rather than a scalar ``<`` so that pairs
+        whose ``learned_at`` values are identical (e.g. two facts committed
+        in the same transaction) are still included, with ``id`` as the
+        deterministic tiebreak.
+
+        Args:
+            after: Optional paging cursor ``(ts1, id1, ts2, id2)`` — the
+                   full 4-tuple of the last pair processed.  The 4-tuple
+                   order (f1.learned_at, f1.id, f2.learned_at, f2.id) makes
+                   every pair uniquely addressable, so a single f1 with
+                   multiple same-key f2 partners no longer causes starvation
+                   when all first-page pairs are KEEP_BOTH.  Pass ``None``
+                   to start from the oldest pair.
+
+        Returns:
+            List of dicts with keys ``id1``, ``id2``, ``c1``, ``c2``,
+            ``ts1`` (f1.learned_at), ``ts2`` (f2.learned_at).
+        """
+        if after is not None:
+            sql = text("""
+                SELECT f1.id AS id1, f2.id AS id2,
+                       f1.content AS c1, f2.content AS c2,
+                       f1.learned_at AS ts1, f2.learned_at AS ts2
+                FROM heart.facts f1
+                JOIN heart.facts f2
+                  ON f2.agent_id = f1.agent_id
+                 AND f2.subject_key = f1.subject_key
+                 AND f2.attribute_key = f1.attribute_key
+                 AND (f1.learned_at, f1.id) < (f2.learned_at, f2.id)
+                WHERE f1.agent_id = :agent_id
+                  AND f1.active = true AND f2.active = true
+                  AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
+                  AND (f1.event_date IS NULL OR f2.event_date IS NULL
+                       OR f1.event_date = f2.event_date)
+                  AND (f1.learned_at, f1.id, f2.learned_at, f2.id)
+                      > (:after_ts1, :after_id1, :after_ts2, :after_id2)
+                ORDER BY f1.learned_at ASC, f1.id ASC,
+                         f2.learned_at ASC, f2.id ASC
+                LIMIT :limit
+            """)
+            params: dict = {
+                "agent_id": self.agent_id,
+                "limit": limit,
+                "after_ts1": after[0],
+                "after_id1": after[1],
+                "after_ts2": after[2],
+                "after_id2": after[3],
+            }
+        else:
+            sql = text("""
+                SELECT f1.id AS id1, f2.id AS id2,
+                       f1.content AS c1, f2.content AS c2,
+                       f1.learned_at AS ts1, f2.learned_at AS ts2
+                FROM heart.facts f1
+                JOIN heart.facts f2
+                  ON f2.agent_id = f1.agent_id
+                 AND f2.subject_key = f1.subject_key
+                 AND f2.attribute_key = f1.attribute_key
+                 AND (f1.learned_at, f1.id) < (f2.learned_at, f2.id)
+                WHERE f1.agent_id = :agent_id
+                  AND f1.active = true AND f2.active = true
+                  AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
+                  AND (f1.event_date IS NULL OR f2.event_date IS NULL
+                       OR f1.event_date = f2.event_date)
+                ORDER BY f1.learned_at ASC, f1.id ASC,
+                         f2.learned_at ASC, f2.id ASC
+                LIMIT :limit
+            """)
+            params = {"agent_id": self.agent_id, "limit": limit}
+        if session is None:
+            async with self.db.session() as session:
+                rows = await session.execute(sql, params)
+                return [dict(r._mapping) for r in rows.fetchall()]
+        rows = await session.execute(sql, params)
+        return [dict(r._mapping) for r in rows.fetchall()]
+
+    async def resolve_key_conflict_pair(
+        self, id1: UUID, id2: UUID, c1: str, c2: str
+    ) -> bool:
+        """064 R2 sweep/backfill seam: confirm a same-key pair via the F027
+        classifier and resolve per policy. fact1 (id1/c1) is the OLDER fact.
+        Owns its session + commit. Returns True iff a supersession was written.
+        Fail-open (classifier None / low conf / budget spent / guard) => False.
+
+        NOTE (devil-2 #5): the F075 distinct-event-date exclusion for the sweep
+        lives in find_key_conflict_pairs' SQL; the write-time twin lives in
+        _resolve_key_conflicts' Python. One rule, two encodings — any future
+        change (tolerance windows, date ranges) MUST update both. Both compare
+        `date` values (FactInput's validator coerces to datetime.date; the ORM
+        column is Date) — the implementer must add the type-equality test below.
+
+        Execution order (codex r8): (1) open session + fetch both rows + None
+        guard + staleness guard — free, no budget consumed; (2) _key_budget_ok()
+        — consuming; (3) classify; (4) adjudicate + apply_supersession + commit.
+        Stale/missing pairs therefore never burn a classifier slot.
+        """
+        async with self.db.session() as session:
+            f_old = await self._get_fact_orm(id1, session)
+            f_new = await self._get_fact_orm(id2, session)
+            if f_old is None or f_new is None:
+                return False
+            # Stale-pair guard (codex r4 P1): skip pairs where either row is
+            # no longer active or already has a superseded_by set.  A sweep
+            # page can contain A/B, A/C, B/C; resolving A/B deactivates B, so
+            # the pre-fetched B/C pair must be skipped or C could be
+            # superseded to an inactive winner.  active IS NULL is treated as
+            # active (server_default=True, ORM may return None before flush).
+            old_active = f_old.active if f_old.active is not None else True
+            new_active = f_new.active if f_new.active is not None else True
+            if (
+                not old_active
+                or not new_active
+                or f_old.superseded_by is not None
+                or f_new.superseded_by is not None
+            ):
+                logger.debug(
+                    "resolve_key_conflict_pair: pair no longer current — skipping (%s, %s)",
+                    id1,
+                    id2,
+                )
+                return False
+            # Budget check after staleness guard (codex r8): stale pairs must
+            # not consume a classifier slot — dense clusters of already-resolved
+            # pairs would otherwise exhaust the hourly cap on no-ops.
+            if not self._key_budget_ok():
+                return False
+            cls = await self._classify_fact_pair(c1, c2)
+            if not cls:
+                return False
+            relation = cls.get("relation", "")
+            try:
+                conf = float(cls.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                # Malformed confidence (e.g. "high") → fail-open: KEEP BOTH.
+                conf = 0.0
+            if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
+                return False
+            if relation == "CONTRADICTION":
+                current = cls.get("current_fact", "")
+                if current == "new":
+                    winner, loser = f_new, f_old
+                elif current == "old":
+                    winner, loser = f_old, f_new
+                else:
+                    return False  # ambiguous contradiction => KEEP BOTH (devil-2 #1)
+            else:
+                winner, loser = self._pick_winner(f_new, f_old, cls)
+            ok = await self.apply_supersession(winner.id, loser.id, session)
+            if ok:
+                # R2.6 sampled precision audit hook: caller logs the texts.
+                logger.info(
+                    "R2 resolved: superseded %r ==> %r",
+                    loser.content[:200],
+                    winner.content[:200],
+                )
+            await session.commit()
+            return ok
+
+    async def _resolve_key_conflicts(
+        self, fact: Fact, input: FactInput, session: AsyncSession,
+        exclude_ids: list[UUID],
+    ) -> bool:
+        """064 R2.1/R2.2: same-(subject_key, attribute_key) conflict resolution.
+
+        Precedence (binding, reviews RC-4/AC-3):
+          1. F075 — differing non-null event_dates => distinct events, KEEP BOTH.
+          2. Classifier confirm — only UPDATE/CONTRADICTION at conf >= 0.8
+             counts as a same-slot conflict; anything else KEEPS BOTH.
+          3. Policy picks the winner: ordinal (same-episode, both ordinals
+             present) else recency (learned_at).
+        Never deletes; loser keeps full lineage via apply_supersession.
+
+        Returns True when the newly-inserted fact (``fact``) lost and is now
+        inactive; False otherwise (codex r11).
+        """
+        cap = self._settings.supersession_key_candidates_cap if self._settings else 8
+        rows = await session.execute(
+            select(Fact)
+            .where(
+                Fact.agent_id == self.agent_id,
+                Fact.active == True,  # noqa: E712
+                Fact.subject_key == input.subject_key,
+                Fact.attribute_key == input.attribute_key,
+                Fact.id != fact.id,
+            )
+            .order_by(Fact.learned_at.desc())
+            .limit(cap)
+        )
+        for old in rows.scalars().all():
+            if old.id in exclude_ids:
+                continue
+            if (
+                input.event_date is not None
+                and old.event_date is not None
+                and input.event_date != old.event_date
+            ):
+                continue  # F075 precedence: distinct events, never supersede
+            if not self._key_budget_ok():
+                logger.warning("R2: key-conflict classifier hourly budget spent — deferring to sleep sweep")
+                return False
+            cls = await self._classify_fact_pair(old.content, input.content)
+            if not cls:
+                continue  # fail-open: KEEP BOTH
+            relation = cls.get("relation", "")
+            try:
+                conf = float(cls.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                # Malformed confidence (e.g. "high") → fail-open: KEEP BOTH.
+                conf = 0.0
+            if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
+                continue  # not a confirmed same-slot conflict
+            if relation == "CONTRADICTION":
+                # devil-2 #1: a CONTRADICTION is about an inherently FIXED
+                # property — reading order says nothing about truth. Only the
+                # classifier's explicit current_fact verdict may resolve it;
+                # ambiguous => KEEP BOTH. Ordinal/recency never apply here.
+                current = cls.get("current_fact", "")
+                if current == "new":
+                    winner, loser = fact, old
+                elif current == "old":
+                    winner, loser = old, fact
+                else:
+                    continue
+            else:  # UPDATE — mutable state; ordinal (reading order) is the authority signal
+                winner, loser = self._pick_winner(fact, old, cls)
+            await self.apply_supersession(winner.id, loser.id, session)
+            if loser.id == fact.id:
+                return True  # codex r11: new fact lost — it is inactive; stop scanning
+        return False
+
+    def _pick_winner(self, new_fact: Fact, old_fact: Fact, classification: dict | None = None):
+        """R2.2 policy for UPDATE conflicts. Returns (winner, loser).
+        Precedence: same-episode positional ordinal (reading order) →
+        classifier current_fact → recency (later learned_at). CONTRADICTION
+        never reaches this method (resolved by current_fact only)."""
+        policy = getattr(self._settings, "supersession_policy", "ordinal") if self._settings else "ordinal"
+        if (
+            policy == "ordinal"
+            and new_fact.source_ordinal is not None
+            and old_fact.source_ordinal is not None
+            and new_fact.source_episode_id is not None
+            and new_fact.source_episode_id == old_fact.source_episode_id
+        ):
+            return (new_fact, old_fact) if new_fact.source_ordinal >= old_fact.source_ordinal else (old_fact, new_fact)
+        # No comparable ordinals: respect an explicit classifier direction.
+        current = (classification or {}).get("current_fact", "")
+        if current == "old":
+            return (old_fact, new_fact)
+        if current == "new":
+            return (new_fact, old_fact)
+        # recency fallback (also the 'recency' policy): later learned_at wins;
+        # the just-inserted fact's learned_at is now(), so new wins unless the
+        # DB clock says otherwise (backfill can set learned_at explicitly).
+        new_ts = new_fact.learned_at
+        old_ts = old_fact.learned_at
+        if new_ts is not None and old_ts is not None and old_ts > new_ts:
+            return (old_fact, new_fact)
+        return (new_fact, old_fact)
+
+    # ------------------------------------------------------------------
     # contradict()
     # ------------------------------------------------------------------
 
@@ -1522,6 +1926,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for f in facts
         ]
@@ -1650,6 +2055,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -1781,6 +2187,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -1878,6 +2285,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -2011,6 +2419,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for f in facts
         ]
@@ -2044,37 +2453,141 @@ class FactManager:
     # ------------------------------------------------------------------
 
     async def get_current(self, fact_id: UUID, session: AsyncSession | None = None) -> FactDetail:
-        """Follow superseded_by chain to find current version of a fact."""
+        """Follow superseded_by chain to find current version of a fact.
+
+        A detected supersession cycle is repaired in place; with a caller-provided
+        session the repair is flushed and the caller owns the commit.
+        """
         if session is None:
             async with self.db.session() as session:
-                return await self._get_current(fact_id, session)
+                result = await self._get_current(fact_id, session)
+                await session.commit()
+                return result
         return await self._get_current(fact_id, session)
 
     async def _get_current(self, fact_id: UUID, session: AsyncSession) -> FactDetail:
-        sql = text("""
+        # Iterative chain walk: run a depth<100 path-guarded CTE from current_id
+        # each iteration. A NULL-tip row → done (healthy chain). A depth-exhausted
+        # CTE with no NULL tip → restart from the deepest visited row. A Python-side
+        # visited set guards cross-restart cycles (A→…→B after 100 links → B already
+        # in visited → repair). Intra-CTE cycles (superseded_by IN path) go to the
+        # existing latest-learned cycle repair. Restarts are capped at 100 (≈10k-link
+        # chains before ValueError).
+        _tip_sql = text("""
             WITH RECURSIVE chain AS (
-                SELECT id, superseded_by, 1 AS depth
+                SELECT id, superseded_by, 1 AS depth, ARRAY[id]::uuid[] AS path
                 FROM heart.facts
                 WHERE id = :start_id AND agent_id = :agent_id
                 UNION ALL
-                SELECT f.id, f.superseded_by, c.depth + 1
+                SELECT f.id, f.superseded_by, c.depth + 1, c.path || f.id
                 FROM heart.facts f
                 JOIN chain c ON f.id = c.superseded_by
-                WHERE c.depth < 10
+                WHERE NOT (f.id = ANY(c.path))
+                  AND c.depth < 100
             )
             SELECT id FROM chain WHERE superseded_by IS NULL
         """)
+        _diag_sql = text("""
+            WITH RECURSIVE chain AS (
+                SELECT id, superseded_by, learned_at, 1 AS depth,
+                       ARRAY[id]::uuid[] AS path
+                FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
+                UNION ALL
+                SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
+                       c.path || f.id
+                FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
+                WHERE NOT (f.id = ANY(c.path))
+                  AND c.depth < 100
+            )
+            SELECT id, learned_at, superseded_by,
+                   (superseded_by IS NOT NULL
+                    AND superseded_by = ANY(path)) AS is_cycle
+            FROM chain ORDER BY depth DESC LIMIT 1
+        """)
+        _winner_sql = text("""
+            WITH RECURSIVE chain AS (
+                SELECT id, superseded_by, learned_at, 1 AS depth,
+                       ARRAY[id]::uuid[] AS path
+                FROM heart.facts WHERE id = :start_id AND agent_id = :agent_id
+                UNION ALL
+                SELECT f.id, f.superseded_by, f.learned_at, c.depth + 1,
+                       c.path || f.id
+                FROM heart.facts f JOIN chain c ON f.id = c.superseded_by
+                WHERE NOT (f.id = ANY(c.path))
+                  AND c.depth < 100
+            )
+            SELECT id FROM chain ORDER BY learned_at DESC NULLS LAST LIMIT 1
+        """)
 
-        result = await session.execute(sql, {"start_id": fact_id, "agent_id": self.agent_id})
-        row = result.first()
-        if row is None:
-            raise ValueError(f"Fact {fact_id} not found")
+        visited: set[UUID] = set()
+        current_id = fact_id
+        max_restarts = 100
 
-        current_fact = await self._get_fact_orm(row.id, session)
-        if current_fact is None:
-            raise ValueError(f"Current fact for {fact_id} not found")
+        for _restart in range(max_restarts + 1):
+            params = {"start_id": current_id, "agent_id": self.agent_id}
 
-        return self._to_detail(current_fact)
+            result = await session.execute(_tip_sql, params)
+            row = result.first()
+            if row is not None:
+                # Healthy path: CTE found the NULL-tip row.
+                current_fact = await self._get_fact_orm(row.id, session)
+                if current_fact is None:
+                    raise ValueError(f"Current fact for {fact_id} not found")
+                return self._to_detail(current_fact)
+
+            # No NULL-tip — depth-exhausted or intra-CTE cycle.
+            diag_rows = await session.execute(_diag_sql, params)
+            deepest = diag_rows.first()
+            if deepest is None:
+                raise ValueError(f"Fact {fact_id} not found")
+
+            if deepest.is_cycle or deepest.id in visited:
+                # True intra-CTE cycle OR cross-restart cycle detected.
+                # Repair: pick latest-learned member, null superseded_by + reactivate.
+                if deepest.id in visited:
+                    # Cross-restart cycle: the cycle spans >100 links so _winner_sql
+                    # (a 100-depth CTE from the current restart point) may exclude the
+                    # true latest-learned member.  Select over the full visited set
+                    # which covers all restart endpoints accumulated so far.
+                    winner_rows = await session.execute(
+                        text("""
+                            SELECT id FROM heart.facts
+                            WHERE agent_id = :agent_id
+                              AND id::text = ANY(:visited_strs)
+                            ORDER BY learned_at DESC NULLS LAST, id DESC
+                            LIMIT 1
+                        """),
+                        {
+                            "agent_id": self.agent_id,
+                            "visited_strs": [str(v) for v in visited],
+                        },
+                    )
+                else:
+                    # Intra-CTE cycle: the whole cycle fits within the 100-node
+                    # window; the CTE-based winner correctly covers all members.
+                    winner_rows = await session.execute(_winner_sql, params)
+                tip = winner_rows.first()
+                if tip is None:
+                    raise ValueError(f"Fact {fact_id} not found")
+                winner = await self._get_fact_orm(tip.id, session)
+                if winner is None:
+                    raise ValueError(f"Cycle winner {tip.id} not found for fact {fact_id}")
+                logger.warning(
+                    "Supersession CYCLE detected at fact %s — breaking: winner %s",
+                    fact_id, tip.id,
+                )
+                winner.superseded_by = None
+                winner.active = True
+                await session.flush()
+                return self._to_detail(winner)
+
+            # Depth-exhausted, acyclic so far — restart from deepest visited row.
+            visited.add(deepest.id)
+            current_id = deepest.id
+
+        raise ValueError(
+            f"supersession chain exceeds walk bound ({max_restarts} restarts)"
+        )
 
     # ------------------------------------------------------------------
     # deactivate()
@@ -2128,6 +2641,7 @@ class FactManager:
             actionable=fact.actionable,
             actionable_confidence=fact.actionable_confidence,
             event_date=fact.event_date,  # F075
+            overrides_prior=bool(fact.overrides_prior or False),  # R2.4
         )
 
     # ------------------------------------------------------------------

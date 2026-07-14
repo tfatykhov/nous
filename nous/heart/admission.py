@@ -132,6 +132,10 @@ class AdmissionConfig:
             # (composite scores 0.52-0.59 vs prod threshold 0.60).
             "cluster_consolidation",
             "contradiction_resolution",
+            # 064 R1: enumerative facts bypass utility scoring (tuned for
+            # conversational facts); quality control = density gate + dedup +
+            # per-episode cap. Derived source — must still carry an embedding.
+            "enumerative_extractor",
         ]
     )
     utility_llm_enabled: bool = True

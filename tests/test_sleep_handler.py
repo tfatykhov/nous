@@ -220,6 +220,7 @@ class TestPhasesCompleted:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_sweep_key_conflicts = AsyncMock(return_value=True)  # R2.1 sleep hook
         handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_recover_abandoned_episodes = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
@@ -233,13 +234,14 @@ class TestPhasesCompleted:
         assert "compress" in emitted.data["phases_completed"]
         assert "reflect" in emitted.data["phases_completed"]
         assert "resolve_contradictions" in emitted.data["phases_completed"]
+        assert "sweep_key_conflicts" in emitted.data["phases_completed"]
         assert "graph_densification" in emitted.data["phases_completed"]
         assert "recover_abandoned_episodes" in emitted.data["phases_completed"]
         assert "generalize" in emitted.data["phases_completed"]
         # F065 Phase 2: prune_hub_snapshots runs after prune_dead_edges
         # and is included when graph_hub_snapshot_retention_days > 0 (default).
         assert "prune_hub_snapshots" in emitted.data["phases_completed"]
-        assert len(emitted.data["phases_completed"]) == 9
+        assert len(emitted.data["phases_completed"]) == 10
 
     @pytest.mark.asyncio
     async def test_all_phases_succeed_all_in_phases_completed(self):
@@ -249,6 +251,7 @@ class TestPhasesCompleted:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_sweep_key_conflicts = AsyncMock(return_value=True)  # R2.1 sleep hook
         handler._phase_graph_densification = AsyncMock(return_value=True)
         handler._phase_recover_abandoned_episodes = AsyncMock(return_value=True)
         handler._phase_generalize = AsyncMock(return_value=True)
@@ -258,8 +261,8 @@ class TestPhasesCompleted:
         await handler._run_sleep(_make_event("sleep_started"))
 
         emitted = bus.emit.call_args[0][0]
-        # F065 Phase 2 adds prune_hub_snapshots → 10 phases.
-        assert len(emitted.data["phases_completed"]) == 10
+        # F065 Phase 2 adds prune_hub_snapshots + R2.1 adds sweep_key_conflicts → 11 phases.
+        assert len(emitted.data["phases_completed"]) == 11
 
 
 # ===========================================================================
@@ -820,18 +823,16 @@ class TestStructuredContradictionResolution:
             }
         ])
         heart.deactivate_fact = AsyncMock()
-        # 2a: SUPERSEDE now preserves the chain via _apply_supersede, which opens
-        # a session and writes the supersedes edge. Mock the session CM + link.
-        _orm = MagicMock()
-        _orm.superseded_by = None
+        # AC-4: _apply_supersede now delegates to heart.facts.apply_supersession.
+        # Set up the session CM so _apply_supersede can open it, then mock the primitive.
         _sess = AsyncMock()
         _sess.__aenter__ = AsyncMock(return_value=_sess)
         _sess.__aexit__ = AsyncMock(return_value=False)
-        _sess.get = AsyncMock(return_value=_orm)
         _sess.commit = AsyncMock()
         heart.db = MagicMock()
         heart.db.session = MagicMock(return_value=_sess)
-        heart.link_facts = AsyncMock()
+        heart.facts = MagicMock()
+        heart.facts.apply_supersession = AsyncMock(return_value=True)
 
         resolution = {"action": "SUPERSEDE_A", "confidence": 0.9, "reason": "Newer info"}
         response = MagicMock()
@@ -845,11 +846,10 @@ class TestStructuredContradictionResolution:
 
         assert result is True
         assert sleep_stats["contradictions_resolved"] == 1
-        # 2a: SUPERSEDE_A preserves the chain instead of a bare deactivate —
-        # loser=f1 superseded_by winner=f2, active=False, + supersedes edge.
-        assert _orm.superseded_by == "f2"
-        assert _orm.active is False
-        heart.link_facts.assert_awaited_once_with("f2", "f1", "supersedes", 1.0, _sess)
+        # AC-4: _apply_supersede delegates to the shared primitive — verify it's
+        # called with the right (winner, loser, session) args and commit follows.
+        heart.facts.apply_supersession.assert_awaited_once_with("f2", "f1", _sess)
+        _sess.commit.assert_awaited_once()
 
         # Verify tool_choice in payload
         payload = llm_client.call.call_args[0][0]

@@ -110,6 +110,7 @@ class FactExtractor:
         self._bus = bus
         self._llm = llm_client
         self._dedup_via_search = dedup_via_search
+        self._enumerative_extractor = None  # lazily initialized singleton (codex r6)
         if bus is not None:
             bus.on("episode_summarized", self.handle)
 
@@ -233,9 +234,51 @@ class FactExtractor:
         """
         if not summary:
             return []
-        # 008.4: Use pre-extracted candidate_facts if available. Caller may
-        # pass them explicitly (handle() does, reading event.data) or leave
-        # candidate_facts=None and we fall back to the summary dict.
+
+        # 064 R1.1 modal routing: with the flag on, an ENUMERABLE transcript
+        # routes fact storage through the enumerative leg INSTEAD of the
+        # candidate/summary leg (modal, not additive — summary-path facts have
+        # no conflict-slot keys, so R2 could never merge them with their
+        # enumerative paraphrases; storing both would mint permanent variant
+        # pairs, devil-2 #3). Narrative transcripts keep today's path exactly.
+        if (
+            getattr(self._settings, "extraction_enumerative_enabled", False) is True
+            and getattr(self._settings, "enumerative_classifier", "heuristic") != "off"
+            and transcript
+            and self._llm is not None
+        ):
+            from nous.handlers.enumerative_extractor import EnumerativeExtractor, is_enumerable
+            if is_enumerable(transcript, self._settings.enumerative_density_threshold):
+                try:
+                    if getattr(self, "_enumerative_extractor", None) is None:
+                        self._enumerative_extractor = EnumerativeExtractor(
+                            heart=self._heart, settings=self._settings,
+                            llm_client=self._llm, embedder=getattr(self._heart, "_embeddings", None),
+                        )
+                    ex = self._enumerative_extractor
+                    stored_ids = await ex.process_transcript(transcript, _parse_episode_uuid(episode_id))
+                    logger.info("R1: stored %d enumerative facts for episode %s", len(stored_ids), episode_id)
+                    if stored_ids:
+                        return stored_ids
+                    logger.warning(
+                        "R1: enumerative leg stored 0 facts for episode %s — falling back to legacy path",
+                        episode_id,
+                    )
+                    # fall through: zero enumerative facts stored (e.g. API failure
+                    # swallowed by call_background_llm_structured) — legacy path
+                    # ensures the episode's facts are never silently dropped.
+                    # Variant-safety: 0 stored means no summary/enumerative
+                    # variant pairs can form.
+                except Exception:
+                    logger.exception(
+                        "R1 enumerative extraction failed for episode %s — falling back to legacy path",
+                        episode_id,
+                    )
+                    # process_transcript catches per-chunk failures internally and returns
+                    # partial results; reaching this except means nothing was stored, so
+                    # the legacy fallback cannot create variant pairs.
+
+        # Legacy path — byte-identical to today.
         cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])
         if cands:
             return await self._store_candidate_facts(

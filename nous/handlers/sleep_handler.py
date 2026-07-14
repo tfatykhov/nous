@@ -363,6 +363,11 @@ class SleepHandler:
         self._last_sleep_at: datetime | None = None
         self._last_phases: list[str] = []
         self._currently_sleeping: bool = False
+        # 064 R2: paging cursor for the key-conflict sweep. Stores the
+        # (learned_at, id) of the last f1 row processed so KEEP_BOTH pairs
+        # don't starve later conflicts. Reset to None when the fetch returns
+        # fewer rows than the limit (table wrapped — restart next cycle).
+        self._key_sweep_cursor: tuple | None = None
 
         bus.on("sleep_started", self.handle)
         bus.on("message_received", self._on_wake)
@@ -517,6 +522,11 @@ class SleepHandler:
                 success = await self._phase_resolve_contradictions(sleep_stats)
                 if success:
                     phases_completed.append("resolve_contradictions")
+
+            if not self._interrupted:
+                success = await self._phase_sweep_key_conflicts(sleep_stats)
+                if success:
+                    phases_completed.append("sweep_key_conflicts")
 
             if not self._interrupted:
                 success = await self._phase_stale_scan(sleep_stats)
@@ -975,34 +985,17 @@ class SleepHandler:
     async def _apply_supersede(self, winner_id, loser_id) -> bool:
         """2a (2026-06-13 audit): deactivate the loser AND preserve the supersede
         chain — set ``loser.superseded_by = winner`` and write the supersedes
-        edge — all in one session+commit, mirroring the F031 MERGE atomicity and
-        clobber guard. The SUPERSEDE_A/B branches previously called
-        ``deactivate_fact`` alone, severing lineage (no column, no edge).
+        edge — all in one session+commit.
 
-        Returns ``True`` iff a real supersede was committed, ``False`` on either
-        no-op guard (loser gone / already superseded by a concurrent path). The
-        caller gates ``contradictions_resolved`` + the F035.6 audit row on this,
-        so a raced no-op never reports a supersession that did not occur."""
+        Delegates to ``FactManager.apply_supersession`` (AC-4 shared primitive)
+        so the clobber guard and edge write are identical across every write path.
+
+        Returns ``True`` iff a real supersede was committed, ``False`` on the
+        no-op clobber guard (loser gone / already superseded)."""
         async with self._heart.db.session() as session:
-            orm = await session.get(Fact, loser_id)
-            if orm is None:
-                return False
-            # codex P1 (PR #520): if a concurrent path already superseded this
-            # fact, skip EVERYTHING — writing a winner->loser edge now would
-            # record a second, conflicting winner while the column still names
-            # the original. Mirror the MERGE path: leave the existing chain
-            # intact (the active flip is paired — already-superseded is inactive).
-            if orm.superseded_by is not None:
-                logger.debug(
-                    "F031 supersede: skip %s — already superseded by %s",
-                    loser_id, orm.superseded_by,
-                )
-                return False
-            orm.superseded_by = winner_id
-            orm.active = False
-            await self._heart.link_facts(winner_id, loser_id, "supersedes", 1.0, session)
+            ok = await self._heart.facts.apply_supersession(winner_id, loser_id, session)
             await session.commit()
-            return True
+            return ok
 
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""
@@ -1304,6 +1297,57 @@ class SleepHandler:
 
         except Exception:
             logger.warning("Contradiction resolution phase failed", exc_info=True)
+            return False
+
+    async def _phase_sweep_key_conflicts(self, sleep_stats: dict) -> bool:
+        """064 R2: key-based cross-episode supersession sweep. Complements
+        (does NOT replace) the embedding-based _phase_resolve_contradictions."""
+        if getattr(self._settings, "supersession_key_resolution_enabled", False) is not True:
+            return True
+        if not self._llm:
+            return True
+        try:
+            max_pairs = self._settings.supersession_sweep_max_pairs
+            pairs = await self._heart.facts.find_key_conflict_pairs(
+                limit=max_pairs, after=self._key_sweep_cursor
+            )
+            sleep_stats["key_conflicts_found"] = len(pairs)
+            sleep_stats["key_supersessions_written"] = 0
+            last_processed: tuple | None = None
+            interrupted_early = False
+            for pair in pairs:
+                if self._interrupted:
+                    interrupted_early = True
+                    break
+                if self._heart.facts.key_budget_exhausted():
+                    logger.info(
+                        "Key-conflict sweep: classifier budget exhausted — "
+                        "deferring remaining pairs to next cycle"
+                    )
+                    interrupted_early = True
+                    break
+                if await self._heart.facts.resolve_key_conflict_pair(
+                    pair["id1"], pair["id2"], pair["c1"], pair["c2"]
+                ):
+                    sleep_stats["key_supersessions_written"] += 1
+                last_processed = (pair["ts1"], pair["id1"], pair["ts2"], pair["id2"])
+            # Advance the cursor only past pairs that were ACTUALLY processed.
+            # If interrupted mid-page, last_processed is the last resolved pair
+            # (not pairs[-1]) so the unprocessed remainder is retried next cycle.
+            # If the loop was interrupted before processing anything, leave the
+            # cursor unchanged so the same page is retried in full.
+            # Reset to None (restart from oldest) only when the page was exhausted
+            # without interruption, signalling a complete table wrap.
+            if last_processed is not None:
+                if not interrupted_early and len(pairs) < max_pairs:
+                    self._key_sweep_cursor = None
+                else:
+                    self._key_sweep_cursor = last_processed
+            elif not interrupted_early and len(pairs) < max_pairs:
+                self._key_sweep_cursor = None
+            return True
+        except Exception:
+            logger.warning("Key-conflict sweep failed", exc_info=True)
             return False
 
     async def _phase_stale_scan(self, sleep_stats: dict) -> bool:
