@@ -1624,6 +1624,7 @@ class TestSleepHandler:
         handler._phase_compress = AsyncMock(return_value=True)
         handler._phase_reflect = AsyncMock(return_value=True)
         handler._phase_resolve_contradictions = AsyncMock(return_value=True)
+        handler._phase_sweep_key_conflicts = AsyncMock(return_value=True)  # R2.1 sleep hook
         handler._phase_stale_scan = AsyncMock(return_value=True)
         handler._phase_cluster_consolidation = AsyncMock(return_value=True)
         handler._phase_graph_densification = AsyncMock(return_value=True)
@@ -1640,6 +1641,7 @@ class TestSleepHandler:
         handler._phase_compress.assert_called_once()
         handler._phase_reflect.assert_called_once()
         handler._phase_resolve_contradictions.assert_called_once()
+        handler._phase_sweep_key_conflicts.assert_called_once()
         handler._phase_stale_scan.assert_called_once()
         handler._phase_cluster_consolidation.assert_called_once()
         handler._phase_graph_densification.assert_called_once()
@@ -1652,8 +1654,8 @@ class TestSleepHandler:
         bus.emit.assert_called_once()
         emitted = bus.emit.call_args[0][0]
         assert emitted.type == "sleep_completed"
-        # F065 Phase 2 adds prune_hub_snapshots → 12 phases.
-        assert len(emitted.data["phases_completed"]) == 12
+        # F065 Phase 2 adds prune_hub_snapshots + R2.1 adds sweep_key_conflicts → 13 phases.
+        assert len(emitted.data["phases_completed"]) == 13
         assert emitted.data["interrupted"] is False
 
     @pytest.mark.asyncio
