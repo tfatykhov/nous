@@ -1,5 +1,8 @@
 """Write-path adjudication (R1 enumerative extraction + R2 store-time supersession)."""
+import types
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 
@@ -117,3 +120,109 @@ def test_is_enumerable_respects_threshold():
 def test_density_score_detects_unnumbered_short_fact_sheet():
     doc = "\n".join(["Alice is 30.", "City: Paris.", "Bob is CEO.", "Tim likes dogs.", "Bob owns the car.", "Sky is blue."])
     assert density_score(doc) > 0.8
+
+
+# ---------------------------------------------------------------------------
+# R1.2/R1.3: EnumerativeExtractor — chunked LLM extraction + batched store
+# ---------------------------------------------------------------------------
+from nous.handlers.enumerative_extractor import EnumerativeExtractor
+
+_CHUNK_FACTS = {
+    "facts": [
+        {
+            "content": "The red car belongs to Alice.",
+            "subject": "red car",
+            "subject_key": "Red Car",
+            "attribute_key": "Owner",
+            "category": "concept",
+            "confidence": 0.9,
+            "overrides_prior": False,
+        },
+        {
+            "content": "The blue car belongs to Bob.",
+            "subject": "blue car",
+            "subject_key": "blue car",
+            "attribute_key": "owner",
+            "category": "concept",
+            "confidence": 0.9,
+            "overrides_prior": True,
+        },
+    ]
+}
+
+
+@pytest.fixture
+def settings_fixture():
+    """Factory fixture: returns a SimpleNamespace settings object with overrides."""
+
+    def _make(**kwargs):
+        defaults = {
+            "episode_chunk_size": 600,
+            "episode_chunk_overlap": 80,
+            # 0 disables the min_chars guard — lets short test transcripts through.
+            "episode_chunk_min_transcript_chars": 0,
+            "background_model": "claude-haiku-4-5-20251001",
+            "enumerative_density_threshold": 0.6,
+            "enumerative_max_facts_per_episode": 1000,
+            "enumerative_max_chunks_per_episode": 200,
+            "enumerative_extraction_max_per_hour": 1000,
+        }
+        defaults.update(kwargs)
+        return types.SimpleNamespace(**defaults)
+
+    return _make
+
+
+@pytest.mark.asyncio
+async def test_enumerative_extraction_stores_atomic_facts(monkeypatch, settings_fixture):
+    settings = settings_fixture(
+        extraction_enumerative_enabled=True,
+        enumerative_density_threshold=0.0,  # force-enumerable for the test
+        enumerative_max_facts_per_episode=1000,
+    )
+    heart = AsyncMock()
+    heart.learn = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(return_value=_CHUNK_FACTS),
+    )
+    ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=object(), embedder=embedder)
+    stored_ids = await ex.process_transcript("1. a.\n2. b.\n3. c.\n4. d.\n5. e.\n", episode_id=uuid4())
+    assert len(stored_ids) == 2
+    calls = heart.learn.call_args_list
+    fi0 = calls[0].args[0]
+    assert fi0.subject_key == "red car"  # normalized from "Red Car"
+    assert fi0.attribute_key == "owner"  # normalized from "Owner"
+    # devil-2 #2: ordinals are POSITIONAL ONLY (chunk_index * 1_000_000 + pos) —
+    # explicit statement numbers in the source are never used as ordinals.
+    assert fi0.source_ordinal == 0 * 1_000_000 + 0
+    assert fi0.source == "enumerative_extractor"
+    assert fi0.source_text == fi0.content  # per-statement grounding (RC-1a)
+    assert calls[0].kwargs["precomputed_embedding"] == [0.0] * 1536
+    fi1 = calls[1].args[0]
+    assert fi1.source_ordinal == 0 * 1_000_000 + 1  # chunk 0, position 1
+    assert fi1.overrides_prior is True
+
+
+@pytest.mark.asyncio
+async def test_enumerative_cap_truncates_loudly(monkeypatch, settings_fixture, caplog):
+    settings = settings_fixture(
+        extraction_enumerative_enabled=True,
+        enumerative_density_threshold=0.0,
+        enumerative_max_facts_per_episode=1,
+    )
+    heart = AsyncMock()
+    heart.learn = AsyncMock(return_value=SimpleNamespace(id=uuid4()))
+    embedder = AsyncMock()
+    embedder.embed_batch = AsyncMock(side_effect=lambda texts: [[0.0] * 1536] * len(texts))
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.call_background_llm_structured",
+        AsyncMock(return_value=_CHUNK_FACTS),
+    )
+    ex = EnumerativeExtractor(heart=heart, settings=settings, llm_client=object(), embedder=embedder)
+    with caplog.at_level("WARNING"):
+        stored_ids = await ex.process_transcript("1. a.\n2. b.\n3. c.\n4. d.\n5. e.\n", episode_id=uuid4())
+    assert len(stored_ids) == 1
+    assert any("enumerative cap" in r.message.lower() for r in caplog.records)
