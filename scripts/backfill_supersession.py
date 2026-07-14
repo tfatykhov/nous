@@ -249,7 +249,7 @@ async def _run_backfill(
             await client.start()
             try:
                 async with heart:
-                    heart.facts.set_llm_client(client, settings.background_model)
+                    heart.facts.set_llm_client(client, settings.contradiction_model)
                     counters = await run_sweep(
                         heart,
                         settings,
